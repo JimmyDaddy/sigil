@@ -11,12 +11,14 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::Stream;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sigil_kernel::TaskParticipantAttemptId;
 use sigil_kernel::{
     Agent, CompletionRequest, FrozenProviderRequestMaterial, HostedWebSearchCapability,
     ImageInputCapability, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
     ProviderChunk, ProviderFailureClassV1, ProviderFailureObservationV1, ProviderRequestRejection,
-    ProviderRetryHintV1, ProviderRouteCooldownError, ProviderWireStateV1, TaskParticipantAttemptId,
-    ToolRegistry, provider_rate_limit_from_error,
+    ProviderRetryHintV1, ProviderRouteCooldownError, ProviderWireStateV1, ToolRegistry,
+    provider_rate_limit_from_error,
 };
 use tokio::sync::Notify;
 
@@ -34,22 +36,18 @@ const DIAGNOSTICS_COOLDOWN_GRANULARITY_MS: u64 = 250;
 /// This type is diagnostic-only and does not grant durable retry or restart authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskProviderRouteConsumer {
-    Planner,
     Executor,
     SubagentRead,
     SubagentWrite,
-    Synthesis,
 }
 
 impl TaskProviderRouteConsumer {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Planner => "planner",
             Self::Executor => "executor",
             Self::SubagentRead => "subagent_read",
             Self::SubagentWrite => "subagent_write",
-            Self::Synthesis => "synthesis",
         }
     }
 }
@@ -222,10 +220,12 @@ impl TaskProviderPressure {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn check(&self, provider_name: &str, model_name: &str) -> Result<()> {
         self.admit(provider_name, model_name).map(|_| ())
     }
 
+    #[cfg(test)]
     pub(crate) fn retry_schedule_delay(
         &self,
         provider_name: &str,
@@ -243,6 +243,36 @@ impl TaskProviderPressure {
         let jitter = retry_attempt_jitter_ms(&fingerprint, attempt_id.as_str());
         let maximum = u64::try_from(MAX_RATE_LIMIT_COOLDOWN.as_millis()).unwrap_or(u64::MAX);
         Some((remaining.saturating_add(jitter).min(maximum), fingerprint))
+    }
+
+    #[cfg(test)]
+    fn admit(&self, provider_name: &str, model_name: &str) -> Result<ProviderRouteAdmission> {
+        let fingerprint = provider_route_fingerprint(provider_name, model_name);
+        let now = self.clock.now();
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("provider pressure state lock poisoned"))?;
+        if let Some(route) = state.routes.get(&fingerprint)
+            && route.cooldown_until > now
+        {
+            let remaining = route.cooldown_until.duration_since(now);
+            return Err(ProviderRouteCooldownError::new(
+                duration_millis_ceil(remaining),
+                fingerprint,
+            )
+            .into());
+        }
+        let epoch = state
+            .routes
+            .get(&fingerprint)
+            .map_or(0, |route| route.epoch);
+        Ok(ProviderRouteAdmission {
+            fingerprint,
+            provider_name: provider_name.trim().to_owned(),
+            model_name: model_name.trim().to_owned(),
+            epoch,
+        })
     }
 
     async fn acquire(
@@ -328,35 +358,6 @@ impl TaskProviderPressure {
         drop(state);
         self.notify_diagnostics_changed();
         Ok(Some(admission))
-    }
-
-    fn admit(&self, provider_name: &str, model_name: &str) -> Result<ProviderRouteAdmission> {
-        let fingerprint = provider_route_fingerprint(provider_name, model_name);
-        let now = self.clock.now();
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("provider pressure state lock poisoned"))?;
-        if let Some(route) = state.routes.get(&fingerprint)
-            && route.cooldown_until > now
-        {
-            let remaining = route.cooldown_until.duration_since(now);
-            return Err(ProviderRouteCooldownError::new(
-                duration_millis_ceil(remaining),
-                fingerprint,
-            )
-            .into());
-        }
-        let epoch = state
-            .routes
-            .get(&fingerprint)
-            .map_or(0, |route| route.epoch);
-        Ok(ProviderRouteAdmission {
-            fingerprint,
-            provider_name: provider_name.trim().to_owned(),
-            model_name: model_name.trim().to_owned(),
-            epoch,
-        })
     }
 
     fn record_rate_limit(&self, admission: &ProviderRouteAdmission, retry_after_ms: Option<u64>) {
@@ -735,6 +736,7 @@ pub(crate) fn provider_route_fingerprint(provider_name: &str, model_name: &str) 
     format!("sha256:{:x}", hasher.finalize())
 }
 
+#[cfg(test)]
 fn retry_attempt_jitter_ms(route_fingerprint: &str, attempt_id: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(b"sigil-provider-retry-attempt-jitter-v1\0");

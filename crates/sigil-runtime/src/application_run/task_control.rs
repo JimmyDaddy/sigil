@@ -303,6 +303,7 @@ pub async fn prepare_application_task_continuation(
         services,
         &redactor,
         None,
+        false,
         None,
         terminal_lifecycle_sink,
     )
@@ -318,9 +319,12 @@ pub async fn prepare_application_task_continuation(
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
+    let agent_background_runs = session_lease
+        .attachment
+        .agent_tool_background_runs()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
-        workspace_root: workspace_root.clone(),
         parent_session_ref: task.parent_session_ref.clone(),
         options,
         base_registry: surface.registry,
@@ -328,7 +332,8 @@ pub async fn prepare_application_task_continuation(
             task_agent_registry,
             crate::AgentBudgetPolicy::from_root_config(&root_config),
             provider_capabilities,
-        ),
+        )
+        .with_background_runs(agent_background_runs),
         role_provider_builder: Arc::clone(role_provider_builder),
         verification_execution_port: Some(verification_execution_port),
     };
@@ -450,7 +455,6 @@ impl ApplicationTaskContinuationExecution {
 
         let ApplicationTaskExecutionRuntime {
             root_config,
-            workspace_root: _,
             parent_session_ref: _,
             options,
             base_registry,
@@ -617,7 +621,15 @@ pub(super) fn application_task_continuation_terminal(
             ApplicationRunTerminalStatus::Failed,
             None,
             PublicRunEventKind::RunFailed {
-                error: "Task continuation failed".to_owned(),
+                error: session
+                    .task_state_projection()
+                    .tasks
+                    .get(task_id)
+                    .and_then(|task| task.reason.as_deref())
+                    .map(safe_persistence_text)
+                    .unwrap_or_else(|| {
+                        "Task execution failed without a recorded reason".to_owned()
+                    }),
             },
         )),
     }

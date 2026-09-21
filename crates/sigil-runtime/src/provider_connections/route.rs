@@ -209,7 +209,7 @@ enum SnapshotRouteUnavailable {
     Setup(ModelRouteSetupReason),
 }
 
-/// Persisted route facts required by the pure portable-resume planner.
+/// Persisted route facts required by pure portable route recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRouteResumeInput {
     pub route: ResolvedModelRoute,
@@ -760,6 +760,20 @@ pub fn apply_explicit_session_route_selection(
     })
 }
 
+/// Commits the frozen runtime operation through the existing attachment's exclusive permit.
+pub fn apply_session_runtime_transition(
+    store: &JsonlSessionStore,
+    operation_id: &str,
+    session_scope_id: &str,
+    quiescence: SessionRouteMutationPermit,
+) -> Result<sigil_kernel::StoredEvent> {
+    let _mutation_guard = quiescence.enter(session_scope_id)?;
+    sigil_kernel::session_runtime_transition::commit_session_runtime_configuration(
+        store,
+        operation_id,
+    )
+}
+
 /// Returns whether an explicit selection is a validated no-op for the current durable route.
 ///
 /// This check does not mutate the session and therefore does not require global route quiescence.
@@ -826,44 +840,9 @@ pub fn inspect_session_for_route_resume(
     })
 }
 
-/// Loads an exact session route without granting route-mutation authority.
-///
-/// Confirmation, replacement, setup, or automatic-rebind dispositions are returned as stable
-/// errors. Controllers that may mutate a route must use the attachment-aware loader so
-/// cross-process ownership and process-local execution quiescence are both proven.
-pub fn load_session_for_route_resume(
-    root_config: &RootConfig,
-    fallback_route: &ResolvedModelRoute,
-    store: JsonlSessionStore,
-) -> std::result::Result<Session, SessionRouteLoadError> {
-    load_session_for_route_resume_with_directive(root_config, fallback_route, store, None, None)
-}
-
-/// Loads a session through the legacy non-mutating compatibility surface.
-///
-/// Recovery confirmation and explicit replacement require the attachment-aware overload and fail
-/// closed here. Keeping this wrapper exact-only prevents external callers from fabricating an
-/// authority that is disconnected from the controller attachment and its live execution owners.
-pub fn load_session_for_route_resume_with_directive(
-    root_config: &RootConfig,
-    fallback_route: &ResolvedModelRoute,
-    store: JsonlSessionStore,
-    recovery_confirmation: Option<&str>,
-    explicit_selection: Option<(&str, &ResolvedModelRoute)>,
-) -> std::result::Result<Session, SessionRouteLoadError> {
-    load_session_for_route_resume_with_directive_and_attachment(
-        root_config,
-        fallback_route,
-        store,
-        recovery_confirmation,
-        explicit_selection,
-        None,
-    )
-}
-
 /// Attachment-aware route load used by interactive controllers. All execution owners and route
 /// mutations under the attachment share one session-scoped authority.
-pub fn load_session_for_route_resume_with_directive_and_attachment(
+pub fn load_session_for_route(
     root_config: &RootConfig,
     fallback_route: &ResolvedModelRoute,
     store: JsonlSessionStore,
@@ -871,7 +850,7 @@ pub fn load_session_for_route_resume_with_directive_and_attachment(
     explicit_selection: Option<(&str, &ResolvedModelRoute)>,
     attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> std::result::Result<Session, SessionRouteLoadError> {
-    load_session_for_route_resume_with_directive_and_attachment_transition(
+    load_session_for_route_transition(
         root_config,
         fallback_route,
         store,
@@ -883,7 +862,7 @@ pub fn load_session_for_route_resume_with_directive_and_attachment(
 }
 
 /// Loads a session and returns the exact bounded route transition receipt.
-pub fn load_session_for_route_resume_with_directive_and_attachment_transition(
+pub fn load_session_for_route_transition(
     root_config: &RootConfig,
     fallback_route: &ResolvedModelRoute,
     store: JsonlSessionStore,
@@ -891,6 +870,17 @@ pub fn load_session_for_route_resume_with_directive_and_attachment_transition(
     explicit_selection: Option<(&str, &ResolvedModelRoute)>,
     attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> std::result::Result<SessionRouteLoadOutcome, SessionRouteLoadError> {
+    let store = if let Some(attachment) = attachment {
+        let owner = attachment
+            .agent_tool_background_runs()
+            .map_err(SessionRouteLoadError::Unavailable)?;
+        let live_thread_ids = owner
+            .thread_ids()
+            .map_err(SessionRouteLoadError::Unavailable)?;
+        store.with_live_background_agent_threads(live_thread_ids)
+    } else {
+        store
+    };
     let inspected = inspect_session_for_route_resume(root_config, fallback_route, store)
         .map_err(SessionRouteLoadError::Unavailable)?;
     let InspectedSessionRouteResume {

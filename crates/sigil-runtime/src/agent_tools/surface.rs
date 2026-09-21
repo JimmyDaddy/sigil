@@ -137,10 +137,11 @@ pub(super) enum AgentToolKind {
     Cancel,
     Message,
     Close,
+    IntegrateChanges,
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::RequestDelegation,
         Self::Spawn,
         Self::SpawnBatch,
@@ -150,6 +151,7 @@ impl AgentToolKind {
         Self::Cancel,
         Self::Message,
         Self::Close,
+        Self::IntegrateChanges,
     ];
 
     pub(super) fn from_name(name: &str) -> Option<Self> {
@@ -163,6 +165,7 @@ impl AgentToolKind {
             CANCEL_AGENT_TOOL_NAME => Some(Self::Cancel),
             MESSAGE_AGENT_TOOL_NAME => Some(Self::Message),
             CLOSE_AGENT_TOOL_NAME => Some(Self::Close),
+            INTEGRATE_AGENT_CHANGES_TOOL_NAME => Some(Self::IntegrateChanges),
             _ => None,
         }
     }
@@ -178,6 +181,7 @@ impl AgentToolKind {
             Self::Cancel => CANCEL_AGENT_TOOL_NAME,
             Self::Message => MESSAGE_AGENT_TOOL_NAME,
             Self::Close => CLOSE_AGENT_TOOL_NAME,
+            Self::IntegrateChanges => INTEGRATE_AGENT_CHANGES_TOOL_NAME,
         }
     }
 }
@@ -204,13 +208,15 @@ impl Tool for AgentTool {
                 | AgentToolKind::SpawnBatch
                 | AgentToolKind::Cancel
                 | AgentToolKind::Message
-                | AgentToolKind::Close => ToolAccess::Execute,
+                | AgentToolKind::Close
+                | AgentToolKind::IntegrateChanges => ToolAccess::Execute,
             },
             network_effect: None,
             preview: match self.kind {
                 AgentToolKind::RequestDelegation
                 | AgentToolKind::Spawn
-                | AgentToolKind::SpawnBatch => ToolPreviewCapability::Required,
+                | AgentToolKind::SpawnBatch
+                | AgentToolKind::IntegrateChanges => ToolPreviewCapability::Required,
                 AgentToolKind::Wait
                 | AgentToolKind::ReadResult
                 | AgentToolKind::List
@@ -233,6 +239,7 @@ impl Tool for AgentTool {
             }
             AgentToolKind::Cancel | AgentToolKind::Close => ToolOperation::CloseAgent,
             AgentToolKind::Message => ToolOperation::MessageAgent,
+            AgentToolKind::IntegrateChanges => ToolOperation::ApplyChangeSet,
         };
         let mut effects = BTreeSet::new();
         match self.kind {
@@ -255,6 +262,10 @@ impl Tool for AgentTool {
             | AgentToolKind::Message
             | AgentToolKind::Close => {
                 effects.insert(ToolPermissionEffect::AgentLifecycle);
+            }
+            AgentToolKind::IntegrateChanges => {
+                effects.insert(ToolPermissionEffect::AgentLifecycle);
+                effects.insert(ToolPermissionEffect::FileWrite);
             }
         }
         let mut semantic_scope =
@@ -297,6 +308,9 @@ impl Tool for AgentTool {
                     AgentToolKind::Cancel => "Cancel one active agent thread".to_owned(),
                     AgentToolKind::Message => "Route one message to an active agent".to_owned(),
                     AgentToolKind::Close => "Close one terminal agent thread".to_owned(),
+                    AgentToolKind::IntegrateChanges => {
+                        "Apply one child-produced changeset to the parent workspace".to_owned()
+                    }
                 },
                 step_count: 1,
                 workspace_code_steps: 0,
@@ -328,6 +342,10 @@ impl Tool for AgentTool {
             )),
             AgentToolKind::Close => Some(simple_agent_preview(
                 "Close agent",
+                &format!("thread {}", required_string(&args, "thread_id")?),
+            )),
+            AgentToolKind::IntegrateChanges => Some(simple_agent_preview(
+                "Integrate agent changes",
                 &format!("thread {}", required_string(&args, "thread_id")?),
             )),
         })
@@ -426,6 +444,15 @@ impl AgentTool {
                 Some(sigil_kernel::ApprovalMode::Allow),
                 false,
             )),
+            AgentToolKind::IntegrateChanges => Ok((
+                vec![ToolSubject::agent(required_string(args, "thread_id")?)],
+                Some(if disabled {
+                    sigil_kernel::ApprovalMode::Deny
+                } else {
+                    sigil_kernel::ApprovalMode::Ask
+                }),
+                false,
+            )),
         }
     }
 
@@ -458,15 +485,15 @@ impl AgentTool {
                 self.surface.profile_index_description
             ),
             AgentToolKind::SpawnBatch => format!(
-                "Spawn 2-4 independent read-only child agents as one batch. The host preflights the whole batch, reserves every runtime slot atomically, and runs accepted members concurrently. completion_mode=join_before_final resumes the parent with bounded results without wait_agent polling. completion_mode=background returns immediately; live progress and result-ready continuation are host-driven, so do not poll. Every member must use a trusted model-visible profile whose effective tool contracts are proven read-only. Use this only for non-overlapping delegated scopes.\n{}",
+                "Spawn 2-4 independent read-only child agents as one batch. The host preflights the whole batch, reserves every runtime slot atomically, and runs accepted members concurrently. For completion_mode=join_before_final, make this the only tool call in the model turn; mixed batches are rejected because the host cannot own their join barrier. The parent resumes with bounded child results without wait_agent polling. completion_mode=background returns immediately; live progress and result-ready continuation are host-driven, so do not poll. Every member must use a trusted model-visible profile whose effective tool contracts are proven read-only. Use this only for non-overlapping delegated scopes.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
-                "Join an agent thread and return only when it completes or a long bounded wait interval expires. Runtime and UI own live progress updates; do not repeatedly poll wait_agent while it is running. Does not return child result text; use read_agent_result when the user explicitly needs result details."
+                "Join an agent thread and return only when it completes or a long bounded wait interval expires. Runtime and UI own live progress updates; do not repeatedly poll wait_agent while it is running. When a readable final answer is available, terminal wait_agent returns one bounded result page and records its delivery; otherwise it returns the terminal status. Follow next_read_args when unread ranges remain and more detail is needed; result_fully_delivered means all pages are already in this run's context."
                     .to_owned()
             }
             AgentToolKind::ReadResult => {
-                "Explicitly read one bounded page from a completed child agent final answer. Use only when the parent needs details beyond the bounded agent summary; do not request full child transcripts. Prefer read_args returned by wait_agent/result_ref and next_read_args returned by this tool. max_chars is a per-page limit; values outside the supported range are clamped and reported in request metadata."
+                "Explicitly read one bounded page from a completed child agent final answer. Use when the parent needs details beyond the page already returned by wait_agent, when revisiting a result after context compaction, or when reading a completed result directly from list_agents.read_args. Do not request full child transcripts. Prefer next_read_args returned by wait_agent or this tool. max_chars is a per-page limit; values outside the supported range are clamped and reported in request metadata."
                     .to_owned()
             }
             AgentToolKind::List => {
@@ -484,160 +511,174 @@ impl AgentTool {
             AgentToolKind::Close => {
                 "Close a completed, failed, cancelled, or interrupted agent thread.".to_owned()
             }
+            AgentToolKind::IntegrateChanges => {
+                "Resolve one pending changeset merge review produced by a child agent. Use accepted only after reading the child result and checking the proposed scope; use rejected when the proposal should not be applied. The host rechecks the exact child changeset, parent snapshot, and every file before mutation.".to_owned()
+            }
         }
     }
 
     fn input_schema(&self) -> Value {
         match self.kind {
             AgentToolKind::RequestDelegation => json!({
-                "type": "object",
-                "properties": {
-                    "members": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 4,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "request_key": {
-                                    "type": "string",
-                                    "description": "Stable unique id for this proposed member."
-                                },
-                                "profile_id": {
-                                    "type": "string",
-                                    "description": "Stable agent profile id from the model-visible agent index."
-                                },
-                                "objective": { "type": "string" },
-                                "prompt": { "type": "string" },
-                                "display_name_hint": { "type": "string" }
+            "type": "object",
+            "properties": {
+                "members": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "request_key": {
+                                "type": "string",
+                                "description": "Stable unique id for this proposed member."
                             },
-                            "required": ["request_key", "profile_id", "objective", "prompt"],
-                            "additionalProperties": false
+                            "profile_id": {
+                                "type": "string",
+                                "description": "Stable agent profile id from the model-visible agent index."
+                            },
+                            "objective": { "type": "string" },
+                            "prompt": { "type": "string" },
+                            "isolation": {
+                                "type": "string",
+                                "enum": ["shared_read_only", "changeset_only", "worktree"]
+                            },
+                            "display_name_hint": { "type": "string" }
+                        },
+                        "required": ["request_key", "profile_id", "objective", "prompt"],
                         }
-                    },
-                    "completion_mode": {
-                        "type": "string",
-                        "enum": ["join_before_final", "background"],
-                        "default": "join_before_final",
-                        "description": "Join the exact confirmed batch before the next model turn, or detach a proven-safe read-only batch."
-                    }
                 },
-                "required": ["members"],
-                "additionalProperties": false
+                "completion_mode": {
+                    "type": "string",
+                    "enum": ["join_before_final", "background"],
+                    "default": "join_before_final",
+                    "description": "Join the exact confirmed batch before the next model turn, or detach a proven-safe read-only batch."
+                }
+            },
+            "required": ["members"],
             }),
             AgentToolKind::Spawn => json!({
-                "type": "object",
-                "properties": {
-                    "profile_id": {
-                        "type": "string",
-                        "description": "Stable agent profile id from the model-visible agent index."
-                    },
-                    "objective": { "type": "string" },
-                    "prompt": { "type": "string" },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["foreground", "join_before_final", "background"],
-                        "default": "join_before_final"
-                    },
-                    "display_name_hint": { "type": "string" }
+            "type": "object",
+            "properties": {
+                "profile_id": {
+                    "type": "string",
+                    "description": "Stable agent profile id from the model-visible agent index."
                 },
-                "required": ["profile_id", "objective", "prompt"],
-                "additionalProperties": false
+                "objective": { "type": "string" },
+                "prompt": { "type": "string" },
+                "mode": {
+                    "type": "string",
+                    "enum": ["foreground", "join_before_final", "background"],
+                    "default": "join_before_final"
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["shared_read_only", "changeset_only", "worktree"],
+                    "description": "Workspace contract chosen for this child. Omit to use the profile default; worktree requires host Git support and a writable profile."
+                },
+                "display_name_hint": { "type": "string" }
+            },
+            "required": ["profile_id", "objective", "prompt"],
             }),
             AgentToolKind::SpawnBatch => json!({
-                "type": "object",
-                "properties": {
-                    "members": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 4,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "request_key": {
-                                    "type": "string",
-                                    "description": "Stable unique id for this member within the batch."
-                                },
-                                "profile_id": {
-                                    "type": "string",
-                                    "description": "Stable agent profile id from the model-visible agent index."
-                                },
-                                "objective": { "type": "string" },
-                                "prompt": { "type": "string" },
-                                "display_name_hint": { "type": "string" }
+            "type": "object",
+            "properties": {
+                "members": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "request_key": {
+                                "type": "string",
+                                "description": "Stable unique id for this member within the batch."
                             },
-                            "required": ["request_key", "profile_id", "objective", "prompt"],
-                            "additionalProperties": false
+                            "profile_id": {
+                                "type": "string",
+                                "description": "Stable agent profile id from the model-visible agent index."
+                            },
+                            "objective": { "type": "string" },
+                            "prompt": { "type": "string" },
+                            "isolation": {
+                                "type": "string",
+                                "enum": ["shared_read_only", "changeset_only", "worktree"]
+                            },
+                            "display_name_hint": { "type": "string" }
+                        },
+                        "required": ["request_key", "profile_id", "objective", "prompt"],
                         }
-                    },
-                    "completion_mode": {
-                        "type": "string",
-                        "enum": ["join_before_final", "background"],
-                        "default": "join_before_final",
-                        "description": "Join before the next parent model turn, or detach the whole batch and let the host surface result-ready completion."
-                    }
                 },
-                "required": ["members"],
-                "additionalProperties": false
+                "completion_mode": {
+                    "type": "string",
+                    "enum": ["join_before_final", "background"],
+                    "default": "join_before_final",
+                    "description": "Join before the next parent model turn, or detach the whole batch and let the host surface result-ready completion."
+                }
+            },
+            "required": ["members"],
             }),
             AgentToolKind::Wait => json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" }
-                },
-                "required": ["thread_id"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" }
+            },
+            "required": ["thread_id"],
             }),
             AgentToolKind::ReadResult => json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" },
-                    "offset_chars": {
-                        "type": "integer",
-                        "default": 0,
-                        "minimum": 0,
-                        "description": "Character offset into the child agent final answer."
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "default": 40000,
-                        "description": "Maximum characters to return from the child agent final answer. Runtime clamps out-of-range values and reports the effective page size."
-                    }
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "offset_chars": {
+                    "type": "integer",
+                    "default": 0,
+                    "minimum": 0,
+                    "description": "Character offset into the child agent final answer."
                 },
-                "required": ["thread_id"],
-                "additionalProperties": false
+                "max_chars": {
+                    "type": "integer",
+                    "default": 40000,
+                    "description": "Maximum characters to return from the child agent final answer. Runtime clamps out-of-range values and reports the effective page size."
+                }
+            },
+            "required": ["thread_id"],
             }),
             AgentToolKind::List => json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
+            "type": "object",
+            "properties": {},
             }),
             AgentToolKind::Cancel => json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" },
-                    "reason": { "type": "string" }
-                },
-                "required": ["thread_id"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "reason": { "type": "string" }
+            },
+            "required": ["thread_id"],
             }),
             AgentToolKind::Message => json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" },
-                    "prompt": { "type": "string" }
-                },
-                "required": ["thread_id", "prompt"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "prompt": { "type": "string" }
+            },
+            "required": ["thread_id", "prompt"],
             }),
             AgentToolKind::Close => json!({
-                "type": "object",
-                "properties": {
-                    "thread_id": { "type": "string" },
-                    "reason": { "type": "string" }
-                },
-                "required": ["thread_id"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "reason": { "type": "string" }
+            },
+            "required": ["thread_id"],
+            }),
+            AgentToolKind::IntegrateChanges => json!({
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "decision": { "type": "string", "enum": ["accepted", "rejected"] },
+                "reason": { "type": "string" }
+            },
+            "required": ["thread_id", "decision"],
             }),
         }
     }
@@ -660,6 +701,19 @@ impl AgentTool {
             format!("source: {:?}", resolved.source),
             format!("trust: {:?}", resolved.trust_state),
             format!("mode: {}", invocation_mode_label(parsed.mode)),
+            format!(
+                "isolation: {}",
+                parsed.isolation.map_or_else(
+                    || {
+                        if profile_uses_changeset_only_write(resolved.execution_role, resolved) {
+                            "changeset_only"
+                        } else {
+                            "shared_read_only"
+                        }
+                    },
+                    SpawnIsolation::label,
+                )
+            ),
             format!("objective: {}", parsed.objective),
             format!(
                 "provider: {}",
@@ -705,12 +759,16 @@ impl AgentTool {
                         member.spawn.profile_id.as_str()
                     )
                 })?;
-            let isolation = if profile_uses_changeset_only_write(resolved.execution_role, resolved)
-            {
-                "changeset_only"
-            } else {
-                "shared_read_only"
-            };
+            let isolation = member.spawn.isolation.map_or_else(
+                || {
+                    if profile_uses_changeset_only_write(resolved.execution_role, resolved) {
+                        "changeset_only"
+                    } else {
+                        "shared_read_only"
+                    }
+                },
+                SpawnIsolation::label,
+            );
             let expected_effect = if isolation == "changeset_only" {
                 "isolated changeset proposal; parent workspace unchanged"
             } else {
@@ -774,10 +832,10 @@ fn spawn_agent_mode_description(mode: MultiAgentMode) -> &'static str {
             "Multi-agent delegation is disabled by [task].multi_agent_mode=none. Do not call spawn_agent for ordinary model delegation; use list_agents/wait_agent/read_agent_result/message_agent/cancel_agent/close_agent only to manage already existing agent threads. Use stable profile_id values, not display names."
         }
         MultiAgentMode::ExplicitRequestOnly => {
-            "Spawn a child agent only when the user or active AGENTS/skill instructions explicitly ask for delegated, parallel, sub-agent, or child-agent work. A broad request for comprehensive review, deep analysis, or more investigation is not itself delegation authorization. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Use mode=join_before_final when the final answer or next step depends on the child result; the host joins safe same-batch children before the next model turn, so do not call wait_agent merely to collect them. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Write-capable worker profiles use foreground changeset-only isolation and cannot run in background until background isolation is available. Use stable profile_id values, not display names."
+            "Spawn a child agent only when the user or active AGENTS/skill instructions explicitly ask for delegated, parallel, sub-agent, or child-agent work. A broad request for comprehensive review, deep analysis, or more investigation is not itself delegation authorization. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Choose an explicit isolation contract: shared_read_only for inspection, changeset_only for a reviewable proposal, or worktree when the host advertises Git worktree support. Use mode=join_before_final when the final answer or next step depends on the child result; the host joins safe same-batch children before the next model turn, so do not call wait_agent merely to collect them. Use mode=background only when the selected isolation has a durable continuation owner. Use stable profile_id values, not display names."
         }
         MultiAgentMode::Proactive => {
-            "Spawn a child agent when the user explicitly asks for delegation, or proactively when parallel non-overlapping work would clearly improve speed or quality. Do not spawn for overlapping work you will also complete yourself. Use mode=join_before_final when the final answer or next step depends on the child result; the host joins safe same-batch children before the next model turn, so do not call wait_agent merely to collect them. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Write-capable worker profiles use foreground changeset-only isolation and cannot run in background until background isolation is available. Use stable profile_id values, not display names."
+            "Spawn a child agent when the user explicitly asks for delegation, or proactively when parallel non-overlapping work would clearly improve speed or quality. Do not spawn for overlapping work you will also complete yourself. Choose an explicit isolation contract: shared_read_only for inspection, changeset_only for a reviewable proposal, or worktree when the host advertises Git worktree support. Use mode=join_before_final when the final answer or next step depends on the child result; the host joins safe same-batch children before the next model turn, so do not call wait_agent merely to collect them. Use mode=background only when the selected isolation has a durable continuation owner. Use stable profile_id values, not display names."
         }
     }
 }
@@ -814,7 +872,37 @@ pub(super) struct SpawnAgentArgs {
     pub(super) objective: String,
     pub(super) prompt: String,
     pub(super) mode: AgentInvocationMode,
+    pub(super) isolation: Option<SpawnIsolation>,
     pub(super) display_name_hint: Option<String>,
+}
+
+/// The model may choose the child workspace contract; the host only validates it against the
+/// profile and available runtime authority. `None` keeps the legacy profile default for older
+/// callers while the model-visible schema advertises the explicit values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpawnIsolation {
+    SharedReadOnly,
+    ChangesetOnly,
+    Worktree,
+}
+
+impl SpawnIsolation {
+    pub(super) fn parse(value: &str) -> Result<Self> {
+        match value {
+            "shared_read_only" => Ok(Self::SharedReadOnly),
+            "changeset_only" => Ok(Self::ChangesetOnly),
+            "worktree" => Ok(Self::Worktree),
+            other => bail!("unsupported agent isolation {other}"),
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::SharedReadOnly => "shared_read_only",
+            Self::ChangesetOnly => "changeset_only",
+            Self::Worktree => "worktree",
+        }
+    }
 }
 
 pub(super) struct SpawnAgentsArgs {
@@ -834,7 +922,6 @@ pub(super) struct RequestAgentDelegationArgs {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RequestAgentDelegationWire {
     members: Vec<RequestAgentDelegationMemberWire>,
     #[serde(default)]
@@ -842,12 +929,13 @@ struct RequestAgentDelegationWire {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RequestAgentDelegationMemberWire {
     request_key: String,
     profile_id: String,
     objective: String,
     prompt: String,
+    #[serde(default)]
+    isolation: Option<String>,
     #[serde(default)]
     display_name_hint: Option<String>,
 }
@@ -873,6 +961,10 @@ impl SpawnAgentArgs {
                 .map(parse_invocation_mode)
                 .transpose()?
                 .unwrap_or(AgentInvocationMode::JoinBeforeFinal),
+            isolation: optional_string(args, "isolation")
+                .as_deref()
+                .map(SpawnIsolation::parse)
+                .transpose()?,
             display_name_hint: optional_string(args, "display_name_hint"),
         })
     }
@@ -913,6 +1005,10 @@ impl SpawnAgentsArgs {
                 objective: required_string(member, "objective")?,
                 prompt: required_string(member, "prompt")?,
                 mode: completion_mode,
+                isolation: optional_string(member, "isolation")
+                    .as_deref()
+                    .map(SpawnIsolation::parse)
+                    .transpose()?,
                 display_name_hint: optional_string(member, "display_name_hint"),
             };
             parsed.push(SpawnAgentsMemberArgs {
@@ -980,6 +1076,7 @@ impl RequestAgentDelegationArgs {
                 "profile_id": profile_id.as_str(),
                 "objective": member.objective,
                 "prompt": member.prompt,
+                "isolation": member.isolation,
                 "display_name_hint": member.display_name_hint,
             });
             let spawn = SpawnAgentArgs {
@@ -987,6 +1084,10 @@ impl RequestAgentDelegationArgs {
                 objective: required_string(&raw_args, "objective")?,
                 prompt: required_string(&raw_args, "prompt")?,
                 mode: completion_mode,
+                isolation: optional_string(&raw_args, "isolation")
+                    .as_deref()
+                    .map(SpawnIsolation::parse)
+                    .transpose()?,
                 display_name_hint: optional_string(&raw_args, "display_name_hint"),
             };
             members.push(SpawnAgentsMemberArgs {
@@ -1010,6 +1111,7 @@ impl RequestAgentDelegationArgs {
                 "objective": member.spawn.objective,
                 "prompt": member.spawn.prompt,
                 "mode": invocation_mode_label(self.completion_mode),
+                "isolation": member.spawn.isolation.map(SpawnIsolation::label),
                 "display_name_hint": member.spawn.display_name_hint,
             })
         })

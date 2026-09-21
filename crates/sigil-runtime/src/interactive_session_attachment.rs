@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use sha2::{Digest, Sha256};
@@ -74,6 +74,8 @@ pub struct InteractiveSessionAttachmentLease {
     lease_path: PathBuf,
     generation: String,
     route_authority: OnceLock<crate::provider_connections::SessionRouteMutationAuthority>,
+    operation_owner: OnceLock<sigil_kernel::SessionApplicationOperationOwner>,
+    agent_background_runs: Mutex<Option<crate::AgentToolBackgroundRuns>>,
     _lease: File,
 }
 
@@ -227,6 +229,8 @@ impl InteractiveSessionAttachmentLease {
                     lease_path,
                     generation,
                     route_authority: OnceLock::new(),
+                    operation_owner: OnceLock::new(),
+                    agent_background_runs: Mutex::new(None),
                     _lease: lease,
                 })
             }
@@ -251,6 +255,44 @@ impl InteractiveSessionAttachmentLease {
         &self.session_path
     }
 
+    /// Returns the one process-local background-agent owner associated with this attachment.
+    /// Cloned runtime delegates share its handles and cannot accidentally detach work from the
+    /// session lifecycle.
+    pub fn agent_tool_background_runs(&self) -> anyhow::Result<crate::AgentToolBackgroundRuns> {
+        let mut runs = self
+            .agent_background_runs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session attachment background-owner lock poisoned"))?;
+        Ok(runs
+            .get_or_insert_with(crate::AgentToolBackgroundRuns::default)
+            .clone())
+    }
+
+    /// Binds a surface's event-enabled owner to this attachment before child dispatch.
+    ///
+    /// Rebinding an idle attachment is safe when a worker is recreated. Replacing an owner that
+    /// still has children would orphan those runs, so it is rejected.
+    pub fn bind_agent_tool_background_runs(
+        &self,
+        owner: crate::AgentToolBackgroundRuns,
+    ) -> anyhow::Result<()> {
+        let mut runs = self
+            .agent_background_runs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session attachment background-owner lock poisoned"))?;
+        if let Some(current) = runs.as_ref() {
+            if current.shares_owner_with(&owner) {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                !current.has_any(),
+                "cannot replace an active session background-agent owner"
+            );
+        }
+        *runs = Some(owner);
+        Ok(())
+    }
+
     #[must_use]
     pub fn lease_path(&self) -> &Path {
         &self.lease_path
@@ -260,6 +302,35 @@ impl InteractiveSessionAttachmentLease {
     #[must_use]
     pub fn generation(&self) -> &str {
         &self.generation
+    }
+
+    /// Retains a capability issued by the session already attached by the composition host.
+    /// A copied session path or a projection reader cannot create this capability.
+    pub(crate) fn bind_application_operation_owner(
+        &self,
+        session: &sigil_kernel::Session,
+    ) -> anyhow::Result<()> {
+        let path = session.store_path().ok_or_else(|| {
+            anyhow::anyhow!("application operation requires an attached durable session")
+        })?;
+        anyhow::ensure!(
+            normalized_attachment_session_path(path) == self.session_path,
+            "application operation owner attachment mismatch"
+        );
+        self.route_mutation_authority(session.session_scope_id())?;
+        if self.operation_owner.get().is_none() {
+            let _ = self
+                .operation_owner
+                .set(session.application_operation_owner()?);
+        }
+        Ok(())
+    }
+
+    /// Returns the narrow operation owner retained with this exact attachment.
+    pub fn application_operation_owner(
+        &self,
+    ) -> Option<sigil_kernel::SessionApplicationOperationOwner> {
+        self.operation_owner.get().cloned()
     }
 
     /// Returns the one route-mutation authority shared by every execution and transition under

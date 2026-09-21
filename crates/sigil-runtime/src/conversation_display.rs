@@ -1,6 +1,8 @@
 //! Canonical, provider-neutral display projection for durable conversation history.
 
+mod command;
 mod index;
+use command::{command_input, command_result_projection};
 pub use index::{
     ConversationDisplayHashMetrics, ConversationDisplayIndex, ConversationDisplayPagePlan,
     ConversationDisplayRecordPosition,
@@ -109,7 +111,7 @@ impl From<anyhow::Error> for ConversationDisplayProjectionError {
 /// Durable ordering key. The stream sequence is authoritative; `subindex` is deterministic
 /// within one source event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationDisplayOrderV1 {
     pub session_stream_sequence: u64,
     pub subindex: u32,
@@ -144,6 +146,7 @@ pub enum ConversationDisplaySourceV1 {
 pub enum ConversationDisplayStatusV1 {
     Recorded,
     Requested,
+    Running,
     WaitingForApproval,
     Approved,
     Denied,
@@ -174,7 +177,7 @@ pub enum ConversationDisplayAssistantPhaseV1 {
 
 /// User-selected skill bound to one durable prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationDisplaySkillReferenceV1 {
     pub id: String,
     pub name: String,
@@ -222,7 +225,7 @@ pub enum ConversationLiveProvisionalSlotV1 {
 
 /// Typed, secret-safe content carried by one display item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ConversationDisplayContentV1 {
     Message {
         role: ConversationDisplayMessageRoleV1,
@@ -246,6 +249,14 @@ pub enum ConversationDisplayContentV1 {
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_started_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_updated_at_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         truncated: bool,
@@ -296,7 +307,7 @@ pub enum ConversationDisplayContentV1 {
 
 /// One canonical durable display item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationDisplayItemV1 {
     pub schema_version: u16,
     pub display_id: String,
@@ -316,7 +327,7 @@ pub struct ConversationDisplayItemV1 {
 
 /// Latest proven terminal boundary at the page's fixed durable frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationTerminalFrontierV1 {
     pub run_id: String,
     pub session_stream_sequence: u64,
@@ -325,7 +336,7 @@ pub struct ConversationTerminalFrontierV1 {
 
 /// Bounded plan-step state needed to restore Task controls after an application restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationTaskPlanStepV1 {
     pub step_id: String,
     pub title: String,
@@ -339,7 +350,7 @@ pub struct ConversationTaskPlanStepV1 {
 
 /// Bounded integration-lane state without a private workspace, ref, path, or mutation authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationTaskLaneV1 {
     pub lane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,7 +365,7 @@ pub struct ConversationTaskLaneV1 {
 /// The projection deliberately omits the Task objective because it can contain raw user text.
 /// It exposes only bounded public identities, plan summaries, counts, and renderer-safe status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationTaskControlV1 {
     pub schema_version: u16,
     pub task_id: String,
@@ -382,7 +393,7 @@ pub struct ConversationTaskControlV1 {
 
 /// Opaque-cursor page over the canonical display projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationDisplayPageV1 {
     pub schema_version: u16,
     pub session_scope_id: String,
@@ -406,7 +417,7 @@ pub struct ConversationDisplayPageV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct ConversationDisplayCursor {
     schema_version: u16,
     session_scope_sha256: String,
@@ -427,10 +438,30 @@ struct ActiveRunProjection {
     user_provisional_reconciled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ToolProjectionKey {
+    Call(String),
+    Execution(String),
+}
+
+#[derive(Debug, Default)]
+struct ToolProjectionState {
+    items: HashMap<ToolProjectionKey, ToolProjection>,
+    terminals: HashMap<String, command::CommandTerminalState>,
+}
+
 #[derive(Debug, Clone)]
 struct ToolProjection {
     name: String,
     requested_display_id: String,
+    requested_sequence: u64,
+    requested_call_id: String,
+    execution_run_id: Option<String>,
+    execution_started_at_ms: Option<u64>,
+    latest_execution_display_id: Option<String>,
+    execution_artifact: Option<command::CommandArtifactProjection>,
+    input: Option<String>,
+    input_json_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -480,16 +511,15 @@ impl ConversationTaskControlProjection {
                     self.select_current(task_id.as_str());
                 }
             }
-            ControlEntry::TaskCreatedFromPlan(entry) if entry.stale_reason.is_none() => {
+            ControlEntry::TaskCreatedFromPlan(entry) => {
                 self.select_current(entry.task_id.as_str());
             }
             ControlEntry::TaskContinuationSelected(entry) => {
                 let matches_frozen_task =
                     self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
                         task.status == entry.task_status.as_str()
-                            && task.plan_version == entry.plan_version
-                            && task.plan_status.as_deref()
-                                == entry.plan_status.map(sigil_kernel::TaskPlanStatus::as_str)
+                            && task.plan_version.is_none()
+                            && task.plan_status.is_none()
                     });
                 if matches_frozen_task {
                     self.select_current(entry.task_id.as_str());
@@ -498,13 +528,13 @@ impl ConversationTaskControlProjection {
                 }
             }
             ControlEntry::TaskGuidancePromoted(entry) => {
-                let matches_accepted_plan =
+                let matches_direct_task =
                     self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
                         !matches!(task.status.as_str(), "completed" | "cancelled")
-                            && task.plan_version == Some(entry.plan_version)
-                            && task.plan_status.as_deref() == Some("accepted")
+                            && task.plan_version.is_none()
+                            && task.plan_status.is_none()
                     });
-                if matches_accepted_plan {
+                if matches_direct_task {
                     self.select_current(entry.task_id.as_str());
                 } else {
                     self.clear_current();
@@ -980,7 +1010,7 @@ pub fn conversation_display_page_from_records(
     let capacity = limit.saturating_add(1);
     let mut recent = VecDeque::with_capacity(capacity);
     let mut active_run: Option<ActiveRunProjection> = None;
-    let mut tools = HashMap::<String, ToolProjection>::new();
+    let mut tools = ToolProjectionState::default();
     let mut approval_items = HashMap::<String, String>::new();
     let mut run_skills = HashMap::<String, ConversationDisplaySkillReferenceV1>::new();
     let mut terminal_frontier = None;
@@ -1203,7 +1233,7 @@ fn project_record(
     record: &SessionStreamRecord,
     expected_scope: &str,
     active_run: &mut Option<ActiveRunProjection>,
-    tools: &mut HashMap<String, ToolProjection>,
+    tools: &mut ToolProjectionState,
     approval_items: &mut HashMap<String, String>,
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
@@ -1328,7 +1358,7 @@ fn project_lifecycle(
     expected_scope: &str,
     lifecycle: ConversationRunLifecycleRecordV1,
     active_run: &mut Option<ActiveRunProjection>,
-    tools: &mut HashMap<String, ToolProjection>,
+    tools: &mut ToolProjectionState,
     approval_items: &mut HashMap<String, String>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
@@ -1337,7 +1367,9 @@ fn project_lifecycle(
             if active_run.is_some() {
                 bail!("conversation display encountered overlapping durable runs");
             }
-            tools.clear();
+            tools
+                .items
+                .retain(|key, _| matches!(key, ToolProjectionKey::Execution(_)));
             approval_items.clear();
             *active_run = Some(ActiveRunProjection {
                 run_id: started.run_id().to_owned(),
@@ -1377,7 +1409,9 @@ fn project_lifecycle(
                 status,
             });
             *active_run = None;
-            tools.clear();
+            tools
+                .items
+                .retain(|key, _| matches!(key, ToolProjectionKey::Execution(_)));
             approval_items.clear();
             let mut item = new_item(
                 expected_scope,
@@ -1408,7 +1442,7 @@ fn project_session_entry(
     expected_scope: &str,
     entry: SessionLogEntry,
     active_run: &mut Option<ActiveRunProjection>,
-    tools: &mut HashMap<String, ToolProjection>,
+    tools: &mut ToolProjectionState,
     approval_items: &mut HashMap<String, String>,
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
@@ -1504,6 +1538,12 @@ fn project_session_entry(
                 let tool_name_key = call.id.clone();
                 let call_id = bound_identity(&call.id);
                 let tool_name = bound_identity(&call.name);
+                let input = command_input(&call);
+                let input_json_bytes = input
+                    .as_ref()
+                    .map(serde_json::to_vec)
+                    .transpose()?
+                    .map(|bytes| bytes.len());
                 let mut item = new_item(
                     expected_scope,
                     record,
@@ -1515,6 +1555,10 @@ fn project_session_entry(
                     ConversationDisplayContentV1::Tool {
                         call_id: Some(call_id),
                         tool_name: Some(tool_name.clone()),
+                        input: input.clone(),
+                        execution_id: None,
+                        execution_started_at_ms: None,
+                        execution_updated_at_ms: None,
                         output: None,
                         truncated: false,
                         original_content_bytes: 0,
@@ -1537,11 +1581,19 @@ fn project_session_entry(
                         },
                     )?]);
                 }
-                tools.insert(
-                    tool_name_key,
+                tools.items.insert(
+                    ToolProjectionKey::Call(tool_name_key.clone()),
                     ToolProjection {
                         name: tool_name,
                         requested_display_id: item.display_id.clone(),
+                        requested_sequence: record.stream_sequence(),
+                        requested_call_id: tool_name_key,
+                        execution_run_id: None,
+                        execution_started_at_ms: None,
+                        latest_execution_display_id: None,
+                        execution_artifact: None,
+                        input,
+                        input_json_bytes,
                     },
                 );
                 items.push(item);
@@ -1552,8 +1604,22 @@ fn project_session_entry(
             Ok(items)
         }
         SessionLogEntry::ToolResultV3(result) => {
-            let tool = tools.get(&result.call_id).cloned();
+            let tool = tools
+                .items
+                .get(&ToolProjectionKey::Call(result.call_id.clone()))
+                .cloned();
             let display = result.display_view();
+            let origin = command::execution_id_from_result(&result)
+                .and_then(|id| tools.items.get(&ToolProjectionKey::Execution(id)))
+                .cloned();
+            let mut command = command_result_projection(
+                &result,
+                origin.as_ref().or(tool.as_ref()),
+                &display.preview,
+            );
+            command::retain_terminal_result(&result, &mut command, &mut tools.terminals);
+            let execution_id = command.execution_id.clone();
+            let execution_started_at_ms = command.started_at_ms;
             let (artifact_ref, artifact_availability) = match &result.artifact {
                 sigil_kernel::ToolArtifactBindingV1::Published { descriptor } => (
                     Some(descriptor.artifact_ref.artifact_id.clone()),
@@ -1579,14 +1645,18 @@ fn project_session_entry(
                 ConversationDisplayItemKindV1::Tool,
                 ConversationDisplaySourceV1::DurableTranscript,
                 run_id.clone(),
-                ConversationDisplayStatusV1::Completed,
+                command.status,
                 ConversationDisplayContentV1::Tool {
                     call_id: Some(bound_identity(&result.call_id)),
-                    tool_name: Some(tool.as_ref().map_or_else(
+                    tool_name: Some(origin.as_ref().or(tool.as_ref()).map_or_else(
                         || bound_identity(&result.tool_name),
                         |tool| tool.name.clone(),
                     )),
-                    output: Some(display.preview),
+                    input: command.input,
+                    execution_id: command.execution_id,
+                    execution_started_at_ms: command.started_at_ms,
+                    execution_updated_at_ms: command.updated_at_ms,
+                    output: command.output,
                     truncated: display.has_more,
                     original_content_bytes: display.observed_bytes as usize,
                     artifact_ref,
@@ -1608,6 +1678,18 @@ fn project_session_entry(
                     }),
                 },
             );
+            if let Some(execution_id) = execution_id
+                && let Some(mut origin) = origin.or_else(|| tool.clone())
+            {
+                origin.execution_run_id = origin.execution_run_id.or_else(|| run_id.clone());
+                origin.execution_started_at_ms =
+                    origin.execution_started_at_ms.or(execution_started_at_ms);
+                origin.latest_execution_display_id = Some(item.display_id.clone());
+                origin.execution_artifact = command::CommandArtifactProjection::from_item(&item);
+                tools
+                    .items
+                    .insert(ToolProjectionKey::Execution(execution_id), origin);
+            }
             let mut reconciles = tool
                 .as_ref()
                 .map(|tool| vec![tool.requested_display_id.clone()])
@@ -1627,6 +1709,9 @@ fn project_session_entry(
             Ok(vec![item])
         }
         SessionLogEntry::RuntimeContextSnapshotV2(_) => Ok(Vec::new()),
+        SessionLogEntry::Control(ControlEntry::TerminalTask(task)) => {
+            command::project_terminal_snapshot(record, expected_scope, &task, tools)
+        }
         SessionLogEntry::Control(control) => project_control(
             record,
             expected_scope,
@@ -2124,10 +2209,6 @@ struct PlanReviewDisplayProjection {
         sigil_kernel::PlanId,
         Vec<sigil_kernel::TaskCreatedFromPlanEntry>,
     >,
-    materialization_blockers: std::collections::BTreeMap<
-        sigil_kernel::TaskId,
-        sigil_kernel::TaskMaterializationBlockedV1,
-    >,
     revision_guidance:
         std::collections::BTreeMap<sigil_kernel::UserInputIdentityV1, sigil_kernel::PlanId>,
     pending_revision_guidance: std::collections::BTreeSet<sigil_kernel::PlanId>,
@@ -2175,46 +2256,6 @@ impl PlanReviewDisplayProjection {
                 .entry(created.plan_id.clone())
                 .or_default()
                 .push(created),
-            sigil_kernel::SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::TaskMaterializationBlockedV1(blocked),
-            ) => {
-                self.materialization_blockers
-                    .insert(blocked.task_id.clone(), blocked);
-            }
-            sigil_kernel::SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::TaskMaterializationPreparedV1(materialization),
-            ) => {
-                self.materialization_blockers
-                    .remove(&materialization.task_id);
-            }
-            sigil_kernel::SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::PlanExecutionAdoptedV1(adoption),
-            ) => {
-                // An adopted plan is no longer a pending runnable surface.
-                self.decisions
-                    .entry(adoption.plan_id.clone())
-                    .or_default()
-                    .push(sigil_kernel::PlanDecisionRecordedEntry {
-                        plan_id: adoption.plan_id.clone(),
-                        plan_hash: adoption.plan_hash.clone(),
-                        decision: sigil_kernel::PlanDecision::Accepted,
-                        decided_by: sigil_kernel::PlanDecisionActor::User,
-                        decided_at_ms: adoption.adopted_at_ms,
-                        reason: Some("adopted through the single execution spine".to_owned()),
-                    });
-                self.tasks_created
-                    .entry(adoption.plan_id.clone())
-                    .or_default()
-                    .push(sigil_kernel::TaskCreatedFromPlanEntry {
-                        plan_id: adoption.plan_id.clone(),
-                        plan_hash: adoption.plan_hash.clone(),
-                        task_id: adoption.task_id.clone(),
-                        task_plan_version: adoption.adopted_candidate.task_plan.plan_version,
-                        step_mapping: adoption.adopted_candidate.step_mapping.clone(),
-                        stale_reason: None,
-                        created_at_ms: adoption.adopted_at_ms,
-                    });
-            }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::UserInputRequested(requested),
             ) => {
@@ -2310,19 +2351,10 @@ impl PlanReviewDisplayProjection {
             .get(&active_attempt.plan_id)
             .and_then(|entries| entries.last())
             .map(|entry| entry.decision);
-        let materialization_blocker = self
-            .tasks_created
-            .get(&active_attempt.plan_id)
-            .and_then(|entries| entries.last())
-            .and_then(|link| self.materialization_blockers.get(&link.task_id));
-        let materialization_recovery = latest_decision
-            == Some(sigil_kernel::PlanDecision::Accepted)
-            && materialization_blocker.is_some();
-        if !materialization_recovery
-            && (matches!(
-                latest_decision,
-                Some(sigil_kernel::PlanDecision::Accepted | sigil_kernel::PlanDecision::Rejected)
-            ) || self.tasks_created.contains_key(&active_attempt.plan_id))
+        if matches!(
+            latest_decision,
+            Some(sigil_kernel::PlanDecision::Accepted | sigil_kernel::PlanDecision::Rejected)
+        ) || self.tasks_created.contains_key(&active_attempt.plan_id)
         {
             return None;
         }
@@ -2343,13 +2375,12 @@ impl PlanReviewDisplayProjection {
                 latest.status,
                 sigil_kernel::PlanReviewAttemptStatus::Started
                     | sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
-                    | sigil_kernel::PlanReviewAttemptStatus::Finalizing
             );
         let guidance_pending = self
             .pending_revision_guidance
             .contains(&active_attempt.plan_id);
-        // Plan review is text approval, not Task compilation. A missing/failed preflight
-        // candidate does not hide Run; post-approval materialization owns any blocker.
+        // The model-authored Plan body is reviewable input; execution authority is granted only
+        // by the explicit Run decision.
         let candidate = self
             .candidates
             .get(&active_attempt.plan_id)
@@ -2361,24 +2392,7 @@ impl PlanReviewDisplayProjection {
                 content: candidate.content.clone(),
                 completeness: candidate.completeness,
             });
-        let allowed_actions = if let Some(blocker) = materialization_blocker {
-            let mut actions = Vec::new();
-            if blocker
-                .blocker
-                .available_actions
-                .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission)
-            {
-                actions.push(sigil_kernel::PublicPlanAction::Run);
-            }
-            if blocker
-                .blocker
-                .available_actions
-                .contains(&sigil_kernel::TaskBlockerActionV1::Replan)
-            {
-                actions.push(sigil_kernel::PublicPlanAction::Revise);
-            }
-            actions
-        } else if draft.is_some() {
+        let allowed_actions = if draft.is_some() {
             crate::plan_review_coordinator::plan_draft_actions(
                 active_attempt.status,
                 latest_decision,
@@ -2441,9 +2455,6 @@ impl PlanReviewDisplayProjection {
                         }
                         sigil_kernel::PlanReviewAttemptStatus::WaitingForInput => {
                             sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput
-                        }
-                        sigil_kernel::PlanReviewAttemptStatus::Finalizing => {
-                            sigil_kernel::PublicPlanRevisionStatusV1::Finalizing
                         }
                         sigil_kernel::PlanReviewAttemptStatus::DraftReady => {
                             sigil_kernel::PublicPlanRevisionStatusV1::Succeeded

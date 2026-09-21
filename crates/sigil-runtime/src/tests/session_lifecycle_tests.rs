@@ -210,6 +210,37 @@ fn lifecycle_journal_creates_and_repairs_owner_only_data_and_lease_files() -> Re
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn lifecycle_journal_reader_waits_for_a_brief_writer_lock() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_path = temp.path().join("session-lifecycle-v1.jsonl");
+    fs::write(&journal_path, b"")?;
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    )
+    .with_lifecycle_journal_path(&journal_path);
+    let writer = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&journal_path)?;
+    writer.try_lock()?;
+
+    let release_writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        writer.unlock()
+    });
+    let records = service.lifecycle_records()?;
+    release_writer
+        .join()
+        .map_err(|_| anyhow!("lifecycle journal lock release thread panicked"))??;
+
+    assert!(records.is_empty());
+    Ok(())
+}
+
 fn append_v2_tool_artifact(
     path: &Path,
     call_id: &str,

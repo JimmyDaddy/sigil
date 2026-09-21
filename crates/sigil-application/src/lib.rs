@@ -124,13 +124,15 @@ pub struct ApplicationFrontier {
 /// currently attached owner, while `base_durable_sequence` tells an adapter which committed
 /// frontier the preview is based on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct LiveRunUpdate {
     pub schema_version: u16,
     pub session_id: String,
     pub run_id: String,
-    /// Actual provider attempt selected by the execution owner, never a UI-generated identity.
-    pub attempt_id: String,
+    /// Provider previews bind to the actual physical attempt. Tool progress instead binds to
+    /// its existing execution and must not inherit a concurrently running provider attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub slot_id: String,
     pub live_revision: u64,
     pub base_durable_sequence: u64,
@@ -153,12 +155,17 @@ pub enum LiveRunUpdateKind {
 
 /// Bounded display metadata for the latest state of an existing tool execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct LiveToolProgress {
     pub execution_id: String,
     pub call_id: String,
     pub tool_name: String,
     pub status: String,
+    /// Whether `preview` contains captured output rather than a status message.
+    pub preview_is_output: bool,
+    /// Actual process start time supplied by its execution owner, excluding approval wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
     pub total_bytes: Option<u64>,
     pub updated_at_ms: Option<u64>,
 }
@@ -172,7 +179,6 @@ impl LiveRunUpdate {
         for (label, value) in [
             ("live session id", &self.session_id),
             ("live run id", &self.run_id),
-            ("live attempt id", &self.attempt_id),
             ("live slot id", &self.slot_id),
         ] {
             if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
@@ -180,6 +186,25 @@ impl LiveRunUpdate {
                     "{label} is empty, unbounded, or contains control characters"
                 )));
             }
+        }
+        match (&self.kind, &self.attempt_id) {
+            (LiveRunUpdateKind::ToolProgress, None) => {}
+            (LiveRunUpdateKind::ToolProgress, Some(_)) | (_, None) => {
+                return Err(ApplicationError::InvalidRequest(
+                    "live preview owner does not match preview kind".to_owned(),
+                ));
+            }
+            (_, Some(attempt))
+                if attempt.is_empty()
+                    || attempt.len() > 256
+                    || attempt.chars().any(char::is_control) =>
+            {
+                return Err(ApplicationError::InvalidRequest(
+                    "live attempt id is empty, unbounded, or contains control characters"
+                        .to_owned(),
+                ));
+            }
+            _ => {}
         }
         if self.live_revision == 0 {
             return Err(ApplicationError::InvalidRequest(
@@ -202,9 +227,9 @@ impl LiveRunUpdate {
                         ));
                     }
                 }
-                if progress.call_id != self.slot_id {
+                if progress.execution_id != self.slot_id {
                     return Err(ApplicationError::InvalidRequest(
-                        "live tool progress slot does not match its call".to_owned(),
+                        "live tool progress slot does not match its execution".to_owned(),
                     ));
                 }
             }
@@ -715,6 +740,16 @@ pub enum AgentCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserInputCommand {
+    ResumeCommittedUserInput {
+        original_key: Box<CommandReservationKey>,
+        original_fingerprint: String,
+        original_operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_domain_session_scope_id: Option<String>,
+        binding: String,
+        generation: u32,
+        expected_request_hash: SafeText,
+    },
     Resolve {
         binding: String,
         generation: u32,
@@ -878,6 +913,11 @@ impl ApplicationCommand {
                 settlement: EffectSettlementClass::AtomicDurableMutation,
                 requires_session: true,
             },
+            Self::UserInput(UserInputCommand::ResumeCommittedUserInput { .. }) => CommandPolicy {
+                lane: CommandLane::Interactive,
+                settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
+                requires_session: true,
+            },
             Self::Run(
                 RunCommand::Cancel { .. }
                 | RunCommand::CancelTerminalTask { .. }
@@ -936,7 +976,7 @@ impl ApplicationCommandEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationCommandRequest {
     pub envelope: ApplicationCommandEnvelope,
     pub admission: CommandAdmissionContext,
@@ -948,12 +988,89 @@ pub struct ApplicationCommandRequest {
 /// binds the request to its authenticated principal, durable client epoch, and current
 /// application scope before handing it to an [`ApplicationPort`]. The connection instance is
 /// intentionally not part of the durable reservation key; it identifies only the live transport.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandAdmissionContext {
     pub principal: AuthenticatedSubject,
     pub client_epoch: u64,
     pub connection_instance: HostConnectionInstanceId,
     pub scope: ApplicationScope,
+    #[serde(default)]
+    pub command_journal: Option<CommandJournalBinding>,
+}
+
+/// Accepting domain of a durable command. This does not change the meaning of its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandJournalBinding {
+    pub logical_journal_id: String,
+    pub command_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginalCommandContext {
+    pub expected_frontier: ExpectedFrontier,
+    pub command_journal: Option<CommandJournalBinding>,
+}
+
+/// Restricted recovery of the command journal itself; this cannot depend on journal admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryScope {
+    pub scope_digest: String,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogUnresolvedCommand {
+    pub key_digest: String,
+    pub scope_digest: String,
+    pub command_id: String,
+    pub command_kind: String,
+    pub phase: CommandLifecyclePhase,
+}
+
+/// Bounded owner-derived facts from the complete canonical prefix. Counts describe known
+/// records only; an unparsed tail may hide additional identities and never supplies a zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryImpact {
+    pub verified_prefix_bytes: u64,
+    pub verified_record_count: u64,
+    pub verified_prefix_digest: String,
+    pub known_command_count: u64,
+    pub affected_scope_count: u64,
+    pub affected_scopes: Vec<ControlLogRecoveryScope>,
+    pub scopes_truncated: bool,
+    pub known_unresolved_count: u64,
+    pub unresolved_commands: Vec<ControlLogUnresolvedCommand>,
+    pub commands_truncated: bool,
+    pub unparsed_tail_bytes: u64,
+    pub tail_command_count_unknown: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryPreview {
+    pub authority: sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1,
+    pub impact: ControlLogRecoveryImpact,
+}
+
+impl std::ops::Deref for ControlLogRecoveryPreview {
+    type Target = sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1;
+    fn deref(&self) -> &Self::Target {
+        &self.authority
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlLogRecoveryAction {
+    Preview,
+    SealAndRotate {
+        preview: Box<ControlLogRecoveryPreview>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlLogRecoveryOutcome {
+    Preview(Box<ControlLogRecoveryPreview>),
+    Activated(CommandJournalBinding),
 }
 
 impl CommandAdmissionContext {
@@ -976,6 +1093,7 @@ impl CommandAdmissionContext {
             client_epoch,
             connection_instance,
             scope,
+            command_journal: None,
         })
     }
 
@@ -1088,6 +1206,9 @@ pub struct ApplicationDomainReceipt {
 /// One exact domain commit that can be reopened by its owning reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationDomainCommitRef {
+    /// Actual durable source; omitted legacy values refer to the receipt frontier session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session_scope_id: Option<String>,
     pub source_event_id: String,
     pub source_sequence: u64,
     pub source_digest: String,
@@ -1095,7 +1216,11 @@ pub struct ApplicationDomainCommitRef {
 
 impl ApplicationDomainCommitRef {
     pub fn validate(&self) -> Result<(), ApplicationError> {
-        if self.source_event_id.is_empty()
+        if self
+            .source_session_scope_id
+            .as_ref()
+            .is_some_and(|scope| scope.is_empty() || scope.len() > 256)
+            || self.source_event_id.is_empty()
             || self.source_event_id.len() > 256
             || self.source_sequence == 0
             || self.source_digest.len() != 64
@@ -1119,6 +1244,22 @@ impl ApplicationDomainReceipt {
         key.validate()?;
         self.domain_commit.validate()?;
         if self.command_id != key.command_id || self.frontier.scope != key.authority_scope {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let parent_source = self
+            .frontier
+            .scope
+            .session
+            .as_ref()
+            .map(SessionScopeId::as_str);
+        let source = self
+            .domain_commit
+            .source_session_scope_id
+            .as_deref()
+            .or(parent_source);
+        if source == parent_source
+            && self.domain_commit.source_sequence > self.frontier.through_sequence
+        {
             return Err(ApplicationError::ScopeMismatch);
         }
         Ok(())
@@ -1796,6 +1937,32 @@ impl fmt::Display for ApplicationError {
 impl std::error::Error for ApplicationError {}
 
 pub trait ApplicationPort: Send + Sync {
+    /// Explicitly resumes the exact already-bound session runtime transition. This is not a
+    /// generic command retry; hosts must prove its original owner binding and durable effect gate.
+    fn resume_session_runtime_transition(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    fn recover_control_log(
+        &self,
+        _scope: ApplicationScope,
+        _action: ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<ControlLogRecoveryOutcome, ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    fn command_journal_binding(&self) -> Result<Option<CommandJournalBinding>, ApplicationError> {
+        Ok(None)
+    }
+    /// Reads the original command frontier from durable reservation context. Implementations
+    /// must not substitute a newer projection for a known command with unavailable context.
+    fn original_command_context(
+        &self,
+        _key: CommandReservationKey,
+    ) -> BoxFuture<'static, Result<Option<OriginalCommandContext>, ApplicationError>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Fetches actual durable events independently of the current-state snapshot.
     fn delivery_batch(
         &self,
@@ -1873,6 +2040,7 @@ pub struct ApplicationClient {
     observer_generation: u64,
     client_epoch: u64,
     connection_instance: HostConnectionInstanceId,
+    command_journal: Mutex<Option<CommandJournalBinding>>,
     state: Mutex<ApplicationClientState>,
     refresh_gate: futures::lock::Mutex<()>,
 }
@@ -1891,6 +2059,56 @@ impl fmt::Debug for ApplicationClient {
 }
 
 impl ApplicationClient {
+    /// Returns the durable key for an existing command under this attached client authority.
+    pub fn reservation_key(&self, command_id: ApplicationCommandId) -> CommandReservationKey {
+        CommandReservationKey {
+            application_instance: self.scope.application_instance.clone(),
+            authority_scope: self.scope.clone(),
+            principal: self.scope.authenticated_subject.clone(),
+            client_epoch: self.client_epoch,
+            command_id,
+        }
+    }
+
+    pub async fn recover_control_log(
+        &self,
+        action: ControlLogRecoveryAction,
+    ) -> Result<ControlLogRecoveryOutcome, ApplicationError> {
+        let outcome = self
+            .port
+            .recover_control_log(self.scope.clone(), action)
+            .await?;
+        if let ControlLogRecoveryOutcome::Activated(binding) = &outcome {
+            *self
+                .command_journal
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)? = Some(binding.clone());
+        }
+        Ok(outcome)
+    }
+    /// Freezes retries to the frontier that was durably reserved for this exact key.
+    pub async fn restore_original_command_context(
+        &self,
+        request: &mut ApplicationCommandRequest,
+    ) -> Result<(), ApplicationError> {
+        let key = request
+            .admission
+            .reservation_key(&request.envelope.command_id);
+        if key.authority_scope != self.scope
+            || request.envelope.expected_frontier.scope != self.scope
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        if let Some(context) = self.port.original_command_context(key).await? {
+            if context.expected_frontier.scope != self.scope {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            request.envelope.expected_frontier = context.expected_frontier;
+            request.admission.command_journal = context.command_journal;
+        }
+        Ok(())
+    }
+
     pub fn new(
         port: Arc<dyn ApplicationPort>,
         scope: ApplicationScope,
@@ -1903,12 +2121,14 @@ impl ApplicationClient {
                 "application observer generation and client epoch must be non-zero".to_owned(),
             ));
         }
+        let command_journal = port.command_journal_binding()?;
         Ok(Self {
             port,
             scope,
             observer_generation,
             client_epoch,
             connection_instance,
+            command_journal: Mutex::new(command_journal),
             state: Mutex::new(ApplicationClientState::default()),
             refresh_gate: futures::lock::Mutex::new(()),
         })
@@ -2250,7 +2470,7 @@ impl ApplicationClient {
         if expected_frontier.scope != self.scope {
             return Err(ApplicationError::ScopeMismatch);
         }
-        let request = ApplicationCommandRequest {
+        let mut request = ApplicationCommandRequest {
             envelope: ApplicationCommandEnvelope {
                 schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
                 command_id,
@@ -2265,6 +2485,11 @@ impl ApplicationClient {
                 self.scope.clone(),
             )?,
         };
+        request.admission.command_journal = self
+            .command_journal
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .clone();
         Ok(request)
     }
 
@@ -2274,18 +2499,38 @@ impl ApplicationClient {
         &self,
         request: ApplicationCommandRequest,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
-        let expected_admission = CommandAdmissionContext::host_bound(
+        self.validate_prepared_request(&request)?;
+        self.port.execute(request).await
+    }
+
+    /// Resumes only the caller-retained runtime transition without minting a new reservation.
+    pub async fn resume_session_runtime_transition(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.validate_prepared_request(&request)?;
+        self.port.resume_session_runtime_transition(request).await
+    }
+
+    fn validate_prepared_request(
+        &self,
+        request: &ApplicationCommandRequest,
+    ) -> Result<(), ApplicationError> {
+        let mut expected_admission = CommandAdmissionContext::host_bound(
             self.scope.authenticated_subject.clone(),
             self.client_epoch,
             self.connection_instance.clone(),
             self.scope.clone(),
         )?;
+        // Restoring an older reservation is allowed; the durable authority decides whether
+        // that generation can only be queried or can still admit a forward effect.
+        expected_admission.command_journal = request.admission.command_journal.clone();
         if request.admission != expected_admission
             || request.envelope.expected_frontier.scope != self.scope
         {
             return Err(ApplicationError::ScopeMismatch);
         }
-        self.port.execute(request).await
+        Ok(())
     }
 }
 
@@ -2478,6 +2723,7 @@ impl ApplicationPort for FakeApplication {
                 // `FakeApplication` is test-only contract scaffolding. Its source reference is
                 // deterministic fixture evidence, never a production domain commit.
                 domain_commit: ApplicationDomainCommitRef {
+                    source_session_scope_id: None,
                     source_event_id: format!(
                         "fixture-application:{}:{}",
                         request.envelope.command_id.as_str(),

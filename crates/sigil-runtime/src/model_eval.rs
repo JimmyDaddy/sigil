@@ -40,20 +40,27 @@ pub const MODEL_EVAL_MAX_OUTPUT_TOKENS: u32 = 32 * 1024;
 pub const MODEL_EVAL_MAX_CHECKS: usize = 4;
 pub const MODEL_EVAL_MAX_ASSERTIONS: usize = 8;
 pub const MODEL_EVAL_MAX_CHECK_TIMEOUT_MS: u64 = 60_000;
-pub const MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION: u16 = 1;
+pub const MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION: u16 = 2;
 
-const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &["edit_file", "glob", "grep", "read_file", "write_file"];
+const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &[
+    "edit_file",
+    "glob",
+    "grep",
+    "read_file",
+    "spawn_agents",
+    "write_file",
+];
 
 /// Candidate-release facts that cannot be inferred safely from a provider alias or assistant text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalOrchestrationRouteContractV1 {
     pub schema_version: u16,
     pub provider_kind: String,
     pub endpoint_family: String,
     pub canonical_model_version: String,
     pub routing_prompt_digest: String,
-    pub planner_prompt_digest: String,
+    pub direct_task_prompt_digest: String,
     pub system_prompt_digest: String,
     pub tool_profile_contract_digest: String,
     pub sigil_commit: String,
@@ -62,7 +69,7 @@ pub struct ModelEvalOrchestrationRouteContractV1 {
 
 /// Strict, committed definition for one generated model-eval workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalFixtureManifest {
     pub schema_version: u16,
     pub id: String,
@@ -76,6 +83,8 @@ pub struct ModelEvalFixtureManifest {
     pub files: Vec<ModelEvalFixtureFile>,
     pub checks: Vec<ModelEvalFixtureCheck>,
     pub assertions: Vec<ModelEvalFixtureAssertion>,
+    #[serde(default)]
+    pub agent_delegation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,7 +95,7 @@ pub struct ModelEvalFixtureManifest {
 ///
 /// The expected route class is committed with the fixture and is never inferred from prompt text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalOrchestrationCase {
     pub case_class: OrchestrationEvalCaseClass,
     pub corpus_version: String,
@@ -94,7 +103,7 @@ pub struct ModelEvalOrchestrationCase {
 
 /// One immutable source file copied into a generated fixture workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalFixtureFile {
     pub path: PathBuf,
     pub source: PathBuf,
@@ -103,7 +112,7 @@ pub struct ModelEvalFixtureFile {
 
 /// One trusted verification command committed with a fixture.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalFixtureCheck {
     pub id: String,
     pub command: Vec<String>,
@@ -112,7 +121,7 @@ pub struct ModelEvalFixtureCheck {
 
 /// Harness-owned mutation used only to prove verification staleness after a model run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelEvalPostRunMutation {
     pub path: PathBuf,
     pub old_text: String,
@@ -130,7 +139,7 @@ pub struct ModelEvalFixtureAssertion {
 
 /// Supported V1 fixture assertions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ModelEvalFixtureAssertionKind {
     FileContains {
         path: PathBuf,
@@ -146,9 +155,14 @@ pub enum ModelEvalFixtureAssertionKind {
     ToolNotCalled {
         tool_name: String,
     },
+    AgentBatchSucceeded {
+        minimum_members: u8,
+        profile_id: String,
+    },
     PathAbsent {
         path: PathBuf,
     },
+    UserInputPending,
     WorkspaceSourceUnchanged,
 }
 
@@ -169,6 +183,7 @@ pub enum ModelEvalExpectedTerminal {
     Completed,
     Blocked,
     Failed,
+    Paused,
 }
 
 /// Allowed verification buckets for one fixture.
@@ -210,6 +225,7 @@ pub struct MaterializedModelEvalFixture {
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
     pub orchestration: Option<ModelEvalOrchestrationCase>,
+    pub agent_delegation: bool,
 }
 
 /// Loads and fully validates one committed model-eval fixture directory.
@@ -343,6 +359,7 @@ pub fn materialize_model_eval_fixture(
         expected_verification: fixture.manifest.expected_verification.clone(),
         post_run_mutation: fixture.manifest.post_run_mutation.clone(),
         orchestration: fixture.manifest.orchestration.clone(),
+        agent_delegation: fixture.manifest.agent_delegation,
     })
 }
 
@@ -361,6 +378,16 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
             "orchestration corpus version",
             &orchestration.corpus_version,
         )?;
+    }
+    let delegation_tool_enabled = manifest
+        .allowed_tools
+        .iter()
+        .any(|tool| tool == "spawn_agents");
+    if manifest.agent_delegation != delegation_tool_enabled {
+        bail!("model eval agent delegation requires the explicit spawn_agents tool scope");
+    }
+    if manifest.agent_delegation && manifest.orchestration.is_some() {
+        bail!("model eval agent delegation fixtures cannot be orchestration route fixtures");
     }
 
     if manifest.allowed_tools.is_empty() {
@@ -501,9 +528,19 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
                     bail!("model eval tool assertion has an invalid tool name");
                 }
             }
+            ModelEvalFixtureAssertionKind::AgentBatchSucceeded {
+                minimum_members,
+                profile_id,
+            } => {
+                validate_id("agent batch profile id", profile_id)?;
+                if !manifest.agent_delegation || !(2..=4).contains(minimum_members) {
+                    bail!("model eval agent batch assertion is invalid");
+                }
+            }
             ModelEvalFixtureAssertionKind::PathAbsent { path } => {
                 validate_bounded_parent_path("assertion absent path", path)?;
             }
+            ModelEvalFixtureAssertionKind::UserInputPending => {}
             ModelEvalFixtureAssertionKind::WorkspaceSourceUnchanged => {}
         }
     }

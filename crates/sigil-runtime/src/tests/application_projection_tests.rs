@@ -486,7 +486,7 @@ async fn tui_outbox_ack_uses_the_exact_projection_cut_and_rejects_foreign_fronti
     };
 
     let mut detached = binding.clone();
-    detached.owner = None;
+    detached.owner = Arc::new(Mutex::new(None));
     let before_detached_ack = std::fs::read(&session_path)?;
     assert!(matches!(
         detached
@@ -630,7 +630,7 @@ fn owned_projection_reuses_one_strict_cut_after_the_writer_advances() -> anyhow:
     let (_fixture, mut session, store, binding) = owned_projection_fixture()?;
     session.append_user_message(sigil_kernel::ModelMessage::user("before snapshot"))?;
     let snapshot = binding.build_snapshot(None)?.envelope;
-    let owner = binding.owner.as_ref().expect("owned fixture");
+    let owner = binding.owner().expect("owned fixture");
     let metrics = owner.metrics()?;
     let attempts = store.active_projection_metrics().writer_lock_attempt_total;
     assert_eq!(snapshot.projection.conversation.message_count, 1);
@@ -765,8 +765,7 @@ fn owned_projection_rejects_foreign_or_corrupt_owner_without_path_fallback() -> 
         Err(ApplicationError::CorruptProjection(_))
     ));
     let scans = binding
-        .owner
-        .as_ref()
+        .owner()
         .expect("owner")
         .metrics()?
         .full_prefix_scan_count;
@@ -776,8 +775,7 @@ fn owned_projection_rejects_foreign_or_corrupt_owner_without_path_fallback() -> 
     ));
     assert_eq!(
         binding
-            .owner
-            .as_ref()
+            .owner()
             .expect("owner")
             .metrics()?
             .full_prefix_scan_count,
@@ -850,7 +848,7 @@ fn qualify_hot_queries(mebibytes: u64) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = binding.build_snapshot(None)?.envelope;
     let cold_ms = started.elapsed().as_millis();
-    let owner = binding.owner.as_ref().expect("owned fixture");
+    let owner = binding.owner().expect("owned fixture");
     let cold = owner.metrics()?;
     let started = std::time::Instant::now();
     for _ in 0..20 {
@@ -967,7 +965,7 @@ fn runtime_query_hot_path_200_mib() -> anyhow::Result<()> {
 fn runtime_query_concurrent_catchup_applies_each_record_once() -> anyhow::Result<()> {
     let (_fixture, mut session, _store, binding) = owned_projection_fixture()?;
     binding.build_snapshot(None)?;
-    let before = binding.owner.as_ref().expect("owned").metrics()?;
+    let before = binding.owner().expect("owned").metrics()?;
     for index in 0..300 {
         session.append_user_message(sigil_kernel::ModelMessage::user(format!("tail-{index}")))?;
     }
@@ -996,7 +994,7 @@ fn runtime_query_concurrent_catchup_applies_each_record_once() -> anyhow::Result
         }
         Ok(())
     })?;
-    let after = binding.owner.as_ref().expect("owned").metrics()?;
+    let after = binding.owner().expect("owned").metrics()?;
     assert_eq!(after.full_prefix_scan_count, 1);
     assert_eq!(after.records_applied - before.records_applied, 300);
     Ok(())
@@ -1052,7 +1050,7 @@ fn message_content_pages_bind_identity_and_preserve_unicode_under_a_fixed_budget
     let message_id =
         crate::application_run::safe_application_transcript_message_id(&raw_message_id);
     session.append_assistant_message(message)?;
-    let owner = binding.owner.as_ref().expect("owner");
+    let owner = binding.owner().expect("owner");
     let budget = sigil_kernel::SessionReadBudget::default();
     let display = owner.conversation_display_page(
         ConversationDisplayQuery {
@@ -1170,7 +1168,7 @@ fn message_content_reads_user_and_reasoning_but_rejects_replaced_sources() -> an
         kind: "reasoning_trace".into(),
         data: serde_json::json!({"text":"control-note reasoning body"}),
     })?;
-    let owner = binding.owner.as_ref().expect("owner");
+    let owner = binding.owner().expect("owner");
     let budget = sigil_kernel::SessionReadBudget::default();
     let display = owner.conversation_display_page(
         ConversationDisplayQuery {
@@ -1222,7 +1220,7 @@ fn cancelling_a_coordinated_read_preserves_the_verified_prefix_for_retry() -> an
     let (_fixture, mut session, store, binding) = owned_projection_fixture()?;
     session.append_user_message(sigil_kernel::ModelMessage::user("verified prefix"))?;
     binding.build_snapshot(None)?;
-    let owner = binding.owner.as_ref().expect("actual owner");
+    let owner = binding.owner().expect("actual owner");
     let before = owner.metrics()?;
     session.append_user_message(sigil_kernel::ModelMessage::user("new suffix"))?;
     let lock = std::fs::OpenOptions::new()
@@ -1427,7 +1425,7 @@ async fn runtime_delivery_10k_backlog_partial_ack_cancel_and_retry() -> anyhow::
         Some("current-10000")
     );
     assert!(client.take_applied_delivery_event_ids()?.is_empty());
-    let owner = binding.owner.as_ref().expect("owned fixture");
+    let owner = binding.owner().expect("owned fixture");
     let before = owner.metrics()?;
     let mut all_ids = Vec::new();
     let mut batches = 0;
@@ -1589,5 +1587,45 @@ async fn readonly_projection_cannot_ack_even_after_a_valid_snapshot() -> anyhow:
     ));
     assert_eq!(std::fs::read(store.path())?, before);
     assert_eq!(readonly.pending_observations(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_projection_replacement_waits_for_real_observation_and_keeps_scope()
+-> anyhow::Result<()> {
+    let (_fixture, _session, store, binding) = owned_projection_fixture()?;
+    let shared = binding.clone();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let observer_entered = Arc::clone(&entered);
+    let (release, blocked) = std::sync::mpsc::channel();
+    let counter = binding.observation_counter();
+    let observation = tokio::spawn(observation(counter, move |_| {
+        observer_entered.notify_one();
+        blocked.recv().expect("release old projection observation");
+        Ok(())
+    }));
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await?;
+    let next = RuntimeSessionProjectionOwner::from_store(&store);
+    assert!(matches!(
+        binding.replace_owner(next.clone()),
+        Err(ApplicationError::Unavailable)
+    ));
+    assert_eq!(binding.pending_observations(), 1);
+    release.send(())?;
+    observation.await??;
+    binding.replace_owner(next.clone())?;
+    assert!(
+        Arc::ptr_eq(&shared.owner()?.cache, &next.cache),
+        "service clones share the published owner"
+    );
+    let foreign_root = tempfile::tempdir()?;
+    let foreign_store = JsonlSessionStore::new(foreign_root.path().join("foreign.jsonl"))?;
+    let _foreign =
+        sigil_kernel::Session::load_from_store("fixture", "model", foreign_store.clone())?;
+    assert!(matches!(
+        binding.replace_owner(RuntimeSessionProjectionOwner::from_store(&foreign_store)),
+        Err(ApplicationError::ScopeMismatch)
+    ));
+    assert!(Arc::ptr_eq(&binding.owner()?.cache, &next.cache));
     Ok(())
 }

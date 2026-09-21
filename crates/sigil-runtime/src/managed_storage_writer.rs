@@ -26,6 +26,8 @@ use sigil_kernel::resource::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageWriterChannelV1 {
     ApplicationControlLog,
+    ApplicationCommandIndex,
+    ApplicationControlRecovery,
     SessionLog,
     SessionLifecycleLog,
     InputHistory,
@@ -126,6 +128,16 @@ impl StorageWriterChannelV1 {
                 ManagedStorageSemanticOwnerV1::ApplicationControlLog,
                 ManagedStorageCapabilityFamilyV1::AppendLog,
                 "application-control-log",
+            ),
+            Self::ApplicationCommandIndex => (
+                ManagedStorageSemanticOwnerV1::ApplicationCommandIndex,
+                ManagedStorageCapabilityFamilyV1::RebuildableDatabaseProjection,
+                "application-command-index",
+            ),
+            Self::ApplicationControlRecovery => (
+                ManagedStorageSemanticOwnerV1::ApplicationControlRecovery,
+                ManagedStorageCapabilityFamilyV1::AtomicProjection,
+                "application-control-recovery",
             ),
             Self::SessionLog => (
                 ManagedStorageSemanticOwnerV1::SessionLog,
@@ -232,6 +244,15 @@ pub struct ManagedStorageWriterLeaseV1 {
 }
 
 impl ManagedStorageWriterLeaseV1 {
+    fn record_path(&self) -> PathBuf {
+        self.path.join(
+            if self.channel == StorageWriterChannelV1::ApplicationCommandIndex {
+                "records.sqlite3"
+            } else {
+                "records.jsonl"
+            },
+        )
+    }
     /// Admitted namespace digest (the authority-one-shot identity for this lease).
     pub fn namespace_digest(&self) -> CanonicalHash {
         self.handle.namespace_hash
@@ -340,6 +361,403 @@ impl std::fmt::Debug for ManagedStorageWriterAdapterV1 {
 }
 
 impl ManagedStorageWriterAdapterV1 {
+    pub(crate) fn named_namespace_digest(
+        channel: StorageWriterChannelV1,
+        key: &str,
+    ) -> CanonicalHash {
+        stable_namespace_hash(channel.mapping().2, key)
+    }
+
+    pub(crate) fn detach(
+        &self,
+        lease: ManagedStorageWriterLeaseV1,
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .detach_namespace(lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    pub(crate) fn command_forward_guard(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_storage::ManagedStorageForwardGuardV1>,
+        ManagedStorageWriterErrorV1,
+    > {
+        self.service
+            .acquire_forward_guard(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    pub(crate) fn control_log_recovery_state(
+        &self,
+        recovery: &ManagedStorageWriterLeaseV1,
+    ) -> Result<
+        Option<sigil_kernel::managed_storage::ControlLogRecoveryStateV1>,
+        ManagedStorageWriterErrorV1,
+    > {
+        self.service
+            .query_control_log_recovery(&recovery.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    pub(crate) fn preview_control_log_recovery(
+        &self,
+        recovery: &ManagedStorageWriterLeaseV1,
+        old: &ManagedStorageWriterLeaseV1,
+        successor: &ManagedStorageWriterLeaseV1,
+        request: sigil_kernel::managed_storage::ControlLogRecoveryRequestV1,
+    ) -> Result<
+        sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1,
+        ManagedStorageWriterErrorV1,
+    > {
+        self.service
+            .preview_control_log_recovery(&recovery.handle, &old.handle, &successor.handle, request)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    pub(crate) fn advance_control_log_recovery(
+        &self,
+        recovery: &ManagedStorageWriterLeaseV1,
+        old: &ManagedStorageWriterLeaseV1,
+        successor: &ManagedStorageWriterLeaseV1,
+        preview: &sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1,
+        header: &[u8],
+    ) -> Result<sigil_kernel::managed_storage::ControlLogRecoveryStateV1, ManagedStorageWriterErrorV1>
+    {
+        self.service
+            .advance_control_log_recovery(
+                &recovery.handle,
+                &old.handle,
+                &successor.handle,
+                preview,
+                header,
+            )
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    /// Appends at an exact verified command frontier under the authority's generation fence.
+    pub(crate) fn append_command_record(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        expected_bytes: u64,
+        expected_records: u64,
+        record: &[u8],
+    ) -> Result<(), ManagedStorageWriterErrorV1> {
+        if lease.channel != StorageWriterChannelV1::ApplicationControlLog {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "wrong command journal owner".to_owned(),
+            ));
+        }
+        let _lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
+        let path = lease.record_path();
+        reject_reparse_components(&path, true)?;
+        let current = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && is_safe_physical_metadata(&metadata) => {
+                metadata.len()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            _ => {
+                return Err(ManagedStorageWriterErrorV1::Io(
+                    "invalid command journal object".to_owned(),
+                ));
+            }
+        };
+        if current != expected_bytes {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "command journal frontier changed".to_owned(),
+            ));
+        }
+        let next = current
+            .checked_add(record.len() as u64)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                ManagedStorageWriterErrorV1::Io("command journal length overflow".to_owned())
+            })?;
+        self.service
+            .reserve_namespace_quota_capacity(&lease.handle, next, next, expected_records + 1)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        let mut file = options.open(&path).map_err(storage_io)?;
+        file.write_all(record).map_err(storage_io)?;
+        file.write_all(b"\n").map_err(storage_io)?;
+        file.sync_all().map_err(storage_io)?;
+        sync_parent_directory(&path)
+    }
+
+    /// Streams the verified prefix of a command journal. Only an otherwise complete final
+    /// record may gain its missing separator; invalid bytes are kept intact for recovery.
+    pub(crate) fn scan_command_journal(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        repair_separator: bool,
+        mut visit: impl FnMut(&[u8]) -> Result<(), String>,
+    ) -> Result<bool, ManagedStorageWriterErrorV1> {
+        use std::io::BufRead;
+        if lease.channel != StorageWriterChannelV1::ApplicationControlLog {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "wrong journal owner".to_owned(),
+            ));
+        }
+        let _lock = open_namespace_lock(&lease.path)?;
+        let path = lease.record_path();
+        reject_reparse_components(&path, true)?;
+        if !path.try_exists().map_err(storage_io)? {
+            return Ok(true);
+        }
+        let file = open_managed_read_file(&path)?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = Vec::new();
+        let mut record_count = 0_u64;
+        loop {
+            line.clear();
+            // Bounds one protocol record, never the size or lifetime of the journal.
+            let read = reader
+                .by_ref()
+                .take(16 * 1024 * 1024 + 1)
+                .read_until(b'\n', &mut line)
+                .map_err(storage_io)?;
+            if read == 0 {
+                return Ok(true);
+            }
+            if line.len() > 16 * 1024 * 1024 {
+                return Ok(false);
+            }
+            let separated = line.last() == Some(&b'\n');
+            let payload = if separated {
+                &line[..line.len() - 1]
+            } else {
+                &line[..]
+            };
+            if visit(payload).is_err() {
+                return Ok(false);
+            }
+            record_count = record_count.checked_add(1).ok_or_else(|| {
+                ManagedStorageWriterErrorV1::Io("command journal record count overflow".to_owned())
+            })?;
+            if !separated {
+                if !repair_separator {
+                    return Ok(false);
+                }
+                self.service
+                    .validate_namespace_write(&lease.handle)
+                    .map_err(|error| {
+                        ManagedStorageWriterErrorV1::LeaseRejected(error.to_string())
+                    })?;
+                let length = reader.get_ref().metadata().map_err(storage_io)?.len();
+                self.service
+                    .reserve_namespace_quota_capacity(
+                        &lease.handle,
+                        length + 1,
+                        length + 1,
+                        record_count,
+                    )
+                    .map_err(|error| {
+                        ManagedStorageWriterErrorV1::LeaseRejected(error.to_string())
+                    })?;
+                let mut options = std::fs::OpenOptions::new();
+                options.append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW);
+                }
+                let mut output = options.open(&path).map_err(storage_io)?;
+                output.write_all(b"\n").map_err(storage_io)?;
+                output.sync_all().map_err(storage_io)?;
+                return Ok(true);
+            }
+        }
+    }
+
+    pub(crate) fn command_physical_digest(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+    ) -> Result<(u64, CanonicalHash), ManagedStorageWriterErrorV1> {
+        let _lock = open_namespace_lock(&lease.path)?;
+        let path = lease.record_path();
+        reject_reparse_components(&path, true)?;
+        if !path.try_exists().map_err(storage_io)? {
+            return sigil_kernel::managed_storage::read_physical_digest(std::io::empty())
+                .map_err(storage_io);
+        }
+        sigil_kernel::managed_storage::read_physical_digest(open_managed_read_file(&path)?)
+            .map_err(storage_io)
+    }
+
+    pub(crate) fn command_prefix_digest(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        length: u64,
+    ) -> Result<CanonicalHash, ManagedStorageWriterErrorV1> {
+        let _lock = open_namespace_lock(&lease.path)?;
+        let path = lease.record_path();
+        reject_reparse_components(&path, true)?;
+        if length == 0 {
+            return Ok(content_hash(&[]));
+        }
+        let (observed, digest) = sigil_kernel::managed_storage::read_physical_digest(
+            open_managed_read_file(&path)?.take(length),
+        )
+        .map_err(storage_io)?;
+        if observed != length {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "command prefix changed".to_owned(),
+            ));
+        }
+        Ok(digest)
+    }
+
+    /// Opens a rebuildable command index only inside its own admitted namespace. The index
+    /// is private host state; its contents never authorize effects without source replay.
+    pub(crate) fn open_command_index(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        expected_schema: &[(&str, &str)],
+    ) -> Result<rusqlite::Connection, ManagedStorageWriterErrorV1> {
+        if lease.channel != StorageWriterChannelV1::ApplicationCommandIndex {
+            return Err(ManagedStorageWriterErrorV1::Io(
+                "wrong index owner".to_owned(),
+            ));
+        }
+        let _lock = open_namespace_lock(&lease.path)?;
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
+        let path = lease.record_path();
+        reject_reparse_components(&path, true)?;
+        for suffix in ["-journal", "-wal", "-shm"] {
+            reject_reparse_components(
+                &path.with_file_name(format!("records.sqlite3{suffix}")),
+                true,
+            )?;
+        }
+        // Corruption of this disposable projection cannot prevent canonical journal recovery.
+        let open = || {
+            rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+        };
+        let connection =
+            open().map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        let schema_matches = || -> rusqlite::Result<bool> {
+            let count: i64 =
+                connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
+            if count == 0 {
+                return Ok(true);
+            }
+            if count != expected_schema.len() as i64 {
+                return Ok(false);
+            }
+            for (name, expected) in expected_schema {
+                let actual: String = connection.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                    [name],
+                    |row| row.get(0),
+                )?;
+                if actual != *expected {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        let healthy = connection
+            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .is_ok_and(|result| result == "ok")
+            && schema_matches().unwrap_or(false);
+        let connection = if healthy {
+            connection
+        } else {
+            drop(connection);
+            std::fs::remove_file(&path).map_err(storage_io)?;
+            for suffix in ["-journal", "-wal", "-shm"] {
+                let auxiliary = path.with_file_name(format!("records.sqlite3{suffix}"));
+                match std::fs::remove_file(auxiliary) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(storage_io(error)),
+                }
+            }
+            open().map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(storage_io)?;
+        }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(&path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA temp_store=FILE;")
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        sync_parent_directory(&path)?;
+        Ok(connection)
+    }
+
+    pub(crate) fn reserve_index_capacity(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        bytes: u64,
+    ) -> Result<u64, ManagedStorageWriterErrorV1> {
+        self.service
+            .reserve_namespace_quota_capacity(&lease.handle, bytes, bytes, 1)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+    }
+
+    /// Reserves the existing database and recovery/rebuild journal before SQLite may open it.
+    pub(crate) fn reserve_index_open_capacity(
+        &self,
+        lease: &ManagedStorageWriterLeaseV1,
+        minimum: u64,
+    ) -> Result<u64, ManagedStorageWriterErrorV1> {
+        let _lock = open_namespace_lock(&lease.path)?;
+        let mut bytes = 64_u64 * 1024;
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let path = lease.path.join(format!("records.sqlite3{suffix}"));
+            reject_reparse_components(&path, true)?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() && is_safe_physical_metadata(&metadata) => {
+                    let multiplier = if suffix.is_empty() { 2 } else { 1 };
+                    bytes = bytes
+                        .checked_add(metadata.len().checked_mul(multiplier).ok_or_else(|| {
+                            ManagedStorageWriterErrorV1::Io("index capacity overflow".to_owned())
+                        })?)
+                        .ok_or_else(|| {
+                            ManagedStorageWriterErrorV1::Io("index capacity overflow".to_owned())
+                        })?;
+                }
+                Ok(_) => {
+                    return Err(ManagedStorageWriterErrorV1::Io(
+                        "managed index object is not a regular file".to_owned(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(storage_io(error)),
+            }
+        }
+        self.reserve_index_capacity(lease, bytes.max(minimum))
+    }
+
     /// Creates the adapter. `state_anchor` must be the authority-verified bootstrap state anchor
     /// (owner-only, no-follow); the adapter validates it before any acquire.
     pub fn new(
@@ -715,8 +1133,17 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
-        self.prepare_admitted_namespace(&path)?;
-        self.write_admission_marker(&path, &handle)?;
+        if let Err(error) = self
+            .prepare_admitted_namespace(&path)
+            .and_then(|()| self.write_admission_marker(&path, &handle))
+        {
+            // Physical setup can fail after admission. Preserve the durable storage charge,
+            // but release this live holder so the same namespace remains retryable.
+            self.service.detach_namespace(handle).map_err(|failure| {
+                ManagedStorageWriterErrorV1::LeaseRejected(failure.to_string())
+            })?;
+            return Err(error);
+        }
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -760,8 +1187,15 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
-        self.prepare_admitted_namespace(&path)?;
-        self.write_admission_marker(&path, &handle)?;
+        if let Err(error) = self
+            .prepare_admitted_namespace(&path)
+            .and_then(|()| self.write_admission_marker(&path, &handle))
+        {
+            self.service.detach_namespace(handle).map_err(|failure| {
+                ManagedStorageWriterErrorV1::LeaseRejected(failure.to_string())
+            })?;
+            return Err(error);
+        }
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
@@ -771,7 +1205,7 @@ impl ManagedStorageWriterAdapterV1 {
 
     /// Performs the first physical mutation only after RA has consumed the exact current
     /// admission. A failed preparation intentionally does not walk, chmod, or delete any old
-    /// root; its durable pending admission is reconciled fail-closed on the next boot.
+    /// root. The caller detaches its failed live holder while retaining any durable charge.
     fn prepare_admitted_namespace(&self, path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
         if let Some(parent) = path.parent() {
             reject_existing_reparse_components(parent)?;
@@ -863,6 +1297,11 @@ impl ManagedStorageWriterAdapterV1 {
         path: &Path,
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        // The authority's existing-only recovery reader requires its physical lock from the
+        // first query, before any semantic journal append has happened.
+        let lock = open_namespace_lock(path)?;
+        lock.sync_all().map_err(storage_io)?;
+        sync_parent_directory(&path.join(".authority-storage.lock"))?;
         let marker = serde_json::json!({
             "schema_version": 3,
             "handle_id": handle.handle_id.as_str(),
@@ -879,7 +1318,7 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
     ) -> Result<(u64, u64, CanonicalHash), ManagedStorageWriterErrorV1> {
         let _namespace_lock = open_namespace_lock(&lease.path)?;
-        let record_file = lease.path.join("records.jsonl");
+        let record_file = lease.record_path();
         reject_reparse_components(&record_file, true)?;
         let bytes = match std::fs::symlink_metadata(&record_file) {
             Ok(metadata) => {
@@ -907,6 +1346,15 @@ impl ManagedStorageWriterAdapterV1 {
                 #[cfg(not(windows))]
                 file.sync_all()
                     .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                if lease.channel == StorageWriterChannelV1::ApplicationControlLog {
+                    return sigil_kernel::managed_storage::read_jsonl_physical_frontier(file)
+                        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()));
+                }
+                if lease.channel == StorageWriterChannelV1::ApplicationCommandIndex {
+                    let (length, hash) = sigil_kernel::managed_storage::read_physical_digest(file)
+                        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+                    return Ok((length, u64::from(length != 0), hash));
+                }
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes)
                     .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
@@ -1201,6 +1649,33 @@ fn artifact_quota_error(
         },
         _ => ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()),
     }
+}
+
+fn storage_io(error: std::io::Error) -> ManagedStorageWriterErrorV1 {
+    ManagedStorageWriterErrorV1::Io(error.to_string())
+}
+
+fn open_managed_read_file(path: &Path) -> Result<std::fs::File, ManagedStorageWriterErrorV1> {
+    reject_reparse_components(path, false)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(storage_io)?;
+    if !file.metadata().map_err(storage_io)?.is_file() {
+        return Err(ManagedStorageWriterErrorV1::Io(
+            "managed object is not a regular file".to_owned(),
+        ));
+    }
+    Ok(file)
 }
 
 fn managed_physical_record_count(
@@ -1679,6 +2154,16 @@ fn grant_for_owner(
     let (_, capability_family, leaf) = channel.mapping();
     let namespace_hash = writer_namespace_hash(leaf);
     let (quota_class, quota_max_bytes, quota_max_entries, quota_max_holders) = match channel {
+        StorageWriterChannelV1::ApplicationControlLog
+        | StorageWriterChannelV1::ApplicationCommandIndex
+        | StorageWriterChannelV1::ApplicationControlRecovery => (
+            sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
+            // These sources grow for the lifetime of the authority scope. The shared
+            // workspace storage budget remains the authority's real admission limit.
+            512 * 1024 * 1024,
+            u64::MAX,
+            1_024,
+        ),
         StorageWriterChannelV1::ArtifactStaging => (
             sigil_kernel::resource::ResourceQuotaClassV1::ArtifactStaging,
             sigil_kernel::session::TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
@@ -1693,8 +2178,12 @@ fn grant_for_owner(
         ),
         _ => (
             sigil_kernel::resource::ResourceQuotaClassV1::RuntimeState,
-            1024 * 1024,
-            1024,
+            // Byte and entry ceilings apply to the whole quota class, not this
+            // semantic owner. Every RuntimeState grant must use the same limits:
+            // opening a small history or recovery namespace must not reapply a
+            // smaller ceiling to an existing command log and its index.
+            512 * 1024 * 1024,
+            u64::MAX,
             1,
         ),
     };

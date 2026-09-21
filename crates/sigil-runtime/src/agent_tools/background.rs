@@ -4,7 +4,29 @@ use super::*;
 #[derive(Clone, Default)]
 pub struct AgentToolBackgroundRuns {
     handles: Arc<Mutex<BTreeMap<AgentThreadId, BackgroundChatAgentHandle>>>,
-    event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
+    event_sink: Arc<Mutex<Option<Arc<dyn AgentToolBackgroundEventSink>>>>,
+}
+
+impl std::fmt::Debug for AgentToolBackgroundRuns {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (registered_threads, event_sink_registered) = self
+            .handles
+            .lock()
+            .map(|handles| {
+                let event_sink_registered = self
+                    .event_sink
+                    .lock()
+                    .map(|sink| sink.is_some())
+                    .unwrap_or(false);
+                (handles.len(), event_sink_registered)
+            })
+            .unwrap_or((usize::MAX, false));
+        formatter
+            .debug_struct("AgentToolBackgroundRuns")
+            .field("registered_threads", &registered_threads)
+            .field("event_sink_registered", &event_sink_registered)
+            .finish()
+    }
 }
 
 /// Receives live events emitted by detached child-agent runs.
@@ -30,7 +52,24 @@ pub trait AgentToolBackgroundEventSink: Send + Sync {
 pub(super) struct BackgroundChatAgentHandle {
     pub(super) thread: BackgroundChatAgentThreadRecord,
     pub(super) handle: BackgroundChatAgentTask,
+    /// Shared lifecycle state from the exact admitting supervisor, detached from its owner map
+    /// to avoid a strong-reference cycle through `AgentToolBackgroundRuns`.
+    pub(super) collection_supervisor: AgentSupervisor,
     pub(super) cancellation_owner: RunCancellationOwner,
+    pub(super) write_owner: Option<BackgroundChatAgentWriteOwner>,
+}
+
+/// Process-local owner for an isolated write result until its durable merge proposal is recorded.
+pub(super) enum BackgroundChatAgentWriteOwner {
+    ChangesetOnly {
+        base_snapshot_id: String,
+        workspace_root: PathBuf,
+    },
+    Worktree {
+        worktree: Box<crate::isolated_workspace::MaterializedGitWorktree>,
+        workspace_root: PathBuf,
+        objective: String,
+    },
 }
 
 type BackgroundChatAgentOutcome =
@@ -150,11 +189,25 @@ pub(super) struct AgentBatchMemberContext {
 
 pub(super) struct BackgroundCancellationOutcome {
     pub(super) thread: BackgroundChatAgentThreadRecord,
+    pub(super) collection_supervisor: AgentSupervisor,
+    pub(super) cancellation_owner: RunCancellationOwner,
+    pub(super) write_owner: Option<BackgroundChatAgentWriteOwner>,
     pub(super) run_scope_id: String,
     pub(super) outcome: RunCancellationTerminalOutcome,
     pub(super) cleanup_complete: bool,
     pub(super) active_effects: usize,
     pub(super) active_tasks: usize,
+}
+
+/// Durable observation of cancelling one process-owned background child.
+#[derive(Debug, Clone)]
+pub(crate) struct BackgroundAgentCancellation {
+    pub(crate) previous_status: AgentThreadStatus,
+    pub(crate) status: AgentThreadStatus,
+    pub(crate) status_label: &'static str,
+    pub(crate) reason: String,
+    pub(crate) outcome: RunCancellationTerminalOutcome,
+    pub(crate) cleanup_complete: bool,
 }
 
 #[derive(Clone)]
@@ -273,12 +326,53 @@ impl AgentToolBackgroundRuns {
     pub fn with_event_sink(event_sink: Arc<dyn AgentToolBackgroundEventSink>) -> Self {
         Self {
             handles: Arc::new(Mutex::new(BTreeMap::new())),
-            event_sink: Some(event_sink),
+            event_sink: Arc::new(Mutex::new(Some(event_sink))),
         }
     }
 
     pub(super) fn event_sink(&self) -> Option<Arc<dyn AgentToolBackgroundEventSink>> {
-        self.event_sink.clone()
+        self.event_sink.lock().ok().and_then(|sink| sink.clone())
+    }
+
+    /// Rebinds live notifications when the session attachment is resumed by a new surface worker.
+    /// The background task owner itself remains the same across the rebind.
+    pub fn set_event_sink(&self, event_sink: Arc<dyn AgentToolBackgroundEventSink>) -> Result<()> {
+        *self
+            .event_sink
+            .lock()
+            .map_err(|_| anyhow!("agent background event sink lock poisoned"))? = Some(event_sink);
+        Ok(())
+    }
+
+    /// Returns the exact process-local run owner identity shared by two runtime handles.
+    #[must_use]
+    pub fn shares_owner_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handles, &other.handles)
+    }
+
+    /// Returns every child invocation whose result is still owned by this attachment.
+    pub fn thread_ids(&self) -> Result<BTreeSet<AgentThreadId>> {
+        self.handles
+            .lock()
+            .map(|handles| handles.keys().cloned().collect())
+            .map_err(|_| anyhow!("agent background run lock poisoned"))
+    }
+
+    /// Returns durable isolated-workspace IDs that must stay alive with this attachment.
+    pub fn active_worktree_ids(&self) -> Result<BTreeSet<String>> {
+        let handles = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        Ok(handles
+            .values()
+            .filter_map(|background| match background.write_owner.as_ref() {
+                Some(BackgroundChatAgentWriteOwner::Worktree { worktree, .. }) => {
+                    Some(worktree.isolated_workspace_id().to_owned())
+                }
+                Some(BackgroundChatAgentWriteOwner::ChangesetOnly { .. }) | None => None,
+            })
+            .collect())
     }
 
     #[must_use]
@@ -448,6 +542,7 @@ impl AgentToolBackgroundRuns {
             return Ok(None);
         };
         let run_scope_id = background.cancellation_owner.handle().scope_id().to_owned();
+        let collection_supervisor = background.collection_supervisor.clone();
         let activated = background.cancellation_owner.activate_reserved_cancel();
         debug_assert!(
             activated,
@@ -491,12 +586,391 @@ impl AgentToolBackgroundRuns {
         };
         Ok(Some(BackgroundCancellationOutcome {
             thread: background.thread,
+            collection_supervisor,
+            cancellation_owner: background.cancellation_owner,
+            write_owner: background.write_owner,
             run_scope_id,
             outcome,
             cleanup_complete,
             active_effects,
             active_tasks,
         }))
+    }
+
+    /// Cancels one process-owned child and durably records the observed cleanup result.
+    ///
+    /// This is shared by the model-facing `cancel_agent` tool and application-level Task
+    /// cancellation so all surfaces use the same owner, audit records, and terminal controls.
+    pub(crate) async fn cancel_agent_thread_durably(
+        &self,
+        session: &mut Session,
+        thread_id: &AgentThreadId,
+        reason: String,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Option<BackgroundAgentCancellation>> {
+        const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(thread_id) else {
+            bail!("agent thread {} was not found", thread_id.as_str());
+        };
+        let previous_status = thread.status;
+        if previous_status.is_terminal() {
+            bail!(
+                "agent thread {} is already {}",
+                thread_id.as_str(),
+                thread_status_label(previous_status)
+            );
+        }
+
+        let recorder = session.run_cancellation_recorder()?;
+        let Some(run_scope_id) = self.reserve_cancellation_scope(thread_id)? else {
+            return Ok(None);
+        };
+        let request_id = format!("cancel-{run_scope_id}");
+        let requested_at_ms = unix_time_ms();
+        let request = RunCancellationRequestedEntry {
+            request_id: request_id.clone(),
+            run_scope_id: run_scope_id.clone(),
+            target: RunCancellationTarget::AgentThread {
+                thread_id: thread_id.as_str().to_owned(),
+            },
+            reason: reason.clone(),
+            requested_at_ms,
+            quiescence_deadline_ms: requested_at_ms
+                .saturating_add(QUIESCENCE_TIMEOUT.as_millis() as u64),
+        };
+        if let Err(error) = recorder.append_requested(&request) {
+            if let Some(mut cancellation) = self.cancel(thread_id, QUIESCENCE_TIMEOUT).await? {
+                cancellation
+                    .collection_supervisor
+                    .release_runtime_thread(thread_id);
+                if cancellation.outcome == RunCancellationTerminalOutcome::Cancelled
+                    && cancellation.cleanup_complete
+                    && let Some(write_owner) = cancellation.write_owner.take()
+                {
+                    super::chat::cleanup_background_isolated_write_owner(
+                        session,
+                        handler,
+                        write_owner,
+                    )
+                    .await
+                    .context(
+                        "failed to clean up the isolated workspace after cancellation audit failure",
+                    )?;
+                }
+            }
+            return Err(error.context("failed to persist agent cancellation request"));
+        }
+
+        let Some(mut cancellation) = self.cancel(thread_id, QUIESCENCE_TIMEOUT).await? else {
+            bail!(
+                "agent thread {} lost its runtime owner during cancellation",
+                thread_id.as_str()
+            );
+        };
+        let write_cleanup_error = if cancellation.outcome
+            == RunCancellationTerminalOutcome::Cancelled
+            && cancellation.cleanup_complete
+            && let Some(write_owner) = cancellation.write_owner.take()
+        {
+            super::chat::cleanup_background_isolated_write_owner(session, handler, write_owner)
+                .await
+                .err()
+        } else {
+            None
+        };
+        let route_revocation_error = if cancellation.outcome
+            == RunCancellationTerminalOutcome::Cancelled
+            && cancellation.cleanup_complete
+        {
+            self.revoke_child_pending_routes(session, thread_id, handler)
+                .await
+                .err()
+        } else {
+            None
+        };
+        if write_cleanup_error.is_some() || route_revocation_error.is_some() {
+            cancellation
+                .cancellation_owner
+                .handle()
+                .mark_cleanup_incomplete();
+            cancellation.cleanup_complete = false;
+            cancellation.outcome = RunCancellationTerminalOutcome::Interrupted;
+        }
+        cancellation
+            .collection_supervisor
+            .release_runtime_thread(thread_id);
+        let (status, status_label, terminal_reason) = match cancellation.outcome {
+            RunCancellationTerminalOutcome::Cancelled => {
+                (AgentThreadStatus::Cancelled, "cancelled", reason)
+            }
+            RunCancellationTerminalOutcome::Interrupted => (
+                AgentThreadStatus::Interrupted,
+                "interrupted",
+                write_cleanup_error.map_or_else(
+                    || {
+                        route_revocation_error.map_or_else(
+                            || {
+                                "cancellation deadline exceeded; cleanup could not be confirmed"
+                                    .to_owned()
+                            },
+                            |error| format!("background child route revocation failed: {error:#}"),
+                        )
+                    },
+                    |error| format!("background isolated-workspace cleanup failed: {error:#}"),
+                ),
+            ),
+        };
+        recorder.append_finalized(&RunCancellationFinalizedEntry {
+            request_id,
+            run_scope_id: cancellation.run_scope_id,
+            outcome: cancellation.outcome,
+            cleanup_complete: cancellation.cleanup_complete,
+            active_effects: cancellation.active_effects,
+            active_tasks: cancellation.active_tasks,
+            reason: terminal_reason.clone(),
+            finalized_at_ms: unix_time_ms(),
+        })?;
+        let controls = [
+            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status,
+                reason: Some(terminal_reason.clone()),
+                updated_at_ms: Some(unix_time_ms()),
+            }),
+            ControlEntry::AgentRunInterrupted(AgentRunInterruptedEntry {
+                thread_id: thread_id.clone(),
+                attempt_id: cancellation.thread.attempt_id,
+                reason: terminal_reason.clone(),
+            }),
+        ];
+        for control in controls {
+            handler.commit_controls(session, vec![control])?;
+        }
+
+        Ok(Some(BackgroundAgentCancellation {
+            previous_status,
+            status,
+            status_label,
+            reason: terminal_reason,
+            outcome: cancellation.outcome,
+            cleanup_complete: cancellation.cleanup_complete,
+        }))
+    }
+
+    async fn revoke_child_pending_routes(
+        &self,
+        session: &mut Session,
+        thread_id: &AgentThreadId,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<(bool, Option<sigil_kernel::AgentRunAttemptId>)> {
+        let projection = session.agent_thread_state_projection();
+        let input_routes =
+            sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
+                .routes_for_thread(thread_id)
+                .filter(|route| {
+                    matches!(
+                        route.status,
+                        AgentRouteStatus::Requested | AgentRouteStatus::Registered
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+        let mut approval_routes = projection
+            .approval_routes
+            .values()
+            .filter(|route| {
+                &route.source_thread_id == thread_id
+                    && matches!(
+                        route.status,
+                        AgentRouteStatus::Requested | AgentRouteStatus::Registered
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if input_routes.is_empty() && approval_routes.is_empty() {
+            return Ok((false, None));
+        }
+
+        let mut controls = Vec::new();
+        let mut interrupted_attempt = None;
+        for route in input_routes {
+            let mut child =
+                super::shared::build_agent_child_session(session, &route.child_session_ref)?;
+            let command_id = sigil_kernel::UserInputCommandId::new(format!(
+                "cancel-{}",
+                short_digest(&hash_text(&format!(
+                    "{}:{}:{}",
+                    thread_id.as_str(),
+                    route.route_id.as_str(),
+                    route.request.request_hash,
+                )))
+            ))?;
+            let command = sigil_kernel::UserInputDecisionCommandV1 {
+                identity: route.request.identity.clone(),
+                request_hash: route.request.request_hash.clone(),
+                command_id,
+                decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
+            };
+            let now = unix_time_ms();
+            sigil_kernel::preview_user_input_decision(&child, &command, now)?;
+            let receipt = sigil_kernel::accept_user_input_decision(&mut child, command, now)?;
+            let mut closed_route = route.clone();
+            closed_route.request = receipt.request;
+            closed_route.status = AgentRouteStatus::Cancelled;
+            closed_route.updated_at_unix_ms = unix_time_ms();
+            interrupted_attempt.get_or_insert(route.source_attempt_id);
+            controls.push(ControlEntry::AgentUserInputRoute(closed_route));
+        }
+        for mut route in approval_routes.drain(..) {
+            if interrupted_attempt.is_none() {
+                interrupted_attempt = route
+                    .binding
+                    .as_ref()
+                    .map(|binding| binding.attempt_id.clone());
+            }
+            route.status = AgentRouteStatus::Cancelled;
+            controls.push(ControlEntry::AgentApprovalRoute(route));
+        }
+        handler.commit_controls(session, controls)?;
+        Ok((true, interrupted_attempt))
+    }
+
+    /// Cancels every live child durably owned by one exact Direct Task.
+    ///
+    /// The parent Task may already have recorded `Interrupted` or `Paused` when its root run
+    /// finalizer observes cancellation. Child cleanup is still required, so this operation is
+    /// intentionally selected by the durable cancellation-scope binding rather than by the
+    /// Task's current status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact Task's live children cannot all be cancelled and cleaned
+    /// up durably. Returns `Ok(None)` when the cancellation scope is not bound to a Task.
+    pub async fn cancel_task_background_agents_for_scope(
+        &self,
+        session: &mut Session,
+        cancellation_target: &RunCancellationTarget,
+        run_scope_id: &str,
+        reason: &str,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Option<sigil_kernel::TaskId>> {
+        let Some(task_id) = crate::agent_supervisor::task_execution::task_id_for_cancellation_scope(
+            session.entries(),
+            cancellation_target,
+            run_scope_id,
+        ) else {
+            return Ok(None);
+        };
+        self.cancel_direct_task_agents_durably(session, &task_id, reason, handler)
+            .await?;
+        Ok(Some(task_id))
+    }
+
+    pub(crate) async fn cancel_direct_task_agents_durably(
+        &self,
+        session: &mut Session,
+        task_id: &sigil_kernel::TaskId,
+        reason: &str,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<()> {
+        let thread_ids = session
+            .task_state_projection()
+            .direct_task_background_agents(task_id);
+        let mut failures = Vec::new();
+        for thread_id in thread_ids {
+            let projection = session.agent_thread_state_projection();
+            if projection
+                .threads
+                .get(&thread_id)
+                .is_some_and(|thread| thread.status.is_terminal())
+            {
+                if projection
+                    .threads
+                    .get(&thread_id)
+                    .is_some_and(|thread| thread.status == AgentThreadStatus::Interrupted)
+                    && let Err(error) = self
+                        .revoke_child_pending_routes(session, &thread_id, handler)
+                        .await
+                {
+                    failures.push(format!(
+                        "interrupted agent {} route revocation failed: {error:#}",
+                        thread_id.as_str()
+                    ));
+                }
+                continue;
+            }
+            match self
+                .cancel_agent_thread_durably(session, &thread_id, reason.to_owned(), handler)
+                .await
+            {
+                Ok(Some(cancellation))
+                    if cancellation.outcome == RunCancellationTerminalOutcome::Cancelled
+                        && cancellation.cleanup_complete => {}
+                Ok(Some(cancellation)) => failures.push(format!(
+                    "agent {} cleanup was not confirmed ({})",
+                    thread_id.as_str(),
+                    cancellation.status_label
+                )),
+                Ok(None)
+                    if projection
+                        .threads
+                        .get(&thread_id)
+                        .is_some_and(|thread| thread.status == AgentThreadStatus::Blocked) =>
+                {
+                    match self
+                        .revoke_child_pending_routes(session, &thread_id, handler)
+                        .await
+                    {
+                        Ok((true, attempt_id)) => {
+                            let mut controls = vec![ControlEntry::AgentThreadStatusChanged(
+                                AgentThreadStatusChangedEntry {
+                                    thread_id: thread_id.clone(),
+                                    status: AgentThreadStatus::Cancelled,
+                                    reason: Some(reason.to_owned()),
+                                    updated_at_ms: Some(unix_time_ms()),
+                                },
+                            )];
+                            if let Some(attempt_id) = attempt_id {
+                                controls.push(ControlEntry::AgentRunInterrupted(
+                                    AgentRunInterruptedEntry {
+                                        thread_id: thread_id.clone(),
+                                        attempt_id,
+                                        reason: reason.to_owned(),
+                                    },
+                                ));
+                            }
+                            handler.commit_controls(session, controls)?;
+                        }
+                        Ok((false, _)) => failures.push(format!(
+                            "blocked agent {} has no revocable pending route",
+                            thread_id.as_str()
+                        )),
+                        Err(error) => failures.push(format!(
+                            "blocked agent {} route revocation failed: {error:#}",
+                            thread_id.as_str()
+                        )),
+                    }
+                }
+                Ok(None) => failures.push(format!(
+                    "agent {} has no process-local cancellation owner",
+                    thread_id.as_str()
+                )),
+                Err(error) => failures.push(format!(
+                    "agent {} cancellation failed: {error:#}",
+                    thread_id.as_str()
+                )),
+            }
+        }
+        if !failures.is_empty() {
+            bail!(
+                "Task {} background cleanup could not be confirmed: {}",
+                task_id.as_str(),
+                failures.join("; ")
+            );
+        }
+        Ok(())
     }
 }
 
@@ -508,6 +982,7 @@ pub(super) async fn run_background_chat_agent(
     initial_input: sigil_kernel::AgentRunInput,
     child_options: sigil_kernel::AgentRunOptions,
     mailbox_rx: mpsc::Receiver<AgentMailboxMessage>,
+    isolated_write: bool,
     event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
     let thread_id = thread.thread_id.clone();
@@ -547,6 +1022,10 @@ pub(super) async fn run_background_chat_agent(
         &latest_output,
         consumed_route_ids.lock().await.clone(),
     )? {
+        if isolated_write {
+            reconcile_failed_background_user_input_continuations(&mut child_session)?;
+            bail!("background isolated-write child requested user input; resume it in foreground");
+        }
         emit_background_agent_status(
             event_sink.as_ref(),
             &thread_id,
@@ -693,7 +1172,19 @@ fn emit_background_agent_error_status(
             ),
         )
     } else {
-        (AgentThreadStatus::Failed, format!("{error:#}"))
+        let status = match sigil_kernel::agent::execution::execution_failure_disposition(error) {
+            sigil_kernel::agent::execution::ExecutionDisposition::Blocked => {
+                AgentThreadStatus::Blocked
+            }
+            sigil_kernel::agent::execution::ExecutionDisposition::Cancelled => {
+                AgentThreadStatus::Cancelled
+            }
+            sigil_kernel::agent::execution::ExecutionDisposition::Interrupted => {
+                AgentThreadStatus::Interrupted
+            }
+            _ => AgentThreadStatus::Failed,
+        };
+        (status, format!("{error:#}"))
     };
     emit_background_agent_status(sink, thread_id, status, Some(reason));
 }
@@ -713,6 +1204,7 @@ fn agent_status_from_task_child_status(status: TaskChildSessionStatus) -> AgentT
     match status {
         TaskChildSessionStatus::Started => AgentThreadStatus::Started,
         TaskChildSessionStatus::Completed => AgentThreadStatus::Completed,
+        TaskChildSessionStatus::Blocked => AgentThreadStatus::Blocked,
         TaskChildSessionStatus::Failed => AgentThreadStatus::Failed,
         TaskChildSessionStatus::Cancelled => AgentThreadStatus::Cancelled,
         TaskChildSessionStatus::Interrupted => AgentThreadStatus::Interrupted,

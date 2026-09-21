@@ -3,6 +3,8 @@ use super::*;
 /// Input required to accept one exact durable user-input decision.
 #[derive(Debug, Clone)]
 pub struct ApplicationUserInputDecisionRequest {
+    /// Original application identity transferred to the actual decision owner.
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     /// Resolved Sigil config path.
     pub config_path: PathBuf,
     /// Process launch working directory.
@@ -245,11 +247,7 @@ pub fn recoverable_agent_user_input_decision_from_child_sessions(
         sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(parent_entries)?;
     let mut recovered = Vec::new();
     for route in projection.unresolved() {
-        if !matches!(
-            route.request.source,
-            sigil_kernel::UserInputSourceV1::Agent
-                | sigil_kernel::UserInputSourceV1::Planner { .. }
-        ) {
+        if !matches!(route.request.source, sigil_kernel::UserInputSourceV1::Agent) {
             continue;
         }
         let child_path = route.child_session_ref.resolve(parent_dir);
@@ -344,7 +342,7 @@ pub async fn prepare_application_user_input_decision(
                 ))
             })?;
         let (receipt, revision_request, revision_terminal_outbox) =
-            crate::application_plan_review_research_input_decision(
+            crate::plan_review_coordinator::application_plan_review_research_input_decision_bound(
                 &request.session_path,
                 &request.expected_session_scope_id,
                 sigil_kernel::UserInputDecisionCommandV1 {
@@ -354,6 +352,7 @@ pub async fn prepare_application_user_input_decision(
                     decision: request.decision,
                 },
                 child_resource_provisioner.as_ref(),
+                request.application_operation.clone(),
             )
             .map_err(ApplicationRunPrepareError::execution)?;
         return Ok(PreparedApplicationUserInputDecision {
@@ -361,133 +360,6 @@ pub async fn prepare_application_user_input_decision(
             continuation: None,
             revision_request,
             revision_terminal_outbox,
-        });
-    }
-    let planner_route =
-        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&initial_entries)
-            .map_err(ApplicationRunPrepareError::execution)?
-            .route_for_request(&request.identity, &request.request_hash)
-            .filter(|route| {
-                matches!(
-                    route.request.source,
-                    sigil_kernel::UserInputSourceV1::Planner { .. }
-                )
-            })
-            .cloned();
-    if let Some(route) = planner_route {
-        let command = sigil_kernel::UserInputDecisionCommandV1 {
-            identity: request.identity.clone(),
-            request_hash: request.request_hash.clone(),
-            command_id: request.command_id.clone(),
-            decision: request.decision.clone(),
-        };
-        let public_prompt = "Continue task planning after answering a requested question";
-        let mut prepared = prepare_application_run(
-            ApplicationRunRequest {
-                config_path: request.config_path,
-                launch_cwd: request.launch_cwd,
-                prompt: public_prompt.to_owned(),
-                run_id: request.run_id,
-                session_path: Some(request.session_path),
-                session_attachment: request.session_attachment,
-                interaction: request.interaction,
-                permission_mode: request.permission_mode,
-                model_connection_id: None,
-                model_name: None,
-                model_selection_binding: None,
-                route_recovery_binding: None,
-                reasoning_effort: None,
-                reasoning_effort_binding: None,
-                skill_binding: None,
-                agent_binding: None,
-                constraints: None,
-            },
-            services,
-        )
-        .await?;
-        if prepared.execution.session.session_scope_id() != request.expected_session_scope_id {
-            return Err(ApplicationRunPrepareError::InvalidInvocation {
-                message: "durable session identity changed before planner answer".to_owned(),
-            });
-        }
-        crate::agent_supervisor::task_role_runtime::validate_task_planner_user_input_route(
-            &prepared.execution.session,
-            &route,
-        )
-        .map_err(ApplicationRunPrepareError::execution)?;
-        let child = crate::agent_supervisor::build_child_session(
-            &prepared.execution.session,
-            &route.child_session_ref,
-        )
-        .map_err(ApplicationRunPrepareError::execution)?;
-        sigil_kernel::preview_user_input_decision(&child, &command, current_unix_time_ms())
-            .map_err(ApplicationRunPrepareError::execution)?;
-        if !matches!(
-            command.decision,
-            sigil_kernel::UserInputDecisionV1::Submitted { .. }
-        ) {
-            let (receipt, _) = crate::agent_supervisor::task_role_runtime::settle_task_planner_user_input_without_continuation(
-                &mut prepared.execution.session,
-                &route,
-                command,
-            )
-            .map_err(ApplicationRunPrepareError::execution)?;
-            return Ok(PreparedApplicationUserInputDecision {
-                receipt,
-                continuation: None,
-                revision_request: None,
-                revision_terminal_outbox: None,
-            });
-        }
-        let task_execution = prepared
-            .execution
-            .task_execution
-            .take()
-            .context("task planner continuation runtime is unavailable")
-            .map_err(ApplicationRunPrepareError::execution)?;
-        let ApplicationTaskExecutionRuntime {
-            root_config,
-            workspace_root: _,
-            parent_session_ref: _,
-            options,
-            base_registry,
-            agent_supervisor,
-            role_provider_builder,
-            verification_execution_port,
-        } = task_execution;
-        let max_plan_steps = root_config.task.max_plan_steps;
-        let prepared_planner = crate::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
-            &root_config,
-            &options,
-            &base_registry,
-            agent_supervisor,
-            role_provider_builder.as_ref(),
-            verification_execution_port
-                .context("current-schema planner continuation requires the managed verification route")
-                .map_err(ApplicationRunPrepareError::execution)?,
-            &mut prepared.execution.session,
-            &route,
-            &command,
-        )
-        .await
-        .map_err(ApplicationRunPrepareError::provider_unavailable)?;
-        let crate::agent_supervisor::task_role_runtime::PreparedTaskPlannerUserInputContinuation {
-            runtime,
-            receipt,
-            route,
-        } = prepared_planner;
-        prepared.execution.kind = ApplicationRunExecutionKind::TaskPlannerUserInput {
-            runtime: Box::new(runtime),
-            route: Box::new(route),
-            command: Box::new(command),
-            max_plan_steps,
-        };
-        prepared.execution.plan_review_runtime = None;
-        return Ok(PreparedApplicationUserInputDecision {
-            receipt,
-            continuation: Some(prepared),
-            revision_request: None,
-            revision_terminal_outbox: None,
         });
     }
     if request.identity.session_scope_id.as_str() != request.expected_session_scope_id {
@@ -509,19 +381,21 @@ pub async fn prepare_application_user_input_decision(
             &request.launch_cwd,
             &root_config.workspace.root,
         );
-        let (receipt, revision_request) = crate::application_plan_revision_guidance_decision(
-            &root_config,
-            &workspace_root,
-            &request.session_path,
-            &request.expected_session_scope_id,
-            sigil_kernel::UserInputDecisionCommandV1 {
-                identity: request.identity,
-                request_hash: request.request_hash,
-                command_id: request.command_id,
-                decision: request.decision,
-            },
-        )
-        .map_err(ApplicationRunPrepareError::execution)?;
+        let (receipt, revision_request) =
+            crate::plan_review_coordinator::application_plan_revision_guidance_decision_bound(
+                &root_config,
+                &workspace_root,
+                &request.session_path,
+                &request.expected_session_scope_id,
+                sigil_kernel::UserInputDecisionCommandV1 {
+                    identity: request.identity,
+                    request_hash: request.request_hash,
+                    command_id: request.command_id,
+                    decision: request.decision,
+                },
+                request.application_operation.clone(),
+            )
+            .map_err(ApplicationRunPrepareError::execution)?;
         return Ok(PreparedApplicationUserInputDecision {
             receipt,
             continuation: None,
@@ -602,6 +476,11 @@ pub async fn prepare_application_user_input_decision(
             message: "durable session identity changed before user-input decision".to_owned(),
         });
     }
+    if let Some(binding) = request.application_operation {
+        session
+            .bind_application_operation(binding)
+            .map_err(ApplicationRunPrepareError::execution)?;
+    }
     let accepted_at_unix_ms = current_unix_time_ms();
     let decision_command = sigil_kernel::UserInputDecisionCommandV1 {
         identity: request.identity.clone(),
@@ -674,6 +553,7 @@ pub async fn prepare_application_user_input_decision(
         services,
         &redactor,
         None,
+        false,
         None,
         terminal_lifecycle_sink,
     )
@@ -745,6 +625,7 @@ pub async fn prepare_application_user_input_decision(
                         .map_err(ApplicationRunPrepareError::execution)?,
                 ),
                 input: Box::new(input),
+                agent_tool_runtime: None,
             },
             task_execution: None,
             plan_review_runtime: None,

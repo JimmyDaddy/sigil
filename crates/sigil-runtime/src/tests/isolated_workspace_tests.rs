@@ -538,6 +538,7 @@ async fn startup_reconciliation_removes_durable_created_worktree_once() -> Resul
         overlay_content_artifact_refs: Vec::new(),
         overlay_entry_count: 0,
         materialized_snapshot_id: None,
+        baseline_tree: None,
     };
     let session_path = repository
         .root()

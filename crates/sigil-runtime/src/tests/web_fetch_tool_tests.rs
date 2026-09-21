@@ -87,8 +87,10 @@ fn webfetch_permission_plan_binds_exact_safe_endpoint_once() {
         WebUrlProvenanceKind::UserMessage,
     );
 
-    let first = webfetch_permission_plan(&args, &capability).expect("webfetch plan");
-    let repeated = webfetch_permission_plan(&args, &capability).expect("repeated webfetch plan");
+    let first =
+        webfetch_permission_plan(&current_root(), &args, &capability).expect("webfetch plan");
+    let repeated = webfetch_permission_plan(&current_root(), &args, &capability)
+        .expect("repeated webfetch plan");
 
     assert_eq!(first, repeated);
     assert_eq!(first.operation, ToolOperation::NetworkRequest);
@@ -105,4 +107,50 @@ fn webfetch_permission_plan_binds_exact_safe_endpoint_once() {
         "https://example.test/page?[redacted]"
     );
     assert!(!format!("{first:?}").contains("token=secret"));
+}
+
+#[test]
+fn webfetch_grant_binding_tracks_exact_url_even_when_display_redacts_the_difference() {
+    let root = current_root();
+    let args = json!({"source_id":"source"});
+    let capability = |url: &str| {
+        sigil_kernel::ResolvedUserUrlCapability::new(
+            "session",
+            "source",
+            SecretString::new(url),
+            "https://example.test/page?[redacted]",
+            ToolRestartPolicy::InterruptOnRestart,
+            WebUrlProvenanceKind::UserMessage,
+        )
+    };
+    let first = webfetch_permission_plan(
+        &root,
+        &args,
+        &capability("https://example.test/page?token=first"),
+    )
+    .expect("first");
+    let second = webfetch_permission_plan(
+        &root,
+        &args,
+        &capability("https://example.test/page?token=second"),
+    )
+    .expect("second");
+    assert_eq!(first.subjects, second.subjects);
+    assert_ne!(
+        first.analysis_bindings["network_endpoint_hash"],
+        second.analysis_bindings["network_endpoint_hash"]
+    );
+    assert!(!format!("{first:?}").contains("token=first"));
+    let mut changed = root;
+    changed.web.allow_http = !changed.web.allow_http;
+    let third = webfetch_permission_plan(
+        &changed,
+        &args,
+        &capability("https://example.test/page?token=first"),
+    )
+    .expect("policy");
+    assert_ne!(
+        first.analysis_bindings["network_policy_hash"],
+        third.analysis_bindings["network_policy_hash"]
+    );
 }

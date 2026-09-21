@@ -1461,7 +1461,7 @@ fn registry_projects_existing_task_roles_to_builtin_profiles() -> Result<()> {
     assert!(worker.profile.model_invocation_allowed());
     assert!(!worker.profile.tool_scope.allows("write_file"));
     assert!(!worker.profile.tool_scope.allows("apply_changeset"));
-    assert!(!worker.profile.tool_scope.allows("bash"));
+    assert!(!worker.profile.tool_scope.allows("exec_command"));
     assert!(registry.warnings().is_empty());
     Ok(())
 }
@@ -1474,7 +1474,13 @@ fn builtin_profiles_and_role_registries_share_the_role_scope_matrix() -> Result<
         (EXPLORE_PROFILE_ID, sigil_kernel::AgentRole::SubagentRead),
         (WORKER_PROFILE_ID, sigil_kernel::AgentRole::SubagentWrite),
     ];
-    let probe_names = ["read_file", "grep", "write_file", "edit_file", "bash"];
+    let probe_names = [
+        "read_file",
+        "grep",
+        "write_file",
+        "edit_file",
+        "exec_command",
+    ];
     let mut tools = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut tools);
 
@@ -1582,8 +1588,8 @@ fn builtin_profiles_and_role_registries_share_the_role_scope_matrix() -> Result<
     assert!(planner.profile.tool_scope.allows("write_file"));
     let plan_review = crate::build_plan_review_tool_registry(&tools, &configured);
     assert!(plan_review.spec_for("read_file").is_some());
-    assert!(plan_review.spec_for("write_file").is_none());
-    assert!(plan_review.spec_for("edit_file").is_none());
+    assert!(plan_review.spec_for("write_file").is_some());
+    assert!(plan_review.spec_for("edit_file").is_some());
     Ok(())
 }
 
@@ -1761,16 +1767,16 @@ edit = "allow"
         vec![ToolSubject::path("crates/lib.rs", "crates/lib.rs")],
     )?;
     let test_decision = PermissionPolicy::new(&writer.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "cargo test -p sigil-runtime",
             "cargo test -p sigil-runtime",
         )],
     )?;
     let push_decision = PermissionPolicy::new(&writer.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git push origin main",
             "git push origin main",
@@ -1822,8 +1828,8 @@ Review and edit docs.
         vec![ToolSubject::path("src/lib.rs", "src/lib.rs")],
     )?;
     let git_diff = PermissionPolicy::new(&reviewer.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git diff -- crates",
             "git diff -- crates",
@@ -1861,24 +1867,24 @@ deny = ["git push*"]
         .get(&AgentProfileId::new("shell-runner")?)
         .expect("shell-runner profile is discovered");
     let status = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git status --short",
             "family:git_read_only",
         )],
     )?;
     let test = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "cargo test -p sigil-runtime",
             "family:cargo_test",
         )],
     )?;
     let push = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git push origin main",
             "git push origin main",
@@ -1924,24 +1930,24 @@ Run selected commands.
         .get(&AgentProfileId::new("markdown-shell")?)
         .expect("markdown-shell profile is discovered");
     let status = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git status --short",
             "family:git_read_only",
         )],
     )?;
     let test = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "cargo test -p sigil-runtime",
             "family:cargo_test",
         )],
     )?;
     let push = PermissionPolicy::new(&runner.profile.permission_policy).decide(
-        &permission_spec("bash", ToolAccess::Execute),
-        "bash",
+        &permission_spec("exec_command", ToolAccess::Execute),
+        "exec_command",
         vec![ToolSubject::command(
             "git push origin main",
             "git push origin main",

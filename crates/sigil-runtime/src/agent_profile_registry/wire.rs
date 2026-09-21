@@ -376,7 +376,7 @@ fn permission_key_tools(key: &str) -> Vec<String> {
         "glob" => vec!["glob".to_owned()],
         "grep" => vec!["grep".to_owned()],
         "list" => vec!["ls".to_owned()],
-        "bash" => vec!["bash".to_owned()],
+        "bash" | "shell" | "exec_command" => vec!["exec_command".to_owned()],
         "task" => vec![SPAWN_AGENT_TOOL_NAME.to_owned()],
         "skill" => vec![LOAD_SKILL_TOOL_NAME.to_owned()],
         "webfetch" => vec!["webfetch".to_owned()],

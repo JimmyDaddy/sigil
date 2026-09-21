@@ -1,10 +1,10 @@
 //! RFC-0071 R71.1: side-effect-free shadow planner (isolated qualification only).
 //!
-//! The shadow planner implements the kernel ManagedExecutionPlannerV1 port with no filesystem
-//! mutation, no session-log write and no V3 event. It is registered only in the isolated
-//! qualification composition; production keeps the legacy planner until R71.6. Its drafts are
-//! fed to deterministic hash fixtures so that a cache miss / restart can recompute a stable
-//! digest instead of fabricating an approved requirement.
+//! The planner implements the kernel ManagedExecutionPlannerV1 port with no filesystem mutation,
+//! no session-log write and no V3 event. The same pure implementation is injected into runtime
+//! authority composition and isolated qualification. Its drafts are fed to deterministic hash
+//! fixtures so that a cache miss or restart can recompute a stable digest instead of fabricating
+//! an approved requirement; it does not select or recover user Tasks.
 
 use std::collections::BTreeSet;
 

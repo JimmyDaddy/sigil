@@ -4,6 +4,7 @@
 use sigil_kernel::cutover_manifest::{
     CUTOVER_MANIFEST_SCHEMA_VERSION, CutoverManifestV1, StartupEpochV1,
     ValidatedCutoverPredecessorV1, validate_bootstrap_cutover_predecessor_v1,
+    validate_optional_terminal_cutover_predecessor_v2,
 };
 use sigil_resource_authority::bootstrap::{
     AuthorityBootstrapObjectClassV1, AuthorityBootstrapPublicationGuard, AuthorityBootstrapStoreV1,
@@ -13,14 +14,14 @@ use sigil_resource_authority::bootstrap::{
 use super::{AuthorityConfigGenerationRecordV1, BootAuthorityErrorV1};
 
 pub(super) enum ExistingBootPointerV1 {
-    Schema1(ValidatedCutoverPredecessorV1),
+    Historical(ValidatedCutoverPredecessorV1),
     Current(CutoverManifestV1),
 }
 
 impl ExistingBootPointerV1 {
     pub fn application_generation(&self) -> u64 {
         match self {
-            Self::Schema1(predecessor) => predecessor.application_generation(),
+            Self::Historical(predecessor) => predecessor.application_generation(),
             Self::Current(manifest) => manifest.application_generation,
         }
     }
@@ -54,17 +55,23 @@ pub(super) fn load_validated_boot_pointer(
     // Decode each schema directly from the original bytes. A serde_json::Value round trip
     // would erase duplicate JSON fields before the version-specific decoder could reject them.
     let pointer = match header.schema_version {
-        1 => ExistingBootPointerV1::Schema1(
+        1 => ExistingBootPointerV1::Historical(
             validate_bootstrap_cutover_predecessor_v1(&bytes).map_err(invalid_pointer)?,
         ),
-        CUTOVER_MANIFEST_SCHEMA_VERSION => ExistingBootPointerV1::Current(
-            crate::r71_global_cutover::RuntimeGlobalCutoverV1::validate_manifest_bytes(&bytes)
-                .map_err(invalid_pointer)?,
-        ),
+        CUTOVER_MANIFEST_SCHEMA_VERSION => {
+            match crate::r71_global_cutover::RuntimeGlobalCutoverV1::validate_manifest_bytes(&bytes)
+            {
+                Ok(manifest) => ExistingBootPointerV1::Current(manifest),
+                Err(_) => ExistingBootPointerV1::Historical(
+                    validate_optional_terminal_cutover_predecessor_v2(&bytes)
+                        .map_err(invalid_pointer)?,
+                ),
+            }
+        }
         _ => return Err(invalid_pointer("unknown manifest schema version")),
     };
     let (instance, authority_digest) = match &pointer {
-        ExistingBootPointerV1::Schema1(predecessor) => (
+        ExistingBootPointerV1::Historical(predecessor) => (
             predecessor.application_instance_id(),
             predecessor.authority_generation_digest(),
         ),

@@ -48,13 +48,13 @@ fn ordinary_shell_namespace_preparation_does_not_scan_siblings() {
         workspace_hard_bytes: 1,
     };
     control
-        .ensure_session_namespace_for_command(Some("healthy"), &quota)
+        .ensure_session_scratch(Some("healthy"), &quota)
         .expect("provision healthy namespace");
     std::fs::write(root.join("sessions").join("broken"), b"not a namespace")
         .expect("broken sibling");
 
     control
-        .ensure_session_namespace_for_command(Some("healthy"), &quota)
+        .ensure_session_scratch(Some("healthy"), &quota)
         .expect("ordinary shell must not be blocked by sibling observation");
 }
 
@@ -136,31 +136,8 @@ fn registered_authority_tools(
 }
 
 #[cfg(unix)]
-fn assert_quota_error(
-    result: &sigil_kernel::ToolResult,
-    scope: &str,
-    usage_bytes: u64,
-    quota_bytes: u64,
-    hidden_path: &std::path::Path,
-) {
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("scratch quota must fail before spawning the command");
-    };
-    assert_eq!(error.kind, ToolErrorKind::ScratchQuotaExceeded);
-    assert_eq!(error.details["scope"], scope);
-    assert_eq!(error.details["usage_bytes"], usage_bytes);
-    assert_eq!(error.details["quota_bytes"], quota_bytes);
-    assert!(!error.retryable);
-    assert!(error.message.contains("reset scratch storage"));
-    assert!(!error.message.contains(&hidden_path.display().to_string()));
-    assert!(!result.content.contains(&hidden_path.display().to_string()));
-    assert_eq!(error.details["recovery"]["automatic"], false);
-    assert_eq!(error.details["recovery"]["requires_confirmation"], true);
-}
-
-#[cfg(unix)]
 #[tokio::test]
-async fn registered_authority_provider_carries_scratch_quota_across_bash_and_terminal()
+async fn registered_authority_provider_keeps_commands_usable_above_scratch_thresholds()
 -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -182,7 +159,7 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
         .execute(
             context.clone(),
             tool_call(
-                "bash",
+                "exec_command",
                 json!({ "command": "printf 123456789012345678901234 > \"$SIGIL_SCRATCH_DIR/payload\"" }),
             ),
         )
@@ -193,27 +170,15 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
     let bash_command =
         "printf session-recovered > quota-session-sentinel; printf session-recovered";
 
-    let rejected = registry
-        .execute(
-            context.clone(),
-            tool_call("bash", json!({ "command": bash_command })),
-        )
-        .await?;
-    assert_quota_error(&rejected, "session", 24, 16, temp.path());
-    assert!(
-        !workspace.join("quota-session-sentinel").exists(),
-        "a quota rejection must occur before Bash is spawned"
-    );
-
-    fs::remove_file(session_dir.join("payload"))?;
     let recovered = registry
         .execute(
             context,
-            tool_call("bash", json!({ "command": bash_command })),
+            tool_call("exec_command", json!({ "command": bash_command })),
         )
         .await?;
     assert!(matches!(recovered.status, ToolResultStatus::Ok));
-    assert_eq!(recovered.content, "session-recovered");
+    assert!(recovered.content.contains("session-recovered"));
+    assert_eq!(recovered.metadata.details["exit_code"], 0);
     assert_eq!(
         fs::read_to_string(workspace.join("quota-session-sentinel"))?,
         "session-recovered"
@@ -237,7 +202,7 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
         .execute(
             writer_context.clone(),
             tool_call(
-                "bash",
+                "exec_command",
                 json!({ "command": "printf 123456789012345678901234 > \"$SIGIL_SCRATCH_DIR/workspace-payload\"" }),
             ),
         )
@@ -253,45 +218,22 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
         "i=0; while [ \"$i\" -lt 60 ]; do i=$((i + 1)); sleep 1; done"
     );
 
-    let terminal_rejected = registry
-        .execute(
-            terminal_context.clone(),
-            tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "quota-terminal",
-                    "command": terminal_command,
-                    "mode": "background",
-                    "shell": "sh"
-                }),
-            ),
-        )
-        .await?;
-    assert_quota_error(&terminal_rejected, "workspace", 24, 16, temp.path());
-    assert!(
-        !scratch
-            .session_scratch_dir(terminal_context.session_scope_id())
-            .join("terminal-sentinel")
-            .exists(),
-        "a quota rejection must occur before the managed terminal launcher is called"
-    );
-
-    fs::remove_file(workspace_payload)?;
     let started = registry
         .execute(
             terminal_context.clone(),
             tool_call(
-                "terminal_start",
+                "exec_command",
                 json!({
-                    "task_id": "quota-terminal",
                     "command": terminal_command,
-                    "mode": "background",
                     "shell": "sh"
                 }),
             ),
         )
         .await?;
     assert!(matches!(started.status, ToolResultStatus::Ok));
+    let execution_id = started.metadata.details["execution_id"]
+        .as_str()
+        .expect("host execution identity");
     let generation = started.metadata.details["generation"]
         .as_u64()
         .expect("terminal start generation");
@@ -299,13 +241,13 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
         .execute(
             terminal_context.clone(),
             tool_call(
-                "terminal_wait",
+                "exec_wait",
                 json!({
-                    "task_id": "quota-terminal",
+                    "execution_id": execution_id,
                     "after_generation": generation,
                     "until": "output_contains",
                     "value": "terminal-recovered",
-                    "timeout_secs": 30
+                    "yield_time_ms": 30_000
                 }),
             ),
         )
@@ -315,9 +257,9 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
         .execute(
             terminal_context.clone(),
             tool_call(
-                "terminal_read",
+                "exec_read",
                 json!({
-                    "task_id": "quota-terminal",
+                    "execution_id": execution_id,
                     "offset": 0,
                     "limit_bytes": 64,
                     "include_content": true
@@ -338,7 +280,7 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
     let cancelled = registry
         .execute(
             terminal_context.clone(),
-            tool_call("terminal_cancel", json!({ "task_id": "quota-terminal" })),
+            tool_call("exec_cancel", json!({ "execution_id": execution_id })),
         )
         .await?;
     assert!(matches!(cancelled.status, ToolResultStatus::Ok));
@@ -359,21 +301,19 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
     let initial = registry
         .execute(
             io_context.clone(),
-            tool_call("bash", json!({ "command": "printf ready" })),
+            tool_call("exec_command", json!({ "command": "printf ready" })),
         )
         .await?;
     assert!(matches!(initial.status, ToolResultStatus::Ok));
-    symlink(
-        temp.path().join("outside"),
-        scratch
-            .session_scratch_dir(io_context.session_scope_id())
-            .join("escape"),
-    )?;
+    let unsafe_root = scratch.session_scratch_dir(io_context.session_scope_id());
+    fs::remove_dir_all(&unsafe_root)?;
+    fs::create_dir(temp.path().join("outside"))?;
+    symlink(temp.path().join("outside"), unsafe_root)?;
     let io_failure = registry
         .execute(
             io_context,
             tool_call(
-                "bash",
+                "exec_command",
                 json!({ "command": "printf should-not-run > io-failure-sentinel" }),
             ),
         )
@@ -393,6 +333,35 @@ async fn registered_authority_provider_carries_scratch_quota_across_bash_and_ter
             .join("io-failure-sentinel")
             .exists(),
         "a non-quota scratch failure must not be classified after a child starts"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn registered_authority_command_reports_runtime_timeout_and_completed_cleanup()
+-> anyhow::Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let (registry, _scratch) = registered_authority_tools(
+        &workspace,
+        fixture.path().join("scratch"),
+        fixture.path().join("execution-temp"),
+        ScratchQuota::default(),
+    );
+    let result = registry.execute(ToolContext::new(&workspace, 5).with_session_scope_id("command-deadline-session"),
+        tool_call("exec_command", json!({"command": "sleep 2", "shell": "sh", "max_runtime_secs": 1, "yield_time_ms": 5000}))).await?;
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("runtime deadline must be a command timeout: {result:?}");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Timeout);
+    assert_eq!(result.metadata.details["verdict"], "timed_out");
+    assert_eq!(result.metadata.details["cleanup_complete"], true);
+    assert!(result.metadata.details["execution_id"].as_str().is_some());
+    assert_eq!(
+        fs::read_dir(fixture.path().join("execution-temp"))?.count(),
+        0
     );
     Ok(())
 }

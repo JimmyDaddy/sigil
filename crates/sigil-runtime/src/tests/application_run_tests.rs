@@ -26,11 +26,10 @@ use sigil_kernel::{
     ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RuntimeContextCandidates,
     Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, StartDurableTaskAction,
-    StartPlanReviewAction, TASK_COMPLETION_CLAIM_TOOL_NAME, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskHandoffId, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest,
-    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus,
+    StartPlanReviewAction, TERMINAL_TASK_SCHEMA_VERSION, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskDirectExecutionAdmittedV1, TaskHandoffId, TaskId,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepId,
     TaskVerificationRerunRequest, TerminalLifecycleEvent, TerminalLifecycleUpdateV2,
     TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle,
     TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolArtifactSensitivity,
@@ -38,14 +37,17 @@ use sigil_kernel::{
     ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats, UserInputActionV1,
     UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId, UserInputContinuationBindingV1,
-    UserInputDecisionAcceptedV1, UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1,
+    UserInputDecisionAcceptedV1, UserInputDecisionV1, UserInputIdentityV1,
     UserInputLifecycleEntryV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
     UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1, UserInputSourceV1,
     UserInputStatusV1, conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
-use crate::application_run::is_application_public_outbox_append_error;
+use crate::application_run::{
+    ApplicationTaskFailed, application_task_terminal_output,
+    is_application_public_outbox_append_error,
+};
 use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
@@ -87,98 +89,15 @@ mod git_five_batch_tests;
 #[path = "application_verification_guard_tests.rs"]
 mod verification_guard_tests;
 
-/// Appends the model-owned completion claim used by scripted Task providers when they return a
-/// terminal text response. The production binding is rendered into a system message so fixtures
-/// can exercise the same exact subject/source validation without hard-coding generated ids.
 fn scripted_task_completion_chunks(
-    request: &CompletionRequest,
+    _request: &CompletionRequest,
     text: &str,
-    call_id: &str,
+    _call_id: &str,
 ) -> Vec<Result<ProviderChunk>> {
-    let mut chunks = Vec::new();
-    let Some(binding) = request.messages.iter().find_map(|message| {
-        message
-            .content
-            .as_deref()
-            .filter(|content| content.contains("Task completion claim binding"))
-    }) else {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    };
-    let line_value = |prefix: &str| {
-        binding
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-    };
-    let Some(subject) = line_value("subject=") else {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    };
-    let Some(attempt_id) = binding
-        .lines()
-        .find_map(|line| line.strip_prefix("attempt_id="))
-        .map(str::to_owned)
-    else {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    };
-    let claim_call_id = format!("{call_id}-{attempt_id}");
-    // The claim tool result causes one final provider turn. Do not emit the same claim again on
-    // that follow-up or the scripted provider would keep the agent loop alive until its limit.
-    if request
-        .messages
-        .iter()
-        .any(|message| message.tool_call_id.as_deref() == Some(claim_call_id.as_str()))
-    {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    }
-    let Some(sources) = line_value("allowed requirement source templates=") else {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    };
-    let source_values = sources.as_array().cloned().unwrap_or_default();
-    let claim = serde_json::json!({
-        "schema_version": sigil_kernel::TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-        "subject": subject,
-        "attempt_id": attempt_id,
-        "evidence_frontier": format!("sha256:{}", "0".repeat(64)),
-        "status": "completed",
-        "requirements": source_values.iter().map(|source| serde_json::json!({
-            "source": source,
-            "required": true,
-            "outcome": "fulfilled"
-        })).collect::<Vec<_>>()
-    });
-    if claim["requirements"].as_array().is_none_or(Vec::is_empty) {
-        chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-        chunks.push(Ok(ProviderChunk::Done));
-        return chunks;
-    }
-    let args = claim.to_string();
-    chunks.extend([
-        Ok(ProviderChunk::ToolCallStart {
-            id: claim_call_id.clone(),
-            name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
-        }),
-        Ok(ProviderChunk::ToolCallArgsDelta {
-            id: claim_call_id.clone(),
-            delta: args.clone(),
-        }),
-        Ok(ProviderChunk::ToolCallComplete(ToolCall {
-            id: claim_call_id,
-            name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
-            args_json: args,
-        })),
+    vec![
+        Ok(ProviderChunk::TextDelta(text.to_owned())),
         Ok(ProviderChunk::Done),
-    ]);
-    chunks
+    ]
 }
 
 fn application_conversation_lifecycle(
@@ -236,7 +155,7 @@ fn append_running_application_task(
     session: &mut Session,
     task_id: &TaskId,
     scope_id: Option<&str>,
-    plan_version: u32,
+    _plan_version: u32,
 ) -> Result<()> {
     let mut controls = vec![
         ControlEntry::TaskRun(TaskRunEntry {
@@ -248,23 +167,11 @@ fn append_running_application_task(
             status: TaskRunStatus::Running,
             reason: None,
         }),
-        ControlEntry::TaskPlan(TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version,
-            status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
-            reason: None,
-        }),
-        ControlEntry::TaskStep(TaskStepEntry {
-            task_id: task_id.clone(),
-            plan_version,
-            step_id: TaskStepId::new("step-active")?,
-            role: AgentRole::Executor,
-            status: TaskStepStatus::Running,
-            title: Some("active application step".to_owned()),
-            summary: None,
-            reason: None,
-        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "control an application Task",
+            1,
+        )),
     ];
     if let Some(scope_id) = scope_id {
         controls.push(ControlEntry::TaskRunCancellationScopeBound(
@@ -432,7 +339,8 @@ fn seed_application_user_input_request(
     let call = ToolCall {
         id: "call-user-input-runtime".to_owned(),
         name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
-        args_json: r#"{"prompt":"Choose a runtime mode","questions":[{"id":"mode","header":"Mode","question":"Which mode should continue?","required":true,"field":{"kind":"text","multiline":false,"max_chars":32}}]}"#.to_owned(),
+        args_json: r#"{"questions":[{"id":"mode","question":"Which mode should continue?"}]}"#
+            .to_owned(),
     };
     let assistant = ModelMessage::assistant(None, vec![call.clone()]);
     let assistant_message_id = assistant.id.clone();
@@ -452,14 +360,11 @@ fn seed_application_user_input_request(
         prompt: "Choose a runtime mode".to_owned(),
         questions: vec![UserInputQuestionV1 {
             id: "mode".to_owned(),
-            header: "Mode".to_owned(),
             question: "Which mode should continue?".to_owned(),
             description: None,
             required: true,
-            field: UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 32,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![
             UserInputActionV1::Submit,
@@ -509,6 +414,7 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
 
     let prepared = prepare_application_user_input_decision(
         ApplicationUserInputDecisionRequest {
+            application_operation: None,
             config_path: config_path.clone(),
             launch_cwd: temp.path().to_path_buf(),
             session_path: binding.session_log_path.clone(),
@@ -640,6 +546,7 @@ async fn submitted_user_input_remains_retryable_when_provider_preparation_fails(
 
     let error = match prepare_application_user_input_decision(
         ApplicationUserInputDecisionRequest {
+            application_operation: None,
             config_path,
             launch_cwd: temp.path().to_path_buf(),
             session_path: binding.session_log_path.clone(),
@@ -726,10 +633,6 @@ impl EgressDisclosurePresenter for RejectingDisclosurePresenter {
 
 struct ApplicationTaskRoleProviderBuilder;
 
-struct QuestioningApplicationTaskRoleProviderBuilder {
-    planner_calls: Arc<AtomicUsize>,
-}
-
 #[async_trait]
 impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
     async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
@@ -737,23 +640,8 @@ impl TaskRoleProviderBuilder for ApplicationTaskRoleProviderBuilder {
     }
 }
 
-#[async_trait]
-impl TaskRoleProviderBuilder for QuestioningApplicationTaskRoleProviderBuilder {
-    async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
-        Ok(Box::new(QuestioningApplicationTaskRoleProvider {
-            role,
-            planner_calls: Arc::clone(&self.planner_calls),
-        }))
-    }
-}
-
 struct ApplicationTaskRoleProvider {
     role: AgentRole,
-}
-
-struct QuestioningApplicationTaskRoleProvider {
-    role: AgentRole,
-    planner_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -770,66 +658,7 @@ impl Provider for ApplicationTaskRoleProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let chunks = if self.role == AgentRole::Planner
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == TASK_GUIDANCE_APPLY_TOOL_NAME)
-        {
-            let args = r#"{
-                "reason": "prioritizes_pending_step",
-                "target_step_ids": ["inspect_application"]
-            }"#;
-            vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "application-task-guidance".to_owned(),
-                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "application-task-guidance".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "application-task-guidance".to_owned(),
-                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ]
-        } else if self.role == AgentRole::Planner
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == TASK_PLAN_UPDATE_TOOL_NAME)
-        {
-            let args = r#"{
-                "plan_version": 1,
-                "status": "accepted",
-                "steps": [{
-                    "step_id": "inspect_application",
-                    "title": "Inspect application runtime",
-                    "role": "executor",
-                    "mode": "read",
-                    "isolation": "shared_read_only"
-                }]
-            }"#;
-            vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "application-task-plan".to_owned(),
-                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "application-task-plan".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "application-task-plan".to_owned(),
-                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ]
-        } else if self.role == AgentRole::Planner {
+        let chunks = if self.role == AgentRole::Planner {
             scripted_task_completion_chunks(
                 &request,
                 "application durable task completed",
@@ -843,182 +672,6 @@ impl Provider for ApplicationTaskRoleProvider {
             )
         };
         Ok(Box::pin(stream::iter(chunks)))
-    }
-}
-
-#[async_trait]
-impl Provider for QuestioningApplicationTaskRoleProvider {
-    fn name(&self) -> &str {
-        "questioning-application-task-test"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        application_task_provider_capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let is_planning = self.role == AgentRole::Planner
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == TASK_PLAN_UPDATE_TOOL_NAME);
-        let chunks = if is_planning && self.planner_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            let args = r#"{
-                "prompt": "Choose the application subsystem",
-                "questions": [{
-                    "id": "scope",
-                    "header": "Scope",
-                    "question": "Which subsystem should the task inspect?",
-                    "required": true,
-                    "field": {
-                        "kind": "text",
-                        "multiline": false,
-                        "max_chars": 128
-                    }
-                }]
-            }"#;
-            vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "application-task-question".to_owned(),
-                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "application-task-question".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "application-task-question".to_owned(),
-                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ]
-        } else if is_planning {
-            let args = r#"{
-                "plan_version": 1,
-                "status": "accepted",
-                "steps": [{
-                    "step_id": "inspect_application",
-                    "title": "Inspect the selected application subsystem",
-                    "role": "executor",
-                    "mode": "read",
-                    "isolation": "shared_read_only"
-                }]
-            }"#;
-            vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "application-task-plan-after-answer".to_owned(),
-                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "application-task-plan-after-answer".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "application-task-plan-after-answer".to_owned(),
-                    name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ]
-        } else if self.role == AgentRole::Planner {
-            scripted_task_completion_chunks(
-                &request,
-                "application task completed after clarification",
-                "application-task-completion",
-            )
-        } else {
-            scripted_task_completion_chunks(
-                &request,
-                "application task step completed",
-                "application-task-completion",
-            )
-        };
-        Ok(Box::pin(stream::iter(chunks)))
-    }
-}
-
-struct CapturingApplicationTaskRoleProviderBuilder {
-    executor_requests: Arc<Mutex<Vec<CompletionRequest>>>,
-    guidance_review_requests: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl TaskRoleProviderBuilder for CapturingApplicationTaskRoleProviderBuilder {
-    async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
-        Ok(Box::new(CapturingApplicationTaskRoleProvider {
-            role,
-            executor_requests: Arc::clone(&self.executor_requests),
-            guidance_review_requests: Arc::clone(&self.guidance_review_requests),
-        }))
-    }
-}
-
-struct CapturingApplicationTaskRoleProvider {
-    role: AgentRole,
-    executor_requests: Arc<Mutex<Vec<CompletionRequest>>>,
-    guidance_review_requests: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl Provider for CapturingApplicationTaskRoleProvider {
-    fn name(&self) -> &str {
-        "capturing-application-task-test"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        application_task_provider_capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        if self.role == AgentRole::Planner
-            && request
-                .tools
-                .iter()
-                .any(|tool| tool.name == TASK_GUIDANCE_APPLY_TOOL_NAME)
-        {
-            self.guidance_review_requests.fetch_add(1, Ordering::SeqCst);
-            let args = r#"{
-                "reason": "prioritizes_pending_step",
-                "target_step_ids": ["step_2"]
-            }"#;
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "application-guidance-recovery".to_owned(),
-                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "application-guidance-recovery".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "application-guidance-recovery".to_owned(),
-                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        let text = if self.role == AgentRole::Executor {
-            self.executor_requests
-                .lock()
-                .expect("executor request lock should not be poisoned")
-                .push(request.clone());
-            "recovered application task step completed"
-        } else {
-            "recovered application task synthesis completed"
-        };
-        Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
-            &request,
-            text,
-            "application-guidance-completion",
-        ))))
     }
 }
 
@@ -3324,16 +2977,15 @@ fn public_control_commit_bundles_typed_controls_with_their_exact_domain_ids() ->
     )?;
     let public = projection.events_in_order();
     assert_eq!(domain.len(), 2);
-    assert_eq!(public.len(), 3, "accepted TaskPlan emits two typed DTOs");
+    assert_eq!(public.len(), 2, "accepted TaskPlan emits one typed DTO");
     assert_eq!(public[0].domain_event_id, domain[0].event_id);
     assert_eq!(public[1].domain_event_id, domain[1].event_id);
-    assert_eq!(public[2].domain_event_id, domain[1].event_id);
     assert_eq!(
         public
             .iter()
             .map(|entry| entry.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 2]
     );
     assert!(matches!(
         &public[0].event.event,
@@ -3345,15 +2997,10 @@ fn public_control_commit_bundles_typed_controls_with_their_exact_domain_ids() ->
     ));
     assert!(matches!(
         &public[1].event.event,
-        PublicRunEventKind::TaskExecutionAdmitted { task_id, .. }
-            if task_id == "task-control"
-    ));
-    assert!(matches!(
-        &public[2].event.event,
         PublicRunEventKind::TaskPlanUpdated { task_id, .. }
             if task_id == "task-control"
     ));
-    assert_eq!(recorder.0.len(), 3);
+    assert_eq!(recorder.0.len(), 2);
     Ok(())
 }
 
@@ -3598,7 +3245,7 @@ fn public_control_commit_replays_a_failed_delivery_before_a_later_control() -> R
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3],
+        vec![1, 2],
         "the failed control is replayed before the later accepted TaskPlan batch"
     );
     let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
@@ -4711,6 +4358,73 @@ fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay()
 }
 
 #[test]
+fn failed_task_preserves_durable_error_instead_of_delegation_blocker() -> Result<()> {
+    let task_id = TaskId::new("task-terminal-failure")?;
+    let reason = "missing terminal task field schema_version";
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "read command output".to_owned(),
+        title: None,
+        status: TaskRunStatus::Failed,
+        reason: Some(reason.to_owned()),
+    }))?;
+    let output = AgentRunOutput {
+        disposition: AgentRunDisposition::FinalAnswer,
+        result: AgentRunResult {
+            final_text: "previous turn".to_owned(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome::default(),
+    };
+
+    let error = application_task_terminal_output(&session, &task_id, TaskRunStatus::Failed, output)
+        .expect_err("failed task must enter the application failure finalizer");
+    assert!(error.downcast_ref::<ApplicationTaskFailed>().is_some());
+    assert_eq!(
+        error.to_string(),
+        format!("task {} failed: {reason}", task_id.as_str())
+    );
+    Ok(())
+}
+
+#[test]
+fn unfinished_task_does_not_claim_delegation_failure() -> Result<()> {
+    let task_id = TaskId::new("task-terminal-pending")?;
+    for task_status in [
+        TaskRunStatus::Started,
+        TaskRunStatus::Running,
+        TaskRunStatus::Paused,
+    ] {
+        let output = application_task_terminal_output(
+            &Session::new("deepseek", "deepseek-v4-flash"),
+            &task_id,
+            task_status,
+            AgentRunOutput {
+                disposition: AgentRunDisposition::FinalAnswer,
+                result: AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: 0,
+                    final_message_id: None,
+                },
+                outcome: AgentRunOutcome::default(),
+            },
+        )?;
+        assert_eq!(
+            output.outcome.terminal_reason,
+            AgentRunTerminalReason::TaskHandoff
+        );
+        assert!(matches!(application_terminal_projection(&output), (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunBlocked { reason }
+        ) if reason == "run is waiting for its durable task to complete"));
+    }
+    Ok(())
+}
+
+#[test]
 fn non_final_kernel_terminals_do_not_project_as_run_finished() {
     for (terminal_reason, expected_status) in [
         (
@@ -4732,7 +4446,6 @@ fn non_final_kernel_terminals_do_not_project_as_run_finished() {
                 final_text: String::new(),
                 tool_calls: 0,
                 final_message_id: None,
-                completion_claim: None,
             },
             outcome: AgentRunOutcome {
                 terminal_reason,
@@ -4772,7 +4485,6 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
             final_text: String::new(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: AgentRunOutcome {
             terminal_reason: AgentRunTerminalReason::TaskHandoff,
@@ -5019,6 +4731,13 @@ credential = {{ source = "none" }}
         status: TaskRunStatus::Started,
         reason: Some("accepted by the application conversation coordinator".to_owned()),
     }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "inspect the application runtime",
+            1,
+        ),
+    ))?;
     let profile_registry =
         crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
@@ -5027,7 +4746,6 @@ credential = {{ source = "none" }}
         )?;
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
@@ -5065,7 +4783,6 @@ credential = {{ source = "none" }}
             final_text: String::new(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: AgentRunOutcome {
             terminal_reason: AgentRunTerminalReason::TaskHandoff,
@@ -5087,673 +4804,16 @@ credential = {{ source = "none" }}
     .await?;
 
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_eq!(
-        output.result.final_text,
-        "application durable task completed"
-    );
+    assert_eq!(output.result.final_text, "application task step completed");
     assert!(output.result.final_message_id.is_some());
     assert!(cancellation_handle.is_naturally_finalized());
     let projection = session.task_state_projection();
     let task = projection.tasks.get(&task_id).expect("task should exist");
     assert_eq!(task.status, TaskRunStatus::Completed);
-    assert_eq!(
-        task.final_answer
-            .as_ref()
-            .map(|answer| answer.message_id.as_str()),
-        output.result.final_message_id.as_deref()
-    );
-    Ok(())
-}
-
-#[test]
-fn application_task_planner_question_resumes_through_the_public_decision_path() -> Result<()> {
-    std::thread::Builder::new()
-        .name("application-planner-input-recovery".to_owned())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| -> Result<()> {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(application_task_planner_question_resumes_through_the_public_decision_path_inner())
-        })?
-        .join()
-        .map_err(|_| anyhow::anyhow!("application planner input recovery test panicked"))?
-}
-
-async fn application_task_planner_question_resumes_through_the_public_decision_path_inner()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let storage = isolated_storage_toml(&config_path);
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"config_version = 2
-
-{storage}
-
-[workspace]
-root = "."
-
-[agent]
-connection = "application-task-test"
-model = "application-task-model"
-
-[connections.application-task-test]
-label = "Application task test"
-provider = "custom"
-protocol = "chat_completions"
-base_url = "http://127.0.0.1:11434/v1"
-credential = {{ source = "none" }}
-"#
-        ),
-    )?;
-    let mut root_config = RootConfig::load(&config_path)?;
-    root_config.task.enabled = true;
-    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
-    let requested_session_path = temp.path().join("session.jsonl");
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?;
-    let binding = bind_application_test_managed_session(
-        &config_path,
-        temp.path(),
-        &requested_session_path,
-        &services,
-    )?;
-    let session_path = binding.session_log_path.clone();
-    let store = JsonlSessionStore::new(&session_path)?;
-    let mut session =
-        Session::load_from_store("application-task-test", "application-task-model", store)?;
-    let session_scope_id = binding.session_scope_id;
-    let task_id = TaskId::new("task-application-planner-question")?;
-    let parent_session_ref = SessionRef::new_relative(
-        session_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("managed session leaf"),
-    )?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref,
-        objective: "inspect an application subsystem after clarification".to_owned(),
-        title: None,
-        status: TaskRunStatus::Started,
-        reason: Some("accepted by the application conversation coordinator".to_owned()),
-    }))?;
-    let profile_registry =
-        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &root_config,
-            temp.path(),
-            session.entries(),
-        )?;
-    let planner_calls = Arc::new(AtomicUsize::new(0));
-    let provider_builder: Arc<dyn TaskRoleProviderBuilder> =
-        Arc::new(QuestioningApplicationTaskRoleProviderBuilder {
-            planner_calls: Arc::clone(&planner_calls),
-        });
-    let task_execution = ApplicationTaskExecutionRuntime {
-        root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-        options: crate::build_run_options(
-            &root_config,
-            temp.path().to_path_buf(),
-            InteractionMode::Headless,
-            None,
-        ),
-        base_registry: ToolRegistry::new(),
-        agent_supervisor: crate::AgentSupervisor::new(
-            profile_registry,
-            crate::AgentBudgetPolicy::from_root_config(&root_config),
-            application_task_provider_capabilities(),
-        ),
-        role_provider_builder: Arc::clone(&provider_builder),
-        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
-    };
-    let cancellation_owner = RunCancellationOwner::new();
-    let cancellation_handle = cancellation_owner.handle();
-    let action = StartDurableTaskAction {
-        handoff_id: TaskHandoffId::new("handoff-application-planner-question")?,
-        task_id: task_id.clone(),
-        source_turn: sigil_kernel::ConversationTurnRef::new(
-            &session_scope_id,
-            "message-application-planner-question",
-            "run-application-planner-question",
-        )?,
-    };
-    let root_output = AgentRunOutput {
-        disposition: AgentRunDisposition::StartDurableTask(action),
-        result: AgentRunResult {
-            final_text: String::new(),
-            tool_calls: 1,
-            final_message_id: None,
-            completion_claim: None,
-        },
-        outcome: AgentRunOutcome {
-            terminal_reason: AgentRunTerminalReason::TaskHandoff,
-            tool_calls: 1,
-            ..AgentRunOutcome::default()
-        },
-    };
-    let mut handler = NoopEventHandler;
-    let mut approval_handler = AutoApproveHandler;
-
-    let suspended = Box::pin(continue_application_task_handoff(
-        &mut session,
-        root_output,
-        Some(task_execution),
-        &mut handler,
-        &mut approval_handler,
-        &cancellation_handle,
-    ))
-    .await?;
-    let AgentRunDisposition::AwaitingUserInput(request_ref) = suspended.disposition else {
-        panic!("application task planner must surface its question to the root run");
-    };
-    let route =
-        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
-            .pending()
-            .next()
-            .cloned()
-            .expect("planner question must have a root attention route");
-    assert_eq!(route.request.identity, request_ref.identity);
-    assert_eq!(route.request.request_hash, request_ref.request_hash);
-    assert_eq!(
-        session
-            .task_state_projection()
-            .tasks
-            .get(&task_id)
-            .map(|task| task.status),
-        Some(TaskRunStatus::Paused)
-    );
-    drop(session);
-
-    let services = services.with_task_role_provider_builder(provider_builder);
-    let command = sigil_kernel::UserInputDecisionCommandV1 {
-        identity: route.request.identity.clone(),
-        request_hash: route.request.request_hash.clone(),
-        command_id: UserInputCommandId::new("application-planner-answer-command")?,
-        decision: UserInputDecisionV1::Submitted {
-            answers: vec![UserInputAnswerV1 {
-                question_id: "scope".to_owned(),
-                value: UserInputAnswerValueV1::Text {
-                    value: "runtime".to_owned(),
-                },
-            }],
-        },
-    };
-    let stranded = Box::pin(prepare_application_user_input_decision(
-        ApplicationUserInputDecisionRequest {
-            config_path: config_path.clone(),
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: session_path.clone(),
-            session_attachment: None,
-            expected_session_scope_id: session_scope_id.clone(),
-            run_id: "application-planner-answer-run".to_owned(),
-            identity: command.identity.clone(),
-            request_hash: command.request_hash.clone(),
-            command_id: command.command_id.clone(),
-            decision: command.decision.clone(),
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    ))
-    .await?;
-    assert!(stranded.has_continuation());
-    drop(stranded);
-
-    let recovered_command = crate::application_run::application_recoverable_user_input_decision(
-        &session_path,
-        &session_scope_id,
-        None,
-    )?
-    .expect("accepted planner answer must survive a controller crash before registration");
-    assert_eq!(recovered_command, command);
-    let recovered_request = crate::application_run::application_user_input_request_view(
-        &session_path,
-        &session_scope_id,
-        &command.identity,
-        &command.request_hash,
-    )?;
-    assert_eq!(
-        recovered_request.status,
-        sigil_kernel::UserInputStatusV1::DecisionAccepted
-    );
-
-    let prepared = Box::pin(prepare_application_user_input_decision(
-        ApplicationUserInputDecisionRequest {
-            config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: session_path.clone(),
-            session_attachment: None,
-            expected_session_scope_id: session_scope_id.clone(),
-            run_id: "application-planner-answer-recovery-run".to_owned(),
-            identity: recovered_command.identity,
-            request_hash: recovered_command.request_hash,
-            command_id: recovered_command.command_id,
-            decision: recovered_command.decision,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    ))
-    .await?;
-    assert!(prepared.has_continuation());
-    assert!(prepared.receipt().continuation_required);
-    let (_, continuation, revision) = prepared.into_parts();
-    assert!(revision.is_none());
-    let (execution, control) = continuation
-        .expect("submitted planner answer must prepare a supervised continuation")
-        .into_parts();
-    let mut events = RecordingApplicationRunEvents::default();
-    let completed = Box::pin(execution.execute(&mut events, &mut approval_handler)).await?;
-    drop(control);
-    assert_eq!(planner_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        completed.agent_output.disposition,
-        AgentRunDisposition::FinalAnswer
-    );
-    assert_eq!(
-        completed.agent_output.result.final_text,
-        "application task completed after clarification"
-    );
-    let recovered = Session::load_from_store(
-        "application-task-test",
-        "application-task-model",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    assert_eq!(
-        recovered
-            .task_state_projection()
-            .tasks
-            .get(&task_id)
-            .map(|task| task.status),
-        Some(TaskRunStatus::Completed)
-    );
-    assert_eq!(
-        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(recovered.entries(),)?
-            .route(&route.route_id)
-            .map(|route| route.status),
-        Some(sigil_kernel::AgentRouteStatus::Resolved)
-    );
-    assert!(
-        events
-            .0
-            .iter()
-            .any(|event| matches!(event.event, PublicRunEventKind::RunFinished { .. }))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn application_typed_task_continuation_executes_exact_selected_task() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let storage = isolated_storage_toml(&config_path);
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"config_version = 2
-
-{storage}
-
-[workspace]
-root = "."
-
-[agent]
-connection = "application-task-test"
-model = "application-task-model"
-
-[connections.application-task-test]
-label = "Application task test"
-provider = "custom"
-protocol = "chat_completions"
-base_url = "http://127.0.0.1:11434/v1"
-credential = {{ source = "none" }}
-"#
-        ),
-    )?;
-    let mut root_config = RootConfig::load(&config_path)?;
-    root_config.task.enabled = true;
-    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
-    let session_path = temp.path().join("session.jsonl");
-    let store = JsonlSessionStore::new(&session_path)?;
-    let mut session =
-        Session::load_from_store("application-task-test", "application-task-model", store)?;
-    let task_id = TaskId::new("task-application-selected-continuation")?;
-    let decoy_task_id = TaskId::new("task-application-newer-decoy")?;
-    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
-    for (id, objective) in [
-        (task_id.clone(), "finish the selected application task"),
-        (decoy_task_id.clone(), "leave this newer task paused"),
-    ] {
-        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-            task_id: id.clone(),
-            parent_session_ref: parent_session_ref.clone(),
-            objective: objective.to_owned(),
-            title: None,
-            status: TaskRunStatus::Paused,
-            reason: Some("waiting for a follow-up".to_owned()),
-        }))?;
-        session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-            task_id: id,
-            plan_version: 1,
-            status: TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: TaskStepId::new("inspect_application")?,
-                title: "Inspect application runtime".to_owned(),
-                display_name: None,
-                detail: None,
-                role: AgentRole::Executor,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            }],
-            reason: None,
-        }))?;
-    }
-    let source_turn = sigil_kernel::ConversationTurnRef::new(
-        session.session_scope_id(),
-        "message-application-selected-continuation",
-        "run-application-selected-continuation",
-    )?;
-    let exact_guidance = "finish the task we were already working on";
-    let mut message = ModelMessage::user(exact_guidance);
-    message.id = source_turn.message_id.clone();
-    session.append_user_message(message)?;
-    let route_contract_fingerprint = "route-selected-application-task".to_owned();
-    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
-        sigil_kernel::ConversationRouteDecisionRecordedEntry {
-            decision_id: sigil_kernel::conversation_route_decision_id_for_source(&source_turn),
-            source_turn: source_turn.clone(),
-            route: sigil_kernel::ConversationRoute::Task,
-            reason_codes: Vec::new(),
-            configured_policy: TaskRoutingPolicy::Auto,
-            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
-            policy_snapshot_hash: "task-routing-policy".to_owned(),
-            route_contract_fingerprint: route_contract_fingerprint.clone(),
-            decided_at_ms: 1,
-        },
-    ))?;
-    let guidance_projection =
-        sigil_kernel::project_conversation_prompt_for_persistence(exact_guidance);
-    let guidance_receipt = sigil_kernel::TaskContinuationSelectedEntry {
-        task_id: task_id.clone(),
-        source_turn: source_turn.clone(),
-        plan_version: Some(1),
-        task_status: TaskRunStatus::Paused,
-        plan_status: Some(TaskPlanStatus::Accepted),
-        route_contract_fingerprint: route_contract_fingerprint.clone(),
-        control: sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-        prompt_hash: guidance_projection.prompt_hash,
-        exact_prompt_required: guidance_projection.exact_prompt_required,
-        guidance: guidance_projection.safe_prompt,
-        selected_at_ms: 1,
-    };
-    session.append_control(ControlEntry::TaskContinuationSelected(
-        guidance_receipt.clone(),
-    ))?;
-    let profile_registry =
-        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &root_config,
-            temp.path(),
-            session.entries(),
-        )?;
-    let task_execution = ApplicationTaskExecutionRuntime {
-        root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-        options: crate::build_run_options(
-            &root_config,
-            temp.path().to_path_buf(),
-            InteractionMode::Headless,
-            None,
-        ),
-        base_registry: ToolRegistry::new(),
-        agent_supervisor: crate::AgentSupervisor::new(
-            profile_registry,
-            crate::AgentBudgetPolicy::from_root_config(&root_config),
-            application_task_provider_capabilities(),
-        ),
-        role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
-        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
-    };
-    let cancellation_owner = RunCancellationOwner::new();
-    let cancellation_handle = cancellation_owner.handle();
-    let root_output = AgentRunOutput {
-        disposition: AgentRunDisposition::ContinueDurableTask(Box::new(
-            sigil_kernel::ContinueDurableTaskAction {
-                task_id: task_id.clone(),
-                source_turn,
-                plan_version: Some(1),
-                task_status: TaskRunStatus::Paused,
-                plan_status: Some(TaskPlanStatus::Accepted),
-                route_contract_fingerprint,
-                control: sigil_kernel::TaskContinuationControl::ApplyTaskGuidance(
-                    exact_guidance.to_owned(),
-                ),
-                guidance: sigil_kernel::SecretString::new(exact_guidance),
-                guidance_receipt,
-            },
-        )),
-        result: AgentRunResult {
-            final_text: String::new(),
-            tool_calls: 1,
-            final_message_id: None,
-            completion_claim: None,
-        },
-        outcome: AgentRunOutcome {
-            terminal_reason: AgentRunTerminalReason::TaskHandoff,
-            tool_calls: 1,
-            ..AgentRunOutcome::default()
-        },
-    };
-    let mut handler = NoopEventHandler;
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = Box::pin(continue_application_task_handoff(
-        &mut session,
-        root_output,
-        Some(task_execution),
-        &mut handler,
-        &mut approval_handler,
-        &cancellation_handle,
-    ))
-    .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_eq!(
-        output.result.final_text,
-        "application durable task completed"
-    );
-    assert!(cancellation_handle.is_naturally_finalized());
-    let projection = session.task_state_projection();
-    assert_eq!(
-        projection.tasks.get(&task_id).map(|task| task.status),
-        Some(TaskRunStatus::Completed)
-    );
-    assert_eq!(
-        projection.tasks.get(&decoy_task_id).map(|task| task.status),
-        Some(TaskRunStatus::Paused),
-        "typed continuation must never fall back to a newer resumable Task"
-    );
-    assert!(session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-            if applied.task_id == task_id
-                && applied.target_step_ids
-                    == vec![TaskStepId::new("inspect_application").expect("valid step id")]
-    )));
-    assert_eq!(
-        session
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(bound))
-                    if bound.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_run() -> Result<()> {
-    let _environment_guard = crate::test_env::lock();
-    struct ConflictingTaskAdapter {
-        store: JsonlSessionStore,
-        inserted: bool,
-        events: Vec<PublicRunEvent>,
-    }
-
-    impl ApplicationRunEventHandler for ConflictingTaskAdapter {
-        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-            if !self.inserted
-                && matches!(
-                    &event.event,
-                    PublicRunEventKind::TaskPhaseChanged {
-                        phase: sigil_kernel::PublicTaskPhase::Execution,
-                        status,
-                        ..
-                    } if status == "running"
-                )
-            {
-                let next = event.sequence + 1;
-                let foreign_id = format!("task-conflicting-public:{next}");
-                let foreign = PublicRunEvent::new(
-                    &event.session_id,
-                    &event.run_id,
-                    next,
-                    PublicRunEventKind::Notice {
-                        message: "exact competing fact, not the runtime candidate".to_owned(),
-                    },
-                );
-                sigil_kernel::PublicEventOutboxRecorder::new(self.store.clone()).append_outbox(
-                    &sigil_kernel::PublicEventOutboxEntryV1 {
-                        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-                        public_event_id: foreign_id.clone(),
-                        domain_event_id: foreign_id,
-                        run_id: event.run_id.clone(),
-                        sequence: next,
-                        payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(
-                            &foreign,
-                        )?),
-                        event: foreign,
-                    },
-                )?;
-                self.inserted = true;
-            }
-            self.events.push(event);
-            Ok(())
-        }
-    }
-
-    let temp = tempfile::tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    write_unauthenticated_application_test_config(&config_path)?;
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
-    let binding = bind_application_test_managed_session(
-        &config_path,
-        temp.path(),
-        &temp.path().join("session.jsonl"),
-        &services,
-    )?;
-    let session_path = binding.session_log_path;
-    let store = JsonlSessionStore::new(&session_path)?;
-    let root_config = RootConfig::load(&config_path)?;
-    let (provider_name, route) =
-        crate::provider_connections::resolve_default_model_route(&root_config)
-            .map_err(anyhow::Error::new)?;
-    let mut session = Session::load_from_store_with_route(
-        provider_name,
-        route.model_ref.model_id.clone(),
-        Some(route),
-        store.clone(),
-    )?;
-    crate::bind_session_composition(&mut session, &root_config)?;
-    let task_id = TaskId::new("task-public-append-failure")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative(
-            session_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("managed session leaf"),
-        )?,
-        objective: "continue without inventing a terminal on publication failure".to_owned(),
-        title: None,
-        status: TaskRunStatus::Paused,
-        reason: Some("restart".to_owned()),
-    }))?;
-    let session_scope_id = session.session_scope_id().to_owned();
-    drop(session);
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: session_path.clone(),
-            session_attachment: None,
-            expected_session_scope_id: session_scope_id,
-            run_id: "run-task-public-append-failure".to_owned(),
-            task_id: task_id.clone(),
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = ConflictingTaskAdapter {
-        store,
-        inserted: false,
-        events: Vec::new(),
-    };
-    let error = execution
-        .execute(&mut handler, &mut AutoApproveHandler)
-        .await
-        .expect_err("an unconfirmed public append must stop the original execution");
-    assert!(
-        handler.inserted,
-        "inject after entering the real Task execution path"
-    );
-    assert!(
-        is_application_public_outbox_append_error(&error),
-        "{error:#}"
-    );
-    assert!(
-        handler
-            .events
-            .iter()
-            .all(|event| !matches!(event.event, PublicRunEventKind::RunFailed { .. }))
-    );
-    let records = JsonlSessionStore::read_event_records(&session_path)?;
-    for record in records {
-        assert_ne!(
-            record.stored_event().event_kind(),
-            Some(sigil_kernel::DurableEventType::RunFinalized)
-        );
-        if let Some(SessionLogEntry::Control(ControlEntry::TaskRun(task))) =
-            record.session_log_entry()?
-        {
-            assert_ne!(
-                task.status,
-                TaskRunStatus::Failed,
-                "publication failure is not Task failure"
-            );
-        }
-    }
+    assert!(task.direct_execution_attempts.values().any(|attempt| {
+        attempt.status == sigil_kernel::TaskExecutionAttemptStatus::Completed
+            && attempt.final_message_id.as_deref() == output.result.final_message_id.as_deref()
+    }));
     Ok(())
 }
 
@@ -5800,6 +4860,13 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         status: TaskRunStatus::Paused,
         reason: Some("application restart".to_owned()),
     }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "continue the application task",
+            1,
+        ),
+    ))?;
     let unrelated_user = ModelMessage::user("explain an unrelated module first");
     let unrelated_user_id = unrelated_user.id.clone();
     session.append_user_message(unrelated_user)?;
@@ -5863,22 +4930,16 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
     );
     assert_eq!(
         output.final_text.as_deref(),
-        Some("application durable task completed")
+        Some("application task step completed")
     );
     assert!(matches!(
         events.0.first().map(|event| &event.event),
         Some(PublicRunEventKind::RunStarted { .. })
     ));
-    assert!(
-        events
-            .0
-            .iter()
-            .any(|event| matches!(event.event, PublicRunEventKind::TaskPlanUpdated { .. }))
-    );
     assert!(matches!(
         events.0.last().map(|event| &event.event),
         Some(PublicRunEventKind::RunFinished { final_text })
-            if final_text == "application durable task completed"
+            if final_text == "application task step completed"
     ));
     assert!(control.handle().is_naturally_finalized());
     let lifecycle = application_conversation_lifecycle(&session_path)?;
@@ -5910,1160 +4971,17 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
     assert_eq!(
         reopened
             .task_state_projection()
-            .current_task()
-            .map(|task| &task.task_id),
-        Some(&task_id)
+            .tasks
+            .get(&task_id)
+            .map(|task| task.status),
+        Some(TaskRunStatus::Completed)
     );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(selected))
-                    if selected.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-struct ApplicationGuidanceRecoveryFixture {
-    services: ApplicationRunServices,
-    config_path: std::path::PathBuf,
-    session_path: std::path::PathBuf,
-    session_scope_id: String,
-    task_id: TaskId,
-    exact_guidance: String,
-    safe_guidance: String,
-}
-
-#[derive(Clone, Copy)]
-enum ApplicationGuidanceRecoveryBoundary {
-    Materialized,
-    SelectionOnly,
-    SelectionWithStartedPlanner,
-}
-
-fn application_guidance_recovery_fixture(
-    root: &Path,
-    exact_prompt_required: bool,
-    boundary: ApplicationGuidanceRecoveryBoundary,
-) -> Result<ApplicationGuidanceRecoveryFixture> {
-    let config_path = root.join("sigil.toml");
-    write_unauthenticated_application_test_config(&config_path)?;
-    let services = with_application_test_managed_authority(
-        root,
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?;
-    let binding = bind_application_test_managed_session(
-        &config_path,
-        root,
-        &root.join("session.jsonl"),
-        &services,
-    )?;
-    let session_path = binding.session_log_path;
-    let store = JsonlSessionStore::new(&session_path)?;
-    let root_config = RootConfig::load(&config_path)?;
-    let (provider_name, route) =
-        crate::provider_connections::resolve_default_model_route(&root_config)
-            .map_err(anyhow::Error::new)?;
-    let mut session = Session::load_from_store_with_route(
-        provider_name,
-        route.model_ref.model_id.clone(),
-        Some(route),
-        store,
-    )?;
-    crate::bind_session_composition(&mut session, &root_config)?;
-    let task_id = TaskId::new(match (exact_prompt_required, boundary) {
-        (true, ApplicationGuidanceRecoveryBoundary::Materialized) => {
-            "task-application-guidance-exact-recovery"
-        }
-        (false, ApplicationGuidanceRecoveryBoundary::Materialized) => {
-            "task-application-guidance-safe-recovery"
-        }
-        (true, ApplicationGuidanceRecoveryBoundary::SelectionOnly) => {
-            "task-application-guidance-exact-selection-recovery"
-        }
-        (false, ApplicationGuidanceRecoveryBoundary::SelectionOnly) => {
-            "task-application-guidance-safe-selection-recovery"
-        }
-        (true, ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner) => {
-            "task-application-guidance-exact-started-recovery"
-        }
-        (false, ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner) => {
-            "task-application-guidance-safe-started-recovery"
-        }
-    })?;
-    let initial_task_status = if matches!(
-        boundary,
-        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner
-    ) {
-        TaskRunStatus::Started
-    } else {
-        TaskRunStatus::Paused
-    };
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative(
-            session_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("managed session leaf"),
-        )?,
-        objective: "recover materialized application guidance".to_owned(),
-        title: None,
-        status: initial_task_status,
-        reason: Some("crashed after guidance review".to_owned()),
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            sigil_kernel::TaskStepSpec {
-                step_id: TaskStepId::new("step_1")?,
-                title: "Inspect the baseline".to_owned(),
-                display_name: None,
-                detail: None,
-                role: AgentRole::Executor,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            },
-            sigil_kernel::TaskStepSpec {
-                step_id: TaskStepId::new("step_2")?,
-                title: "Inspect the exact recovery target".to_owned(),
-                display_name: None,
-                detail: None,
-                role: AgentRole::Executor,
-                depends_on: vec![TaskStepId::new("step_1")?],
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            },
-        ],
-        reason: None,
-    }))?;
-    session.append_user_message(ModelMessage::user("explain an unrelated module first"))?;
-
-    let exact_guidance = if exact_prompt_required {
-        "inspect step 2 with authorization=super-secret-value"
-    } else {
-        "prioritize the compatibility check in step 2"
-    }
-    .to_owned();
-    let projected = sigil_kernel::project_conversation_prompt_for_persistence(&exact_guidance);
-    assert_eq!(projected.exact_prompt_required, exact_prompt_required);
-    match boundary {
-        ApplicationGuidanceRecoveryBoundary::Materialized => {
-            let applied = sigil_kernel::TaskGuidanceAppliedEntry {
-                queue_id: sigil_kernel::ConversationInputQueueId::new(if exact_prompt_required {
-                    "queue-application-guidance-exact-recovery"
-                } else {
-                    "queue-application-guidance-safe-recovery"
-                })?,
-                task_id: task_id.clone(),
-                plan_version: 1,
-                dispatch_run_id: if exact_prompt_required {
-                    "dispatch-application-guidance-exact-recovery"
-                } else {
-                    "dispatch-application-guidance-safe-recovery"
-                }
-                .to_owned(),
-                reason: sigil_kernel::TaskGuidanceApplyReason::PrioritizesPendingStep,
-                target_step_ids: vec![TaskStepId::new("step_2")?],
-            };
-            let materialized = sigil_kernel::TaskGuidanceMaterializedEntry::new(
-                &applied,
-                projected.prompt_hash.clone(),
-                projected.exact_prompt_required,
-                projected.safe_prompt.clone(),
-            )?;
-            session.append_controls(vec![
-                ControlEntry::TaskGuidanceApplied(applied),
-                ControlEntry::TaskGuidanceMaterialized(materialized),
-            ])?;
-            assert!(session.task_state_projection().current_task().is_none());
-        }
-        ApplicationGuidanceRecoveryBoundary::SelectionOnly
-        | ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner => {
-            let source_turn = sigil_kernel::ConversationTurnRef::new(
-                session.session_scope_id(),
-                "message-application-guidance-selection-recovery",
-                "run-application-guidance-selection-recovery",
-            )?;
-            let mut source_message = ModelMessage::user(projected.safe_prompt.clone());
-            source_message.id = source_turn.message_id.clone();
-            session.append_user_message(source_message)?;
-            session.append_control(ControlEntry::TaskContinuationSelected(
-                sigil_kernel::TaskContinuationSelectedEntry {
-                    task_id: task_id.clone(),
-                    plan_version: Some(1),
-                    task_status: initial_task_status,
-                    plan_status: Some(TaskPlanStatus::Accepted),
-                    source_turn,
-                    route_contract_fingerprint: "sha256:application-guidance-selection-recovery"
-                        .to_owned(),
-                    control:
-                        sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-                    prompt_hash: projected.prompt_hash.clone(),
-                    exact_prompt_required: projected.exact_prompt_required,
-                    guidance: projected.safe_prompt.clone(),
-                    selected_at_ms: 1,
-                },
-            ))?;
-            if matches!(
-                boundary,
-                ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner
-            ) {
-                let attempt_id = sigil_kernel::task_participant_attempt_id(
-                    &task_id,
-                    sigil_kernel::TaskParticipantPurpose::Planner,
-                    None,
-                    None,
-                    1,
-                )?;
-                session.append_control(ControlEntry::TaskParticipantAttempt(
-                    sigil_kernel::TaskParticipantAttemptEntry {
-                        child_session_ref: sigil_kernel::task_participant_session_ref(
-                            &task_id,
-                            &attempt_id,
-                        )?,
-                        attempt_id,
-                        task_id: task_id.clone(),
-                        purpose: sigil_kernel::TaskParticipantPurpose::Planner,
-                        ordinal: 1,
-                        plan_version: None,
-                        step_id: None,
-                        role: AgentRole::Planner,
-                        status: sigil_kernel::TaskParticipantAttemptStatus::Started,
-                        reason: None,
-                    },
-                ))?;
-            }
-            assert_eq!(
-                session
-                    .task_state_projection()
-                    .current_task()
-                    .map(|task| &task.task_id),
-                Some(&task_id)
-            );
-        }
-    }
-
-    Ok(ApplicationGuidanceRecoveryFixture {
-        services,
-        config_path,
-        session_path,
-        session_scope_id: session.session_scope_id().to_owned(),
-        task_id,
-        exact_guidance,
-        safe_guidance: projected.safe_prompt,
-    })
-}
-
-#[tokio::test]
-async fn application_continuation_recovers_safe_materialized_guidance_after_reload() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        false,
-        ApplicationGuidanceRecoveryBoundary::Materialized,
-    )?;
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-safe-recovery".to_owned(),
-            task_id: fixture.task_id,
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await?;
-
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    let prompts = executor_requests
-        .lock()
-        .expect("executor request lock should not be poisoned")
-        .iter()
-        .map(|request| {
-            request
-                .messages
-                .iter()
-                .filter_map(|message| message.content.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .collect::<Vec<_>>();
-    assert!(prompts.len() >= 2);
-    let first = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_1"))
-        .expect("first executor step request");
-    let second = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_2"))
-        .expect("second executor step request");
-    assert!(!first.contains(&fixture.safe_guidance));
-    assert!(second.contains(&fixture.safe_guidance));
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn application_continuation_recovers_exact_required_materialized_guidance_after_reload()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        true,
-        ApplicationGuidanceRecoveryBoundary::Materialized,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let exact_guidance = fixture.exact_guidance.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-exact-recovery".to_owned(),
-            task_id: fixture.task_id,
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await?;
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    let prompts = executor_requests
-        .lock()
-        .expect("executor request lock should not be poisoned")
-        .iter()
-        .map(|request| {
-            request
-                .messages
-                .iter()
-                .filter_map(|message| message.content.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .collect::<Vec<_>>();
-    assert!(prompts.len() >= 2);
-    let first = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_1"))
-        .expect("first executor step request");
-    let second = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_2"))
-        .expect("second executor step request");
-    assert!(!first.contains(&fixture.safe_guidance));
-    assert!(second.contains(&fixture.safe_guidance));
-    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn application_continuation_recovers_safe_selection_only_guidance_after_reload() -> Result<()>
-{
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        false,
-        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let task_id = fixture.task_id.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-safe-selection-recovery".to_owned(),
-            task_id: fixture.task_id,
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await?;
-
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
-    let prompts = executor_requests
-        .lock()
-        .expect("executor request lock should not be poisoned")
-        .iter()
-        .map(|request| {
-            request
-                .messages
-                .iter()
-                .filter_map(|message| message.content.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .collect::<Vec<_>>();
-    assert!(prompts.len() >= 2);
-    let first = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_1"))
-        .expect("first executor step request");
-    let second = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_2"))
-        .expect("second executor step request");
-    assert!(!first.contains(&fixture.safe_guidance));
-    assert!(second.contains(&fixture.safe_guidance));
-
-    let reopened = Session::load_from_store(
-        "deepseek",
-        "deepseek-v4-flash",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
-                    if selected.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-                    if applied.task_id == task_id
-            ))
-            .count(),
-        1,
-        "selection-only recovery must consume the existing authority exactly once"
-    );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(materialized))
-                    if materialized.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[test]
-fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
--> Result<()> {
-    std::thread::Builder::new()
-        .name("application-selection-retry-recovery".to_owned())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| -> Result<()> {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(
-                    application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async(),
-                )
-        })
-        .expect("application recovery test thread should spawn")
-        .join()
-        .map_err(|_| anyhow::anyhow!("application recovery test thread should not panic"))?
-}
-
-async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload_async()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        false,
-        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let task_id = fixture.task_id.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-started-selection-recovery".to_owned(),
-            task_id: fixture.task_id,
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await?;
-
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .len()
-            >= 2
-    );
-    let reopened = Session::load_from_store(
-        "deepseek",
-        "deepseek-v4-flash",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    let task = reopened
-        .task_state_projection()
-        .tasks
-        .get(&task_id)
-        .cloned()
-        .expect("recovered task remains projected");
-    let first = task
-        .participant_attempts
-        .values()
-        .find(|attempt| {
-            attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner && attempt.ordinal == 1
-        })
-        .expect("crashed planner attempt remains auditable");
-    assert_eq!(
-        first.status,
-        sigil_kernel::TaskParticipantAttemptStatus::Interrupted
-    );
-    assert!(
-        first
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("interrupted by explicit continuation"))
-    );
-    let second = task
-        .participant_attempts
-        .values()
-        .find(|attempt| {
-            attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner && attempt.ordinal == 2
-        })
-        .expect("explicit retry uses a fresh planner attempt ordinal");
-    assert_eq!(
-        second.status,
-        sigil_kernel::TaskParticipantAttemptStatus::Completed
-    );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-                    if applied.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn application_continuation_recovers_exact_selection_only_guidance_after_reload() -> Result<()>
-{
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        true,
-        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let exact_guidance = fixture.exact_guidance.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-exact-selection-recovery".to_owned(),
-            task_id: fixture.task_id,
-            guidance: None,
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await
-        .expect("safe durable guidance projection should recover after reload");
-
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .iter()
-            .all(|request| {
-                request
-                    .messages
-                    .iter()
-                    .filter_map(|message| message.content.as_deref())
-                    .all(|content| !content.contains(&exact_guidance))
-            })
-    );
-    let durable_log = std::fs::read_to_string(session_path)?;
-    assert!(!durable_log.contains(&exact_guidance));
-    assert!(durable_log.contains("task_guidance_applied"));
-    Ok(())
-}
-
-#[test]
-fn application_exact_reentry_preserves_active_task_then_recovers_started_planner() -> Result<()> {
-    std::thread::Builder::new()
-        .name("application-exact-reentry-recovery".to_owned())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| -> Result<()> {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(async {
-                    let temp = tempfile::tempdir()?;
-                    let fixture = application_guidance_recovery_fixture(
-                        temp.path(),
-                        true,
-                        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner,
-                    )?;
-                    let config_path = fixture.config_path.clone();
-                    let session_path = fixture.session_path.clone();
-                    let session_scope_id = fixture.session_scope_id.clone();
-                    let task_id = fixture.task_id.clone();
-                    let exact_guidance = fixture.exact_guidance.clone();
-                    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-                    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-                    let services =
-                        fixture
-                            .services
-                            .clone()
-                            .with_task_role_provider_builder(Arc::new(
-                                CapturingApplicationTaskRoleProviderBuilder {
-                                    executor_requests: Arc::clone(&executor_requests),
-                                    guidance_review_requests: Arc::clone(&guidance_review_requests),
-                                },
-                            ));
-
-                    let prepared = prepare_application_task_continuation(
-                        ApplicationTaskContinuationRequest {
-                            config_path: config_path.clone(),
-                            launch_cwd: temp.path().to_path_buf(),
-                            session_path: session_path.clone(),
-                            session_attachment: None,
-                            expected_session_scope_id: session_scope_id.clone(),
-                            run_id: "run-application-guidance-started-missing-exact".to_owned(),
-                            task_id: task_id.clone(),
-                            guidance: None,
-                            interaction: ApplicationRunInteraction::NonInteractive,
-                            permission_mode: None,
-                        },
-                        &services,
-                    )
-                    .await?;
-                    let (execution, first_control) = prepared.into_parts();
-                    let mut handler = RecordingApplicationRunEvents::default();
-                    let mut approval_handler = AutoApproveHandler;
-                    let output = execution
-                        .execute(&mut handler, &mut approval_handler)
-                        .await
-                        .expect(
-                            "safe durable guidance projection should recover the started planner",
-                        );
-                    assert_eq!(output.task_status, TaskRunStatus::Completed);
-
-                    let reopened = Session::load_from_store(
-                        "deepseek",
-                        "deepseek-v4-flash",
-                        JsonlSessionStore::new(&session_path)?,
-                    )?;
-                    let task = reopened
-                        .task_state_projection()
-                        .tasks
-                        .get(&task_id)
-                        .cloned()
-                        .expect("active Task remains projected after admission failure");
-                    assert_eq!(task.status, TaskRunStatus::Completed);
-                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
-                    assert!(
-                        executor_requests
-                            .lock()
-                            .expect("executor request lock should not be poisoned")
-                            .iter()
-                            .all(|request| {
-                                request
-                                    .messages
-                                    .iter()
-                                    .filter_map(|message| message.content.as_deref())
-                                    .all(|content| !content.contains(&exact_guidance))
-                            })
-                    );
-                    drop(first_control);
-
-                    let reopened = Session::load_from_store(
-                        "deepseek",
-                        "deepseek-v4-flash",
-                        JsonlSessionStore::new(&session_path)?,
-                    )?;
-                    let task = reopened
-                        .task_state_projection()
-                        .tasks
-                        .get(&task_id)
-                        .cloned()
-                        .expect("recovered Task remains projected");
-                    assert_eq!(task.status, TaskRunStatus::Completed);
-                    assert_eq!(
-                        task.participant_attempts
-                            .values()
-                            .find(|attempt| {
-                                attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner
-                                    && attempt.ordinal == 1
-                            })
-                            .map(|attempt| attempt.status),
-                        Some(sigil_kernel::TaskParticipantAttemptStatus::Interrupted)
-                    );
-                    assert_eq!(
-                        task.participant_attempts
-                            .values()
-                            .find(|attempt| {
-                                attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner
-                                    && attempt.ordinal == 2
-                            })
-                            .map(|attempt| attempt.status),
-                        Some(sigil_kernel::TaskParticipantAttemptStatus::Completed)
-                    );
-                    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
-                    if selected.task_id == task_id
-            ))
-            .count(),
-        1
-    );
-                    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
-                    Ok(())
-                })
-        })?
-        .join()
-        .map_err(|_| anyhow::anyhow!("application exact re-entry recovery thread panicked"))?
-}
-
-#[tokio::test]
-async fn application_continuation_reenters_exact_selection_only_guidance_with_original_scope()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        true,
-        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let task_id = fixture.task_id.clone();
-    let exact_guidance = fixture.exact_guidance.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-exact-selection-reentry".to_owned(),
-            task_id: fixture.task_id,
-            guidance: Some(exact_guidance.clone()),
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let output = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await?;
-
-    assert_eq!(output.task_status, TaskRunStatus::Completed);
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
-    let prompts = executor_requests
-        .lock()
-        .expect("executor request lock should not be poisoned")
-        .iter()
-        .map(|request| {
-            request
-                .messages
-                .iter()
-                .filter_map(|message| message.content.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .collect::<Vec<_>>();
-    assert!(prompts.len() >= 2);
-    let first = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_1"))
-        .expect("first executor step request");
-    let second = prompts
-        .iter()
-        .find(|prompt| prompt.contains("Step: step_2"))
-        .expect("second executor step request");
-    assert!(!first.contains(&exact_guidance));
-    assert!(second.contains(&exact_guidance));
-
-    let reopened = Session::load_from_store(
-        "deepseek",
-        "deepseek-v4-flash",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-                    if applied.task_id == task_id
-                        && applied.target_step_ids == vec![TaskStepId::new("step_2")
-                            .expect("valid recovery target")]
-            ))
-            .count(),
-        1
-    );
-    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
-    Ok(())
-}
-
-#[tokio::test]
-async fn application_continuation_rejects_mismatched_exact_selection_before_provider_io()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        true,
-        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
-    )?;
-    let session_path = fixture.session_path.clone();
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = fixture
-        .services
-        .clone()
-        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }));
-    let prepared = prepare_application_task_continuation(
-        ApplicationTaskContinuationRequest {
-            config_path: fixture.config_path,
-            launch_cwd: temp.path().to_path_buf(),
-            session_path: fixture.session_path,
-            session_attachment: None,
-            expected_session_scope_id: fixture.session_scope_id,
-            run_id: "run-application-guidance-mismatched-selection-reentry".to_owned(),
-            task_id: fixture.task_id,
-            guidance: Some(
-                "replace step 1 entirely with authorization=a-different-secret-value".to_owned(),
-            ),
-            interaction: ApplicationRunInteraction::NonInteractive,
-            permission_mode: None,
-        },
-        &services,
-    )
-    .await?;
-    let (execution, _control) = prepared.into_parts();
-    let mut handler = RecordingApplicationRunEvents::default();
-    let mut approval_handler = AutoApproveHandler;
-
-    let error = execution
-        .execute(&mut handler, &mut approval_handler)
-        .await
-        .expect_err("mismatched exact guidance must fail before provider I/O");
-
-    assert!(
-        format!("{error:#}")
-            .contains("explicit guidance conflicts with pending durable task guidance")
-    );
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .is_empty()
-    );
-    assert!(!std::fs::read_to_string(session_path)?.contains("task_guidance_applied"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let fixture = application_guidance_recovery_fixture(
-        temp.path(),
-        false,
-        ApplicationGuidanceRecoveryBoundary::Materialized,
-    )?;
-    let root_config = RootConfig::load(&fixture.config_path)?;
-    let (provider_name, route) =
-        crate::provider_connections::resolve_default_model_route(&root_config)
-            .map_err(anyhow::Error::new)?;
-    let mut session = Session::load_from_store_with_route(
-        provider_name,
-        route.model_ref.model_id.clone(),
-        Some(route),
-        JsonlSessionStore::new(&fixture.session_path)?,
-    )?;
-    let source_turn = sigil_kernel::ConversationTurnRef::new(
-        session.session_scope_id(),
-        "message-materialized-guidance-new-selection",
-        "run-materialized-guidance-new-selection",
-    )?;
-    let mut source_message = ModelMessage::user(fixture.safe_guidance.clone());
-    source_message.id = source_turn.message_id.clone();
-    session.append_user_message(source_message)?;
-    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
-        sigil_kernel::ConversationRouteDecisionRecordedEntry {
-            decision_id: sigil_kernel::conversation_route_decision_id_for_source(&source_turn),
-            source_turn: source_turn.clone(),
-            route: sigil_kernel::ConversationRoute::Task,
-            reason_codes: Vec::new(),
-            configured_policy: TaskRoutingPolicy::Auto,
-            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
-            policy_snapshot_hash: "task-routing-policy".to_owned(),
-            route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
-            decided_at_ms: 2,
-        },
-    ))?;
-    let prompt = sigil_kernel::project_conversation_prompt_for_persistence(&fixture.exact_guidance);
-    let selection = sigil_kernel::TaskContinuationSelectedEntry {
-        task_id: fixture.task_id.clone(),
-        plan_version: Some(1),
-        task_status: TaskRunStatus::Paused,
-        plan_status: Some(TaskPlanStatus::Accepted),
-        source_turn: source_turn.clone(),
-        route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
-        control: sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-        prompt_hash: prompt.prompt_hash,
-        exact_prompt_required: prompt.exact_prompt_required,
-        guidance: prompt.safe_prompt,
-        selected_at_ms: 2,
-    };
-    session.append_control(ControlEntry::TaskContinuationSelected(selection.clone()))?;
-    let profile_registry =
-        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &root_config,
-            temp.path(),
-            session.entries(),
-        )?;
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let task_execution = ApplicationTaskExecutionRuntime {
-        root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-        options: crate::build_run_options(
-            &root_config,
-            temp.path().to_path_buf(),
-            InteractionMode::Headless,
-            None,
-        ),
-        base_registry: ToolRegistry::new(),
-        agent_supervisor: crate::AgentSupervisor::new(
-            profile_registry,
-            crate::AgentBudgetPolicy::from_root_config(&root_config),
-            application_task_provider_capabilities(),
-        ),
-        role_provider_builder: Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-            executor_requests: Arc::clone(&executor_requests),
-            guidance_review_requests: Arc::clone(&guidance_review_requests),
-        }),
-        verification_execution_port: Some(Arc::new(LocalExecutionBackend)),
-    };
-    let cancellation_owner = RunCancellationOwner::new();
-    let cancellation_handle = cancellation_owner.handle();
-    let root_output = AgentRunOutput {
-        disposition: AgentRunDisposition::ContinueDurableTask(Box::new(
-            sigil_kernel::ContinueDurableTaskAction {
-                task_id: fixture.task_id.clone(),
-                source_turn,
-                plan_version: Some(1),
-                task_status: TaskRunStatus::Paused,
-                plan_status: Some(TaskPlanStatus::Accepted),
-                route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
-                control: sigil_kernel::TaskContinuationControl::ApplyTaskGuidance(
-                    fixture.exact_guidance.clone(),
-                ),
-                guidance: sigil_kernel::SecretString::new(fixture.exact_guidance),
-                guidance_receipt: selection,
-            },
-        )),
-        result: AgentRunResult {
-            final_text: String::new(),
-            tool_calls: 1,
-            final_message_id: None,
-            completion_claim: None,
-        },
-        outcome: AgentRunOutcome {
-            terminal_reason: AgentRunTerminalReason::TaskHandoff,
-            tool_calls: 1,
-            ..AgentRunOutcome::default()
-        },
-    };
-    let mut handler = NoopEventHandler;
-    let mut approval_handler = AutoApproveHandler;
-
-    let error = continue_application_task_handoff(
-        &mut session,
-        root_output,
-        Some(task_execution),
-        &mut handler,
-        &mut approval_handler,
-        &cancellation_handle,
-    )
-    .await
-    .expect_err("a new typed authority must not fork unfinished materialized guidance");
-
-    assert!(
-        format!("{error:#}").contains("conflicts with unfinished durable materialization"),
-        "unexpected conflict error: {error:#}"
-    );
-    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
-    assert!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .is_empty()
-    );
-    assert_eq!(
-        session
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-                    if applied.task_id == fixture.task_id
-            ))
-            .count(),
-        1,
-        "the original materialization remains the only planner-owned decision"
-    );
+    assert!(reopened.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))
+            if attempt.task_id == task_id
+                && attempt.status == sigil_kernel::TaskExecutionAttemptStatus::Completed
+    )));
     Ok(())
 }
 
@@ -7179,7 +5097,15 @@ async fn application_task_pause_writes_paused_only_after_quiescence() -> Result<
         }
     }
     let mut events = Recorder::default();
-    let pause_request = TaskPauseRequest::new(task_id.clone(), 1);
+    let pause_request = TaskPauseRequest::direct(
+        task_id.clone(),
+        TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "control an application Task",
+            1,
+        )
+        .admission_id,
+    );
     let pause_action_id = pause_request.request_id.clone();
     let ticket = control.request_task_pause(pause_request, None, || {})?;
     assert_ne!(ticket.cancellation.request.request_id, pause_action_id);
@@ -7283,7 +5209,11 @@ async fn stale_application_task_pause_does_not_activate_cancellation() -> Result
     };
 
     let error = control
-        .request_task_pause(TaskPauseRequest::new(task_id, 1), None, || {})
+        .request_task_pause(
+            TaskPauseRequest::direct(task_id, "stale-admission"),
+            None,
+            || {},
+        )
         .expect_err("stale rendered pause action must fail closed");
 
     assert!(error.to_string().contains("binding is stale"));
@@ -7307,7 +5237,15 @@ async fn unaudited_application_task_pause_records_interrupted_before_failing() -
     let root_task_guard = handle.register_task()?;
     let task_id = TaskId::new("task-application-unaudited-pause")?;
     append_running_application_task(&mut session, &task_id, Some(handle.scope_id()), 1)?;
-    let pause_request = TaskPauseRequest::new(task_id.clone(), 1);
+    let pause_request = TaskPauseRequest::direct(
+        task_id.clone(),
+        TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "control an application Task",
+            1,
+        )
+        .admission_id,
+    );
     let cancellation_request = RunCancellationRequestedEntry {
         request_id: pause_request.request_id.clone(),
         run_scope_id: handle.scope_id().to_owned(),
@@ -7416,7 +5354,15 @@ async fn application_task_pause_records_interrupted_when_execution_did_not_join(
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = control.request_task_pause(
-        TaskPauseRequest::new(task_id.clone(), 1),
+        TaskPauseRequest::direct(
+            task_id.clone(),
+            TaskDirectExecutionAdmittedV1::task_request(
+                task_id.clone(),
+                "control an application Task",
+                1,
+            )
+            .admission_id,
+        ),
         Some(std::time::Duration::from_millis(10)),
         || {},
     )?;
@@ -7831,10 +5777,10 @@ impl Provider for PlanReviewDraftProvider {
     }
 }
 
-struct PlanReviewFinalizingDraftProvider(AtomicUsize);
+struct PlanReviewCandidateProvider;
 
 #[async_trait]
-impl Provider for PlanReviewFinalizingDraftProvider {
+impl Provider for PlanReviewCandidateProvider {
     fn name(&self) -> &str {
         "plan-review-finalizing-draft"
     }
@@ -7847,15 +5793,13 @@ impl Provider for PlanReviewFinalizingDraftProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta(
-                    "research completed without a draft".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        PlanReviewDraftProvider.stream(request).await
+        let _ = request;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "research completed without a draft".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 
@@ -7950,7 +5894,6 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
             final_text: String::new(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: sigil_kernel::AgentRunOutcome::default(),
         disposition: AgentRunDisposition::StartPlanReview(StartPlanReviewAction {
@@ -8346,18 +6289,18 @@ async fn explicit_application_plan_review_starts_once_and_projects_its_parent_co
 }
 
 #[tokio::test]
-async fn explicit_plan_review_finalizing_publication_failure_preserves_its_started_marker()
+async fn explicit_plan_review_candidate_publication_failure_preserves_its_started_marker()
 -> Result<()> {
-    struct FinalizingPublicationConflict<'a> {
+    struct CandidatePublicationConflict<'a> {
         inner: PublicApplicationEventBridge<'a, RecordingApplicationRunEvents>,
         store: JsonlSessionStore,
         session_id: String,
         run_id: String,
         inserted: bool,
-        reached_finalizing: bool,
+        reached_candidate: bool,
     }
 
-    impl EventHandler for FinalizingPublicationConflict<'_> {
+    impl EventHandler for CandidatePublicationConflict<'_> {
         fn handle(&mut self, event: RunEvent) -> Result<()> {
             EventHandler::handle(&mut self.inner, event)
         }
@@ -8367,15 +6310,11 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
             session: &mut Session,
             controls: Vec<ControlEntry>,
         ) -> Result<Vec<sigil_kernel::StoredEvent>> {
-            let finalizing = controls.iter().any(|control| {
-                matches!(
-                    control,
-                    ControlEntry::PlanReviewAttempt(attempt)
-                        if attempt.status == sigil_kernel::PlanReviewAttemptStatus::Finalizing
-                )
-            });
-            if finalizing {
-                self.reached_finalizing = true;
+            let candidate = controls
+                .iter()
+                .any(|control| matches!(control, ControlEntry::PlanReviewCandidateRecordedV1(_)));
+            if candidate {
+                self.reached_candidate = true;
                 let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
                     &JsonlSessionStore::read_event_records(self.store.path())?,
                 )?;
@@ -8394,7 +6333,8 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
                     &self.run_id,
                     sequence,
                     PublicRunEventKind::Notice {
-                        message: "competing public sequence before Finalizing".to_owned(),
+                        message: "competing public sequence before candidate publication"
+                            .to_owned(),
                     },
                 );
                 sigil_kernel::PublicEventOutboxRecorder::new(self.store.clone()).append_outbox(
@@ -8416,7 +6356,7 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         }
     }
 
-    impl ApplicationRunEventHandler for FinalizingPublicationConflict<'_> {
+    impl ApplicationRunEventHandler for CandidatePublicationConflict<'_> {
         fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
             self.inner.handler.handle_public_event(event)
         }
@@ -8430,14 +6370,14 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
     let root_config = RootConfig::load(&config_path)?;
-    let session_path = temp.path().join("plan-review-finalizing.jsonl");
+    let session_path = temp.path().join("plan-review-candidate.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
     let mut session = Session::load_from_store("deepseek", "test-model", store.clone())?;
-    let run_id = "run-explicit-plan-finalizing-publication-failure";
+    let run_id = "run-explicit-plan-candidate-publication-failure";
     start_application_public_control_run(&session, run_id)?;
     let request = crate::PlanReviewCoordinator::prepare_explicit_plan_review(
         &mut session,
-        "prove finalizing publication does not manufacture a terminal",
+        "prove candidate publication does not manufacture a terminal",
         run_id,
         None,
         1,
@@ -8453,7 +6393,7 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         options,
 
         agent: Box::new(sigil_kernel::Agent::new(
-            Box::new(PlanReviewFinalizingDraftProvider(AtomicUsize::new(0))),
+            Box::new(PlanReviewCandidateProvider),
             ToolRegistry::new(),
         )),
         tool_registry: ToolRegistry::new(),
@@ -8466,7 +6406,6 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
             final_text: String::new(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: AgentRunOutcome::default(),
     };
@@ -8475,13 +6414,13 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         durable_application_event_sequence(session.session_scope_id(), run_id, &session_path)?,
         &mut recorder,
     )?;
-    let mut handler = FinalizingPublicationConflict {
+    let mut handler = CandidatePublicationConflict {
         inner: bridge,
         store,
         session_id: session.session_scope_id().to_owned(),
         run_id: run_id.to_owned(),
         inserted: false,
-        reached_finalizing: false,
+        reached_candidate: false,
     };
     let cancellation_owner = RunCancellationOwner::new();
     let error = super::run_application_plan_review_request(
@@ -8496,14 +6435,14 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         &sigil_kernel::SecretRedactor::empty(),
     )
     .await
-    .expect_err("a stale Finalizing outbox sequence must stop the original execution");
+    .expect_err("a stale candidate outbox sequence must stop the original execution");
     assert!(
-        handler.reached_finalizing,
-        "the real child reached Finalizing"
+        handler.reached_candidate,
+        "the real child produced a candidate"
     );
     assert!(
         handler.inserted,
-        "inject only at the Finalizing control commit"
+        "inject only at the candidate control commit"
     );
     assert!(
         is_application_public_outbox_append_error(&error),
@@ -8581,6 +6520,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     source_message.id = source_turn.message_id.clone();
     session.append_user_message(source_message)?;
     let request = crate::PlanReviewRunRequest {
+        application_operation: None,
         plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-route")?,
         attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-route")?,
         plan_id: sigil_kernel::PlanId::new("plan_pending_route")?,
@@ -8588,7 +6528,6 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         source_turn: source_turn.clone(),
         route_decision_id: None,
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
-        finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
         revision_generation: None,
         attempt_ordinal: 1,
@@ -8608,7 +6547,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         request.plan_id.clone(),
         r#"```sigil-plan-v2
-{"summary":"Inspect the pending plan route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"]}]}
+{"summary":"Inspect the pending plan route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"],"deliverables":["Report the pending plan route inspection."]}]}
 ```"#,
         request.plan_source_ref(),
         2,
@@ -8632,7 +6571,6 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         )?;
     let task_execution = super::ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
@@ -8666,7 +6604,6 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
             final_text: String::new(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: AgentRunOutcome {
             terminal_reason: AgentRunTerminalReason::TaskHandoff,
@@ -8688,23 +6625,13 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
     // Approval atomically created one stable Task plus first-class direct execution authority.
     let artifacts = session.plan_artifact_projection();
-    assert!(artifacts.materializations.is_empty());
     let task_link = artifacts
         .tasks_created
         .get(&plan_id)
         .and_then(|entries| entries.first())
         .expect("model route must create the approved Task");
     assert_eq!(task_link.plan_hash, plan_hash);
-    assert_eq!(task_link.task_plan_version, 0);
-    assert!(task_link.stale_reason.is_none());
     let tasks = session.task_state_projection();
-    assert!(
-        tasks
-            .admission_attempts
-            .get(&task_link.task_id)
-            .is_none_or(Vec::is_empty),
-        "direct Plan execution must not require candidate admission"
-    );
     assert_eq!(
         tasks.tasks.get(&task_link.task_id).map(|task| task.status),
         Some(TaskRunStatus::Completed)
@@ -8736,7 +6663,6 @@ model = "missing-model"
 
 [task]
 enabled = true
-max_plan_steps = 64
 "#,
     )?;
     let root_config = RootConfig::load(&config_path)?;
@@ -8754,6 +6680,7 @@ max_plan_steps = 64
     source_message.id = source_turn.message_id.clone();
     session.append_user_message(source_message)?;
     let request = crate::PlanReviewRunRequest {
+        application_operation: None,
         plan_review_id: sigil_kernel::PlanReviewId::new("review-pending-plan-blocked")?,
         attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-pending-plan-blocked")?,
         plan_id: sigil_kernel::PlanId::new("plan_pending_blocked")?,
@@ -8761,7 +6688,6 @@ max_plan_steps = 64
         source_turn: source_turn.clone(),
         route_decision_id: None,
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
-        finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
         revision_generation: None,
         attempt_ordinal: 1,
@@ -8781,7 +6707,7 @@ max_plan_steps = 64
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         request.plan_id.clone(),
         r#"```sigil-plan-v2
-{"summary":"Inspect the blocked route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"]}]}
+{"summary":"Inspect the blocked route","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only","target_paths":["session.jsonl"],"deliverables":["Report the blocked pending plan route inspection."]}]}
 ```"#,
         request.plan_source_ref(),
         2,
@@ -8805,7 +6731,6 @@ max_plan_steps = 64
         )?;
     let task_execution = super::ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
-        workspace_root: temp.path().to_path_buf(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         options: crate::build_run_options(
             &root_config,
@@ -8839,7 +6764,6 @@ max_plan_steps = 64
             final_text: String::new(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         outcome: AgentRunOutcome {
             terminal_reason: AgentRunTerminalReason::TaskHandoff,
@@ -8861,7 +6785,6 @@ max_plan_steps = 64
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
     assert_eq!(output.result.final_text, "application task step completed");
     let artifacts = session.plan_artifact_projection();
-    assert!(artifacts.materializations.is_empty());
     let task_link = artifacts
         .tasks_created
         .get(&plan_id)
@@ -8872,7 +6795,6 @@ max_plan_steps = 64
         tasks.execution_phase(&task_link.task_id),
         Some(sigil_kernel::TaskExecutionPhaseV1::Completed)
     );
-    assert!(tasks.active_blocker(&task_link.task_id).is_none());
     Ok(())
 }
 
@@ -8984,6 +6906,3 @@ async fn r71_application_prepare_rejects_legacy_composition() -> Result<()> {
     assert!(!managed_path.exists());
     Ok(())
 }
-
-#[path = "application_task_ablation_tests.rs"]
-mod application_task_ablation_tests;

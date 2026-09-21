@@ -23,7 +23,7 @@ fn qualified_gate(task_config_digest: String) -> OrchestrationEvalRouteGateV1 {
         canonical_model_version: "DeepSeek-V4-Flash@fp-test".to_owned(),
         route_fingerprint: digest.clone(),
         routing_prompt_digest: digest.clone(),
-        planner_prompt_digest: digest.clone(),
+        direct_task_prompt_digest: digest.clone(),
         system_prompt_digest: digest.clone(),
         tool_profile_contract_digest: digest.clone(),
         task_config_digest,

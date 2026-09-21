@@ -118,7 +118,6 @@ impl ProviderCredentialStore for FileProviderCredentialStore {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CredentialFileWire {
     version: u32,
     records: BTreeMap<String, EncodedCredential>,

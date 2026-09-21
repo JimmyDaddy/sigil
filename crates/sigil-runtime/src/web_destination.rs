@@ -166,6 +166,14 @@ impl ProxyEnvironment {
         }
     }
 
+    pub(crate) fn route_fingerprint(&self, url: &Url) -> String {
+        let route = self
+            .select_proxy(url)
+            .map(|(proxy, source)| format!("{source:?}:{}", proxy.expose_secret()))
+            .unwrap_or_else(|| "direct".to_owned());
+        sigil_kernel::sha256_hex(route.as_bytes())
+    }
+
     fn select_proxy(&self, url: &Url) -> Option<(&SecretString, WebFetchProxyEnvSource)> {
         let host = normalize_host(url.host_str()?);
         let port = url.port_or_known_default()?;

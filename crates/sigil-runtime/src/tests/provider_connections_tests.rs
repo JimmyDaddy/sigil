@@ -450,7 +450,7 @@ fn recent_models_reject_malformed_or_unsafe_state_and_use_private_permissions() 
 }
 
 #[test]
-fn connection_config_rejects_unknown_fields_and_unsafe_auth_or_endpoint() {
+fn connection_config_ignores_unknown_fields_and_rejects_unsafe_auth_or_endpoint() {
     let id = ConnectionId::new("custom-local").expect("connection id");
     let unknown = json!({
         "label": "Local",
@@ -461,7 +461,8 @@ fn connection_config_rejects_unknown_fields_and_unsafe_auth_or_endpoint() {
         "options": {},
         "unknown": true
     });
-    assert!(ProviderConnectionConfig::from_raw(id.clone(), unknown).is_err());
+    ProviderConnectionConfig::from_raw(id.clone(), unknown)
+        .expect("unknown connection fields are ignored");
 
     let plaintext_option = json!({
         "label": "Local",
@@ -510,10 +511,8 @@ fn connection_config_rejects_unknown_fields_and_unsafe_auth_or_endpoint() {
             "credential": {"source": "none"},
             "options": options
         });
-        let error = ProviderConnectionConfig::from_raw(id.clone(), schema_escape)
-            .expect_err("provider-owned exact schema must reject unknown option containers");
-        assert!(format!("{error:#}").contains("invalid provider-specific connection options"));
-        assert!(!format!("{error:?}").contains("schema-secret"));
+        ProviderConnectionConfig::from_raw(id.clone(), schema_escape)
+            .expect("unknown provider option containers are ignored");
     }
 
     let wrong_env = json!({
@@ -1165,8 +1164,7 @@ fn identical_explicit_route_is_a_noop_while_an_execution_owner_is_live() -> anyh
 }
 
 #[test]
-fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -> anyhow::Result<()>
-{
+fn route_loader_requires_attachment_for_mutation_authority() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let source_root =
         local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
@@ -1190,12 +1188,13 @@ fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -
     drop(session);
     let before = std::fs::read(&session_path)?;
 
-    let explicit_error = match load_session_for_route_resume_with_directive(
+    let explicit_error = match load_session_for_route(
         &source_root,
         &source_route,
         sigil_kernel::JsonlSessionStore::new(&session_path)?,
         None,
         Some((&provider_name, &source_route)),
+        None,
     ) {
         Ok(_) => anyhow::bail!("legacy loader must reject explicit route mutation"),
         Err(error) => error,
@@ -1214,10 +1213,13 @@ fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -
         &source_route.model_ref,
     )?;
     let (_, target_route) = resolve_default_model_route(&target_root)?;
-    let rebind_error = match load_session_for_route_resume(
+    let rebind_error = match load_session_for_route(
         &target_root,
         &target_route,
         sigil_kernel::JsonlSessionStore::new(&session_path)?,
+        None,
+        None,
+        None,
     ) {
         Ok(_) => anyhow::bail!("legacy loader must reject automatic route mutation"),
         Err(error) => error,
@@ -1233,7 +1235,7 @@ fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -
         crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
             &session_path,
         )?;
-    let rebound = load_session_for_route_resume_with_directive_and_attachment(
+    let rebound = load_session_for_route(
         &target_root,
         &target_route,
         sigil_kernel::JsonlSessionStore::new(&session_path)?,

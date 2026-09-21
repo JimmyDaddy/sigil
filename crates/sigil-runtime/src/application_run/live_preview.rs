@@ -25,6 +25,8 @@ struct PreviewState {
     attempt_id: Option<String>,
     revision: u64,
     slots: BTreeMap<String, PreviewSlot>,
+    executions: BTreeMap<String, ExecutionPreview>,
+    execution_slots: BTreeMap<String, PreviewSlot>,
     admitted_slots: BTreeSet<String>,
     retired_tool_slots: BTreeSet<String>,
     retired_tool_arguments: BTreeSet<String>,
@@ -32,6 +34,13 @@ struct PreviewState {
     reasoning_retired: bool,
     attempt_closed: bool,
     terminal: bool,
+}
+
+#[derive(Debug)]
+struct ExecutionPreview {
+    tool_name: String,
+    execution_id: Option<String>,
+    started_at_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -122,15 +131,9 @@ impl RuntimeLivePreviewSource {
                 id.as_str(),
                 delta.as_str(),
             ),
-            PublicRunEventKind::ToolProgress { progress } => (
-                LiveRunUpdateKind::ToolProgress,
-                progress.call_id.as_str(),
-                progress
-                    .output_preview
-                    .as_deref()
-                    .or(progress.message.as_deref())
-                    .unwrap_or(&progress.status),
-            ),
+            PublicRunEventKind::ToolProgress { progress } => {
+                return self.apply_tool_progress(progress, base);
+            }
             _ => return Ok(()),
         };
         if text.is_empty() {
@@ -140,19 +143,6 @@ impl RuntimeLivePreviewSource {
             !slot_id.is_empty() && slot_id.len() <= 256 && !slot_id.chars().any(char::is_control),
             "invalid live semantic slot identity"
         );
-        if let PublicRunEventKind::ToolProgress { progress } = event {
-            for value in [
-                progress.execution_id.as_str(),
-                progress.call_id.as_str(),
-                progress.tool_name.as_str(),
-                progress.status.as_str(),
-            ] {
-                ensure!(
-                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
-                    "invalid live tool progress metadata"
-                );
-            }
-        }
         let mut state = self
             .state
             .lock()
@@ -173,13 +163,13 @@ impl RuntimeLivePreviewSource {
         if state.retired_tool_slots.contains(slot_id) {
             return Ok(());
         }
-        if state.slots.get(slot_id).is_some_and(|slot| {
-            slot.kind != kind
-                && !(slot.kind == LiveRunUpdateKind::ToolCallArguments
-                    && kind == LiveRunUpdateKind::ToolProgress)
-        }) {
+        if state
+            .slots
+            .get(slot_id)
+            .is_some_and(|slot| slot.kind != kind)
+        {
             // Provider tool-call IDs are opaque: a collision must not replace another
-            // semantic channel's content or turn a progress snapshot back into arguments.
+            // semantic channel's content.
             return Ok(());
         }
         state.revision = state
@@ -207,20 +197,6 @@ impl RuntimeLivePreviewSource {
                 tool_progress: None,
             });
         slot.kind = kind;
-        if let PublicRunEventKind::ToolProgress { progress } = event {
-            slot.tool_progress = Some(sigil_application::LiveToolProgress {
-                execution_id: progress.execution_id.as_str().to_owned(),
-                call_id: progress.call_id.clone(),
-                tool_name: progress.tool_name.clone(),
-                status: progress.status.clone(),
-                total_bytes: progress.total_bytes,
-                updated_at_ms: progress.updated_at_ms,
-            });
-        }
-        if kind == LiveRunUpdateKind::ToolProgress {
-            slot.text.clear();
-            slot.truncated = false;
-        }
         let budget = MAX_SAFE_TEXT_BYTES.saturating_sub(slot.text.len());
         let mut end = text.len().min(budget);
         while !text.is_char_boundary(end) {
@@ -233,12 +209,114 @@ impl RuntimeLivePreviewSource {
         Ok(())
     }
 
+    fn apply_tool_progress(
+        &self,
+        progress: &sigil_kernel::ToolProgressEvent,
+        base: u64,
+    ) -> Result<()> {
+        for value in [
+            progress.execution_id.as_str(),
+            progress.call_id.as_str(),
+            progress.tool_name.as_str(),
+            progress.status.as_str(),
+        ] {
+            ensure!(
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
+                "invalid live tool progress metadata"
+            );
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("live preview source is unavailable"))?;
+        ensure!(!state.terminal, "live preview source is terminal");
+        // The completed, safely projected call admits progress independently from any provider
+        // attempt. Removing this binding on the result also rejects late producer snapshots.
+        let Some(binding) = state.executions.get(&progress.call_id) else {
+            return Ok(());
+        };
+        if binding.tool_name != progress.tool_name
+            || binding
+                .execution_id
+                .as_deref()
+                .is_some_and(|id| id != progress.execution_id.as_str())
+            || state.executions.iter().any(|(call, binding)| {
+                call != &progress.call_id
+                    && binding.execution_id.as_deref() == Some(progress.execution_id.as_str())
+            })
+        {
+            return Ok(());
+        }
+        let started_at_ms = if let Some(binding) = state.executions.get_mut(&progress.call_id) {
+            binding.execution_id = Some(progress.execution_id.as_str().to_owned());
+            binding.started_at_ms = binding.started_at_ms.or_else(|| {
+                progress
+                    .details
+                    .get("started_at_ms")
+                    .and_then(serde_json::Value::as_u64)
+            });
+            binding.started_at_ms
+        } else {
+            None
+        };
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("live preview revision exhausted"))?;
+        let revision = state.revision;
+        let execution_id = progress.execution_id.as_str();
+        if !state.execution_slots.contains_key(execution_id)
+            && state.execution_slots.len() >= MAX_LIVE_PREVIEW_SLOTS
+            && let Some(oldest) = state
+                .execution_slots
+                .iter()
+                .min_by_key(|(_, slot)| slot.revision)
+                .map(|(id, _)| id.clone())
+        {
+            state.execution_slots.remove(&oldest);
+        }
+        let output = progress
+            .output_preview
+            .as_deref()
+            .filter(|text| !text.is_empty());
+        let text = output
+            .or(progress.message.as_deref().filter(|text| !text.is_empty()))
+            .unwrap_or(&progress.status);
+        let mut end = text.len().min(MAX_SAFE_TEXT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        state.execution_slots.insert(
+            execution_id.to_owned(),
+            PreviewSlot {
+                kind: LiveRunUpdateKind::ToolProgress,
+                text: text[..end].to_owned(),
+                revision,
+                base,
+                truncated: end < text.len(),
+                tool_progress: Some(sigil_application::LiveToolProgress {
+                    execution_id: execution_id.to_owned(),
+                    call_id: progress.call_id.clone(),
+                    tool_name: progress.tool_name.clone(),
+                    status: progress.status.clone(),
+                    preview_is_output: output.is_some(),
+                    started_at_ms,
+                    total_bytes: progress.total_bytes,
+                    updated_at_ms: progress.updated_at_ms,
+                }),
+            },
+        );
+        Ok(())
+    }
+
     pub(super) fn apply_committed(&self, event: &PublicRunEventKind, terminal: bool) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if terminal {
             state.slots.clear();
+            state.executions.clear();
+            state.execution_slots.clear();
             state.terminal = true;
             return;
         }
@@ -259,12 +337,25 @@ impl RuntimeLivePreviewSource {
                 }
             }
             PublicRunEventKind::ToolCallCompleted { call } => {
+                state
+                    .executions
+                    .entry(call.id.clone())
+                    .or_insert_with(|| ExecutionPreview {
+                        tool_name: call.name.clone(),
+                        execution_id: None,
+                        started_at_ms: None,
+                    });
                 state.slots.remove(&call.id);
                 if state.admitted_slots.contains(&call.id) {
                     state.retired_tool_arguments.insert(call.id.clone());
                 }
             }
             PublicRunEventKind::ToolResult { result } => {
+                if let Some(binding) = state.executions.remove(&result.call_id)
+                    && let Some(execution_id) = binding.execution_id
+                {
+                    state.execution_slots.remove(&execution_id);
+                }
                 state.slots.remove(&result.call_id);
                 if state.admitted_slots.contains(&result.call_id) {
                     state.retired_tool_slots.insert(result.call_id.clone());
@@ -285,7 +376,7 @@ impl RuntimeLivePreviewSource {
 pub struct RuntimeLivePreviewReader {
     source: RuntimeLivePreviewSource,
     last_poll: Option<Instant>,
-    revisions: BTreeMap<String, (String, u64)>,
+    revisions: BTreeMap<(bool, String), (Option<String>, u64)>,
 }
 
 impl RuntimeLivePreviewReader {
@@ -295,7 +386,8 @@ impl RuntimeLivePreviewReader {
     }
 
     /// Takes changed replacement snapshots at most once per 32 ms. There are never more than
-    /// four payloads, each bounded before allocation by the producer to 64 KiB of UTF-8.
+    /// four provider previews and four latest execution snapshots, each bounded before allocation
+    /// by the producer to 64 KiB of UTF-8. Execution snapshots replace, never append, output.
     pub fn poll_updates(&mut self) -> Result<Vec<LiveRunUpdate>> {
         self.poll_at(Instant::now())
     }
@@ -313,19 +405,34 @@ impl RuntimeLivePreviewReader {
             .state
             .lock()
             .map_err(|_| anyhow!("live preview source is unavailable"))?;
-        let Some(attempt_id) = &state.attempt_id else {
-            return Ok(Vec::new());
-        };
-        self.revisions.retain(|id, _| state.slots.contains_key(id));
-        let mut updates = Vec::with_capacity(state.slots.len());
-        for (slot_id, slot) in &state.slots {
-            if self
-                .revisions
-                .get(slot_id)
-                .is_some_and(|(attempt, revision)| {
-                    attempt == attempt_id && *revision >= slot.revision
-                })
-            {
+        self.revisions.retain(|(execution, id), _| {
+            if *execution {
+                state.execution_slots.contains_key(id)
+            } else {
+                state.slots.contains_key(id)
+            }
+        });
+        let mut updates = Vec::with_capacity(state.slots.len() + state.execution_slots.len());
+        for (execution, slot_id, slot) in state
+            .slots
+            .iter()
+            .map(|(id, slot)| (false, id, slot))
+            .chain(
+                state
+                    .execution_slots
+                    .iter()
+                    .map(|(id, slot)| (true, id, slot)),
+            )
+        {
+            let attempt_id = if execution {
+                None
+            } else {
+                state.attempt_id.clone()
+            };
+            let key = (execution, slot_id.clone());
+            if self.revisions.get(&key).is_some_and(|(attempt, revision)| {
+                attempt == &attempt_id && *revision >= slot.revision
+            }) {
                 continue;
             }
             if slot.text.is_empty() {
@@ -345,8 +452,7 @@ impl RuntimeLivePreviewReader {
                 truncated: slot.truncated,
             };
             update.validate()?;
-            self.revisions
-                .insert(slot_id.clone(), (attempt_id.clone(), slot.revision));
+            self.revisions.insert(key, (attempt_id, slot.revision));
             updates.push(update);
         }
         Ok(updates)

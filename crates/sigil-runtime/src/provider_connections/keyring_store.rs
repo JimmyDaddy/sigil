@@ -21,7 +21,6 @@ static CREDENTIAL_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 pub struct SystemProviderCredentialStore;
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CredentialRecordWire {
     version: u32,
     credential_id: String,

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -64,8 +61,7 @@ impl Tool for WebFetchTool {
                     }
                 },
                 "required": ["source_id"],
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Search,
             access: ToolAccess::Read,
             network_effect: Some(NetworkEffect::Read),
@@ -75,7 +71,7 @@ impl Tool for WebFetchTool {
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let capability = resolve_capability(ctx, args)?;
-        webfetch_permission_plan(args, &capability)
+        webfetch_permission_plan(&self.root_config, args, &capability)
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
@@ -101,6 +97,17 @@ impl Tool for WebFetchTool {
                 ToolErrorKind::PermissionDenied,
                 "webfetch requires current network authorization",
             ));
+        }
+        if let Some(approved) = ctx.prepared_permission_plan() {
+            let current = self.permission_plan(&ctx, &args)?;
+            if current.analysis_bindings != approved.analysis_bindings {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "webfetch",
+                    ToolErrorKind::PermissionDenied,
+                    "network endpoint, route or policy changed after approval",
+                ));
+            }
         }
         let capability = match resolve_capability(&ctx, &args) {
             Ok(capability) => capability,
@@ -290,6 +297,7 @@ impl Tool for WebFetchTool {
 }
 
 fn webfetch_permission_plan(
+    root: &RootConfig,
     args: &Value,
     capability: &sigil_kernel::ResolvedUserUrlCapability,
 ) -> Result<ToolPermissionPlanDraft> {
@@ -328,7 +336,16 @@ fn webfetch_permission_plan(
         semantic_scope: Some(semantic_scope),
         tool_default_mode: None,
         managed_file_access: None,
-        analysis_bindings: BTreeMap::from([("planner".to_owned(), "webfetch_v2".to_owned())]),
+        analysis_bindings: {
+            let mut bindings = crate::network_grant_binding::network_grant_bindings(
+                root,
+                capability.raw_canonical_url().expose_secret(),
+                "webfetch:reqwest-pinned-v1",
+                &json!({"route": root.web.proxy_mode}),
+            )?;
+            bindings.insert("planner".to_owned(), "webfetch_v2".to_owned());
+            bindings
+        },
         safe_summary: ToolPermissionSummary {
             title: "Fetch observed web source".to_owned(),
             detail: "Read one exact session-authorized HTTP(S) source".to_owned(),

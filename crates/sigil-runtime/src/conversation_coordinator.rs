@@ -1,25 +1,19 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ContinueDurableTaskAction,
-    ControlEntry, ConversationPurposeContext, ConversationTurnRef, JsonlSessionStore, MessageRole,
-    ModelMessage, PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
-    ProviderTurnRecoveryProjection, RecoverableTaskGuidanceReviewAuthority, Session,
+    ControlEntry, ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
+    PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding, Session,
     SessionLogEntry, SessionRef, StartDurableTaskAction, TaskAdmissionTrigger,
-    TaskContinuationControl, TaskContinuationHandoffBinding, TaskHandoffDecision, TaskHandoffId,
-    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus,
-    WriteLeaseReleased, conversation_route_contract_fingerprint,
-    conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
+    TaskContinuationControl, TaskContinuationHandoffBinding, TaskExecutionAttemptStatus,
+    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStartHandoffBinding,
+    conversation_auto_execution_contract_material, conversation_route_contract_fingerprint,
+    conversation_route_decision_id_for_source, conversation_tool_specs_for_bound_context,
     durable_task_cancellation_requested, plan_review_attempt_id_for_review,
     plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
-    reconcile_result_backed_participant_attempts, reconcile_task_final_answer_prefix,
-    reconcile_task_step_projections, recoverable_task_guidance_review,
     route_surface_tool_specs_for_bound_context, route_surface_tool_specs_with_memory,
-    safe_persistence_text, task_participant_logical_run_id, task_planner_logical_run_id,
+    safe_persistence_text,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
@@ -31,9 +25,7 @@ const TASK_CONTINUATION_POLICY_DOMAIN: &str = "sigil-task-continuation-policy-v1
 #[derive(Debug, Clone)]
 struct TaskContinuationCandidate {
     task_id: TaskId,
-    plan_version: Option<u32>,
     task_status: TaskRunStatus,
-    plan_status: Option<TaskPlanStatus>,
 }
 
 /// Host-owned evidence used to derive the automatic route capability tier.
@@ -109,7 +101,7 @@ impl ConversationCoordinator {
         self
     }
 
-    /// Returns the exact model-visible tool contracts for one routing microturn.
+    /// Returns optional handoff and memory tool contracts for one automatic capability.
     #[must_use]
     pub fn route_tool_specs(
         &self,
@@ -131,6 +123,35 @@ impl ConversationCoordinator {
             task_continuation_candidate(session, None).is_some(),
             draft_ready_pending_plan(session).is_some(),
         )
+    }
+
+    /// Returns the complete first-turn tool surface, preserving ordinary tools outside bound routing.
+    #[must_use]
+    pub fn conversation_tool_specs_for_session(
+        &self,
+        session: &Session,
+        capability: AutomaticRouteCapability,
+        ordinary_tools: Vec<sigil_kernel::ToolSpec>,
+    ) -> Vec<sigil_kernel::ToolSpec> {
+        conversation_tool_specs_for_bound_context(
+            ordinary_tools,
+            capability,
+            self.writable_memory_routing,
+            task_continuation_candidate(session, None).is_some(),
+            draft_ready_pending_plan(session).is_some(),
+        )
+    }
+
+    /// Returns the model contract selected by capability and durable Plan/Task bindings.
+    #[must_use]
+    pub fn conversation_contract_for_session(
+        &self,
+        _session: &Session,
+        capability: AutomaticRouteCapability,
+    ) -> Option<&'static str> {
+        capability
+            .routes_automatically()
+            .then_some(conversation_auto_execution_contract_material())
     }
 
     /// Persists a route-local kill switch when durable facts expose a hard invariant.
@@ -192,7 +213,7 @@ impl ConversationCoordinator {
 
     /// Computes the deterministic route-contract fingerprint for one capability tier.
     ///
-    /// The fingerprint binds the routing contract, the exact tool surface, the effective
+    /// The fingerprint binds the conversation contract, internal control and memory tools, the effective
     /// capability, and host route facts (provider/model/build/route fingerprint), and is recorded
     /// with every durable route decision.
     fn route_contract_fingerprint(
@@ -219,27 +240,10 @@ impl ConversationCoordinator {
                     ("model", session.model_name()),
                 ]
             });
-        let continuation_plan_version = continuation.map(|continuation| {
-            continuation
-                .plan_version
-                .map(|version| version.to_string())
-                .unwrap_or_else(|| "none".to_owned())
-        });
         if let Some(continuation) = continuation {
             host_facts.extend([
                 ("continuation_task", continuation.task_id.as_str()),
-                (
-                    "continuation_plan_version",
-                    continuation_plan_version.as_deref().unwrap_or("none"),
-                ),
                 ("continuation_status", continuation.task_status.as_str()),
-                (
-                    "continuation_plan_status",
-                    continuation
-                        .plan_status
-                        .map(TaskPlanStatus::as_str)
-                        .unwrap_or("none"),
-                ),
             ]);
         }
         if let Some(pending_plan) = pending_plan {
@@ -249,8 +253,13 @@ impl ConversationCoordinator {
             ]);
         }
         conversation_route_contract_fingerprint(
-            conversation_route_routing_contract_material(),
-            &route_surface_tool_specs_for_bound_context(
+            conversation_auto_execution_contract_material(),
+            &conversation_tool_specs_for_bound_context(
+                if self.writable_memory_routing {
+                    sigil_kernel::writable_memory_route_tool_specs()
+                } else {
+                    Vec::new()
+                },
                 capability,
                 self.writable_memory_routing,
                 continuation.is_some(),
@@ -335,9 +344,7 @@ impl ConversationCoordinator {
                     TaskContinuationHandoffBinding {
                         task_id: candidate.task_id,
                         source_turn: source_turn.clone(),
-                        plan_version: candidate.plan_version,
                         task_status: candidate.task_status,
-                        plan_status: candidate.plan_status,
                         effective_capability: capability,
                         policy_snapshot_hash: task_continuation_policy_snapshot_hash(),
                         route_contract_fingerprint: route_contract_fingerprint
@@ -406,7 +413,7 @@ impl ConversationCoordinator {
         now_ms: u64,
     ) -> Result<StartDurableTaskAction> {
         if !self.task_enabled {
-            bail!("task planning is disabled in config");
+            bail!("durable Task execution is disabled in config");
         }
         if user_message.role != MessageRole::User {
             bail!("explicit task admission requires a user message");
@@ -454,7 +461,7 @@ impl ConversationCoordinator {
             handoff_id: handoff_id.clone(),
             source_turn: source_turn.clone(),
             trigger: TaskAdmissionTrigger::ExplicitTaskCommand,
-            reason_codes: Vec::new(),
+            title: None,
             recovery_objective: Some(objective.clone()),
             policy_snapshot_hash: explicit_task_policy_snapshot_hash(),
             requested_at_ms: existing
@@ -508,6 +515,7 @@ impl ConversationCoordinator {
             &task_id,
             &parent_session_ref,
             &objective,
+            None,
             "admitted by explicit task command",
         )?;
         Ok(StartDurableTaskAction {
@@ -533,21 +541,13 @@ impl ConversationCoordinator {
         parent_session_ref: &SessionRef,
         now_ms: u64,
     ) -> Result<Vec<StartDurableTaskAction>> {
-        // Close any provider physical attempt whose owner disappeared before it could append a
-        // terminal. This is a durable, idempotent repair only; task reconciliation below still
-        // pauses the affected Task and requires an explicit Continue before new provider I/O.
         session.recover_unfinished_provider_physical_attempts(now_ms)?;
         let projection = session.task_handoff_projection();
         if projection.has_conflicts() {
             bail!("task handoff projection contains conflicting durable facts");
         }
-        for task_id in reconcile_result_backed_participant_attempts(session)? {
-            release_active_task_write_leases(session, &task_id)?;
-        }
-        interrupt_durably_cancelled_active_tasks(session)?;
-        let states = projection.handoffs.into_iter().collect::<Vec<_>>();
         let mut actions = Vec::new();
-        for (handoff_id, state) in states {
+        for (handoff_id, state) in projection.handoffs {
             let request = state.request.ok_or_else(|| {
                 anyhow!(
                     "task handoff {} has a resolution without a request",
@@ -555,8 +555,7 @@ impl ConversationCoordinator {
                 )
             })?;
             validate_supported_request(&request)?;
-            let expected_handoff_id = handoff_id_for_source(&request.source_turn)?;
-            if handoff_id != expected_handoff_id {
+            if handoff_id != handoff_id_for_source(&request.source_turn)? {
                 bail!("task handoff id does not match its durable source turn");
             }
             let task_id = task_id_for_handoff(&handoff_id)?;
@@ -579,139 +578,34 @@ impl ConversationCoordinator {
             {
                 bail!("task handoff resolution conflicts with deterministic admission");
             }
-            let objective = match source_turn_objective(session, &request.source_turn) {
-                Some(objective) => {
-                    if request
-                        .recovery_objective
-                        .as_ref()
-                        .is_some_and(|recovery| recovery != &objective)
-                    {
-                        bail!(
-                            "task handoff recovery objective conflicts with its source user turn"
-                        );
-                    }
-                    objective
-                }
-                None => recover_explicit_source_turn(session, &request)?,
-            };
-            let task_was_created = ensure_task_started(
+            let objective = source_turn_objective(session, &request.source_turn)
+                .or_else(|| request.recovery_objective.clone())
+                .ok_or_else(|| anyhow!("accepted Task handoff is missing its source objective"))?;
+            ensure_task_started(
                 session,
                 &task_id,
                 parent_session_ref,
                 &objective,
-                "reconciled accepted conversation handoff",
+                request.title.as_deref(),
+                "admitted conversation Task",
             )?;
             if durable_task_cancellation_requested(session, task_id.as_str())? {
                 interrupt_task_after_durable_cancellation(session, &task_id)?;
                 continue;
             }
-            reconcile_committed_planner_attempts(session, &task_id)?;
             let task = session
                 .task_state_projection()
                 .tasks
                 .get(&task_id)
                 .cloned()
-                .ok_or_else(|| anyhow!("reconciled task is missing from task projection"))?;
-            let resumable_started_participant =
-                single_started_participant_provider_recovery(session, &task);
-            let safe_to_resume = if task_was_created {
-                true
-            } else if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
-                let has_uncertain_participant = task
-                    .participant_attempts
-                    .values()
-                    .any(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
-                    || task
-                        .steps
-                        .values()
-                        .any(|step| step.status == TaskStepStatus::Running);
-                let accepted_plan = task.latest_plan_version.is_some_and(|version| {
-                    task.plans
-                        .get(&version)
-                        .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-                });
-                resumable_started_participant
-                    || (!has_uncertain_participant
-                        && (accepted_plan || !task_planner_dispatch_seen(session, &task_id)?))
-            } else {
-                false
-            };
-            if safe_to_resume {
-                if resumable_started_participant {
-                    // Reconciliation runs after process loss, so no local holder remains. The
-                    // original participant is preserved, while its deterministic workspace lease
-                    // is released before the recovery-only child is admitted again.
-                    release_active_task_write_leases(session, &task_id)?;
-                }
+                .ok_or_else(|| anyhow!("admitted Task is missing from task projection"))?;
+            if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
                 actions.push(StartDurableTaskAction {
                     handoff_id,
                     task_id,
                     source_turn: request.source_turn,
                 });
-            } else if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
-                pause_uncertain_task(session, &task_id, parent_session_ref, &objective)?;
             }
-        }
-
-        let repairable_task_ids = session
-            .task_state_projection()
-            .tasks
-            .values()
-            .filter(|task| matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running))
-            .filter(|task| {
-                task.final_answer.is_some()
-                    || task.participant_attempts.values().any(|attempt| {
-                        attempt.purpose == TaskParticipantPurpose::Synthesis
-                            && attempt.status == TaskParticipantAttemptStatus::Completed
-                            && task.participant_results.contains_key(&attempt.attempt_id)
-                    })
-            })
-            .map(|task| task.task_id.clone())
-            .collect::<Vec<_>>();
-        // Reproject stale blocked step facts before deciding whether a continuation can resume.
-        // This is an append-only repair through the kernel task writer, not a JSONL rewrite.
-        let reprojection_task_ids = session
-            .task_state_projection()
-            .tasks
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for task_id in reprojection_task_ids {
-            reconcile_task_step_projections(session, &task_id)?;
-        }
-        for task_id in repairable_task_ids {
-            reconcile_task_final_answer_prefix(session, &task_id)?;
-        }
-        let repaired_projection = session.task_state_projection();
-        actions.retain(|action| {
-            repaired_projection
-                .tasks
-                .get(&action.task_id)
-                .is_some_and(|task| {
-                    matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running)
-                })
-        });
-
-        let resumable_task_ids = actions
-            .iter()
-            .map(|action| action.task_id.clone())
-            .collect::<BTreeSet<_>>();
-        let uncertain_tasks = session
-            .task_state_projection()
-            .tasks
-            .values()
-            .filter(|task| matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running))
-            .filter(|task| !resumable_task_ids.contains(&task.task_id))
-            .map(|task| {
-                (
-                    task.task_id.clone(),
-                    task.parent_session_ref.clone(),
-                    task.objective.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        for (task_id, parent_session_ref, objective) in uncertain_tasks {
-            pause_uncertain_task(session, &task_id, &parent_session_ref, &objective)?;
         }
         Ok(actions)
     }
@@ -724,7 +618,7 @@ impl ConversationCoordinator {
         objective: String,
         now_ms: u64,
         route_contract_fingerprint: String,
-    ) -> Result<TaskPlanningHandoffBinding> {
+    ) -> Result<TaskStartHandoffBinding> {
         let expected_handoff_id = handoff_id_for_source(&source_turn)?;
         let expected_task_id = task_id_for_handoff(&expected_handoff_id)?;
         let projection = session.task_handoff_projection();
@@ -743,7 +637,7 @@ impl ConversationCoordinator {
         {
             bail!("source turn has a conflicting task handoff resolution");
         }
-        Ok(TaskPlanningHandoffBinding {
+        Ok(TaskStartHandoffBinding {
             handoff_id: expected_handoff_id,
             task_id: expected_task_id,
             source_turn,
@@ -829,17 +723,9 @@ pub fn validate_task_continuation_action(
     let selected = selected.ok_or_else(|| {
         anyhow!("Task continuation action is missing its durable selection receipt")
     })?;
-    let legacy_receipt_upgrade =
-        selected.control == sigil_kernel::TaskContinuationControlKind::LegacyUnspecified && {
-            let mut upgraded = selected.clone();
-            upgraded.control = action.guidance_receipt.control;
-            upgraded == action.guidance_receipt
-        };
-    if (selected != &action.guidance_receipt && !legacy_receipt_upgrade)
+    if selected != &action.guidance_receipt
         || selected.task_id != action.task_id
-        || selected.plan_version != action.plan_version
         || selected.task_status != action.task_status
-        || selected.plan_status != action.plan_status
         || selected.route_contract_fingerprint != action.route_contract_fingerprint
     {
         bail!("Task continuation action conflicts with its durable selection receipt");
@@ -872,21 +758,9 @@ pub fn validate_task_continuation_action(
         bail!("Task continuation route changed after the model decision");
     }
     let projection = session.task_state_projection();
-    let pending_selection_matches = recoverable_task_guidance_review(
-        session,
-        &action.task_id,
-        (!action_is_resume).then_some(action.guidance.expose_secret()),
-    )?
-    .is_some_and(|review| {
-        matches!(
-            review.authority,
-            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(recorded)
-                if recorded.as_ref() == selected
-        )
-    });
     let focus_matches = match projection.current_task_id.as_ref() {
         Some(current_task_id) => current_task_id == &action.task_id,
-        None => pending_selection_matches,
+        None => false,
     };
     if projection.focus_conflicts != 0 || !focus_matches {
         bail!("Task continuation is no longer the current durable run target");
@@ -895,40 +769,16 @@ pub fn validate_task_continuation_action(
         .tasks
         .get(&action.task_id)
         .ok_or_else(|| anyhow!("Task continuation target is no longer present"))?;
-    let plan_status = action
-        .plan_version
-        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-    if (task.status != action.task_status && !pending_selection_matches)
-        || task.latest_plan_version != action.plan_version
-        || plan_status != action.plan_status
-    {
+    if task.status != action.task_status || task.latest_plan_version.is_some() {
         bail!("Task continuation target changed before adapter dispatch");
+    }
+    if task.direct_execution_admission.is_none() {
+        bail!("Task continuation target has no direct execution admission");
     }
     crate::agent_supervisor::task_execution::resolve_task_continuation(
         session,
         Some(action.task_id.as_str()),
     )
-}
-
-fn interrupt_durably_cancelled_active_tasks(session: &mut Session) -> Result<()> {
-    let active_task_ids = session
-        .task_state_projection()
-        .tasks
-        .values()
-        .filter(|task| {
-            matches!(
-                task.status,
-                TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Paused
-            )
-        })
-        .map(|task| task.task_id.clone())
-        .collect::<Vec<_>>();
-    for task_id in active_task_ids {
-        if durable_task_cancellation_requested(session, task_id.as_str())? {
-            interrupt_task_after_durable_cancellation(session, &task_id)?;
-        }
-    }
-    Ok(())
 }
 
 fn interrupt_task_after_durable_cancellation(
@@ -947,13 +797,16 @@ fn interrupt_task_after_durable_cancellation(
     ) {
         return Ok(());
     }
-    if matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
-        pause_uncertain_task(
-            session,
-            &task.task_id,
-            &task.parent_session_ref,
-            &task.objective,
-        )?;
+    for mut attempt in task
+        .direct_execution_attempts
+        .values()
+        .filter(|attempt| attempt.status == TaskExecutionAttemptStatus::Started)
+        .cloned()
+    {
+        attempt.status = TaskExecutionAttemptStatus::Cancelled;
+        attempt.reason =
+            Some("durable cancellation won before direct Task execution completed".to_owned());
+        session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))?;
     }
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task.task_id,
@@ -961,10 +814,7 @@ fn interrupt_task_after_durable_cancellation(
         objective: task.objective,
         title: None,
         status: TaskRunStatus::Interrupted,
-        reason: Some(
-            "durable cancellation won before crash recovery; final answer repair is suppressed"
-                .to_owned(),
-        ),
+        reason: Some("durable cancellation won before direct Task execution completed".to_owned()),
     }))?;
     Ok(())
 }
@@ -1030,20 +880,12 @@ fn task_continuation_candidate(
     ) {
         return None;
     }
-    let plan_status = task
-        .latest_plan_version
-        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-    let has_accepted_plan = plan_status == Some(TaskPlanStatus::Accepted);
-    let has_direct_execution_authority =
-        task.latest_plan_version.is_none() && task.direct_execution_admission.is_some();
-    if !has_accepted_plan && !has_direct_execution_authority {
+    if task.latest_plan_version.is_some() || task.direct_execution_admission.is_none() {
         return None;
     }
     Some(TaskContinuationCandidate {
         task_id: task.task_id.clone(),
-        plan_version: task.latest_plan_version,
         task_status: task.status,
-        plan_status,
     })
 }
 
@@ -1077,6 +919,7 @@ fn ensure_task_started(
     task_id: &TaskId,
     parent_session_ref: &SessionRef,
     objective: &str,
+    title: Option<&str>,
     reason: &str,
 ) -> Result<bool> {
     if let Some(task) = session.task_state_projection().tasks.get(task_id) {
@@ -1089,249 +932,14 @@ fn ensure_task_started(
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: objective.to_owned(),
-        title: None,
+        title: Some(title.map_or_else(
+            || sigil_kernel::task_semantic_title(objective),
+            str::to_owned,
+        )),
         status: TaskRunStatus::Started,
         reason: Some(reason.to_owned()),
     }))?;
     Ok(true)
-}
-
-fn task_planner_dispatch_seen(session: &Session, task_id: &TaskId) -> Result<bool> {
-    if session.store_path().is_none() {
-        return Ok(false);
-    }
-    let attempts = session.provider_physical_attempt_projection()?;
-    Ok(!attempts
-        .attempts_for_logical_run_id(&task_planner_logical_run_id(task_id))
-        .is_empty())
-}
-
-/// Closes a planner attempt left `Started` when the parent plan commit survived but the child
-/// completion record did not. The plan batch is the authoritative recovery boundary: it is
-/// written before the runtime records child completion, so a matching accepted plan proves the
-/// planner result is already durable and can be resumed without re-running the planner.
-fn reconcile_committed_planner_attempts(session: &mut Session, task_id: &TaskId) -> Result<usize> {
-    let projection = session.task_state_projection();
-    let Some(task) = projection.tasks.get(task_id) else {
-        return Ok(0);
-    };
-    let Some(plan_version) = task.latest_plan_version else {
-        return Ok(0);
-    };
-    let Some(plan) = task.plans.get(&plan_version) else {
-        return Ok(0);
-    };
-    let plan_is_recoverable = plan.status == TaskPlanStatus::Accepted
-        && (plan.step_contracts.is_empty() || plan.contract_set_committed_v2);
-    if !plan_is_recoverable {
-        return Ok(0);
-    }
-    let attempts = task
-        .participant_attempts
-        .values()
-        .filter(|attempt| {
-            attempt.purpose == TaskParticipantPurpose::Planner
-                && attempt.status == TaskParticipantAttemptStatus::Started
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    for mut attempt in attempts.iter().cloned() {
-        attempt.status = TaskParticipantAttemptStatus::Completed;
-        attempt.reason = Some(format!(
-            "recovered accepted task plan v{plan_version} after parent plan commit"
-        ));
-        session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
-    }
-    Ok(attempts.len())
-}
-
-fn pause_uncertain_task(
-    session: &mut Session,
-    task_id: &TaskId,
-    parent_session_ref: &SessionRef,
-    objective: &str,
-) -> Result<()> {
-    let task = session
-        .task_state_projection()
-        .tasks
-        .get(task_id)
-        .cloned()
-        .ok_or_else(|| anyhow!("uncertain task is missing from task projection"))?;
-    for attempt in task
-        .participant_attempts
-        .values()
-        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
-    {
-        let mut interrupted = attempt.clone();
-        interrupted.status = TaskParticipantAttemptStatus::Interrupted;
-        interrupted.reason = Some(
-            "interrupted during crash recovery; explicit task continue is required".to_owned(),
-        );
-        session.append_control(ControlEntry::TaskParticipantAttempt(interrupted))?;
-    }
-    for attempt in task
-        .direct_execution_attempts
-        .values()
-        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
-    {
-        let mut interrupted = attempt.clone();
-        interrupted.status = TaskParticipantAttemptStatus::Interrupted;
-        interrupted.reason = Some(
-            "interrupted during crash recovery; explicit task continue is required".to_owned(),
-        );
-        session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(interrupted))?;
-    }
-    for step in task
-        .steps
-        .values()
-        .filter(|step| step.status == TaskStepStatus::Running)
-    {
-        session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-            task_id: task_id.clone(),
-            plan_version: step.plan_version,
-            step_id: step.step_id.clone(),
-            role: step.role,
-            status: TaskStepStatus::Interrupted,
-            title: step.title.clone(),
-            summary: step.summary.clone(),
-            reason: Some(
-                "interrupted during crash recovery; explicit task continue is required".to_owned(),
-            ),
-        }))?;
-    }
-
-    release_active_task_write_leases(session, task_id)?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_session_ref.clone(),
-        objective: objective.to_owned(),
-        title: Some(sigil_kernel::task_semantic_title(objective)),
-        status: TaskRunStatus::Paused,
-        reason: Some(
-            "recovery found uncertain planner or participant execution; explicit continue required"
-                .to_owned(),
-        ),
-    }))
-}
-
-/// A single in-flight planner, step, or final-synthesis participant can re-enter only through the kernel's
-/// `with_durable_provider_recovery_only` guard. This predicate intentionally does not inspect a
-/// child prompt or infer a provider error: the child session verifies its own schedule, request
-/// envelope, frontier, and CAS claim before opening a new send barrier. Missing evidence is
-/// converted to a durable `Blocked` participant by the normal owner.
-fn single_started_participant_provider_recovery(
-    session: &Session,
-    task: &sigil_kernel::TaskRunProjection,
-) -> bool {
-    let all_started = task
-        .participant_attempts
-        .values()
-        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
-        .collect::<Vec<_>>();
-    if all_started.len() != 1 {
-        return false;
-    }
-    let Some(attempt) = all_started.first() else {
-        return false;
-    };
-    match attempt.purpose {
-        TaskParticipantPurpose::Planner => {
-            attempt.plan_version.is_none()
-                && attempt.step_id.is_none()
-                && task.latest_plan_version.is_none()
-                && !task.participant_results.contains_key(&attempt.attempt_id)
-                && participant_has_durable_provider_recovery_authority(session, attempt)
-        }
-        TaskParticipantPurpose::Step => {
-            let Some(plan_version) = task.latest_plan_version else {
-                return false;
-            };
-            if attempt.plan_version != Some(plan_version)
-                || !task
-                    .plans
-                    .get(&plan_version)
-                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-            {
-                return false;
-            }
-            let Some(step_id) = attempt.step_id.as_ref() else {
-                return false;
-            };
-            task.steps
-                .get(&(plan_version, step_id.clone()))
-                .is_some_and(|step| step.status == TaskStepStatus::Running)
-                && participant_has_durable_provider_recovery_authority(session, attempt)
-        }
-        TaskParticipantPurpose::Synthesis => {
-            let Some(plan_version) = task.latest_plan_version else {
-                return false;
-            };
-            attempt.plan_version == Some(plan_version)
-                && task
-                    .plans
-                    .get(&plan_version)
-                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-                && attempt.step_id.is_none()
-                && !task.participant_results.contains_key(&attempt.attempt_id)
-                && task
-                    .steps
-                    .iter()
-                    .filter(|((version, _), _)| *version == plan_version)
-                    .all(|(_, step)| step.status == TaskStepStatus::Completed)
-                && participant_has_durable_provider_recovery_authority(session, attempt)
-        }
-    }
-}
-
-/// Confirms that the original child session contains the recovery authority needed for the
-/// recovery-only send barrier. A missing child stream, malformed projection, terminal logical
-/// turn, or ordinary started participant intentionally remains fail-closed and is paused by the
-/// existing crash repair path.
-fn participant_has_durable_provider_recovery_authority(
-    session: &Session,
-    attempt: &sigil_kernel::TaskParticipantAttemptEntry,
-) -> bool {
-    let Some(parent_path) = session.store_path() else {
-        return false;
-    };
-    let Some(parent_dir) = parent_path.parent() else {
-        return false;
-    };
-    let child_path = attempt.child_session_ref.resolve(parent_dir);
-    let Ok(records) = JsonlSessionStore::read_event_records(&child_path) else {
-        return false;
-    };
-    let Ok(recovery) = ProviderTurnRecoveryProjection::from_records(&records) else {
-        return false;
-    };
-    let logical_run_id = task_participant_logical_run_id(&attempt.attempt_id);
-    recovery
-        .terminal_for_logical_run_id(&logical_run_id)
-        .is_none()
-        && recovery
-            .recoveries_for_logical_run_id(&logical_run_id)
-            .iter()
-            .any(|state| state.exhausted.is_none())
-}
-
-fn release_active_task_write_leases(session: &mut Session, task_id: &TaskId) -> Result<()> {
-    let owner_prefix = format!("task:{}:", task_id.as_str());
-    let stale_task_leases = session
-        .write_isolation_projection()
-        .leases
-        .values()
-        .filter(|state| state.is_active())
-        .filter_map(|state| state.acquired.as_ref().map(|entry| (state, entry)))
-        .filter(|(_, entry)| entry.owner_agent_id.as_str().starts_with(&owner_prefix))
-        .map(|(state, _)| WriteLeaseReleased {
-            lease_id: state.lease_id.clone(),
-            status: WriteLeaseReleaseStatus::Interrupted,
-        })
-        .collect::<Vec<_>>();
-    for release in stale_task_leases {
-        session.append_control(ControlEntry::WriteLeaseReleased(release))?;
-    }
-    Ok(())
 }
 
 fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -> Option<String> {
@@ -1341,28 +949,6 @@ fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -
     session
         .source_user_message(&source_turn.message_id)
         .map(|message| message.content.clone().unwrap_or_default())
-}
-
-fn recover_explicit_source_turn(
-    session: &mut Session,
-    request: &TaskHandoffRequestedEntry,
-) -> Result<String> {
-    if request.trigger != TaskAdmissionTrigger::ExplicitTaskCommand {
-        bail!(
-            "task handoff source user turn {} is not present",
-            request.source_turn.message_id
-        );
-    }
-    let objective = request
-        .recovery_objective
-        .as_deref()
-        .map(safe_persistence_text)
-        .filter(|objective| !objective.trim().is_empty())
-        .ok_or_else(|| anyhow!("explicit task handoff is missing its recovery objective"))?;
-    let mut user_message = ModelMessage::user(objective.clone());
-    user_message.id = request.source_turn.message_id.clone();
-    session.append_user_message(user_message)?;
-    Ok(objective)
 }
 
 fn handoff_id_for_source(source_turn: &ConversationTurnRef) -> Result<TaskHandoffId> {

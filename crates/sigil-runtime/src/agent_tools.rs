@@ -16,27 +16,29 @@ use sigil_kernel::{
     AgentDelegationRunContext, AgentInvocationGrant, AgentInvocationGrantBinding,
     AgentInvocationGrantSource, AgentInvocationMode, AgentInvocationSource,
     AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentProfileSource,
-    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRouteId,
-    AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions, AgentRunOutcome,
-    AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection,
-    AgentThreadResult, AgentThreadResultDeliveredEntry, AgentThreadStatus,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentResultDeliveryCoverage,
+    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunInterruptedEntry, AgentRunOptions,
+    AgentRunOutcome, AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry,
+    AgentThreadProjection, AgentThreadResult, AgentThreadResultDeliveredEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
-    AgentUsageSummary, ApprovalHandler, ApprovalMode, ChangeSet, ControlEntry,
+    AgentUsageSummary, ApprovalHandler, ApprovalMode, ChangeSet, ChangeSetId, ControlEntry,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DelegationAuthority, EventHandler, FileType,
-    FinalAnswerContext, IsolatedChangeSetProduced, JsonlSessionStore, MergeReviewId,
-    MergeReviewRequested, ModelMessage, MultiAgentMode, MutationSubject, NetworkPolicy,
-    PermissionConfig, PermissionMode, Provider, RootConfig, RunCancellationFinalizedEntry,
-    RunCancellationOwner, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, Session, SessionLogEntry,
-    SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalContext,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionStatus, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
-    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, VerificationScope,
-    WriteIsolationMode, build_workspace_snapshot_for_event, changeset_only_child_contract_prompt,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output, saturating_elapsed,
-    stable_event_uuid, stable_workspace_id,
+    FinalAnswerContext, IsolatedChangeSetProduced, IsolatedWorkspaceBackend,
+    IsolatedWorkspaceCleanupRecorded, IsolatedWorkspaceCleanupStatus, IsolatedWorkspaceCreated,
+    IsolatedWorkspacePrepared, JsonlSessionStore, MergeDecision, MergeReviewId,
+    MergeReviewParentMutationRequest, MergeReviewRequested, ModelMessage, MultiAgentMode,
+    MutationSubject, NetworkPolicy, PermissionConfig, PermissionMode, Provider, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationOwner, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, Session,
+    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode, Tool,
+    ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalContext, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolErrorKind, ToolExecutionStatus, ToolOperation, ToolPermissionEffect,
+    ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject,
+    VerificationScope, WriteIsolationMode, build_workspace_snapshot_for_event,
+    changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
+    decode_changeset_only_child_output, saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
 use crate::{
@@ -55,6 +57,7 @@ pub const LIST_AGENTS_TOOL_NAME: &str = "list_agents";
 pub const CANCEL_AGENT_TOOL_NAME: &str = "cancel_agent";
 pub const MESSAGE_AGENT_TOOL_NAME: &str = "message_agent";
 pub const CLOSE_AGENT_TOOL_NAME: &str = "close_agent";
+pub const INTEGRATE_AGENT_CHANGES_TOOL_NAME: &str = "integrate_agent_changes";
 
 const MAIN_THREAD_ID: &str = "main";
 const DEFAULT_RESULT_SUMMARY_LIMIT: usize = 4_000;
@@ -92,6 +95,7 @@ mod chat;
 mod completion;
 mod delegation_request;
 mod handlers;
+mod integration;
 mod permissions;
 mod result_pages;
 mod runtime;
@@ -114,8 +118,8 @@ type JoinedChatAgentFuture =
 
 use background::{
     AgentBatchMemberContext, BackgroundChatAgentDisposition, BackgroundChatAgentHandle,
-    BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, JoinedChatAgentHandle,
-    run_background_chat_agent,
+    BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, BackgroundChatAgentWriteOwner,
+    JoinedChatAgentHandle, run_background_chat_agent,
 };
 use chat::close_agent_from_args;
 #[cfg(test)]
@@ -125,17 +129,20 @@ use handlers::{
     BackgroundApprovalHandler, BackgroundApprovalRequired, ChatAgentApprovalRouteHandler,
     ChatChildEventHandler, ChatChildThreadGuard,
 };
+use integration::integrate_agent_changes;
 use permissions::{
     admit_model_agent_spawn, apply_child_permission_constraints,
-    apply_recovered_readonly_child_constraints, tool_contracts_are_safe_readonly_for_auto_spawn,
-    tool_scope_summary,
+    apply_recovered_readonly_child_constraints, invocation_source_for_authority,
+    tool_contracts_are_safe_readonly_for_auto_spawn, tool_scope_summary,
 };
 pub(crate) use permissions::{
     delegation_admission_entry, mint_agent_invocation_grant, revalidate_agent_invocation_grant,
     tool_registry_is_safe_readonly_for_auto_spawn,
 };
+use result_pages::read_agent_final_answer_text;
 use result_pages::{
-    agent_result_already_delivered_tool_result, agent_result_page_tool_result,
+    agent_budget_denied_tool_result, agent_result_has_page_source,
+    agent_result_page_already_delivered_tool_result, agent_result_page_tool_result,
     agent_result_tool_result, agent_spawn_denied_tool_result, agent_status_tool_result,
     agent_wait_throttled_tool_result, read_agent_result_page, required_result_page_request_arg,
 };
@@ -146,6 +153,11 @@ use shared::{
     parse_invocation_mode, parse_tool_args, profile_index_description, required_string,
     short_digest, simple_agent_preview, terminal_status_label, thread_id_arg, thread_status_label,
     unix_time_ms, usage_summary_from_stats,
+};
+use spawn::{
+    PreparedChatIsolatedChildControls, append_prepared_chat_isolated_child_controls,
+    cleanup_chat_worktree, prepare_chat_changeset_only_child_controls,
+    prepare_chat_worktree_child_controls,
 };
 use surface::{
     AgentToolKind, ChatAgentRunRequest, RequestAgentDelegationArgs, SpawnAgentArgs, SpawnAgentsArgs,

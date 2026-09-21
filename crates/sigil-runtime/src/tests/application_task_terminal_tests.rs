@@ -1,7 +1,42 @@
 use anyhow::Result;
-use sigil_kernel::{PublicRunEventKind, Session, TaskId, TaskRunStatus};
+use sigil_kernel::{
+    ControlEntry, JsonlSessionStore, PublicEventOutboxProjectionV1, PublicRunEventKind, Session,
+    SessionRef, TaskId, TaskRunEntry, TaskRunStatus,
+};
 
 use super::{ApplicationRunTerminalStatus, task_control::application_task_continuation_terminal};
+
+#[test]
+fn task_failure_recorder_commits_real_reason_as_failed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store.clone());
+    let task_id = TaskId::new("task-recorder-failure")?;
+    let reason = "missing terminal task field schema_version";
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "read output".to_owned(),
+        title: None,
+        status: TaskRunStatus::Failed,
+        reason: Some(reason.to_owned()),
+    }))?;
+    let recorder = crate::ApplicationRunEventRecorder::start(&session, "run-failure", "read")?;
+    recorder.finish_task(&session, &task_id, TaskRunStatus::Failed)?;
+    let outbox = PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(temp.path().join("session.jsonl"))?,
+    )?;
+    assert!(outbox.events_in_order().iter().any(|entry| {
+        matches!(&entry.event.event, PublicRunEventKind::RunFailed { error } if error == reason)
+    }));
+    assert!(
+        !outbox
+            .events_in_order()
+            .iter()
+            .any(|entry| { matches!(&entry.event.event, PublicRunEventKind::RunBlocked { .. }) })
+    );
+    Ok(())
+}
 
 #[test]
 fn task_continuation_terminal_preserves_each_noncompleted_status() -> Result<()> {

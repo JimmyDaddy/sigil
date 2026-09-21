@@ -770,7 +770,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_li
 /// Builds the lazy-MCP tool surface with terminal routes frozen from each exact tool context.
 ///
 /// Unlike a mutable process-global route, the factory receives the immutable session scope,
-/// logical run id, and durable recorder that authorized the individual `terminal_start` call.
+/// logical run id, and durable recorder that authorized the individual `exec_command` call.
 #[allow(clippy::too_many_arguments)]
 pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory(
     root_config: &RootConfig,
@@ -1346,9 +1346,6 @@ fn register_local_tools(
         builtin_paths,
         managed_executor,
         sigil_tools_builtin::BuiltinToolSelection {
-            terminal: root_config
-                .composition
-                .allows(sigil_kernel::OptionalCapability::Terminal),
             changesets: root_config
                 .composition
                 .allows(sigil_kernel::OptionalCapability::ChangeSets),

@@ -24,9 +24,8 @@ use sigil_kernel::{
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
     Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, TaskId, TaskPauseRequest,
     TaskRunStatus, TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope,
-    VerificationProductView, WorkspaceTrust, conversation_route_routing_contract_material,
-    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
-    verification_product_view, workspace_trust_from_entries,
+    VerificationProductView, WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root,
+    safe_persistence_text, verification_product_view, workspace_trust_from_entries,
 };
 
 /// The kernel owns the sole exhaustive conversation/application terminal status table.
@@ -354,6 +353,58 @@ pub struct ApplicationModelOptionView {
     pub default_reasoning_effort: Option<ReasoningEffort>,
     /// Opaque provider/model binding required with an explicit effort selection.
     pub reasoning_effort_binding: Option<String>,
+}
+
+/// Returns exact Direct Tasks whose durable root attempt is complete and whose admitted
+/// background children all have a persisted terminal result that a model continuation may read.
+///
+/// This projection is shared by interactive surfaces so a process-local completion signal alone
+/// can never restart a Task after its child owner was lost.
+#[must_use]
+pub fn ready_direct_task_background_continuations(
+    session: &sigil_kernel::Session,
+) -> Vec<sigil_kernel::TaskId> {
+    let tasks = session.task_state_projection();
+    let agent_threads = session.agent_thread_state_projection();
+    tasks
+        .tasks
+        .iter()
+        .filter_map(|(task_id, task)| {
+            let latest_attempt = task
+                .direct_execution_attempts
+                .values()
+                .max_by_key(|attempt| attempt.ordinal);
+            (task.status == sigil_kernel::TaskRunStatus::Running
+                && task.latest_plan_version.is_none()
+                && task.direct_execution_admission.is_some()
+                && latest_attempt.is_some_and(|attempt| {
+                    attempt.status == sigil_kernel::TaskExecutionAttemptStatus::Completed
+                })
+                && direct_task_background_results_are_ready(&tasks, &agent_threads, task_id))
+            .then_some(task_id.clone())
+        })
+        .collect()
+}
+
+fn direct_task_background_results_are_ready(
+    tasks: &sigil_kernel::TaskStateProjection,
+    agent_threads: &sigil_kernel::AgentThreadStateProjection,
+    task_id: &sigil_kernel::TaskId,
+) -> bool {
+    let thread_ids = tasks.direct_task_background_agents(task_id);
+    !thread_ids.is_empty()
+        && thread_ids.iter().all(|thread_id| {
+            agent_threads
+                .threads
+                .get(thread_id)
+                .is_some_and(|thread| match thread.status {
+                    sigil_kernel::AgentThreadStatus::Completed => thread.result.is_some(),
+                    // A collected failure has a durable status and reason for the model to inspect.
+                    // An ownerless interruption or unresolved child state is not safe to resume.
+                    sigil_kernel::AgentThreadStatus::Failed => true,
+                    _ => false,
+                })
+        })
 }
 
 /// Provider-neutral facts needed to configure and explain the next application run.
@@ -1444,6 +1495,31 @@ impl ApplicationRunControl {
         }
     }
 
+    async fn cancel_scoped_task_background_agents(&self, reason: &str) -> Result<()> {
+        let background_runs = self
+            ._session_lease
+            .attachment
+            .agent_tool_background_runs()?;
+        let live_threads = background_runs.thread_ids()?;
+        let store = JsonlSessionStore::new(&self._session_lease.path)?
+            .with_live_background_agent_threads(live_threads);
+        let mut session = Session::load_from_store_for_control(store)?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application control session identity changed during Task cancellation");
+        }
+        let mut event_handler = NoopEventHandler;
+        background_runs
+            .cancel_task_background_agents_for_scope(
+                &mut session,
+                &self.cancellation_target,
+                self.owner.handle().scope_id(),
+                reason,
+                &mut event_handler,
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Waits for bounded quiescence and durably records the observed terminal cleanup state.
     ///
     /// `execution_joined` proves that the owned run task/thread reached its terminal boundary.
@@ -1469,6 +1545,13 @@ impl ApplicationRunControl {
                 .context("failed to recover application conversation run start")
         };
         if !ticket.request_recorded {
+            if let Err(error) = self
+                .cancel_scoped_task_background_agents(&ticket.request.reason)
+                .await
+            {
+                self.owner.handle().mark_cleanup_incomplete();
+                tracing::warn!(%error, "Task background cleanup could not be confirmed during unaudited cancellation");
+            }
             let _ = self
                 .owner
                 .wait_for_quiescence(ticket.remaining_timeout())
@@ -1501,6 +1584,13 @@ impl ApplicationRunControl {
             conversation_terminal?;
             conversation_start?;
             bail!("application cancellation request was not durably recorded");
+        }
+        if let Err(error) = self
+            .cancel_scoped_task_background_agents(&ticket.request.reason)
+            .await
+        {
+            self.owner.handle().mark_cleanup_incomplete();
+            tracing::warn!(%error, "Task background cleanup could not be confirmed during cancellation");
         }
         let outcome = self
             .finalize_recorded_cancellation(ticket, execution_joined, conversation_start)
@@ -1584,6 +1674,13 @@ impl ApplicationRunControl {
                 .context("failed to recover application conversation run start")
         };
         if !cancellation.request_recorded {
+            if let Err(error) = self
+                .cancel_scoped_task_background_agents("Task pause requested")
+                .await
+            {
+                self.owner.handle().mark_cleanup_incomplete();
+                tracing::warn!(%error, "Task background cleanup could not be confirmed during unaudited pause");
+            }
             let _ = self
                 .owner
                 .wait_for_quiescence(cancellation.remaining_timeout())
@@ -1592,7 +1689,7 @@ impl ApplicationRunControl {
                 self.append_task_stop_state_and_emit(
                     &mut session,
                     handler,
-                    Some(&request.task_id),
+                    &request.task_id,
                     crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
                     "application Task pause request could not be durably audited",
                 )
@@ -1620,6 +1717,13 @@ impl ApplicationRunControl {
             conversation_terminal?;
             conversation_start?;
             bail!("application Task pause request was not durably recorded");
+        }
+        if let Err(error) = self
+            .cancel_scoped_task_background_agents("Task pause requested")
+            .await
+        {
+            self.owner.handle().mark_cleanup_incomplete();
+            tracing::warn!(%error, "Task background cleanup could not be confirmed during pause");
         }
         let cancellation_outcome = self
             .finalize_recorded_cancellation(cancellation, execution_joined, conversation_start)
@@ -1655,7 +1759,7 @@ impl ApplicationRunControl {
             .append_task_stop_state_and_emit(
                 &mut session,
                 handler,
-                Some(&request.task_id),
+                &request.task_id,
                 disposition,
                 &reason,
             )?
@@ -1776,20 +1880,14 @@ impl ApplicationRunControl {
         let Some(task_id) = task_id else {
             return Ok(None);
         };
-        self.append_task_stop_state_and_emit(
-            &mut session,
-            handler,
-            Some(&task_id),
-            disposition,
-            reason,
-        )
+        self.append_task_stop_state_and_emit(&mut session, handler, &task_id, disposition, reason)
     }
 
     fn append_task_stop_state_and_emit<H>(
         &self,
         session: &mut Session,
         handler: &mut H,
-        exact_task_id: Option<&TaskId>,
+        task_id: &TaskId,
         disposition: crate::agent_supervisor::task_execution::TaskStopDisposition,
         reason: &str,
     ) -> Result<Option<crate::agent_supervisor::task_execution::AppendedTaskStopState>>
@@ -1800,7 +1898,7 @@ impl ApplicationRunControl {
         let task_stop = crate::agent_supervisor::task_execution::append_task_stop_state(
             session,
             &mut bridge,
-            exact_task_id,
+            task_id,
             disposition,
             reason,
         )?;
@@ -2146,7 +2244,6 @@ impl ApplicationPostRunMaintenance {
 
 struct ApplicationTaskExecutionRuntime {
     root_config: RootConfig,
-    workspace_root: PathBuf,
     parent_session_ref: SessionRef,
     options: AgentRunOptions,
     base_registry: sigil_kernel::ToolRegistry,
@@ -2171,6 +2268,7 @@ enum ApplicationRunExecutionKind {
     Main {
         agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
         input: Box<AgentRunInput>,
+        agent_tool_runtime: Option<Box<crate::AgentToolRuntime>>,
     },
     AgentProfile {
         runtime: Box<crate::AgentToolRuntime>,
@@ -2178,12 +2276,6 @@ enum ApplicationRunExecutionKind {
     },
     ExplicitPlanReview {
         request: Box<crate::PlanReviewRunRequest>,
-    },
-    TaskPlannerUserInput {
-        runtime: Box<crate::agent_supervisor::task_role_runtime::TaskRoleRuntime>,
-        route: Box<sigil_kernel::AgentUserInputRouteEntryV1>,
-        command: Box<sigil_kernel::UserInputDecisionCommandV1>,
-        max_plan_steps: usize,
     },
 }
 
@@ -2372,16 +2464,33 @@ impl ApplicationRunExecution {
             }
         }
         let run = match self.kind {
-            ApplicationRunExecutionKind::Main { agent, input } => {
-                agent
-                    .run_with_approval_input(
-                        &mut self.session,
-                        *input,
-                        self.options,
-                        &mut bridge,
-                        approval_handler,
-                    )
-                    .await
+            ApplicationRunExecutionKind::Main {
+                agent,
+                input,
+                mut agent_tool_runtime,
+            } => {
+                if let Some(runtime) = agent_tool_runtime.as_mut() {
+                    agent
+                        .run_with_approval_input_and_agent_delegate(
+                            &mut self.session,
+                            *input,
+                            self.options,
+                            &mut bridge,
+                            approval_handler,
+                            runtime.as_mut(),
+                        )
+                        .await
+                } else {
+                    agent
+                        .run_with_approval_input(
+                            &mut self.session,
+                            *input,
+                            self.options,
+                            &mut bridge,
+                            approval_handler,
+                        )
+                        .await
+                }
             }
             ApplicationRunExecutionKind::AgentProfile {
                 mut runtime,
@@ -2411,7 +2520,6 @@ impl ApplicationRunExecution {
                             final_text: String::new(),
                             tool_calls: 0,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome: AgentRunOutcome::default(),
                     },
@@ -2424,79 +2532,6 @@ impl ApplicationRunExecution {
                     &self.redactor,
                 )
                 .await
-            }
-            ApplicationRunExecutionKind::TaskPlannerUserInput {
-                runtime,
-                route,
-                command,
-                max_plan_steps,
-            } => {
-                let task = self
-                    .session
-                    .task_state_projection()
-                    .tasks
-                    .get(&route.budget_scope_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("planner continuation task is unavailable"))?;
-                let crate::agent_supervisor::task_role_runtime::TaskRoleRuntime {
-                    orchestrator,
-                    planner_options,
-                    executor_options,
-                    subagent_read_options,
-                    subagent_write_options,
-                } = *runtime;
-                let status = orchestrator
-                    .with_cancellation(self.cancellation_handle.clone())
-                    .resume_planner_after_user_input(
-                        &mut self.session,
-                        sigil_kernel::SequentialTaskRequest {
-                            task_id: task.task_id.clone(),
-                            parent_session_ref: task.parent_session_ref.clone(),
-                            objective: task.objective.clone(),
-                        },
-                        *route,
-                        *command,
-                        planner_options,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        max_plan_steps,
-                        &mut bridge,
-                        approval_handler,
-                    )
-                    .await
-                    .map(|output| output.status);
-                let status = match status {
-                    Err(error) if is_application_public_outbox_append_error(&error) => {
-                        return Err(error).context(
-                            "planner continuation public outbox append was not confirmed; durable recovery must decide the next terminal",
-                        );
-                    }
-                    status => status,
-                };
-                let status = crate::agent_supervisor::task_execution::finalize_task_root(
-                    &mut self.session,
-                    &task.task_id,
-                    &task.parent_session_ref,
-                    &task.objective,
-                    &self.cancellation_handle,
-                    status,
-                )?;
-                application_task_terminal_output(
-                    &self.session,
-                    &task.task_id,
-                    status,
-                    AgentRunOutput {
-                        disposition: AgentRunDisposition::FinalAnswer,
-                        result: AgentRunResult {
-                            final_text: String::new(),
-                            tool_calls: 0,
-                            final_message_id: None,
-                            completion_claim: None,
-                        },
-                        outcome: AgentRunOutcome::default(),
-                    },
-                )
             }
         };
         let run = match run {
@@ -2681,7 +2716,6 @@ impl ApplicationRunExecution {
                             final_text: String::new(),
                             tool_calls: 0,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome: AgentRunOutcome {
                             terminal_reason: AgentRunTerminalReason::DelegationUnsatisfied,
@@ -2747,21 +2781,6 @@ where
     H: EventHandler + Send,
     A: ApprovalHandler + Send,
 {
-    if let AgentRunDisposition::PendingPlanDecisionRequired(_action) = output.disposition.clone() {
-        let final_text = "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned();
-        let final_message_id =
-            append_application_final_answer(session, handler, final_text.clone())?;
-        return Ok(AgentRunOutput {
-            disposition: AgentRunDisposition::FinalAnswer,
-            result: AgentRunResult {
-                final_text,
-                tool_calls: output.result.tool_calls,
-                final_message_id: Some(final_message_id),
-                completion_claim: None,
-            },
-            outcome: output.outcome,
-        });
-    }
     if let AgentRunDisposition::RunPendingPlan(action) = output.disposition.clone() {
         let Some(task_execution) = task_execution else {
             bail!("pending plan execution requires an attached durable Task executor");
@@ -2786,7 +2805,6 @@ where
             session_id: session.session_scope_id().to_owned(),
             plan_id: plan_id.clone(),
             expected_plan_hash: action.plan_hash.clone(),
-            expected_candidate_hash: String::new(),
             expected_durable_frontier: session.durable_frontier_sequence(),
             start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
             permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
@@ -2873,7 +2891,6 @@ where
     };
     let ApplicationTaskExecutionRuntime {
         root_config,
-        workspace_root,
         parent_session_ref: _,
         options,
         base_registry,
@@ -2881,43 +2898,6 @@ where
         role_provider_builder,
         verification_execution_port,
     } = task_execution;
-    // New approved Plans already carry first-class direct execution admission. Legacy sessions may
-    // still contain a materialized/adopted candidate, so preserve their historical admission
-    // checks during replay without imposing that boundary on new Plan runs.
-    let materialized_candidate = {
-        let artifacts = session.plan_artifact_projection();
-        artifacts
-            .materialization_for_task(&task_id)
-            .or_else(|| artifacts.adoption_for_task(&task_id))
-            .map(|receipt| receipt.adopted_candidate.clone())
-    };
-    if let Some(candidate) = materialized_candidate {
-        let probes = crate::build_task_admission_probes(
-            &root_config,
-            &workspace_root,
-            Some(base_registry.contracts()),
-            session,
-            &task_id,
-            &candidate,
-        );
-        let outcome = crate::admit_adopted_task(
-            session,
-            &root_config,
-            &workspace_root,
-            &task_id,
-            &candidate,
-            &probes,
-            crate::now_ms(),
-        )?;
-        if let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &outcome {
-            if !cancellation_handle.is_naturally_finalized()
-                && !cancellation_handle.try_finalize_naturally()
-            {
-                bail!("run cancellation won the blocked-task terminal-state race");
-            }
-            return application_task_blocked_output(session, handler, &task_id, blocker, output);
-        }
-    }
     let status = crate::agent_supervisor::task_execution::run_admitted_task_to_root_terminal(
         session,
         crate::agent_supervisor::task_execution::AdmittedTaskExecution {
@@ -2957,11 +2937,7 @@ where
     let Some(task_execution) = task_execution else {
         return Ok(output);
     };
-    // A live application can continue a task without crossing the session-open transition.
-    // Reproject completed participant evidence here as well, so a stale blocked step is repaired
-    // before the continuation scheduler computes its ready queue.
-    sigil_kernel::reconcile_task_step_projections(session, &action.task_id)
-        .context("failed to reconcile durable task step projections before continuation")?;
+    // A live application can continue a direct Task without crossing the session-open transition.
     let task = match crate::validate_task_continuation_action(session, &action) {
         Ok(task) => task,
         Err(error) => {
@@ -2975,7 +2951,6 @@ where
     };
     let ApplicationTaskExecutionRuntime {
         root_config,
-        workspace_root: _,
         parent_session_ref: _,
         options,
         base_registry,
@@ -3183,7 +3158,6 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::AwaitingUserInput(
@@ -3249,16 +3223,13 @@ where
                     final_text,
                     tool_calls: output.result.tool_calls,
                     final_message_id: Some(final_message_id),
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::FinalAnswer,
             })
         }
         crate::PlanReviewRunOutcome::CompletedWithoutDraft => {
-            let final_text =
-                "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
-                    .to_owned();
+            let final_text = "Plan review closed without a ready draft or Task. Any unconfirmed candidate remains review-only; make an explicit decision before execution.".to_owned();
             let recorded_at_ms = current_unix_time_ms();
             let controls = crate::PlanReviewCoordinator::plan_review_no_draft_terminal_controls(
                 session,
@@ -3310,7 +3281,6 @@ where
                     final_text,
                     tool_calls: output.result.tool_calls,
                     final_message_id: Some(final_message_id),
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::FinalAnswer,
@@ -3334,7 +3304,6 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::Interrupted,
@@ -3358,7 +3327,6 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::Interrupted,
@@ -3382,7 +3350,6 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::Blocked,
@@ -3406,7 +3373,6 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 // ApplicationRun currently has no independent PlanReview pause disposition. The
@@ -3433,39 +3399,11 @@ where
                     final_text: String::new(),
                     tool_calls: output.result.tool_calls,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: output.outcome,
                 disposition: AgentRunDisposition::Blocked,
             })
             .context(format!("plan review failed: {error}"))
-        }
-        crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
-            crate::PlanReviewCoordinator::close_plan_review_run(
-                session,
-                &request,
-                &crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
-                handler,
-                current_unix_time_ms(),
-            )?;
-            if !cancellation_handle.is_naturally_finalized()
-                && !cancellation_handle.try_finalize_naturally()
-            {
-                bail!("run cancellation won the plan review protocol terminal-state race");
-            }
-            Ok::<AgentRunOutput, anyhow::Error>(AgentRunOutput {
-                result: sigil_kernel::AgentRunResult {
-                    final_text: String::new(),
-                    tool_calls: output.result.tool_calls,
-                    final_message_id: None,
-                    completion_claim: None,
-                },
-                outcome: output.outcome,
-                disposition: AgentRunDisposition::Blocked,
-            })
-            .context(format!(
-                "plan review submit-only protocol violation: {error}"
-            ))
         }
     }
 }
@@ -3502,23 +3440,18 @@ fn application_task_final_answer(
         .tasks
         .get(task_id)
         .ok_or_else(|| anyhow!("completed application task is missing"))?;
-    let (message_id, expected_hash) = if let Some(committed) = task.final_answer.as_ref() {
-        (committed.message_id.clone(), committed.content_hash.clone())
-    } else {
-        task.direct_execution_attempts
-            .values()
-            .filter(|attempt| {
-                attempt.status == sigil_kernel::TaskParticipantAttemptStatus::Completed
-            })
-            .max_by_key(|attempt| attempt.ordinal)
-            .and_then(|attempt| {
-                Some((
-                    attempt.final_message_id.clone()?,
-                    attempt.output_hash.clone()?,
-                ))
-            })
-            .ok_or_else(|| anyhow!("completed application task has no committed final answer"))?
-    };
+    let (message_id, expected_hash) = task
+        .direct_execution_attempts
+        .values()
+        .filter(|attempt| attempt.status == sigil_kernel::TaskExecutionAttemptStatus::Completed)
+        .max_by_key(|attempt| attempt.ordinal)
+        .and_then(|attempt| {
+            Some((
+                attempt.final_message_id.clone()?,
+                attempt.output_hash.clone()?,
+            ))
+        })
+        .ok_or_else(|| anyhow!("completed application task has no committed final answer"))?;
     let message = session
         .entries()
         .iter()
@@ -3540,27 +3473,11 @@ fn application_task_final_answer(
     Ok(ApplicationTaskFinalAnswer { message_id, text })
 }
 
-fn application_task_blocked_output<H: EventHandler + Send>(
-    session: &mut Session,
-    handler: &mut H,
-    task_id: &TaskId,
-    blocker: &sigil_kernel::TaskBlockerV1,
-    mut output: AgentRunOutput,
-) -> Result<AgentRunOutput> {
-    // RFC-0067 13.2/13.3: a blocked Task keeps its durable identity; the run surface shows the
-    // blocker and its actions instead of a failed run.
-    let final_text = format!(
-        "Task {} is blocked ({}): {}. The task is kept and can be retried once the environment is resolved.",
-        task_id.as_str(),
-        blocker.reason_code.as_str(),
-        blocker.summary
-    );
-    let final_message_id = append_application_final_answer(session, handler, final_text.clone())?;
-    output.result.final_text = final_text;
-    output.result.final_message_id = Some(final_message_id);
-    output.disposition = AgentRunDisposition::FinalAnswer;
-    output.outcome.terminal_reason = AgentRunTerminalReason::FinalAnswer;
-    Ok(output)
+#[derive(Debug, thiserror::Error)]
+#[error("task {} failed: {reason}", task_id.as_str())]
+struct ApplicationTaskFailed {
+    task_id: TaskId,
+    reason: String,
 }
 
 fn application_task_terminal_output(
@@ -3593,8 +3510,7 @@ fn application_task_terminal_output(
             .find(|route| {
                 matches!(
                     &route.request.source,
-                    sigil_kernel::UserInputSourceV1::Planner { task_id: source_task_id }
-                        if source_task_id == task_id
+                    sigil_kernel::UserInputSourceV1::Agent
                 )
             })
             .map(|route| sigil_kernel::UserInputRequestRefV1 {
@@ -3606,14 +3522,28 @@ fn application_task_terminal_output(
                 output.outcome.terminal_reason = AgentRunTerminalReason::AwaitingUserInput;
             } else {
                 output.disposition = AgentRunDisposition::Blocked;
-                output.outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
+                output.outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
             }
         }
-        TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Failed => {
+        TaskRunStatus::Failed => {
+            let projection = session.task_state_projection();
+            let task = projection
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| anyhow!("failed application task is missing"))?;
+            return Err(ApplicationTaskFailed {
+                task_id: task_id.clone(),
+                reason: task.reason.clone().unwrap_or_else(|| {
+                    "task execution failed without a recorded reason".to_owned()
+                }),
+            }
+            .into());
+        }
+        TaskRunStatus::Started | TaskRunStatus::Running => {
             output.result.final_text.clear();
             output.result.final_message_id = None;
             output.disposition = AgentRunDisposition::Blocked;
-            output.outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
+            output.outcome.terminal_reason = AgentRunTerminalReason::TaskHandoff;
         }
     }
     Ok(output)
@@ -3681,7 +3611,6 @@ async fn execute_application_agent_profile(
             final_text: parent_summary,
             tool_calls: 0,
             final_message_id: Some(final_message_id),
-            completion_claim: None,
         },
         outcome: AgentRunOutcome::default(),
     })
@@ -3714,6 +3643,7 @@ async fn assemble_application_tool_surface(
     services: &ApplicationRunServices,
     redactor: &sigil_kernel::SecretRedactor,
     skill_descriptor: Option<&sigil_kernel::SkillDescriptor>,
+    agent_delegation_available: bool,
     tool_scope: Option<&ToolRegistryScope>,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
 ) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
@@ -3771,6 +3701,9 @@ async fn assemble_application_tool_surface(
         terminal_control,
         scratch_control,
     } = surface;
+    if agent_delegation_available {
+        crate::register_agent_tools(&mut registry, root_config)?;
+    }
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
     crate::mcp_registry::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
@@ -3961,6 +3894,10 @@ async fn prepare_application_run_internal(
         managed_session_log,
         managed_artifact_store,
     } = prepared;
+    let agent_background_runs = session_lease
+        .attachment
+        .agent_tool_background_runs()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let selected_composition =
         sigil_kernel::SessionCompositionSnapshotV1::new(root_config.selected_capabilities());
     crate::session_composition::validate_session_composition_snapshot(
@@ -4022,6 +3959,10 @@ async fn prepare_application_run_internal(
         services.terminal_lifecycle_handler.clone(),
         events.clone(),
     );
+    let agent_delegation_available = root_config.task.enabled
+        && root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None
+        && task_agent_registry.is_some()
+        && services.task_role_provider_builder.is_some();
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -4033,6 +3974,7 @@ async fn prepare_application_run_internal(
         services,
         &redactor,
         skill_descriptor.as_ref(),
+        agent_delegation_available,
         tool_scope.as_ref(),
         terminal_lifecycle_sink,
     )
@@ -4082,27 +4024,30 @@ async fn prepare_application_run_internal(
             .unwrap_or("session.jsonl"),
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    let task_execution = task_agent_registry
-        .zip(services.task_role_provider_builder.as_ref())
-        .map(
-            |(profile_registry, role_provider_builder)| ApplicationTaskExecutionRuntime {
-                root_config: root_config.clone(),
-                workspace_root: workspace_root.clone(),
-                parent_session_ref: parent_session_ref.clone(),
-                options: options.clone(),
-                base_registry: registry.clone(),
-                agent_supervisor: crate::AgentSupervisor::new(
-                    profile_registry,
-                    crate::AgentBudgetPolicy::from_root_config(&root_config),
-                    provider.capabilities(),
-                ),
-                role_provider_builder: Arc::clone(role_provider_builder),
-                verification_execution_port: services.authority_composition().map(|composition| {
-                    Arc::clone(&composition.command_execution)
-                        as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
-                }),
-            },
-        );
+    let task_execution = if let Some((profile_registry, role_provider_builder)) =
+        task_agent_registry.zip(services.task_role_provider_builder.as_ref())
+    {
+        let agent_supervisor = crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            provider.capabilities(),
+        )
+        .with_background_runs(agent_background_runs.clone());
+        Some(ApplicationTaskExecutionRuntime {
+            root_config: root_config.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            options: options.clone(),
+            base_registry: registry.clone(),
+            agent_supervisor,
+            role_provider_builder: Arc::clone(role_provider_builder),
+            verification_execution_port: services.authority_composition().map(|composition| {
+                Arc::clone(&composition.command_execution)
+                    as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
+            }),
+        })
+    } else {
+        None
+    };
     let conversation_coordinator = orchestration_route_guard.map(|guard| {
         crate::ConversationCoordinator::new(
             root_config.task.enabled,
@@ -4145,19 +4090,21 @@ async fn prepare_application_run_internal(
                     .routes_automatically()
                     .then_some((coordinator, capability))
             });
-            let automatic_routing = routing.is_some();
             let tool_specs = routing.map_or_else(
                 || registry.specs(),
                 |(coordinator, capability)| {
-                    coordinator.route_tool_specs_for_session(&session, capability)
+                    coordinator.conversation_tool_specs_for_session(
+                        &session,
+                        capability,
+                        registry.specs(),
+                    )
                 },
             );
             let mut transient_messages = vec![exact_user_message];
-            if automatic_routing {
-                transient_messages.insert(
-                    0,
-                    ModelMessage::system(conversation_route_routing_contract_material()),
-                );
+            if let Some(contract) = routing.and_then(|(coordinator, capability)| {
+                coordinator.conversation_contract_for_session(&session, capability)
+            }) {
+                transient_messages.insert(0, ModelMessage::system(contract));
             }
             let request = session
                 .build_pre_turn_candidate_request(
@@ -4248,7 +4195,8 @@ async fn prepare_application_run_internal(
             registry_snapshot,
             crate::AgentBudgetPolicy::from_root_config(&root_config),
             provider.capabilities().clone(),
-        );
+        )
+        .with_background_runs(agent_background_runs.clone());
         let mut runtime =
             crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry.clone());
         sigil_kernel::AgentToolDelegate::set_run_cancellation(
@@ -4261,12 +4209,27 @@ async fn prepare_application_run_internal(
             profile_id,
         }
     } else {
+        let agent_tool_runtime = task_execution.as_ref().and_then(|task_execution| {
+            (root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None).then(|| {
+                let mut runtime = crate::AgentToolRuntime::new(
+                    task_execution.agent_supervisor.clone(),
+                    root_config.clone(),
+                    registry.clone(),
+                );
+                sigil_kernel::AgentToolDelegate::set_run_cancellation(
+                    &mut runtime,
+                    Some(cancellation_handle.clone()),
+                );
+                Box::new(runtime)
+            })
+        });
         ApplicationRunExecutionKind::Main {
             agent: Box::new(
                 crate::configured_agent(&root_config, provider, registry.clone())
                     .map_err(ApplicationRunPrepareError::execution)?,
             ),
             input: Box::new(input),
+            agent_tool_runtime,
         }
     };
     crate::session_composition::bind_session_composition_snapshot(
@@ -4517,15 +4480,15 @@ pub fn bind_application_session_with_model_ref_and_projection_owner(
     .map_err(ApplicationRunPrepareError::execution)?;
     crate::validate_session_composition(&inspected.session, &root_config)
         .map_err(ApplicationRunPrepareError::execution)?;
-    let mut outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
-            &root_config,
-            &selected_route,
-            store.clone(),
-            None,
-            None,
-            Some(attachment.as_ref()),
-        )
-        .map_err(application_route_load_prepare_error)?;
+    let mut outcome = crate::provider_connections::load_session_for_route_transition(
+        &root_config,
+        &selected_route,
+        store.clone(),
+        None,
+        None,
+        Some(attachment.as_ref()),
+    )
+    .map_err(application_route_load_prepare_error)?;
     crate::bind_session_composition(&mut outcome.session, &root_config)
         .map_err(ApplicationRunPrepareError::execution)?;
     if let Some(managed_session_log) = managed_session_log {
@@ -4533,6 +4496,9 @@ pub fn bind_application_session_with_model_ref_and_projection_owner(
             .finalize()
             .map_err(ApplicationRunPrepareError::execution)?;
     }
+    attachment
+        .bind_application_operation_owner(&outcome.session)
+        .map_err(ApplicationRunPrepareError::execution)?;
     Ok((
         ApplicationSessionBinding {
             session_scope_id: outcome.session.session_scope_id().to_owned(),
@@ -4784,7 +4750,13 @@ pub fn bind_existing_application_session_with_attachment_and_projection_owner(
         Some(persisted_model_id),
     )?;
     let store = JsonlSessionStore::new(&read_binding.session_log_path)
-        .map_err(ApplicationRunPrepareError::execution)?;
+        .map_err(ApplicationRunPrepareError::execution)?
+        .with_live_background_agent_threads(
+            attachment
+                .agent_tool_background_runs()
+                .and_then(|runs| runs.thread_ids())
+                .map_err(ApplicationRunPrepareError::execution)?,
+        );
     let inspected = crate::provider_connections::inspect_session_for_route_resume(
         &root_config,
         &fallback_route,
@@ -4793,7 +4765,7 @@ pub fn bind_existing_application_session_with_attachment_and_projection_owner(
     .map_err(ApplicationRunPrepareError::execution)?;
     crate::validate_session_composition(&inspected.session, &root_config)
         .map_err(ApplicationRunPrepareError::execution)?;
-    let mut outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+    let mut outcome = crate::provider_connections::load_session_for_route_transition(
         &root_config,
         &fallback_route,
         store.clone(),
@@ -4803,6 +4775,9 @@ pub fn bind_existing_application_session_with_attachment_and_projection_owner(
     )
     .map_err(application_route_load_prepare_error)?;
     crate::bind_session_composition(&mut outcome.session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    attachment
+        .bind_application_operation_owner(&outcome.session)
         .map_err(ApplicationRunPrepareError::execution)?;
     Ok((
         ApplicationSessionBinding {
@@ -4926,7 +4901,7 @@ pub(crate) fn load_application_session_for_route_with_attachment(
     store: JsonlSessionStore,
     attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> Result<Session> {
-    crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+    crate::provider_connections::load_session_for_route(
         root_config,
         fallback_route,
         store,
@@ -6102,6 +6077,15 @@ fn prepare_application_run_blocking_with_writer(
                     ApplicationRunPrepareError::execution(error)
                 }
             })?,
+    );
+    let background_runs = session_lease
+        .attachment
+        .agent_tool_background_runs()
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let session_store = session_store.with_live_background_agent_threads(
+        background_runs
+            .thread_ids()
+            .map_err(ApplicationRunPrepareError::execution)?,
     );
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
     if let Some(provisioner) = managed_plan_review_child_resources.as_deref() {
@@ -8233,7 +8217,22 @@ fn application_terminal_projection(
         AgentRunDisposition::Blocked => (
             ApplicationRunTerminalStatus::Blocked,
             PublicRunEventKind::RunBlocked {
-                reason: "run blocked because its required delegation was not satisfied".to_owned(),
+                reason: match output.outcome.terminal_reason {
+                    AgentRunTerminalReason::DelegationUnsatisfied => {
+                        "run blocked because its required delegation was not satisfied"
+                    }
+                    AgentRunTerminalReason::TaskHandoff => {
+                        "run is waiting for its durable task to complete"
+                    }
+                    AgentRunTerminalReason::FinalAnswerBlocked => {
+                        "run final answer was blocked by completion requirements"
+                    }
+                    AgentRunTerminalReason::RepairReplanRequired => {
+                        "run requires repair before completion"
+                    }
+                    _ => "run is blocked from completing",
+                }
+                .to_owned(),
             },
         ),
         AgentRunDisposition::StartDurableTask(_) => (
@@ -8257,12 +8256,6 @@ fn application_terminal_projection(
                     .to_owned(),
             },
         ),
-        AgentRunDisposition::PendingPlanDecisionRequired(_) => (
-            ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunBlocked {
-                reason: "the current plan is still awaiting an explicit decision".to_owned(),
-            },
-        ),
         AgentRunDisposition::StartPlanReview(_) => (
             ApplicationRunTerminalStatus::Blocked,
             PublicRunEventKind::RunBlocked {
@@ -8274,12 +8267,6 @@ fn application_terminal_projection(
             ApplicationRunTerminalStatus::Blocked,
             PublicRunEventKind::RunBlocked {
                 reason: "plan review draft submitted outside an attached plan review coordinator".to_owned(),
-            },
-        ),
-        AgentRunDisposition::TaskPlanAccepted => (
-            ApplicationRunTerminalStatus::Blocked,
-            PublicRunEventKind::RunBlocked {
-                reason: "task planning completed outside an attached task executor".to_owned(),
             },
         ),
     }

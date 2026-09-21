@@ -4,12 +4,11 @@ use sigil_kernel::{
     AgentMailboxStatus, AgentMergeSafePointEntry, AgentRouteId, AgentRouteStatus, AgentThreadId,
     AgentThreadResultRecordedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentUsageSummary, AgentUserInputRouteEntryV1, AgentUserInputRouteProjectionV1, ControlEntry,
-    EventHandler, PublicUserInputRequestV1, Session, SessionRef, TaskChildSessionStatus, TaskId,
-    TaskIsolationMode, UserInputSourceV1,
+    EventHandler, PublicUserInputRequestV1, Session, TaskChildSessionStatus,
 };
 
 use super::{
-    AgentChatChildThread, AgentResultMaterialization, AgentSupervisor, AgentTaskChildThread,
+    AgentChatChildThread, AgentResultMaterialization, AgentSupervisor,
     agent_terminal_status_from_task_child, append_control, build_agent_thread_result, hash_text,
     short_digest,
 };
@@ -89,47 +88,6 @@ impl AgentSupervisor {
         Ok(())
     }
 
-    pub(crate) fn record_task_child_result<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        child_session_ref: SessionRef,
-        status: TaskChildSessionStatus,
-        materialized: &AgentResultMaterialization,
-        outcome: &sigil_kernel::AgentRunOutcome,
-        usage: Option<AgentUsageSummary>,
-    ) -> Result<()>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        let terminal_status = agent_terminal_status_from_task_child(status);
-        let result = build_agent_thread_result(
-            thread.thread_id.clone(),
-            child_session_ref.clone(),
-            terminal_status,
-            materialized,
-            outcome,
-            usage,
-        );
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry { result }),
-        )?;
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentMergeSafePoint(AgentMergeSafePointEntry {
-                thread_id: thread.thread_id.clone(),
-                parent_thread_id: thread.parent_thread_id.clone(),
-                result_hash: hash_text(&materialized.final_text),
-            }),
-        )?;
-        self.release_thread(&thread.thread_id);
-        Ok(())
-    }
-
     pub(crate) fn record_chat_child_result<H>(
         &self,
         session: &mut Session,
@@ -196,96 +154,6 @@ impl AgentSupervisor {
                 }),
             )?;
         }
-        Ok(())
-    }
-
-    pub fn record_task_child_failure<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        reason: String,
-    ) -> Result<()>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        self.record_task_child_stop(session, handler, thread, AgentThreadStatus::Failed, reason)
-    }
-
-    pub(crate) fn record_task_child_error<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        error: &anyhow::Error,
-    ) -> Result<AgentThreadStatus>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        // A root cancellation flag does not erase a real child failure. Only the provider's
-        // structured cancellation terminal proves this error represents a cancelled turn.
-        let status = match error.downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>() {
-            Some(terminal)
-                if terminal.disposition
-                    == sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled =>
-            {
-                AgentThreadStatus::Cancelled
-            }
-            _ => AgentThreadStatus::Failed,
-        };
-        self.record_task_child_stop(session, handler, thread, status, format!("{error:#}"))?;
-        Ok(status)
-    }
-
-    fn record_task_child_stop<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        status: AgentThreadStatus,
-        reason: String,
-    ) -> Result<()>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-                thread_id: thread.thread_id.clone(),
-                status,
-                reason: Some(reason),
-                updated_at_ms: None,
-            }),
-        )?;
-        self.release_thread(&thread.thread_id);
-        Ok(())
-    }
-
-    /// Records a task-child stop that has an actionable recovery path. This is deliberately
-    /// distinct from `record_task_child_failure`: the task orchestrator will project the same
-    /// durable provider-turn terminal into `TaskStepStatus::Blocked`.
-    pub fn record_task_child_blocked<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        reason: String,
-    ) -> Result<()>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-                thread_id: thread.thread_id.clone(),
-                status: AgentThreadStatus::Blocked,
-                reason: Some(reason),
-                updated_at_ms: None,
-            }),
-        )?;
-        self.release_thread(&thread.thread_id);
         Ok(())
     }
 
@@ -392,69 +260,6 @@ impl AgentSupervisor {
                 budget_scope_id: thread.budget_scope_id.clone(),
                 isolation: thread.isolation,
                 child_session_ref: thread.child_session_ref.clone(),
-                request,
-                status: AgentRouteStatus::Requested,
-                updated_at_unix_ms: crate::current_unix_time_ms(),
-            }),
-        )?;
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-                thread_id: thread.thread_id.clone(),
-                status: AgentThreadStatus::Blocked,
-                reason: Some(format!("blocked_needs_user_input:{}", route_id.as_str())),
-                updated_at_ms: Some(crate::current_unix_time_ms()),
-            }),
-        )?;
-        self.release_thread(&thread.thread_id);
-        Ok(())
-    }
-
-    pub(crate) fn record_task_planner_waiting_for_input<H>(
-        &self,
-        session: &mut Session,
-        handler: &mut H,
-        thread: &AgentTaskChildThread,
-        task_id: &TaskId,
-        child_session_ref: &SessionRef,
-        request: PublicUserInputRequestV1,
-    ) -> Result<()>
-    where
-        H: EventHandler + Send + ?Sized,
-    {
-        if request.identity.source_thread_id != thread.thread_id {
-            anyhow::bail!("planner user-input request belongs to a different child thread");
-        }
-        if !matches!(
-            &request.source,
-            UserInputSourceV1::Planner { task_id: source_task_id } if source_task_id == task_id
-        ) {
-            anyhow::bail!("planner user-input request is not bound to the active task");
-        }
-        let route_id = AgentRouteId::new(format!(
-            "agent_input_{}",
-            short_digest(&hash_text(&format!(
-                "{}\0{}\0{}",
-                thread.thread_id.as_str(),
-                request.identity.request_id.as_str(),
-                request.request_hash,
-            )))
-        ))?;
-        append_control(
-            session,
-            handler,
-            ControlEntry::AgentUserInputRoute(AgentUserInputRouteEntryV1 {
-                schema_version: AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
-                route_id: route_id.clone(),
-                source_thread_id: thread.thread_id.clone(),
-                source_attempt_id: thread.attempt_id.clone(),
-                profile_id: thread.profile_id.clone(),
-                parent_thread_id: thread.parent_thread_id.clone(),
-                batch_id: None,
-                budget_scope_id: task_id.clone(),
-                isolation: TaskIsolationMode::SharedReadOnly,
-                child_session_ref: child_session_ref.clone(),
                 request,
                 status: AgentRouteStatus::Requested,
                 updated_at_unix_ms: crate::current_unix_time_ms(),

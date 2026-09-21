@@ -5,10 +5,6 @@ use sigil_kernel::{Agent, AgentUsageSummary, Provider, ProviderCapabilities, Tas
 
 use crate::AgentProfileRegistry;
 use crate::provider_pressure::{TaskProviderPressure, TaskProviderRouteDiagnosticsSnapshot};
-use crate::task_completion_progress::{
-    TaskCompletionProgressRegistry, TaskCompletionProgressSnapshot,
-};
-
 mod batch;
 mod begin;
 mod budget;
@@ -18,31 +14,23 @@ mod hash;
 mod ids;
 mod projection;
 mod record;
-mod task_discovery;
-pub(crate) use task_discovery::{planner_tools_with_discovery, task_discovery_system_prompt};
 pub mod task_execution;
 pub mod task_role_runtime;
 mod task_runner;
 mod thread_ops;
 mod thread_state;
 pub use budget::AgentBudgetPolicy;
+pub(crate) use budget::{AgentBudgetDenial, AgentReservationError};
 use control::{agent_terminal_status_from_task_child, append_control};
-#[cfg(test)]
-use guard::tool_scope_is_write_capable;
 use hash::{hash_json, hash_text, short_digest};
-#[cfg(test)]
-pub(crate) use ids::agent_thread_id_for_task_child;
 pub use ids::chat_agent_thread_id_for_call;
 use projection::build_agent_thread_result;
 pub(crate) use projection::{AgentResultMaterialization, materialize_child_agent_final_answer};
-pub use task_discovery::{MAX_TASK_DISCOVERY_PROBES, REQUEST_TASK_DISCOVERY_TOOL_NAME};
 pub use task_runner::AgentSupervisorTaskChildRunner;
-pub(crate) use task_runner::build_child_session;
-pub(crate) use task_runner::task_child_status_from_outcome;
 use thread_state::AgentSupervisorState;
 pub use thread_state::{
     AgentChatChildStart, AgentChatChildThread, AgentInterruptedThread, AgentMailboxMessage,
-    AgentTaskChildStart, AgentTaskChildThread, ForegroundCancelImpact,
+    ForegroundCancelImpact,
 };
 
 type BoxedAgent = Agent<Box<dyn Provider>>;
@@ -55,8 +43,6 @@ type BoxedAgent = Agent<Box<dyn Provider>>;
 pub enum AgentSupervisorChange {
     /// Provider-route concurrency, waiting, or cooldown diagnostics changed.
     ProviderRouteDiagnostics,
-    /// Parallel task completion-arrival progress changed.
-    TaskCompletionProgress,
 }
 
 /// Receives process-local supervisor change notifications.
@@ -110,7 +96,7 @@ pub struct AgentSupervisor {
     provider_capabilities: ProviderCapabilities,
     state: Arc<Mutex<AgentSupervisorState>>,
     provider_pressure: TaskProviderPressure,
-    task_completion_progress: TaskCompletionProgressRegistry,
+    background_runs: crate::AgentToolBackgroundRuns,
 }
 
 impl AgentSupervisor {
@@ -126,15 +112,26 @@ impl AgentSupervisor {
             provider_capabilities,
             state: Arc::new(Mutex::new(AgentSupervisorState::default())),
             provider_pressure: TaskProviderPressure::default(),
-            task_completion_progress: TaskCompletionProgressRegistry::default(),
+            background_runs: crate::AgentToolBackgroundRuns::default(),
         }
+    }
+
+    /// Binds this supervisor to the exact background owner shared by its session attachment.
+    #[must_use]
+    pub fn with_background_runs(mut self, background_runs: crate::AgentToolBackgroundRuns) -> Self {
+        self.background_runs = background_runs;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn background_runs(&self) -> crate::AgentToolBackgroundRuns {
+        self.background_runs.clone()
     }
 
     /// Installs a process-local change sink for event-driven observers.
     #[must_use]
     pub fn with_event_sink(self, sink: Arc<dyn AgentSupervisorEventSink>) -> Self {
         self.provider_pressure.set_change_sink(Arc::clone(&sink));
-        self.task_completion_progress.set_change_sink(sink);
         self
     }
 
@@ -152,10 +149,6 @@ impl AgentSupervisor {
         &self.provider_pressure
     }
 
-    pub(crate) fn completion_progress(&self) -> &TaskCompletionProgressRegistry {
-        &self.task_completion_progress
-    }
-
     /// Returns live task provider-route pressure for user-facing diagnostics.
     ///
     /// This process-local snapshot is observational only and must not be persisted or used as
@@ -163,15 +156,6 @@ impl AgentSupervisor {
     #[must_use]
     pub fn task_provider_route_diagnostics(&self) -> TaskProviderRouteDiagnosticsSnapshot {
         self.provider_pressure.diagnostics()
-    }
-
-    /// Returns live completion-arrival order for the latest parallel task batch.
-    ///
-    /// This process-local snapshot is observational only. Durable parent commits remain ordered by
-    /// stable request sequence and this snapshot must not be used as restart authority.
-    #[must_use]
-    pub fn task_completion_progress(&self) -> TaskCompletionProgressSnapshot {
-        self.task_completion_progress.snapshot()
     }
 
     #[must_use]
@@ -190,7 +174,3 @@ impl AgentSupervisor {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "tests/agent_supervisor_tests.rs"]
-mod tests;

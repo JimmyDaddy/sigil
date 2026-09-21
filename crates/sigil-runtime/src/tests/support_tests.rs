@@ -62,7 +62,7 @@ fn support_bundle() -> Result<SupportBundleV1> {
 }
 
 #[test]
-fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -> Result<()> {
+fn doctor_support_schema_v1_matches_fixture_and_ignores_unknown_fields() -> Result<()> {
     let report = DoctorReport {
         cutover: Default::default(),
         checks: vec![
@@ -170,7 +170,8 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
         .as_object_mut()
         .expect("report is an object")
         .insert("future_field".to_owned(), json!(true));
-    assert!(serde_json::from_value::<DoctorSupportReportV1>(with_unknown).is_err());
+    serde_json::from_value::<DoctorSupportReportV1>(with_unknown)
+        .expect("unknown fields are ignored");
     Ok(())
 }
 
@@ -466,7 +467,7 @@ fn support_bundle_schema_and_writer_are_private_bounded_and_non_overwriting() ->
         .as_object_mut()
         .expect("bundle object")
         .insert("future_field".to_owned(), json!(true));
-    assert!(serde_json::from_value::<SupportBundleV1>(with_unknown).is_err());
+    serde_json::from_value::<SupportBundleV1>(with_unknown).expect("unknown fields are ignored");
 
     let first = write_support_bundle(&cache_root, &bundle)?;
     let second = write_support_bundle(&cache_root, &bundle)?;

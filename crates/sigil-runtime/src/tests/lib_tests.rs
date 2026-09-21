@@ -69,10 +69,6 @@ fn production_runtime_tools_expose_only_native_permission_plans() {
             "agent_tools/surface.rs",
             include_str!("../agent_tools/surface.rs"),
         ),
-        (
-            "agent_supervisor/task_discovery.rs",
-            include_str!("../agent_supervisor/task_discovery.rs"),
-        ),
     ];
     let legacy_permission_paths = [
         "fn permission_subjects(",
@@ -1049,7 +1045,7 @@ async fn build_plan_prompt_tool_registry_keeps_agent_tools_with_readonly_scope()
 }
 
 #[tokio::test]
-async fn build_plan_review_tool_registry_is_fail_closed_even_with_write_planner_allowlist()
+async fn build_plan_review_tool_registry_exposes_explicitly_allowed_tools_for_effect_checks()
 -> Result<()> {
     let mut registry = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut registry);
@@ -1057,7 +1053,7 @@ async fn build_plan_review_tool_registry_is_fail_closed_even_with_write_planner_
     // Adversarial planner allowlist that explicitly grants mutation tools.
     config.task.planner.tools = sigil_kernel::ToolAllowlistConfig {
         allow_all: true,
-        names: vec!["write_file".to_owned(), "bash".to_owned()],
+        names: vec!["write_file".to_owned(), "exec_command".to_owned()],
         prefixes: vec!["edit_".to_owned(), "terminal_".to_owned()],
     };
     super::register_agent_tools(&mut registry, &config)?;
@@ -1066,11 +1062,10 @@ async fn build_plan_review_tool_registry_is_fail_closed_even_with_write_planner_
 
     assert!(plan_review.spec_for("read_file").is_some());
     assert!(plan_review.spec_for("grep").is_some());
-    assert!(plan_review.spec_for("write_file").is_none());
-    assert!(plan_review.spec_for("bash").is_none());
-    assert!(plan_review.spec_for("edit_file").is_none());
-    assert!(plan_review.spec_for("terminal_start").is_none());
-    assert!(plan_review.spec_for(super::SPAWN_AGENT_TOOL_NAME).is_none());
+    assert!(plan_review.spec_for("write_file").is_some());
+    assert!(plan_review.spec_for("exec_command").is_some());
+    assert!(plan_review.spec_for("edit_file").is_some());
+    assert!(plan_review.spec_for(super::SPAWN_AGENT_TOOL_NAME).is_some());
     Ok(())
 }
 
@@ -1150,7 +1145,7 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
     let planner = build_role_skill_tool_registry(&registry, &config, AgentRole::Planner, &skill);
     assert!(planner.spec_for("read_file").is_some());
     assert!(planner.spec_for("write_file").is_none());
-    assert!(planner.spec_for("bash").is_none());
+    assert!(planner.spec_for("exec_command").is_none());
 
     let read_child = build_role_skill_tool_registry(
         &registry,
@@ -1179,7 +1174,7 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
         build_role_skill_tool_registry(&registry, &config, AgentRole::Planner, &inheriting_skill);
     assert!(inherited.spec_for("read_file").is_some());
     assert!(inherited.spec_for("ls").is_some());
-    assert!(inherited.spec_for("bash").is_none());
+    assert!(inherited.spec_for("exec_command").is_none());
     assert!(inherited.spec_for("write_file").is_none());
     Ok(())
 }
@@ -1196,8 +1191,13 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
     .await?;
 
     assert!(registry.specs().iter().any(|spec| spec.name == "read_file"));
-    assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
-    assert!(registry.spec_for("terminal_start").is_some());
+    assert!(
+        registry
+            .specs()
+            .iter()
+            .any(|spec| spec.name == "exec_command")
+    );
+    assert!(registry.spec_for("exec_command").is_some());
     assert!(registry.spec_for("mcp_activate_server").is_none());
     Ok(())
 }
@@ -1206,12 +1206,10 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
     let call = ToolCall {
         id: "terminal-runtime-audit".to_owned(),
-        name: "terminal_start".to_owned(),
+        name: "exec_command".to_owned(),
         args_json: json!({
-            "task_id": "runtime-audit",
             "command": "tail -f /dev/null",
-            "mode": "background",
-            "readiness": { "kind": "none" }
+            "yield_time_ms": 0
         })
         .to_string(),
     };
@@ -1814,7 +1812,12 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
     let registry =
         build_tool_registry(&config, &provider_capabilities, std::env::current_dir()?).await?;
 
-    assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
+    assert!(
+        registry
+            .specs()
+            .iter()
+            .any(|spec| spec.name == "exec_command")
+    );
     Ok(())
 }
 
@@ -1861,12 +1864,10 @@ async fn build_tool_registry_rejects_uncomposed_terminal_pty_route() -> Result<(
             ToolContext::new(temp.path().to_path_buf(), 5),
             ToolCall {
                 id: "terminal-sandboxed-pty".to_owned(),
-                name: "terminal_start".to_owned(),
+                name: "exec_command".to_owned(),
                 args_json: json!({
-                    "task_id": "runtime-sandboxed-pty",
                     "command": "printf runtime > runtime.txt; tail -f /dev/null",
                     "shell": "/bin/sh",
-                    "mode": "interactive",
                     "pty": true
                 })
                 .to_string(),

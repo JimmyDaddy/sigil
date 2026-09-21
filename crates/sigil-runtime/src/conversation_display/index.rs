@@ -121,7 +121,16 @@ impl ConversationDisplayIndex {
         let scope = self
             .scope
             .get_or_insert_with(|| record.session_id().to_owned());
-        let context = self.row_state.context(record)?;
+        let mut context = self.row_state.context(record)?;
+        if let Some(sequence) = context.tool_input_source_sequence() {
+            context.tool_source = sequence
+                .checked_sub(1)
+                .and_then(|index| self.envelopes.get(index as usize))
+                .map(|source| source.position.clone());
+            if context.tool_source.is_none() {
+                bail!("command input source is absent from the display index");
+            }
+        }
         if let Some(entry) = record.session_log_entry()? {
             self.surface_cache.apply(&entry, position.sequence)?;
             let input = self.task.apply(&entry, &position)?;
@@ -131,14 +140,16 @@ impl ConversationDisplayIndex {
         let mut projected = self.row_state.apply(record, scope)?;
         projected.sort_by_key(|item| item.display_order);
         for item in projected {
-            let projected_bytes = serde_json::to_vec(&item)?.len();
+            let projected_bytes = serde_json::to_vec(&item)?.len() + context.hydrated_input_bytes();
             self.rows.push(RowMetadata {
                 order: item.display_order,
                 projected_bytes,
                 source: position.clone(),
                 context: context.clone(),
             });
-            self.row_cache.apply(item, projected_bytes);
+            if context.tool_source.is_none() {
+                self.row_cache.apply(item, projected_bytes);
+            }
         }
         push_version(
             &mut self.terminals,
@@ -257,11 +268,14 @@ impl ConversationDisplayIndex {
                 break;
             }
             let cached = self.row_cache.get(row.order);
-            let raw_bytes = if cached.is_none() && !positions.contains_key(&row.source.sequence) {
-                row.source.end - row.source.offset
-            } else {
-                0
-            };
+            let required = std::iter::once(&row.source)
+                .chain(row.context.tool_source.iter())
+                .filter(|position| cached.is_none() && !positions.contains_key(&position.sequence))
+                .collect::<Vec<_>>();
+            let raw_bytes = required
+                .iter()
+                .map(|position| position.end - position.offset)
+                .sum::<u64>();
             if hydrated_bytes.saturating_add(raw_bytes) > MAX_CONVERSATION_DISPLAY_HYDRATION_BYTES {
                 if rows.is_empty() {
                     return Err(anyhow!("conversation display row source exceeds the remaining 4 MiB hydration budget").into());
@@ -271,7 +285,9 @@ impl ConversationDisplayIndex {
             if let Some(item) = cached {
                 cached_rows.insert(row.order, item);
             } else {
-                positions.insert(row.source.sequence, row.source.clone());
+                for position in required {
+                    positions.insert(position.sequence, position.clone());
+                }
             }
             hydrated_bytes += raw_bytes;
             bytes = bytes.saturating_add(row.projected_bytes);
@@ -359,7 +375,7 @@ impl ConversationDisplayPagePlan {
                 projected.entry(row.source.sequence)
             {
                 let source = records.record(&row.source)?;
-                entry.insert(row.context.project(source, &self.scope)?);
+                entry.insert(row.context.project(source, &self.scope, &records)?);
             }
             let item = projected
                 .get(&row.source.sequence)

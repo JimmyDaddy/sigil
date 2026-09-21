@@ -79,7 +79,6 @@ impl WritableMemoryScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 struct MemorySourceRefV1 {
     session_scope_id: String,
     logical_run_id: String,
@@ -87,7 +86,6 @@ struct MemorySourceRefV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 struct MemorySidecarV1 {
     schema_version: u32,
     memory_id: String,
@@ -113,7 +111,6 @@ enum MemoryJournalAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 struct MemoryJournalRecordV1 {
     schema_version: u32,
     event_id: String,
@@ -1122,8 +1119,7 @@ impl Tool for InspectMemoryTool {
                     "scope": { "type": "string", "enum": ["all", "user_preference", "project_fact"] },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
                 },
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
             network_effect: None,
@@ -1176,8 +1172,7 @@ impl Tool for ForgetMemoryTool {
                     "memory_id": { "type": "string", "description": "Opaque id returned by a durable memory receipt or inspect_memory." }
                 },
                 "required": ["memory_id"],
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Custom,
             access: ToolAccess::Write,
             network_effect: None,

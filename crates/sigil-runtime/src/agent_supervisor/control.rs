@@ -20,6 +20,7 @@ pub(super) fn agent_terminal_status_from_task_child(
 ) -> AgentThreadTerminalStatus {
     match status {
         TaskChildSessionStatus::Completed => AgentThreadTerminalStatus::Completed,
+        TaskChildSessionStatus::Blocked => AgentThreadTerminalStatus::Blocked,
         TaskChildSessionStatus::Failed | TaskChildSessionStatus::Unavailable => {
             AgentThreadTerminalStatus::Failed
         }

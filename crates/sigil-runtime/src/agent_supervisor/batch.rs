@@ -4,10 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{AgentInvocationMode, AgentThreadId};
 
 use super::{
-    AgentChatChildStart, AgentSupervisor, AgentTaskChildStart,
-    begin::begin_attempt_id,
-    chat_agent_thread_id_for_call,
-    ids::{agent_thread_id_for_task_child, profile_id_for_role},
+    AgentChatChildStart, AgentSupervisor, begin::begin_attempt_id, chat_agent_thread_id_for_call,
     thread_state::ActiveAgentThread,
 };
 
@@ -60,10 +57,12 @@ impl AgentSupervisor {
                 bail!("agent child batch cannot mix invocation modes");
             }
             if start.parent_depth >= self.budget.max_depth {
-                bail!(
-                    "agent depth budget exceeded: max_depth={}",
-                    self.budget.max_depth
-                );
+                return Err(anyhow::Error::new(super::AgentReservationError::Budget(
+                    super::AgentBudgetDenial::DepthLimit {
+                        parent_depth: start.parent_depth,
+                        max_depth: self.budget.max_depth,
+                    },
+                )));
             }
             let thread_id = chat_agent_thread_id_for_call(&start.call_id, &start.profile_id)?;
             if !thread_ids.insert(thread_id.clone()) {
@@ -78,53 +77,6 @@ impl AgentSupervisor {
                     profile_id: start.profile_id.clone(),
                     attempt_id: begin_attempt_id(&thread_id)?,
                     background: invocation_mode == AgentInvocationMode::Background,
-                    mailbox_tx: None,
-                    batch_reserved: true,
-                },
-            ));
-        }
-
-        self.reserve_child_batch_candidates(candidates, thread_ids)
-    }
-
-    /// Reserves every runtime slot for one task-owned discovery batch or reserves none.
-    pub(crate) fn reserve_task_child_batch(
-        &self,
-        starts: &[AgentTaskChildStart],
-    ) -> Result<AgentChildBatchReservation> {
-        if starts.is_empty() {
-            bail!("agent task child batch cannot be empty");
-        }
-        let mut candidates = Vec::with_capacity(starts.len());
-        let mut thread_ids = BTreeSet::new();
-        for start in starts {
-            if start.invocation_mode != AgentInvocationMode::JoinBeforeFinal {
-                bail!("agent task child batch only supports join-before-final participants");
-            }
-            if start.parent_depth >= self.budget.max_depth {
-                bail!(
-                    "agent depth budget exceeded: max_depth={}",
-                    self.budget.max_depth
-                );
-            }
-            let thread_id = agent_thread_id_for_task_child(
-                &start.task_id,
-                start.plan_version,
-                &start.step,
-                &start.child_task_id,
-            )?;
-            if !thread_ids.insert(thread_id.clone()) {
-                bail!(
-                    "agent task child batch contains duplicate thread {}",
-                    thread_id.as_str()
-                );
-            }
-            candidates.push((
-                thread_id.clone(),
-                ActiveAgentThread {
-                    profile_id: profile_id_for_role(start.role)?,
-                    attempt_id: begin_attempt_id(&thread_id)?,
-                    background: false,
                     mailbox_tx: None,
                     batch_reserved: true,
                 },
@@ -149,12 +101,13 @@ impl AgentSupervisor {
             .checked_add(candidates.len())
             .ok_or_else(|| anyhow!("agent thread budget calculation overflowed"))?;
         if requested_total > self.budget.max_subagents {
-            bail!(
-                "agent thread budget exceeded: active={} requested={} [task].max_subagents={}",
-                state.active_threads.len(),
-                candidates.len(),
-                self.budget.max_subagents
-            );
+            return Err(anyhow::Error::new(super::AgentReservationError::Budget(
+                super::AgentBudgetDenial::ActiveThreadLimit {
+                    active_threads: state.active_threads.len(),
+                    requested_threads: candidates.len(),
+                    max_subagents: self.budget.max_subagents,
+                },
+            )));
         }
         if let Some((thread_id, _)) = candidates
             .iter()

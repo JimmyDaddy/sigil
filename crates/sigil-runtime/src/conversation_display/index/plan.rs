@@ -59,11 +59,6 @@ impl PlanMetadataProjection {
                 compact.reason = None;
                 ControlEntry::PlanDecisionRecorded(compact)
             }
-            ControlEntry::TaskMaterializationBlockedV1(blocked) => {
-                let mut compact = blocked.clone();
-                compact.blocker.summary.clear();
-                ControlEntry::TaskMaterializationBlockedV1(compact)
-            }
             ControlEntry::UserInputRequested(requested) => {
                 let sigil_kernel::UserInputSourceV1::PlanRevision { base_plan_id, .. } =
                     &requested.request.source
@@ -96,9 +91,7 @@ impl PlanMetadataProjection {
                 }
                 ControlEntry::UserInputResolved(compact)
             }
-            ControlEntry::TaskCreatedFromPlan(_)
-            | ControlEntry::TaskMaterializationPreparedV1(_)
-            | ControlEntry::PlanExecutionAdoptedV1(_) => control.clone(),
+            ControlEntry::TaskCreatedFromPlan(_) => control.clone(),
             _ => return Ok(()),
         };
         self.projection

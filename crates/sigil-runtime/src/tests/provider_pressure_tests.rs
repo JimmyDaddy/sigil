@@ -279,7 +279,7 @@ async fn cancelled_route_waiter_removes_its_diagnostic_attribution() -> Result<(
             .acquire(
                 "deepseek",
                 "deepseek-v4-flash",
-                TaskProviderRouteConsumer::Synthesis,
+                TaskProviderRouteConsumer::SubagentRead,
             )
             .await
     });
@@ -304,7 +304,7 @@ async fn route_windows_are_independent() -> Result<()> {
         .acquire(
             "deepseek",
             "deepseek-v4-flash",
-            TaskProviderRouteConsumer::Planner,
+            TaskProviderRouteConsumer::Executor,
         )
         .await?;
     let (_, pro) = tokio::time::timeout(
@@ -312,7 +312,7 @@ async fn route_windows_are_independent() -> Result<()> {
         pressure.acquire(
             "deepseek",
             "deepseek-v4-pro",
-            TaskProviderRouteConsumer::Synthesis,
+            TaskProviderRouteConsumer::SubagentRead,
         ),
     )
     .await
@@ -332,7 +332,7 @@ async fn diagnostics_attribute_active_consumers_and_hide_healthy_idle_routes() -
         .acquire(
             "deepseek",
             "deepseek-v4-flash",
-            TaskProviderRouteConsumer::Planner,
+            TaskProviderRouteConsumer::Executor,
         )
         .await?;
     let (_, read_lease) = pressure
@@ -355,7 +355,7 @@ async fn diagnostics_attribute_active_consumers_and_hide_healthy_idle_routes() -
         route.consumers,
         vec![
             TaskProviderRouteConsumerDiagnostics {
-                consumer: TaskProviderRouteConsumer::Planner,
+                consumer: TaskProviderRouteConsumer::Executor,
                 in_flight: 1,
                 waiting: 0,
             },
@@ -385,7 +385,7 @@ async fn diagnostics_keep_rate_limited_route_visible_after_lease_release() -> Re
         .acquire(
             "anthropic",
             "claude-sonnet",
-            TaskProviderRouteConsumer::Synthesis,
+            TaskProviderRouteConsumer::SubagentRead,
         )
         .await?;
 
@@ -424,7 +424,7 @@ async fn terminal_stream_chunk_records_success_and_releases_route_capacity() -> 
         .acquire(
             "deepseek",
             "deepseek-v4-flash",
-            TaskProviderRouteConsumer::Planner,
+            TaskProviderRouteConsumer::Executor,
         )
         .await?;
     let mut stream = PressureAwareTaskStream {

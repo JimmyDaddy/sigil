@@ -1,6 +1,7 @@
 use super::spawn::{
     child_tool_registry_for_profile, profile_uses_changeset_only_write, spawn_scope_overlap_warning,
 };
+use super::surface::SpawnIsolation;
 use super::*;
 
 struct PreparedBatchSpawnMember {
@@ -12,6 +13,7 @@ struct PreparedBatchSpawnMember {
     child_session: Session,
     child_input: sigil_kernel::AgentRunInput,
     child_options: sigil_kernel::AgentRunOptions,
+    cancellation_owner: Option<RunCancellationOwner>,
 }
 
 struct StartedBatchSpawnMember {
@@ -23,6 +25,7 @@ struct StartedBatchSpawnMember {
     child_session: Session,
     child_input: sigil_kernel::AgentRunInput,
     child_options: sigil_kernel::AgentRunOptions,
+    cancellation_owner: Option<RunCancellationOwner>,
 }
 
 impl AgentToolRuntime {
@@ -51,11 +54,15 @@ impl AgentToolRuntime {
         if completion_mode == AgentInvocationMode::JoinBeforeFinal
             && (!self.join_batch_eligible || self.run_cancellation.is_none())
         {
+            let join_batch_eligible = self.join_batch_eligible;
+            let root_run_cancellation_attached = self.run_cancellation.is_some();
             return batch_spawn_error(
                 call,
                 ToolErrorKind::Unsupported,
                 None,
-                "spawn_agents requires a host-owned root-run join barrier".to_owned(),
+                format!(
+                    "spawn_agents requires a host-owned root-run join barrier (eligible_tool_batch={join_batch_eligible}, root_run_cancellation_attached={root_run_cancellation_attached})"
+                ),
             );
         }
         if completion_mode == AgentInvocationMode::JoinBeforeFinal
@@ -122,6 +129,7 @@ impl AgentToolRuntime {
             }
         };
         let authority = delegation_context.authority.clone();
+        let invocation_source = invocation_source_for_authority(&authority);
         let effective_multi_agent_mode = match self.enforce_effective_multi_agent_mode(session) {
             Ok(mode) => mode,
             Err(error) => {
@@ -166,6 +174,17 @@ impl AgentToolRuntime {
                 }
             };
             let role = resolved_profile.execution_role;
+            if spawn
+                .isolation
+                .is_some_and(|isolation| isolation != SpawnIsolation::SharedReadOnly)
+            {
+                return batch_spawn_error(
+                    call,
+                    ToolErrorKind::Unsupported,
+                    Some(&request_key),
+                    "spawn_agents only supports shared_read_only participants; use individual spawn_agent calls for changeset_only or worktree isolation".to_owned(),
+                );
+            }
             if profile_uses_changeset_only_write(role, &resolved_profile) {
                 return batch_spawn_error(
                     call,
@@ -178,7 +197,7 @@ impl AgentToolRuntime {
                 &self.base_registry,
                 &self.root_config,
                 role,
-                false,
+                SpawnIsolation::SharedReadOnly,
                 resolved_profile.profile.tool_scope.clone(),
             );
             if let Err(error) = admit_model_agent_spawn(
@@ -214,10 +233,16 @@ impl AgentToolRuntime {
                     );
                 }
             };
+            let cancellation_owner = (completion_mode == AgentInvocationMode::Background)
+                .then(RunCancellationOwner::new);
+            let invocation_cancellation = cancellation_owner
+                .as_ref()
+                .map(RunCancellationOwner::handle)
+                .unwrap_or_else(|| root_cancellation.clone());
             let grant = match mint_agent_invocation_grant(
                 delegation_context.clone(),
                 &root_logical_run_id,
-                &root_cancellation,
+                &invocation_cancellation,
                 spawn.profile_id.clone(),
                 role,
                 TaskIsolationMode::SharedReadOnly,
@@ -230,7 +255,7 @@ impl AgentToolRuntime {
                     &grant,
                     &delegation_context,
                     &root_logical_run_id,
-                    &root_cancellation,
+                    &invocation_cancellation,
                     &spawn.profile_id,
                     role,
                     TaskIsolationMode::SharedReadOnly,
@@ -255,7 +280,7 @@ impl AgentToolRuntime {
                 thread_id.clone(),
                 spawn.profile_id.clone(),
                 completion_mode,
-                AgentInvocationSource::Chat,
+                invocation_source,
                 &spawn.objective,
             ) {
                 Ok(admission) => admission,
@@ -359,7 +384,7 @@ impl AgentToolRuntime {
                 workspace_root: options.workspace_root.clone(),
                 provider_capabilities: child_capabilities,
                 invocation_mode: completion_mode,
-                invocation_source: AgentInvocationSource::Chat,
+                invocation_source,
                 invocation_grant: grant,
                 delegation_admission,
                 display_name_hint: spawn.display_name_hint,
@@ -387,6 +412,7 @@ impl AgentToolRuntime {
                 child_session,
                 child_input,
                 child_options,
+                cancellation_owner,
             });
         }
 
@@ -397,6 +423,12 @@ impl AgentToolRuntime {
         let reservation = match self.supervisor.reserve_chat_child_batch(&starts) {
             Ok(reservation) => reservation,
             Err(error) => {
+                if let Some(denial) = error
+                    .downcast_ref::<crate::agent_supervisor::AgentReservationError>()
+                    .and_then(crate::agent_supervisor::AgentReservationError::budget_denial)
+                {
+                    return agent_budget_denied_tool_result(call, denial);
+                }
                 return batch_spawn_error(
                     call,
                     ToolErrorKind::PermissionDenied,
@@ -439,6 +471,7 @@ impl AgentToolRuntime {
                 child_session: member.child_session,
                 child_input: member.child_input,
                 child_options: member.child_options,
+                cancellation_owner: member.cancellation_owner,
             });
         }
         reservation.commit();
@@ -584,6 +617,7 @@ impl AgentToolRuntime {
                 child_session,
                 child_input,
                 child_options,
+                cancellation_owner,
             } = member;
             let mailbox_rx = child_thread
                 .mailbox_rx
@@ -591,7 +625,8 @@ impl AgentToolRuntime {
                 .expect("background batch mailboxes were preflighted");
             let thread_id = child_thread.thread_id.clone();
             let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
-            let cancellation_owner = RunCancellationOwner::new();
+            let cancellation_owner = cancellation_owner
+                .expect("background batch members create cancellation owners before grant minting");
             let cancellation_handle = cancellation_owner.handle();
             let cancellation_task_guard = cancellation_handle
                 .register_task()
@@ -615,6 +650,7 @@ impl AgentToolRuntime {
                         child_input,
                         child_options,
                         mailbox_rx,
+                        false,
                         event_sink,
                     )
                     .await
@@ -624,7 +660,12 @@ impl AgentToolRuntime {
                 BackgroundChatAgentHandle {
                     thread: thread_record,
                     handle,
+                    collection_supervisor: self
+                        .supervisor
+                        .clone()
+                        .with_background_runs(AgentToolBackgroundRuns::default()),
                     cancellation_owner,
+                    write_owner: None,
                 },
             ));
             start_gates.push(start_tx);

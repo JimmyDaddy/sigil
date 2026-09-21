@@ -325,6 +325,7 @@ pub struct IsolatedWorkspaceCleanupReconciliation {
     pub inspected: usize,
     pub removed: usize,
     pub already_missing: usize,
+    pub retained: usize,
     pub failed: usize,
     pub failures: Vec<String>,
 }
@@ -733,6 +734,21 @@ pub async fn reconcile_isolated_workspace_cleanup(
     session: &mut Session,
     parent_workspace_root: &Path,
 ) -> Result<IsolatedWorkspaceCleanupReconciliation> {
+    reconcile_isolated_workspace_cleanup_excluding(
+        session,
+        parent_workspace_root,
+        &std::collections::BTreeSet::new(),
+    )
+    .await
+}
+
+/// Reconciles durable cleanup receipts without removing worktrees still owned by live background
+/// child runs on this session attachment.
+pub async fn reconcile_isolated_workspace_cleanup_excluding(
+    session: &mut Session,
+    parent_workspace_root: &Path,
+    live_isolated_workspace_ids: &std::collections::BTreeSet<String>,
+) -> Result<IsolatedWorkspaceCleanupReconciliation> {
     let parent_workspace_root = canonical_directory(parent_workspace_root)
         .await
         .context("failed to resolve parent workspace for isolated cleanup reconciliation")?;
@@ -747,6 +763,10 @@ pub async fn reconcile_isolated_workspace_cleanup(
 
     for state in inventory {
         report.inspected += 1;
+        if live_isolated_workspace_ids.contains(&state.isolated_workspace_id) {
+            report.retained += 1;
+            continue;
+        }
         let binding = state
             .prepared
             .as_ref()
@@ -797,6 +817,10 @@ pub async fn reconcile_isolated_workspace_cleanup(
             Ok(IsolatedWorkspaceCleanupStatus::AlreadyMissing) => {
                 report.already_missing += 1;
                 IsolatedWorkspaceCleanupStatus::AlreadyMissing
+            }
+            Ok(IsolatedWorkspaceCleanupStatus::Retained) => {
+                report.retained += 1;
+                IsolatedWorkspaceCleanupStatus::Retained
             }
             Ok(status) => {
                 report.failed += 1;
@@ -1629,15 +1653,6 @@ async fn validate_git_repository_root(parent_workspace_root: &Path) -> Result<()
         );
     }
     Ok(())
-}
-
-pub(crate) async fn git_worktree_planning_is_available(parent_workspace_root: &Path) -> bool {
-    let Ok(parent_workspace_root) = canonical_directory(parent_workspace_root).await else {
-        return false;
-    };
-    validate_git_repository_root(&parent_workspace_root)
-        .await
-        .is_ok()
 }
 
 async fn validate_clean_parent(parent_workspace_root: &Path) -> Result<()> {

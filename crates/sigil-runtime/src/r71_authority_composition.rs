@@ -31,8 +31,9 @@ mod bootstrap_predecessor;
 use bootstrap_predecessor::{ExistingBootPointerV1, load_validated_boot_pointer};
 
 // This durable workspace ceiling is product policy, independent of enabled writer grants:
-// two 256 MiB artifact families plus ten 1 MiB state grants. Disabling memory removes its
-// grants, not the workspace policy. The sole older Core policy omitted its two 1 MiB grants.
+// preserve the historical 522 MiB cap when RuntimeState grants share a 512 MiB class ceiling.
+// Disabling memory removes its grants, not the workspace policy. The sole older Core policy
+// used a 520 MiB workspace cap.
 const MANAGED_STORAGE_WORKSPACE_CAP_V1: u64 = 522 * 1024 * 1024;
 const PREVIOUS_CORE_STORAGE_WORKSPACE_CAP_V1: u64 = 520 * 1024 * 1024;
 
@@ -976,7 +977,7 @@ fn candidate_authority_config_generation(
         })?,
         None => 1,
     };
-    if let Some(ExistingBootPointerV1::Schema1(predecessor)) = predecessor {
+    if let Some(ExistingBootPointerV1::Historical(predecessor)) = predecessor {
         let successor = predecessor
             .application_generation()
             .checked_add(1)
@@ -1272,6 +1273,8 @@ fn selected_storage_channels(selected: &RuntimeCompositionConfig) -> Vec<Storage
         Ch::AdapterDurableState,
         Ch::AdapterEgressDisclosure,
         Ch::AdapterIdempotencyLedger,
+        Ch::ApplicationCommandIndex,
+        Ch::ApplicationControlRecovery,
     ]
     .into_iter()
     .filter(|channel| *channel != Ch::DurableMemory || selected.allows(OptionalCapability::Memory))

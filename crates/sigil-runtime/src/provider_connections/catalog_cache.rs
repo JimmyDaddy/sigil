@@ -23,7 +23,6 @@ const CATALOG_SWEEP_MAX_ENTRIES: usize = 8_192;
 const CATALOG_ATOMIC_TEMP_GRACE_SECS: u64 = 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CatalogCacheWire {
     version: u32,
     connection_id: String,

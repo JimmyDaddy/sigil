@@ -29,23 +29,15 @@ impl Provider for DirectExecutionProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let stage = self.0.fetch_add(1, Ordering::SeqCst);
         let (name, args) = match stage {
-            0 => ("bash", serde_json::json!({"command": "false"})),
+            0 => ("exec_command", serde_json::json!({"command": "false"})),
             1..=8 => ("read_file", serde_json::json!({"path": "observation.txt"})),
-            9 => ("bash", serde_json::json!({"command": "true"})),
+            9 => ("exec_command", serde_json::json!({"command": "true"})),
             10 => {
                 return Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
                     &request,
                     "Inspection and follow-up check complete",
                     "direct-execution-completion",
                 ))));
-            }
-            11 => {
-                return Ok(Box::pin(stream::iter(vec![
-                    Ok(ProviderChunk::TextDelta(
-                        "Inspection and follow-up check complete".to_owned(),
-                    )),
-                    Ok(ProviderChunk::Done),
-                ])));
             }
             _ => anyhow::bail!("unexpected direct execution request {stage}"),
         };
@@ -121,6 +113,8 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
     let task_id = TaskId::new("direct-execution-task")?;
     let objective = "Inspect the requested files and finish";
     let parent_session_ref = prepared.execution.parent_session_ref.clone();
+    let admission =
+        crate::direct_plan_fixture::append(&mut prepared.execution.session, &task_id, objective)?;
     prepared.execution.session.append_controls(vec![
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
@@ -130,15 +124,7 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
             status: TaskRunStatus::Paused,
             reason: Some("approved Direct Task ready".to_owned()),
         }),
-        ControlEntry::TaskDirectExecutionAdmittedV1(
-            sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
-                task_id.clone(),
-                objective,
-                sigil_kernel::PlanId::new("direct-execution-plan")?,
-                format!("sha256:{}", "c".repeat(64)),
-                1,
-            ),
-        ),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
     ])?;
     drop(prepared);
     let continuation = |run: &str| ApplicationTaskContinuationRequest {
@@ -212,8 +198,8 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        12,
-        "the completion claim adds one final provider turn after the ten tool turns"
+        11,
+        "ten business-tool turns are followed by one final answer"
     );
     let entries = JsonlSessionStore::read_entries(&session_path)?;
     let results: Vec<_> = entries
@@ -223,12 +209,36 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 11);
+    assert_eq!(results.len(), 10);
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.tool_name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "exec_command",
+            "read_file",
+            "read_file",
+            "read_file",
+            "read_file",
+            "read_file",
+            "read_file",
+            "read_file",
+            "read_file",
+            "exec_command"
+        ],
+        "all ten business-tool receipts survive without a completion-claim tool"
+    );
     assert!(results[0].facts.error.is_some());
     assert!(
         results[1..]
             .iter()
-            .all(|result| result.facts.error.is_none())
+            .all(|result| result.facts.error.is_none()),
+        "unexpected execution errors: {:?}",
+        results[1..]
+            .iter()
+            .map(|result| &result.facts.error)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         Session::load_from_store(

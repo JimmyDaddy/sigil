@@ -96,3 +96,7 @@ fn load_deepseek_debug_provider(root_config: &RootConfig) -> Result<DeepSeekProv
 #[cfg(test)]
 #[path = "tests/provider_debug_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/tool_schema_conformance_tests.rs"]
+mod tool_schema_conformance_tests;

@@ -32,6 +32,19 @@ pub(super) fn tool_contracts_are_safe_readonly_for_auto_spawn(
         })
 }
 
+pub(super) fn invocation_source_for_authority(
+    authority: &DelegationAuthority,
+) -> AgentInvocationSource {
+    match authority {
+        DelegationAuthority::AcceptedTaskPlan { .. } | DelegationAuthority::DirectTask { .. } => {
+            AgentInvocationSource::Task
+        }
+        DelegationAuthority::UserExplicit
+        | DelegationAuthority::ModelProactive
+        | DelegationAuthority::SystemRecovery => AgentInvocationSource::Chat,
+    }
+}
+
 pub(crate) fn tool_registry_is_safe_readonly_for_auto_spawn(registry: &ToolRegistry) -> bool {
     tool_contracts_are_safe_readonly_for_auto_spawn(&registry.contracts())
 }
@@ -48,7 +61,7 @@ pub(super) fn admit_model_agent_spawn(
         ),
         DelegationAuthority::UserExplicit
         | DelegationAuthority::AcceptedTaskPlan { .. }
-        | DelegationAuthority::TaskOrchestrator { .. }
+        | DelegationAuthority::DirectTask { .. }
         | DelegationAuthority::ModelProactive => {}
     }
     match mode {
@@ -60,7 +73,7 @@ pub(super) fn admit_model_agent_spawn(
                 authority,
                 DelegationAuthority::UserExplicit
                     | DelegationAuthority::AcceptedTaskPlan { .. }
-                    | DelegationAuthority::TaskOrchestrator { .. }
+                    | DelegationAuthority::DirectTask { .. }
             ) {
                 return Ok(());
             }
@@ -210,6 +223,7 @@ pub(super) fn apply_child_permission_constraints(
     }
     child.permission_config = parent.permission_config.clone();
     child.permission_context = parent.permission_context.clone();
+    child.tool_authority = parent.tool_authority.clone();
     child
         .permission_context
         .delegated_policy_constraints
@@ -236,6 +250,7 @@ pub(super) fn apply_recovered_readonly_child_constraints(
     readonly.external_directory.rules.clear();
     child.permission_config = parent.permission_config.clone();
     child.permission_context = parent.permission_context.clone();
+    child.tool_authority = parent.tool_authority.clone();
     child
         .permission_context
         .delegated_policy_constraints

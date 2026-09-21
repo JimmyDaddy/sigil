@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -76,8 +76,7 @@ impl Tool for WebSearchTool {
                     "max_results": { "type": "integer", "minimum": 1, "maximum": 10 }
                 },
                 "required": ["query"],
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Search,
             access: ToolAccess::Read,
             network_effect: Some(NetworkEffect::Read),
@@ -137,6 +136,37 @@ impl Tool for WebSearchTool {
         semantic_scope
             .qualifiers
             .insert("route".to_owned(), route.to_owned());
+        let (endpoint, transport, route_identity) = if let Some(binding) =
+            &self.root_config.web.search_mcp
+        {
+            let server = self
+                .root_config
+                .mcp_servers
+                .iter()
+                .find(|server| server.name == binding.server)
+                .ok_or_else(|| anyhow!("configured search server is missing"))?;
+            let identity = crate::network_grant_binding::configured_search_route_identity(server)?;
+            let endpoint = server
+                .streamable_http()
+                .map(|remote| remote.url.clone())
+                .unwrap_or_else(|| format!("mcp-stdio:{}", server.name));
+            (endpoint, server.transport_name(), identity)
+        } else {
+            (
+                BUNDLED_SEARCH_ENDPOINT.to_owned(),
+                "streamable_http",
+                json!({
+                    "profile": crate::stable_mcp_search::bundled_profile_fingerprint()
+                }),
+            )
+        };
+        let mut bindings = crate::network_grant_binding::network_grant_bindings(
+            &self.root_config,
+            &endpoint,
+            transport,
+            &route_identity,
+        )?;
+        bindings.insert("planner".to_owned(), "websearch_v2".to_owned());
         Ok(ToolPermissionPlanDraft {
             access: ToolAccess::Read,
             operation: ToolOperation::NetworkRequest,
@@ -147,10 +177,7 @@ impl Tool for WebSearchTool {
             semantic_scope: Some(semantic_scope),
             tool_default_mode,
             managed_file_access: None,
-            analysis_bindings: BTreeMap::from([
-                ("planner".to_owned(), "websearch_v2".to_owned()),
-                ("network_route".to_owned(), route.to_owned()),
-            ]),
+            analysis_bindings: bindings,
             safe_summary: ToolPermissionSummary {
                 title: "Search the web".to_owned(),
                 detail: "Send one bounded query to the configured search service".to_owned(),
@@ -188,6 +215,17 @@ impl Tool for WebSearchTool {
                 ToolErrorKind::PermissionDenied,
                 "web search requires current network authorization",
             ));
+        }
+        if let Some(approved) = ctx.prepared_permission_plan() {
+            let current = self.permission_plan(&ctx, &args)?;
+            if current.analysis_bindings != approved.analysis_bindings {
+                return Ok(ToolResult::error(
+                    call_id,
+                    "websearch",
+                    ToolErrorKind::PermissionDenied,
+                    "network endpoint, route or policy changed after approval",
+                ));
+            }
         }
         let raw_query = args
             .get("query")

@@ -191,6 +191,7 @@ impl AgentToolRuntime {
                     input,
                     child_options,
                     mailbox_rx,
+                    false,
                     event_sink,
                 )
                 .await
@@ -200,7 +201,12 @@ impl AgentToolRuntime {
             BackgroundChatAgentHandle {
                 thread: thread_record,
                 handle,
+                collection_supervisor: self
+                    .supervisor
+                    .clone()
+                    .with_background_runs(AgentToolBackgroundRuns::default()),
                 cancellation_owner,
+                write_owner: None,
             },
         ) {
             drop(start_tx);

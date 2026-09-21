@@ -239,7 +239,7 @@ pub fn write_isolated_model_eval_config(
     config.skills.user_agents = false;
     config.compaction.enabled = false;
     config.code_intelligence.enabled = false;
-    config.task.enabled = fixture.orchestration.is_some();
+    config.task.enabled = fixture.orchestration.is_some() || fixture.agent_delegation;
     if fixture.orchestration.is_some() {
         config.task =
             crate::orchestration_rollout::orchestration_rollout_task_candidate(&config.task);
@@ -247,6 +247,9 @@ pub fn write_isolated_model_eval_config(
         // Deterministic eval runs must never auto-route: an unqualified fresh config now defaults
         // to `Auto`, so pin the isolated policy explicitly.
         config.task.routing_policy = sigil_kernel::TaskRoutingPolicy::Manual;
+        if fixture.agent_delegation {
+            config.task.multi_agent_mode = sigil_kernel::MultiAgentMode::Proactive;
+        }
     }
     config.web.enabled = false;
     config.web.network_mode = NetworkPolicy::Deny;
@@ -287,7 +290,7 @@ pub fn write_isolated_model_eval_config(
         || !reloaded_connections.issues.is_empty()
         || !reloaded.mcp_servers.is_empty()
         || reloaded.web.enabled
-        || reloaded.task.enabled != fixture.orchestration.is_some()
+        || reloaded.task.enabled != (fixture.orchestration.is_some() || fixture.agent_delegation)
     {
         bail!("isolated model eval config did not round-trip its safety boundary");
     }
@@ -296,6 +299,14 @@ pub fn write_isolated_model_eval_config(
             || reloaded.task.multi_agent_mode != sigil_kernel::MultiAgentMode::Proactive)
     {
         bail!("isolated orchestration eval config did not retain the rollout task policy");
+    }
+    if fixture.agent_delegation
+        && (reloaded.task.routing_policy != sigil_kernel::TaskRoutingPolicy::Manual
+            || reloaded.task.multi_agent_mode != sigil_kernel::MultiAgentMode::Proactive)
+    {
+        bail!(
+            "isolated agent delegation eval config did not retain the explicit delegation policy"
+        );
     }
     sync_directory(run_root)?;
 
@@ -424,7 +435,7 @@ fn model_eval_run_services(
     fixture: &MaterializedModelEvalFixture,
     services: &ApplicationRunServices,
 ) -> ApplicationRunServices {
-    if fixture.orchestration.is_none() {
+    if fixture.orchestration.is_none() && !fixture.agent_delegation {
         return services.clone();
     }
     services.clone().with_task_role_provider_builder(Arc::new(
@@ -621,8 +632,8 @@ fn validate_orchestration_route_contract(
             contract.routing_prompt_digest.as_str(),
         ),
         (
-            "planner_prompt_digest",
-            contract.planner_prompt_digest.as_str(),
+            "direct_task_prompt_digest",
+            contract.direct_task_prompt_digest.as_str(),
         ),
         (
             "system_prompt_digest",

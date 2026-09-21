@@ -66,6 +66,7 @@ impl EventHandler for ChatChildEventHandler<'_> {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         match event {
             RunEvent::ToolApprovalRequested {
+                display_call_id,
                 approval_identity,
                 effects,
                 analysis,
@@ -89,6 +90,7 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 command_permission_matches,
                 preview,
             } => self.inner.handle(RunEvent::ToolApprovalRequested {
+                display_call_id,
                 approval_identity,
                 effects,
                 analysis,
@@ -113,11 +115,13 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 preview,
             }),
             RunEvent::ToolApprovalResolved {
+                display_call_id,
                 call_id,
                 approval_request_id,
                 approved,
                 reason,
             } => self.inner.handle(RunEvent::ToolApprovalResolved {
+                display_call_id,
                 call_id,
                 approval_request_id,
                 approved,

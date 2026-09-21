@@ -44,7 +44,6 @@ const EXCLUDED_CATEGORIES: &[&str] = &[
 
 /// Build identity supplied by the final `sigil` binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportBuildInfo {
     pub version: String,
     pub commit: String,
@@ -88,7 +87,6 @@ pub enum SupportTerminalFamily {
 
 /// Non-secret platform facts included in a support report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportEnvironmentV1 {
     pub os: String,
     pub architecture: String,
@@ -142,7 +140,6 @@ impl From<DoctorStatus> for SupportDoctorStatus {
 
 /// Count summary kept separate from human-readable doctor details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportDoctorSummaryV1 {
     pub overall_status: SupportDoctorStatus,
     pub ok: usize,
@@ -152,7 +149,6 @@ pub struct SupportDoctorSummaryV1 {
 
 /// One allowlisted and redacted doctor check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportDoctorCheckV1 {
     pub status: SupportDoctorStatus,
     pub name: String,
@@ -162,7 +158,6 @@ pub struct SupportDoctorCheckV1 {
 
 /// Explicit privacy projection included in every report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportPrivacyV1 {
     pub included: Vec<String>,
     pub excluded: Vec<String>,
@@ -171,7 +166,6 @@ pub struct SupportPrivacyV1 {
 
 /// Frozen JSON contract emitted by `sigil doctor --output json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DoctorSupportReportV1 {
     pub schema_version: u32,
     pub generated_at_unix_ms: u64,
@@ -214,7 +208,6 @@ pub enum SupportRunPhase {
 
 /// Bounded session metadata. Conversation and session-log content are excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportSessionSummaryV1 {
     session_id: String,
     durable_entry_count: usize,
@@ -309,7 +302,6 @@ pub fn project_support_session_summary_v1(
 
 /// Frozen private support bundle exported only after explicit TUI confirmation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SupportBundleV1 {
     pub schema_version: u32,
     pub doctor: DoctorSupportReportV1,

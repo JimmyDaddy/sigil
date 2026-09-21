@@ -253,7 +253,7 @@ fn core_boot_keeps_real_authority_and_omits_unselected_owners() {
         boot.cutover().manifest().composition,
         RuntimeCompositionConfig::core()
     );
-    assert_eq!(boot.cutover().manifest().mandatory_readiness.len(), 13);
+    assert_eq!(boot.cutover().manifest().mandatory_readiness.len(), 14);
     let composed = boot.composition();
     assert!(composed.extension_execution.is_none());
     assert!(composed.services.extension_execution.is_none());
@@ -311,7 +311,7 @@ fn core_boot_keeps_real_authority_and_omits_unselected_owners() {
 #[test]
 fn boot_freezes_module_enable_flags_before_optional_authority_composition() {
     let _environment_guard = crate::test_env::lock();
-    for (profile, expected_probes) in [("core", 13), ("standard", 17)] {
+    for (profile, expected_probes) in [("core", 14), ("standard", 17)] {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("sigil.toml");
         write_r71_boot_config(&config);
@@ -327,6 +327,9 @@ fn boot_freezes_module_enable_flags_before_optional_authority_composition() {
         assert!(boot.cutover().is_current_schema_ready());
         let manifest = boot.cutover().manifest();
         assert_eq!(manifest.mandatory_readiness.len(), expected_probes);
+        assert!(manifest.mandatory_readiness.iter().any(|probe| {
+            probe.adapter == MandatoryAdapterKindV1::ExecutionTerminal && probe.passed
+        }));
         assert_eq!(
             manifest.composition.profile,
             sigil_kernel::RuntimeCompositionProfile::Core,
@@ -386,7 +389,10 @@ fn core_writable_memory_selects_its_owner_when_workspace_memory_is_disabled() {
     let boot = boot_current_schema(&config, dir.path()).expect("writable memory boot");
     let manifest = boot.cutover().manifest();
     assert!(boot.cutover().is_current_schema_ready());
-    assert_eq!(manifest.mandatory_readiness.len(), 14);
+    assert_eq!(manifest.mandatory_readiness.len(), 15);
+    assert!(manifest.mandatory_readiness.iter().any(|probe| {
+        probe.adapter == MandatoryAdapterKindV1::ExecutionTerminal && probe.passed
+    }));
     assert!(manifest.composition.allows(OptionalCapability::Memory));
     assert!(
         manifest
@@ -512,6 +518,7 @@ async fn r71_current_boot_command_route_starts_terminal_with_durable_inventory()
         .composition()
         .command_execution
         .start_persistent(ManagedTerminalStartRequestV1 {
+            max_runtime_secs: None,
             program,
             args,
             cwd: boot.workspace_root().to_path_buf(),

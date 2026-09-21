@@ -869,7 +869,7 @@ async fn durable_integration_review_rebuilds_only_the_exact_reviewed_candidate()
         projection
             .plans
             .get(&plan.plan_id)
-            .and_then(|state| state.synthesis_ready_attempt()),
+            .and_then(|state| state.parent_verification_ready_attempt()),
         accepted.promotion.record.attempt_id.as_ref()
     );
     assert!(sigil_kernel::task_integration_review_product(session.entries()).is_none());
@@ -1450,12 +1450,15 @@ async fn authoritative_parent_checks_pass_on_exact_promoted_workspace_snapshot()
         .get(&fixture.plan_id)
         .expect("integration plan projection");
     assert!(!state.inconsistent);
-    assert_eq!(state.synthesis_ready_attempt(), Some(&fixture.attempt_id));
+    assert_eq!(
+        state.parent_verification_ready_attempt(),
+        Some(&fixture.attempt_id)
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn authoritative_parent_no_check_policy_is_exactly_not_applicable_and_synthesis_ready()
+async fn authoritative_parent_no_check_policy_is_exactly_not_applicable_and_parent_ready()
 -> Result<()> {
     let mut fixture = promoted_workspace_no_check_fixture().await?;
     let promoted_snapshot_id = fixture
@@ -1503,7 +1506,10 @@ async fn authoritative_parent_no_check_policy_is_exactly_not_applicable_and_synt
         .get(&fixture.plan_id)
         .expect("integration plan projection");
     assert!(!state.inconsistent);
-    assert_eq!(state.synthesis_ready_attempt(), Some(&fixture.attempt_id));
+    assert_eq!(
+        state.parent_verification_ready_attempt(),
+        Some(&fixture.attempt_id)
+    );
     Ok(())
 }
 
@@ -1556,7 +1562,7 @@ async fn authoritative_parent_checks_detect_snapshot_drift_before_execution() ->
         .get(&fixture.plan_id)
         .expect("integration plan projection");
     assert!(!state.inconsistent);
-    assert!(state.synthesis_ready_attempt().is_none());
+    assert!(state.parent_verification_ready_attempt().is_none());
     Ok(())
 }
 
@@ -1604,7 +1610,7 @@ async fn failed_authoritative_parent_check_never_opens_synthesis_gate() -> Resul
             .plans
             .get(&fixture.plan_id)
             .expect("integration plan projection")
-            .synthesis_ready_attempt()
+            .parent_verification_ready_attempt()
             .is_none()
     );
     Ok(())
@@ -1665,7 +1671,7 @@ async fn git_ref_parent_checks_use_retained_authoritative_checkout() -> Result<(
         projection
             .plans
             .get(&fixture.plan_id)
-            .and_then(|state| state.synthesis_ready_attempt()),
+            .and_then(|state| state.parent_verification_ready_attempt()),
         Some(&fixture.attempt_id)
     );
     Ok(())

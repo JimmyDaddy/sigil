@@ -3,8 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
 use sigil_kernel::{
     AgentBatchId, AgentDelegationAdmissionEntry, AgentInvocationGrant, AgentInvocationMode,
     AgentInvocationSource, AgentProfileId, AgentRole, AgentRouteId, AgentRunAttemptId,
-    AgentRunInput, AgentThreadId, ProviderCapabilities, SessionRef, TaskId, TaskIsolationMode,
-    TaskStepSpec,
+    AgentThreadId, ProviderCapabilities, SessionRef, TaskId, TaskIsolationMode,
 };
 
 /// Result of cancelling only the foreground parent run.
@@ -39,39 +38,6 @@ pub(super) struct ActiveAgentThread {
 pub struct AgentMailboxMessage {
     pub route_id: AgentRouteId,
     pub prompt: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentTaskChildStart {
-    pub task_id: TaskId,
-    pub parent_thread_id: AgentThreadId,
-    pub parent_depth: usize,
-    pub batch_id: Option<AgentBatchId>,
-    pub batch_member_key: Option<AgentRouteId>,
-    pub parent_session_ref: SessionRef,
-    pub plan_version: u32,
-    pub step: TaskStepSpec,
-    pub child_task_id: TaskId,
-    pub child_session_ref: SessionRef,
-    pub child_input: AgentRunInput,
-    pub objective: String,
-    pub workspace_root: PathBuf,
-    pub provider_capabilities: ProviderCapabilities,
-    pub role: AgentRole,
-    pub invocation_mode: AgentInvocationMode,
-    pub invocation_source: AgentInvocationSource,
-    pub invocation_grant: AgentInvocationGrant,
-    pub delegation_admission: AgentDelegationAdmissionEntry,
-    /// Exact durable worktree identity required before a write-capable Worktree child can start.
-    pub isolated_workspace_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentTaskChildThread {
-    pub thread_id: AgentThreadId,
-    pub attempt_id: AgentRunAttemptId,
-    pub profile_id: AgentProfileId,
-    pub parent_thread_id: AgentThreadId,
 }
 
 #[derive(Debug, Clone)]

@@ -634,7 +634,7 @@ fn live_run_update_is_bounded_and_separate_from_durable_projection() {
         schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
         session_id: "session".to_owned(),
         run_id: "run".to_owned(),
-        attempt_id: "physical-attempt-1".to_owned(),
+        attempt_id: Some("physical-attempt-1".to_owned()),
         slot_id: "assistant-text".to_owned(),
         live_revision: 1,
         base_durable_sequence: 7,
@@ -656,4 +656,36 @@ fn live_run_update_is_bounded_and_separate_from_durable_projection() {
         .validate()
         .is_err()
     );
+}
+
+#[test]
+fn tool_live_preview_requires_execution_owner_instead_of_provider_attempt() {
+    let mut update = LiveRunUpdate {
+        schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+        session_id: "session".into(),
+        run_id: "run".into(),
+        attempt_id: None,
+        slot_id: "execution".into(),
+        live_revision: 1,
+        base_durable_sequence: 3,
+        kind: LiveRunUpdateKind::ToolProgress,
+        preview: SafeText::new("running").expect("safe preview"),
+        tool_progress: Some(LiveToolProgress {
+            execution_id: "execution".into(),
+            call_id: "call".into(),
+            tool_name: "exec_command".into(),
+            status: "running".into(),
+            preview_is_output: false,
+            started_at_ms: None,
+            total_bytes: Some(0),
+            updated_at_ms: None,
+        }),
+        truncated: false,
+    };
+    update.validate().expect("execution-owned progress");
+    update.attempt_id = Some("unrelated-provider".into());
+    assert!(update.validate().is_err());
+    update.attempt_id = None;
+    update.slot_id = "call".into();
+    assert!(update.validate().is_err());
 }

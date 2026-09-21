@@ -39,9 +39,9 @@ impl Provider for FiveBatchProvider {
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let stage = self.0.fetch_add(1, Ordering::SeqCst);
-        let (name, args) = match stage {
+        let (name, mut args) = match stage {
             0 => (
-                "bash",
+                "exec_command",
                 serde_json::json!({"command":"git commit -m 'batch 3'"}),
             ),
             1 => (
@@ -49,11 +49,11 @@ impl Provider for FiveBatchProvider {
                 serde_json::json!({"path":"crates/delivery/src/tests.rs", "content":"#[test]\nfn increment_is_correct() { assert_eq!(super::increment(4), 5); }\n"}),
             ),
             2 => (
-                "bash",
+                "exec_command",
                 serde_json::json!({"command":"rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests && .git/delivery-tests --exact tests::increment_is_correct && git add crates/delivery/src/tests.rs"}),
             ),
             3 => (
-                "bash",
+                "exec_command",
                 serde_json::json!({"command":"git commit -m 'batch 3'"}),
             ),
             4 => (
@@ -61,7 +61,7 @@ impl Provider for FiveBatchProvider {
                 serde_json::json!({"path":"batch-four.md", "content":"Targeted package test passed.\n"}),
             ),
             5 => (
-                "bash",
+                "exec_command",
                 serde_json::json!({"command":"git add batch-four.md && git commit -m 'batch 4'"}),
             ),
             6 => (
@@ -69,7 +69,7 @@ impl Provider for FiveBatchProvider {
                 serde_json::json!({"path":"batch-five.md", "content":"All five batches delivered.\n"}),
             ),
             7 => (
-                "bash",
+                "exec_command",
                 serde_json::json!({"command":"git add batch-five.md && git commit -m 'batch 5'"}),
             ),
             8 => {
@@ -86,16 +86,11 @@ impl Provider for FiveBatchProvider {
                     "five-batch-completion",
                 ))));
             }
-            9 => {
-                return Ok(Box::pin(stream::iter(vec![
-                    Ok(ProviderChunk::TextDelta(
-                        "Five batches committed; package test passed.".to_owned(),
-                    )),
-                    Ok(ProviderChunk::Done),
-                ])));
-            }
             _ => anyhow::bail!("unexpected provider stage {stage}"),
         };
+        if name == "exec_command" {
+            args["yield_time_ms"] = serde_json::json!(60_000);
+        }
         let id = format!("five-batch-{stage}");
         let args_json = args.to_string();
         Ok(Box::pin(stream::iter(vec![
@@ -207,6 +202,8 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
     let objective =
         "Finish five batches, preserving the first two commits and fixing missing package tests";
     let parent_session_ref = prepared.execution.parent_session_ref.clone();
+    let admission =
+        crate::direct_plan_fixture::append(&mut prepared.execution.session, &task_id, objective)?;
     prepared.execution.session.append_controls(vec![
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
@@ -216,15 +213,7 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
             status: TaskRunStatus::Paused,
             reason: Some("delivery ready to resume".to_owned()),
         }),
-        ControlEntry::TaskDirectExecutionAdmittedV1(
-            sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
-                task_id.clone(),
-                objective,
-                sigil_kernel::PlanId::new("five-batch-approved")?,
-                format!("sha256:{}", "a".repeat(64)),
-                1,
-            ),
-        ),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
     ])?;
     drop(prepared);
     for attempt in 0..2 {
@@ -264,7 +253,11 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
             assert_eq!(output.task_status, TaskRunStatus::Completed);
         }
     }
-    assert_eq!(stages.load(Ordering::SeqCst), 10);
+    assert_eq!(
+        stages.load(Ordering::SeqCst),
+        9,
+        "eight business-tool turns and one final answer finish all five batches"
+    );
     let history = git(workspace, &["log", "--reverse", "--format=%s"])?;
     assert_eq!(
         history.lines().collect::<Vec<_>>(),

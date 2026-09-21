@@ -11,11 +11,8 @@ use sigil_kernel::{
     AgentRole, ORCHESTRATION_EVAL_MIN_CHAT_CASES, ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES,
     ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES, OrchestrationEvalCaseClass, RootConfig, ToolRegistry,
     ToolRegistryScope, ToolSpec, WorkspaceTrust, changeset_only_child_contract_prompt,
-    continue_without_task_planning_tool_spec, conversation_route_routing_contract_material,
-    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
-    runtime_context_v2_contract_material, task_participant_finalization_prompt_contract_material,
-    task_participant_system_prompt_contract_material, task_plan_update_tool_spec,
-    task_planner_prompt_contract_material,
+    plan_review_parent_context_contract_material, plan_review_system_prompt_contract_material,
+    runtime_context_v2_contract_material, task_direct_execution_system_prompt_contract_material,
 };
 use sigil_provider_deepseek::{DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DeepSeekProviderConfig};
 
@@ -25,11 +22,10 @@ use super::{
     sha256_digest, sync_directory, write_isolated_model_eval_config,
 };
 use crate::{
-    AgentProfileRegistry, MAX_TASK_DISCOVERY_PROBES, ORCHESTRATION_RUNTIME_BUILD_ID,
-    agent_supervisor::{planner_tools_with_discovery, task_discovery_system_prompt},
-    application_run::constrain_application_tool_registry,
-    build_role_tool_registry, build_tool_surface_without_eager_mcp_with_workspace_trust,
-    provider_capabilities_for_name, provider_config_key, unsupported_mcp_elicitation_handler,
+    AgentProfileRegistry, ORCHESTRATION_RUNTIME_BUILD_ID,
+    application_run::constrain_application_tool_registry, build_role_tool_registry,
+    build_tool_surface_without_eager_mcp_with_workspace_trust, provider_capabilities_for_name,
+    provider_config_key, unsupported_mcp_elicitation_handler,
     unsupported_mcp_runtime_event_handler,
 };
 
@@ -132,26 +128,29 @@ pub fn build_model_eval_orchestration_route_contract(
     let routing_prompt_digest = digest_value(
         b"sigil-orchestration-routing-prompt-v1\0",
         &json!({
-            "system_prompt": conversation_route_routing_contract_material(),
-            "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
-            "tools": [
-                request_task_planning_tool_spec(),
-                continue_without_task_planning_tool_spec(),
-            ],
+            "system_prompt": sigil_kernel::conversation_auto_execution_contract_material(),
+            "tools": sigil_kernel::conversation_tool_specs_for_bound_context(
+                Vec::new(), sigil_kernel::AutomaticRouteCapability::DirectTask, false, false, false,
+            ),
+            "continuation_tools": sigil_kernel::route_surface_tool_specs_for_bound_context(
+                sigil_kernel::AutomaticRouteCapability::DirectTask, false, true, false,
+            ),
+            "pending_plan_tools": sigil_kernel::route_surface_tool_specs_for_bound_context(
+                sigil_kernel::AutomaticRouteCapability::DirectTask, false, false, true,
+            ),
         }),
     )?;
-    let planner_prompt_digest = digest_bytes(
-        b"sigil-orchestration-planner-prompt-v1\0",
-        task_planner_prompt_contract_material().as_bytes(),
+    let direct_task_prompt_digest = digest_bytes(
+        b"sigil-orchestration-direct-task-prompt-v1\0",
+        task_direct_execution_system_prompt_contract_material().as_bytes(),
     );
     let system_prompt_digest = digest_value(
-        b"sigil-orchestration-system-prompt-v1\0",
+        b"sigil-orchestration-system-prompt-v2\0",
         &json!({
             "runtime_context": runtime_context_v2_contract_material(),
             "changeset_only_child": changeset_only_child_contract_prompt(),
-            "planner_discovery": task_discovery_system_prompt(),
-            "task_participant": task_participant_system_prompt_contract_material(),
-            "task_participant_finalization": task_participant_finalization_prompt_contract_material(),
+            "plan_review": plan_review_system_prompt_contract_material(),
+            "plan_review_parent_context": plan_review_parent_context_contract_material(),
         }),
     )?;
     let tool_profile_contract_digest = tool_profile_contract_digest(
@@ -171,7 +170,7 @@ pub fn build_model_eval_orchestration_route_contract(
             request.provider_system_fingerprint
         ),
         routing_prompt_digest,
-        planner_prompt_digest,
+        direct_task_prompt_digest,
         system_prompt_digest,
         tool_profile_contract_digest,
         sigil_commit,
@@ -304,29 +303,13 @@ fn tool_profile_contract_digest(
         .into_values()
         .map(|scope| {
             let scoped = constrain_application_tool_registry(base_registry.clone(), &scope)?;
-            let planner =
-                build_role_tool_registry(&scoped, config, AgentRole::Planner).into_registry();
-            let planner = planner_tools_with_discovery(
-                &planner,
-                config
-                    .task
-                    .max_planning_research_agents
-                    .min(MAX_TASK_DISCOVERY_PROBES),
-            );
             Ok(json!({
                 "scope": scope,
-                "conversation": sorted_specs_with(
-                    scoped.specs(),
-                    [
-                        request_task_planning_tool_spec(),
-                        continue_without_task_planning_tool_spec(),
-                    ]
-                ),
-                "planner": sorted_specs_with(
-                    planner.specs(),
-                    [task_plan_update_tool_spec()]
-                ),
-                "executor": sorted_specs(
+                "conversation": sorted_specs(sigil_kernel::conversation_tool_specs_for_bound_context(
+                    scoped.specs(), sigil_kernel::AutomaticRouteCapability::DirectTask,
+                    config.memory.writable, false, false,
+                )),
+                "direct_task": sorted_specs(
                     build_role_tool_registry(&scoped, config, AgentRole::Executor)
                         .specs()
                 ),
@@ -338,7 +321,6 @@ fn tool_profile_contract_digest(
                     build_role_tool_registry(&scoped, config, AgentRole::SubagentWrite)
                         .specs()
                 ),
-                "synthesis": Vec::<ToolSpec>::new(),
             }))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -370,14 +352,6 @@ fn tool_profile_contract_digest(
 fn sorted_specs(mut specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
     specs.sort_by(|left, right| left.name.cmp(&right.name));
     specs
-}
-
-fn sorted_specs_with(
-    mut specs: Vec<ToolSpec>,
-    additions: impl IntoIterator<Item = ToolSpec>,
-) -> Vec<ToolSpec> {
-    specs.extend(additions);
-    sorted_specs(specs)
 }
 
 fn digest_value(domain: &[u8], value: &Value) -> Result<String> {

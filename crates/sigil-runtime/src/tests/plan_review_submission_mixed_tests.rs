@@ -1,15 +1,15 @@
 use super::*;
 
-struct MixedFinalizerProvider {
+struct MixedSubmissionProvider {
     calls: Arc<AtomicUsize>,
     valid_first: bool,
     invalid_draft: bool,
 }
 
 #[async_trait]
-impl Provider for MixedFinalizerProvider {
+impl Provider for MixedSubmissionProvider {
     fn name(&self) -> &str {
-        "mixed-plan-finalizer"
+        "mixed-plan-review"
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -21,21 +21,13 @@ impl Provider for MixedFinalizerProvider {
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let ordinal = self.calls.fetch_add(1, Ordering::SeqCst);
-        if ordinal == 0 {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta("research complete".to_owned())),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        assert_eq!(
+        assert!(
             request
                 .tools
                 .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME]
+                .any(|tool| tool.name == sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME)
         );
-        if ordinal > 1 {
+        if ordinal > 0 {
             return Ok(Box::pin(stream::iter(submitted_draft_chunks(
                 "redundant-draft",
             ))));
@@ -51,7 +43,7 @@ impl Provider for MixedFinalizerProvider {
             vec![
                 Ok(ProviderChunk::ToolCallStart {
                     id: "rejected-call".to_owned(),
-                    name: "inspect_workspace".to_owned(),
+                    name: "unavailable_inspection".to_owned(),
                 }),
                 Ok(ProviderChunk::ToolCallArgsDelta {
                     id: "rejected-call".to_owned(),
@@ -59,7 +51,7 @@ impl Provider for MixedFinalizerProvider {
                 }),
                 Ok(ProviderChunk::ToolCallComplete(ToolCall {
                     id: "rejected-call".to_owned(),
-                    name: "inspect_workspace".to_owned(),
+                    name: "unavailable_inspection".to_owned(),
                     args_json: "{}".to_owned(),
                 })),
             ]
@@ -76,10 +68,10 @@ impl Provider for MixedFinalizerProvider {
     }
 }
 
-struct CountFinalizerInspections(Arc<AtomicUsize>);
+struct CountSubmissionInspections(Arc<AtomicUsize>);
 
 #[async_trait]
-impl Tool for CountFinalizerInspections {
+impl Tool for CountSubmissionInspections {
     fn spec(&self) -> ToolSpec {
         PlanReviewInspectionTool.spec()
     }
@@ -96,8 +88,8 @@ impl Tool for CountFinalizerInspections {
 }
 
 #[tokio::test]
-async fn mixed_finalizer_preserves_committed_draft_without_dispatching_rejected_calls() -> Result<()>
-{
+async fn model_submitted_mixed_batch_preserves_draft_without_dispatching_unavailable_calls()
+-> Result<()> {
     for valid_first in [false, true] {
         for invalid_draft in [false, true] {
             let temp = tempfile::tempdir()?;
@@ -109,11 +101,11 @@ async fn mixed_finalizer_preserves_committed_draft_without_dispatching_rejected_
             let provider_calls = Arc::new(AtomicUsize::new(0));
             let inspections = Arc::new(AtomicUsize::new(0));
             let mut registry = ToolRegistry::new();
-            registry.register(Arc::new(CountFinalizerInspections(Arc::clone(
+            registry.register(Arc::new(CountSubmissionInspections(Arc::clone(
                 &inspections,
             ))));
             let agent = Agent::new(
-                MixedFinalizerProvider {
+                MixedSubmissionProvider {
                     calls: Arc::clone(&provider_calls),
                     valid_first,
                     invalid_draft,
@@ -133,12 +125,12 @@ async fn mixed_finalizer_preserves_committed_draft_without_dispatching_rejected_
             )
             .await?;
             let PlanReviewRunOutcome::DraftReady { draft } = outcome else {
-                bail!("mixed finalizer must retain its committed draft");
+                bail!("mixed model tool batch must retain its committed draft");
             };
             assert_eq!(
                 provider_calls.load(Ordering::SeqCst),
-                2,
-                "a committed draft must not trigger another finalizer"
+                1,
+                "a committed draft ends the ordinary review loop"
             );
             assert_eq!(
                 inspections.load(Ordering::SeqCst),

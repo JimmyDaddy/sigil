@@ -173,7 +173,7 @@ pub struct RuntimeSessionProjectionBinding {
     stream_generation: u64,
     observer_generation: u64,
     source_generation: u64,
-    owner: Option<RuntimeSessionProjectionOwner>,
+    owner: Arc<Mutex<Option<RuntimeSessionProjectionOwner>>>,
     configuration: Arc<Mutex<Option<QueryConfiguration>>>,
 }
 
@@ -228,7 +228,7 @@ impl RuntimeSessionProjectionBinding {
             stream_generation,
             observer_generation,
             source_generation,
-            owner: None,
+            owner: Arc::new(Mutex::new(None)),
             configuration: Arc::new(Mutex::new(None)),
         })
     }
@@ -239,7 +239,7 @@ impl RuntimeSessionProjectionBinding {
     /// read never falls back to a path-based observer, and detached bindings cannot append ACKs.
     #[must_use]
     pub fn with_owner(mut self, owner: RuntimeSessionProjectionOwner) -> Self {
-        self.owner = Some(owner);
+        self.owner = Arc::new(Mutex::new(Some(owner)));
         self
     }
 
@@ -247,21 +247,60 @@ impl RuntimeSessionProjectionBinding {
         &self.scope
     }
 
-    pub fn read_handle(&self) -> Result<SessionRecordReadHandle, ApplicationError> {
+    /// Queries only the owned durable stream, without configuration or provider inventory.
+    pub async fn durable_frontier(&self) -> Result<ApplicationFrontier, ApplicationError> {
+        let binding = self.clone();
+        observation(binding.observation_counter(), move |budget| {
+            let owner = binding.owner()?;
+            let state = owner.state(&budget)?;
+            if state.session_id.as_deref() != Some(&binding.expected_session_scope_id) {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            Ok(binding.frontier(state.sequence))
+        })
+        .await
+    }
+
+    fn owner(&self) -> Result<RuntimeSessionProjectionOwner, ApplicationError> {
         self.owner
-            .as_ref()
-            .map(RuntimeSessionProjectionOwner::read_handle)
+            .lock()
+            .map_err(unavailable)?
+            .clone()
             .ok_or(ApplicationError::Unavailable)
+    }
+
+    /// Replaces a retired worker's projection capability for this same durable session.
+    /// The host must drain observations before replacement; a new scope requires a new binding.
+    pub fn replace_owner(
+        &self,
+        owner: RuntimeSessionProjectionOwner,
+    ) -> Result<(), ApplicationError> {
+        {
+            let state = owner.state(&sigil_kernel::SessionReadBudget::default())?;
+            if state.session_id.as_deref() != Some(&self.expected_session_scope_id) {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+        }
+        let mut current = self.owner.lock().map_err(unavailable)?;
+        if current
+            .as_ref()
+            .is_some_and(|owner| owner.pending_observations() != 0)
+        {
+            return Err(ApplicationError::Unavailable);
+        }
+        *current = Some(owner);
+        Ok(())
+    }
+
+    pub fn read_handle(&self) -> Result<SessionRecordReadHandle, ApplicationError> {
+        Ok(self.owner()?.read_handle())
     }
     #[must_use]
     pub fn pending_observations(&self) -> usize {
-        self.owner
-            .as_ref()
-            .map_or(0, RuntimeSessionProjectionOwner::pending_observations)
+        self.owner().map_or(0, |owner| owner.pending_observations())
     }
     fn observation_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.owner
-            .as_ref()
+        self.owner()
             .map(|owner| Arc::clone(&owner.observations))
             .unwrap_or_default()
     }
@@ -478,7 +517,7 @@ impl RuntimeSessionProjectionBinding {
         resume: Option<ApplicationFrontier>,
         budget: &sigil_kernel::SessionReadBudget,
     ) -> Result<ProjectionSnapshot, ApplicationError> {
-        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let owner = self.owner()?;
         let state = owner.state(budget)?;
         if let Some(frontier) = &resume {
             self.validate_frontier(frontier, state.sequence)?;
@@ -513,7 +552,7 @@ impl RuntimeSessionProjectionBinding {
                 "page limit exceeds bound".into(),
             ));
         }
-        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let owner = self.owner()?;
         let mut state = owner.state(budget)?;
         self.validate_frontier(&request.at_frontier, state.sequence)?;
         if state.session_id.as_deref() != Some(&self.expected_session_scope_id) {
@@ -529,7 +568,7 @@ impl RuntimeSessionProjectionBinding {
             .map(parse_before_cursor)
             .transpose()?;
         let page = state.transcript_page(
-            owner,
+            &owner,
             request.at_frontier.through_sequence,
             before,
             request.limit.get(),
@@ -580,7 +619,7 @@ impl RuntimeSessionProjectionBinding {
         frontier: &ApplicationFrontier,
         budget: &sigil_kernel::SessionReadBudget,
     ) -> Result<usize, ApplicationError> {
-        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let owner = self.owner()?;
         let recorder = owner
             .delivery_recorder
             .as_ref()
@@ -901,7 +940,6 @@ fn plan_status_label(status: &sigil_kernel::PublicPlanReviewStatus) -> &'static 
     match status {
         sigil_kernel::PublicPlanReviewStatus::Started => "started",
         sigil_kernel::PublicPlanReviewStatus::WaitingForInput => "waiting-for-input",
-        sigil_kernel::PublicPlanReviewStatus::Finalizing => "finalizing",
         sigil_kernel::PublicPlanReviewStatus::DraftReady => "draft-ready",
         sigil_kernel::PublicPlanReviewStatus::CompileFailed => "compile-failed",
         sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft => "completed-without-draft",
@@ -914,6 +952,13 @@ fn plan_status_label(status: &sigil_kernel::PublicPlanReviewStatus) -> &'static 
 }
 
 impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBinding {
+    fn validate_recovery_scope(&self, scope: &ApplicationScope) -> Result<(), ApplicationError> {
+        if scope == &self.scope {
+            Ok(())
+        } else {
+            Err(ApplicationError::ScopeMismatch)
+        }
+    }
     fn delivery_batch(
         &self,
         request: sigil_application::DurableDeliveryRequest,
@@ -924,10 +969,7 @@ impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBindi
                 if request.observer_generation != binding.observer_generation {
                     return Err(ApplicationError::ScopeMismatch);
                 }
-                let owner = binding
-                    .owner
-                    .as_ref()
-                    .ok_or(ApplicationError::Unavailable)?;
+                let owner = binding.owner()?;
                 let mut state = owner.state(&budget)?;
                 if state.session_id.as_deref() != Some(&binding.expected_session_scope_id) {
                     return Err(ApplicationError::ScopeMismatch);
@@ -956,7 +998,7 @@ impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBindi
                     if raw + position.end - position.offset > MAX_PROJECTION_RANGE_BYTES as u64 {
                         break;
                     }
-                    let record = state.read_position(owner, &position, &budget, false)?;
+                    let record = state.read_position(&owner, &position, &budget, false)?;
                     raw += position.end - position.offset;
                     let entry: PublicEventOutboxEntryV1 =
                         serde_json::from_value(record.stored_event().payload.clone())

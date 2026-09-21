@@ -1,30 +1,22 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
-    AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry,
-    CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler,
-    EvidenceScope, RecoverableTaskGuidanceReviewAuthority, RootConfig, RunCancellationHandle,
-    RunCancellationOwner, RunCancellationRecorder, RunCancellationTarget, RunTaskGuard,
-    SandboxProfileRequirement, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskExecutionBindingV1,
-    TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
-    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
-    VerificationPolicyChangedEntry, WorkspaceTrustRequirement, check_specs_from_user_config,
-    recoverable_task_guidance, recoverable_task_guidance_review,
-    recoverable_task_guidance_review_retry_controls, safe_persistence_text, stable_workspace_id,
+    AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckSpecRecordedEntry, ControlEntry,
+    ConversationTurnRef, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DirectTaskRequest, EventHandler,
+    EvidenceScope, RootConfig, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationTarget, RunTaskGuard, Session, SessionLogEntry,
+    SessionRef, TaskContinuationSelectedEntry, TaskExecutionAttemptStatus, TaskExecutionBindingV1,
+    TaskGuidancePromotedEntry, TaskId, TaskPauseRequest, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry,
+    check_specs_from_user_config, safe_persistence_text, stable_workspace_id,
 };
 use thiserror::Error;
 
 use super::{
     AgentSupervisor,
-    task_role_runtime::{
-        TaskRoleDemand, TaskRoleProviderBuilder, TaskRoleRuntime,
-        build_task_role_runtime_for_route, build_task_role_runtime_for_route_with_demand,
-        task_role_demand_for_continuation,
-    },
+    task_role_runtime::{TaskRoleProviderBuilder, TaskRoleRuntime, build_task_role_runtime},
 };
 
 /// Complete host-owned material needed to execute one already-admitted durable task.
@@ -49,29 +41,6 @@ pub struct ResolvedTaskContinuation {
     pub task_id: TaskId,
     pub parent_session_ref: SessionRef,
     pub objective: String,
-    pub execution_route: ResolvedTaskExecutionRoute,
-}
-
-/// First-class execution route selected by durable Task authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedTaskExecutionRoute {
-    NeedsPlanning,
-    Planned,
-    Direct,
-}
-
-impl ResolvedTaskContinuation {
-    /// Returns whether this Task has no admitted execution authority yet.
-    #[must_use]
-    pub fn needs_planning(&self) -> bool {
-        self.execution_route == ResolvedTaskExecutionRoute::NeedsPlanning
-    }
-
-    /// Returns whether this Task executes from a direct admission rather than a TaskPlan.
-    #[must_use]
-    pub fn is_direct(&self) -> bool {
-        self.execution_route == ResolvedTaskExecutionRoute::Direct
-    }
 }
 
 /// Complete host-owned material needed to continue one durable Task.
@@ -139,20 +108,6 @@ impl TaskStopDisposition {
             Self::Paused => TaskRunStatus::Paused,
             Self::Cancelled => TaskRunStatus::Cancelled,
             Self::Interrupted => TaskRunStatus::Interrupted,
-        }
-    }
-
-    fn step_status(self) -> TaskStepStatus {
-        match self {
-            Self::Cancelled => TaskStepStatus::Cancelled,
-            Self::Paused | Self::Interrupted => TaskStepStatus::Interrupted,
-        }
-    }
-
-    fn child_status(self) -> TaskChildSessionStatus {
-        match self {
-            Self::Cancelled => TaskChildSessionStatus::Cancelled,
-            Self::Paused | Self::Interrupted => TaskChildSessionStatus::Interrupted,
         }
     }
 }
@@ -294,10 +249,6 @@ pub fn validate_task_pause_request(
         .get(&request.task_id)
         .ok_or(TaskPauseValidationError::TaskUnavailable)?;
     let authority_matches = match &request.execution {
-        TaskExecutionBindingV1::Plan { plan_version } => {
-            task.latest_plan_version == Some(*plan_version)
-                && !task.superseded_plan_versions.contains(plan_version)
-        }
         TaskExecutionBindingV1::Direct { admission_id } => task
             .direct_execution_admission
             .as_ref()
@@ -374,7 +325,7 @@ where
     match append_task_stop_state(
         session,
         handler,
-        Some(&task_id),
+        &task_id,
         TaskStopDisposition::Interrupted,
         reason,
     ) {
@@ -385,9 +336,8 @@ where
 
 /// Appends one ordered Task stop transition after the caller has proven run quiescence.
 ///
-/// Active steps and child sessions are closed before the Task terminal control, all within one
-/// ordered session-writer batch. Passing `None` selects the latest Task for TUI compatibility;
-/// application adapters should pass an exact Task id derived from the active cancellation scope.
+/// Active direct execution attempts are closed before the Task terminal control, all within one
+/// ordered session-writer batch. The caller must pass the exact Task id owned by its scope.
 ///
 /// # Errors
 ///
@@ -396,7 +346,7 @@ where
 pub fn append_task_stop_state<H>(
     session: &mut Session,
     handler: &mut H,
-    exact_task_id: Option<&TaskId>,
+    task_id: &TaskId,
     disposition: TaskStopDisposition,
     reason: &str,
 ) -> std::result::Result<Option<AppendedTaskStopState>, TaskStopStateError>
@@ -405,149 +355,33 @@ where
 {
     let projection = session.task_state_projection();
     let task =
-        match exact_task_id {
-            Some(task_id) => projection.tasks.get(task_id).ok_or_else(|| {
-                TaskStopStateError::TaskUnavailable {
-                    task_id: task_id.as_str().to_owned(),
-                }
-            })?,
-            None => {
-                let Some(task) = projection.latest_task() else {
-                    return Ok(None);
-                };
-                task
-            }
-        };
+        projection
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| TaskStopStateError::TaskUnavailable {
+                task_id: task_id.as_str().to_owned(),
+            })?;
     if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
-        if exact_task_id.is_none() {
-            return Ok(None);
-        }
         return Err(TaskStopStateError::TaskNotRunning {
             task_id: task.task_id.as_str().to_owned(),
         });
     }
+
     let task_id = task.task_id.clone();
     let parent_session_ref = task.parent_session_ref.clone();
     let objective = task.objective.clone();
-    let title = task
-        .title
-        .clone()
-        .unwrap_or_else(|| sigil_kernel::task_semantic_title(&objective));
-    let cancellation_closure = if disposition == TaskStopDisposition::Cancelled {
-        projection
-            .evaluate_root_terminal(&task_id, TaskRunStatus::Cancelled, None)
-            .map(|evaluation| evaluation.cancellation_closure)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let mut active_steps = task
-        .active_steps
-        .iter()
-        .filter_map(|key| task.steps.get(key))
-        .filter(|step| !step.status.is_terminal())
-        .cloned()
-        .map(|step| {
-            (
-                step.step_id.clone(),
-                TaskStepEntry {
-                    task_id: task_id.clone(),
-                    plan_version: step.plan_version,
-                    step_id: step.step_id,
-                    role: step.role,
-                    status: step.status,
-                    title: step.title,
-                    summary: step.summary,
-                    reason: step.reason,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if !cancellation_closure.is_empty()
-        && let Some(plan) = task
-            .latest_plan_version
-            .and_then(|version| task.plans.get(&version))
-    {
-        for step_id in cancellation_closure {
-            let Some(step) = plan.steps.iter().find(|step| step.step_id == step_id) else {
-                continue;
-            };
-            active_steps
-                .entry(step_id.clone())
-                .or_insert_with(|| TaskStepEntry {
-                    task_id: task_id.clone(),
-                    plan_version: plan.plan_version,
-                    step_id,
-                    role: step.role,
-                    status: TaskStepStatus::Pending,
-                    title: Some(step.title.clone()),
-                    summary: None,
-                    reason: None,
-                });
-        }
-    }
-    let active_participants = match disposition {
-        // A root cancellation must leave no active DAG participant behind. Paused and
-        // interrupted Task paths retain their existing recovery semantics.
-        TaskStopDisposition::Cancelled => task
-            .participant_attempts
-            .values()
-            .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
-            .cloned()
-            .collect::<Vec<TaskParticipantAttemptEntry>>(),
-        TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => Vec::new(),
-    };
-    let active_children = task
-        .child_sessions
-        .values()
-        .filter(|child| child.status == TaskChildSessionStatus::Started)
-        .cloned()
-        .collect::<Vec<_>>();
-    let active_direct_attempts = task
+    let safe_reason = safe_persistence_text(reason);
+    let mut controls = Vec::new();
+    for mut attempt in task
         .direct_execution_attempts
         .values()
-        .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+        .filter(|attempt| attempt.status == TaskExecutionAttemptStatus::Started)
         .cloned()
-        .collect::<Vec<_>>();
-    let safe_reason = safe_persistence_text(reason);
-    let mut controls = Vec::with_capacity(
-        active_steps.len()
-            + active_participants.len()
-            + active_children.len()
-            + active_direct_attempts.len()
-            + 1,
-    );
-    for step in active_steps.into_values() {
-        controls.push(ControlEntry::TaskStep(TaskStepEntry {
-            task_id: task_id.clone(),
-            plan_version: step.plan_version,
-            step_id: step.step_id,
-            role: step.role,
-            status: disposition.step_status(),
-            title: step.title.as_deref().map(safe_persistence_text),
-            summary: None,
-            reason: Some(safe_reason.clone()),
-        }));
-    }
-    for mut attempt in active_participants {
+    {
         attempt.status = match disposition {
-            TaskStopDisposition::Cancelled => TaskParticipantAttemptStatus::Cancelled,
+            TaskStopDisposition::Cancelled => TaskExecutionAttemptStatus::Cancelled,
             TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => {
-                TaskParticipantAttemptStatus::Interrupted
-            }
-        };
-        attempt.reason = Some(safe_reason.clone());
-        controls.push(ControlEntry::TaskParticipantAttempt(attempt));
-    }
-    for mut child in active_children {
-        child.status = disposition.child_status();
-        controls.push(ControlEntry::TaskChildSession(child));
-    }
-    for mut attempt in active_direct_attempts {
-        attempt.status = match disposition {
-            TaskStopDisposition::Cancelled => TaskParticipantAttemptStatus::Cancelled,
-            TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => {
-                TaskParticipantAttemptStatus::Interrupted
+                TaskExecutionAttemptStatus::Interrupted
             }
         };
         attempt.reason = Some(safe_reason.clone());
@@ -558,7 +392,10 @@ where
         task_id: task_id.clone(),
         parent_session_ref,
         objective: safe_persistence_text(&objective),
-        title: Some(title),
+        title: task
+            .title
+            .clone()
+            .or_else(|| Some(sigil_kernel::task_semantic_title(&objective))),
         status,
         reason: Some(safe_reason),
     }));
@@ -582,19 +419,12 @@ pub fn resolve_task_continuation(
     requested_task_id: Option<&str>,
 ) -> Result<ResolvedTaskContinuation> {
     let projection = session.task_state_projection();
-    let task = match requested_task_id {
-        Some(value) => {
-            let task_id = TaskId::new(value.to_owned())?;
-            projection
-                .tasks
-                .get(&task_id)
-                .ok_or_else(|| anyhow!("task {value} is not present in this session"))?
-        }
-        None => projection
-            .latest_unfinished_task()
-            .or_else(|| projection.latest_task())
-            .ok_or_else(|| anyhow!("no task is available to continue"))?,
-    };
+    let value = requested_task_id.ok_or_else(|| anyhow!("an exact Task id is required"))?;
+    let task_id = TaskId::new(value.to_owned())?;
+    let task = projection
+        .tasks
+        .get(&task_id)
+        .ok_or_else(|| anyhow!("task {value} is not present in this session"))?;
     match task.status {
         TaskRunStatus::Completed => {
             return Err(anyhow!(
@@ -611,22 +441,50 @@ pub fn resolve_task_continuation(
         | TaskRunStatus::Failed
         | TaskRunStatus::Interrupted => {}
     }
-    let execution_route = if task.latest_plan_version.is_some() {
-        ResolvedTaskExecutionRoute::Planned
-    } else if task.direct_execution_admission.is_some() {
-        ResolvedTaskExecutionRoute::Direct
-    } else {
-        ResolvedTaskExecutionRoute::NeedsPlanning
-    };
+    if task.latest_plan_version.is_some() || task.direct_execution_admission.is_none() {
+        anyhow::bail!(
+            "task {} is not a current direct Task; direct execution authority is required",
+            task.task_id.as_str()
+        );
+    }
     Ok(ResolvedTaskContinuation {
         task_id: task.task_id.clone(),
         parent_session_ref: task.parent_session_ref.clone(),
         objective: task.objective.clone(),
-        execution_route,
     })
 }
 
-/// Runs one already-admitted task through the shared planner/executor/subagent/synthesis runtime.
+fn resolve_task_guidance_promotion_source(
+    session: &Session,
+    task_id: &TaskId,
+    promotion: &TaskGuidancePromotedEntry,
+    exact_guidance: Option<&str>,
+) -> Result<ConversationTurnRef> {
+    promotion.validate_for_session(session.session_scope_id())?;
+    if promotion.task_id != *task_id
+        || !session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(recorded))
+                    if recorded == promotion
+            )
+        })
+    {
+        anyhow::bail!("direct Task guidance requires its exact durable queue promotion");
+    }
+    let exact_guidance =
+        exact_guidance.context("promoted Task guidance is missing its process-local prompt")?;
+    let projected = sigil_kernel::project_conversation_prompt_for_persistence(exact_guidance);
+    if projected.prompt_hash != promotion.prompt_hash
+        || projected.safe_prompt != promotion.guidance
+        || projected.exact_prompt_required != promotion.exact_prompt_required
+    {
+        anyhow::bail!("promoted Task guidance does not match its exact durable binding");
+    }
+    Ok(promotion.source_turn.clone())
+}
+
+/// Runs one already-admitted task through the model-owned direct runtime.
 ///
 /// # Errors
 ///
@@ -663,40 +521,32 @@ where
     )
     .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
     let TaskRoleRuntime {
-        orchestrator,
-        planner_options,
+        direct_task_runtime,
         executor_options,
-        subagent_read_options,
-        subagent_write_options,
-    } = build_task_role_runtime_for_route(
+    } = build_task_role_runtime(
         &root_config,
         &options,
         &base_registry,
         agent_supervisor,
         role_provider_builder,
         verification_execution_port,
-        resolve_task_continuation(session, Some(task_id.as_str()))?.execution_route,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
-    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
-    let orchestrator = match tool_artifact_read_budget {
-        Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
-        None => orchestrator,
+    let direct_task_runtime = direct_task_runtime.with_cancellation(cancellation_handle);
+    let direct_task_runtime = match tool_artifact_read_budget {
+        Some(budget) => direct_task_runtime.with_tool_artifact_read_budget(budget),
+        None => direct_task_runtime,
     };
-    orchestrator
+    direct_task_runtime
         .run(
             session,
-            SequentialTaskRequest {
+            DirectTaskRequest {
                 task_id,
                 parent_session_ref,
                 objective,
             },
-            planner_options,
-            executor_options,
-            subagent_read_options,
-            subagent_write_options,
-            root_config.task.max_plan_steps,
+            executor_options.clone(),
             handler,
             approval_handler,
         )
@@ -735,171 +585,42 @@ where
         cancellation_handle,
         tool_artifact_read_budget,
     } = request;
-    // The caller already resolved the routing model's typed ResumeTask vs ApplyTaskGuidance
-    // choice. Never reinterpret the localized prompt text here.
-    let guidance = guidance.filter(|value| !value.trim().is_empty());
-    let resume_receipt = continuation_guidance_receipt
-        .as_ref()
-        .is_some_and(|receipt| {
-            receipt.control == sigil_kernel::TaskContinuationControlKind::ResumeTask
-        });
+
     let task = resolve_task_continuation(session, requested_task_id.as_ref().map(TaskId::as_str))?;
-    let mut explicit_focus_required = validate_continuation_guidance_authority(
-        task.execution_route,
-        guidance.as_deref(),
-        guidance_promotion.as_ref(),
-        continuation_guidance_receipt.as_ref(),
-    )?;
-    if continuation_guidance_receipt.is_some()
-        && session.task_state_projection().current_task_id.as_ref() != Some(&task.task_id)
-    {
-        // A recovered typed selection may belong to an earlier user turn. The new source turn
-        // deliberately clears conversation focus, so dispatch must durably reselect the exact
-        // already-validated Task before any provider executes.
-        explicit_focus_required = true;
-    }
-    let recoverable_materialization =
-        if task.execution_route == ResolvedTaskExecutionRoute::Planned && !resume_receipt {
-            // Every continuation entry point resolves unfinished durable guidance before it creates a
-            // new authority or performs provider I/O. This pure admission check prevents direct,
-            // typed, queued, and slash continuations from forking an already-accepted review after a
-            // crash. Sensitive, incomplete, or conflicting materializations fail before focus moves.
-            recoverable_task_guidance(session, &task.task_id, guidance.as_deref())?
-        } else {
-            None
-        };
-    let recoverable_review = if task.execution_route == ResolvedTaskExecutionRoute::Planned
-        && recoverable_materialization.is_none()
-        && !resume_receipt
-    {
-        recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
-    } else {
-        None
-    };
-    if let Some(recovered) = recoverable_materialization.as_ref() {
-        let incoming_matches = match (
-            guidance_promotion.as_ref(),
-            continuation_guidance_receipt.as_ref(),
-        ) {
-            (Some(incoming), None) => {
-                recovered.matches_promotion(incoming)
-                    && session.entries().iter().any(|entry| {
-                        matches!(
-                            entry,
-                            SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(recorded))
-                                if recorded == incoming
-                        )
-                    })
-            }
-            (None, Some(incoming)) => {
-                recovered.matches_continuation_selection(incoming)?
-                    && session.entries().iter().any(|entry| {
-                        matches!(
-                            entry,
-                            SessionLogEntry::Control(
-                                ControlEntry::TaskContinuationSelected(recorded)
-                            ) if recorded == incoming
-                        )
-                    })
-            }
-            (None, None) => true,
-            (Some(_), Some(_)) => false,
-        };
-        if !incoming_matches {
-            return Err(anyhow!(
-                "incoming task guidance authority conflicts with unfinished durable materialization"
-            ));
+    let guidance = guidance.filter(|value| !value.trim().is_empty());
+    let guidance_source = if let Some(promotion) = guidance_promotion.as_ref() {
+        if continuation_guidance_receipt.is_some() {
+            anyhow::bail!(
+                "direct Task guidance cannot combine queue promotion and continuation receipt"
+            );
         }
-    }
-    if let Some(recovered) = recoverable_review.as_ref() {
-        let incoming_matches = match (
-            &recovered.authority,
-            guidance_promotion.as_ref(),
-            continuation_guidance_receipt.as_ref(),
-        ) {
-            (RecoverableTaskGuidanceReviewAuthority::Promoted(recorded), Some(incoming), None) => {
-                recorded.as_ref() == incoming
-            }
-            (
-                RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(recorded),
-                None,
-                Some(incoming),
-            ) => recorded.as_ref() == incoming,
-            (_, None, None) => true,
-            _ => false,
-        };
-        if !incoming_matches {
-            return Err(anyhow!(
-                "incoming task guidance authority conflicts with an unfinished durable review"
-            ));
-        }
-    }
-    if let Some(recovered) = recoverable_review.as_ref() {
-        let retry_controls = recoverable_task_guidance_review_retry_controls(session, recovered)?;
-        if !retry_controls.is_empty() {
-            handler.commit_controls(session, retry_controls)?;
-        }
-    }
-    if explicit_focus_required {
-        append_explicit_task_run_target(
-            session,
-            handler,
-            &task.task_id,
-            cancellation_handle.scope_id(),
-        )?;
-    }
-    materialize_task_verification_config(
-        session,
-        handler,
-        &root_config,
-        &options.workspace_root,
-        &task.task_id,
-    )
-    .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
-    let role_demand = if task.execution_route == ResolvedTaskExecutionRoute::Planned {
-        task_role_demand_for_continuation(
+        Some(resolve_task_guidance_promotion_source(
             session,
             &task.task_id,
-            guidance.is_some()
-                || guidance_promotion.is_some()
-                || continuation_guidance_receipt.is_some()
-                || recoverable_review.is_some(),
-        )?
-    } else {
-        TaskRoleDemand::all()
-    };
-    let TaskRoleRuntime {
-        orchestrator,
-        planner_options,
-        executor_options,
-        subagent_read_options,
-        subagent_write_options,
-    } = build_task_role_runtime_for_route_with_demand(
-        &root_config,
-        &options,
-        &base_registry,
-        agent_supervisor,
-        role_provider_builder,
-        verification_execution_port,
-        task.execution_route,
-        role_demand,
-    )
-    .await
-    .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
-    let task_request = SequentialTaskRequest {
-        task_id: task.task_id,
-        parent_session_ref: task.parent_session_ref,
-        objective: task.objective,
-    };
-    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
-    let orchestrator = match tool_artifact_read_budget {
-        Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
-        None => orchestrator,
-    };
-    let guidance_source = if task.execution_route == ResolvedTaskExecutionRoute::Planned {
-        None
+            promotion,
+            guidance.as_deref(),
+        )?)
     } else if let Some(receipt) = continuation_guidance_receipt.as_ref() {
-        Some(receipt.source_turn.clone())
+        receipt.validate_for_session(session.session_scope_id())?;
+        if receipt.task_id != task.task_id
+            || !session.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded))
+                        if recorded == receipt
+                )
+            })
+        {
+            anyhow::bail!("direct Task guidance requires its exact durable selection");
+        }
+        if receipt.control == sigil_kernel::TaskContinuationControlKind::ResumeTask {
+            if guidance.is_some() {
+                anyhow::bail!("resume Task continuation cannot carry guidance text");
+            }
+            None
+        } else {
+            Some(receipt.source_turn.clone())
+        }
     } else if let Some(run_id) = explicit_guidance_run_id.as_ref() {
         let source_id = sigil_kernel::stable_event_hash(serde_json::to_vec(&(
             session.session_scope_id(),
@@ -913,339 +634,59 @@ where
     } else {
         None
     };
-    let direct_guidance = if task.execution_route != ResolvedTaskExecutionRoute::Planned {
-        guidance
-            .as_deref()
-            .map(|text| {
-                guidance_source
-                    .as_ref()
-                    .map(|source| (text, source))
-                    .context("unplanned Task guidance requires its real source turn")
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    let output = continued_task_dispatch(
-        &orchestrator,
+    let direct_guidance = guidance
+        .as_deref()
+        .map(|text| {
+            guidance_source
+                .as_ref()
+                .map(|source| (text, source))
+                .context("direct Task guidance requires its real source turn")
+        })
+        .transpose()?;
+
+    materialize_task_verification_config(
         session,
-        ContinuedTaskDispatch {
-            execution_route: task.execution_route,
-            task_request,
-            planner_options,
-            executor_options,
-            subagent_read_options,
-            subagent_write_options,
-            max_plan_steps: root_config.task.max_plan_steps,
-            guidance: guidance.clone(),
-            guidance_promotion,
-            continuation_guidance_receipt,
-            recoverable_materialization,
-            recoverable_review,
-        },
-        direct_guidance,
         handler,
-        approval_handler,
-    )?
-    .await?;
-    Ok(output.status)
-}
+        &root_config,
+        &options.workspace_root,
+        &task.task_id,
+    )
+    .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
 
-struct ContinuedTaskDispatch {
-    execution_route: ResolvedTaskExecutionRoute,
-    task_request: SequentialTaskRequest,
-    planner_options: AgentRunOptions,
-    executor_options: AgentRunOptions,
-    subagent_read_options: AgentRunOptions,
-    subagent_write_options: AgentRunOptions,
-    max_plan_steps: usize,
-    guidance: Option<String>,
-    guidance_promotion: Option<TaskGuidancePromotedEntry>,
-    continuation_guidance_receipt: Option<TaskContinuationSelectedEntry>,
-    recoverable_materialization: Option<sigil_kernel::RecoverableTaskGuidance>,
-    recoverable_review: Option<sigil_kernel::RecoverableTaskGuidanceReview>,
-}
-
-// Construct the selected large orchestration future outside every polling frame. In debug
-// builds, constructing these futures inside `continue_task_execution` reserves hundreds of KiB
-// of temporary stack slots that remain live while all nested agent futures are polled.
-// This synchronous frame exits before polling begins; cancellation remains owned by the caller.
-#[inline(never)]
-fn continued_task_dispatch<'a, H, A>(
-    orchestrator: &'a sigil_kernel::SequentialTaskOrchestrator<
-        super::task_runner::AgentSupervisorTaskChildRunner,
-    >,
-    session: &'a mut Session,
-    dispatch: ContinuedTaskDispatch,
-    direct_guidance: Option<(&'a str, &'a sigil_kernel::ConversationTurnRef)>,
-    handler: &'a mut H,
-    approval_handler: &'a mut A,
-) -> Result<futures::future::BoxFuture<'a, Result<sigil_kernel::SequentialTaskRunOutput>>>
-where
-    H: EventHandler + Send,
-    A: ApprovalHandler + Send,
-{
-    let ContinuedTaskDispatch {
-        execution_route,
-        task_request,
-        planner_options,
+    let TaskRoleRuntime {
+        direct_task_runtime,
         executor_options,
-        subagent_read_options,
-        subagent_write_options,
-        max_plan_steps,
-        guidance,
-        guidance_promotion,
-        continuation_guidance_receipt,
-        recoverable_materialization,
-        recoverable_review,
-    } = dispatch;
-    let future: futures::future::BoxFuture<'a, Result<sigil_kernel::SequentialTaskRunOutput>> =
-        if execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
-            if let Some(receipt) = continuation_guidance_receipt.as_ref() {
-                receipt.validate_for_session(session.session_scope_id())?;
-                if receipt.task_id != task_request.task_id || !session.entries().iter().any(|entry| {
-                    matches!(entry, SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded)) if recorded == receipt)
-                }) {
-                    return Err(anyhow!("initial task guidance requires its exact durable selection"));
-                }
-            }
-            Box::pin(orchestrator.run_with_initial_guidance(
-                session,
-                task_request,
-                planner_options,
-                executor_options,
-                subagent_read_options,
-                subagent_write_options,
-                max_plan_steps,
-                direct_guidance,
-                handler,
-                approval_handler,
-            ))
-        } else if execution_route == ResolvedTaskExecutionRoute::Direct {
-            Box::pin(orchestrator.continue_direct_run(
-                session,
-                task_request,
-                executor_options,
-                direct_guidance,
-                handler,
-                approval_handler,
-            ))
-        } else if let Some(recovered) = recoverable_materialization {
-            Box::pin(orchestrator.continue_run(
-                session,
-                task_request,
-                executor_options,
-                subagent_read_options,
-                subagent_write_options,
-                Some(recovered.guidance),
-                handler,
-                approval_handler,
-            ))
-        } else if let Some(recovered) = recoverable_review {
-            match recovered.authority {
-                RecoverableTaskGuidanceReviewAuthority::Promoted(promotion) => {
-                    Box::pin(orchestrator.continue_run_with_guidance_review(
-                        session,
-                        task_request,
-                        planner_options,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        max_plan_steps,
-                        recovered.guidance,
-                        *promotion,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-                RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selection) => {
-                    Box::pin(orchestrator.continue_run_with_conversation_guidance_review(
-                        session,
-                        task_request,
-                        planner_options,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        max_plan_steps,
-                        recovered.guidance,
-                        *selection,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-            }
-        } else {
-            match (guidance, guidance_promotion, continuation_guidance_receipt) {
-                (Some(guidance), Some(promotion), None) => {
-                    Box::pin(orchestrator.continue_run_with_guidance_review(
-                        session,
-                        task_request,
-                        planner_options,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        max_plan_steps,
-                        guidance,
-                        promotion,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-                (Some(guidance), None, Some(selection)) => {
-                    Box::pin(orchestrator.continue_run_with_conversation_guidance_review(
-                        session,
-                        task_request,
-                        planner_options,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        max_plan_steps,
-                        guidance,
-                        selection,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-                (guidance, None, None) => Box::pin(orchestrator.continue_run(
-                    session,
-                    task_request,
-                    executor_options,
-                    subagent_read_options,
-                    subagent_write_options,
-                    guidance,
-                    handler,
-                    approval_handler,
-                )),
-                (None, Some(_), None) => {
-                    return Err(anyhow!(
-                        "task guidance promotion is missing its guidance material"
-                    ));
-                }
-                (None, None, Some(receipt)) if receipt.guidance.trim().is_empty() => {
-                    Box::pin(orchestrator.continue_run(
-                        session,
-                        task_request,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        None,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-                (None, None, Some(_)) => {
-                    // A recovered selection may carry only the safe durable projection. Resume from
-                    // that projection instead of requiring the process-local exact source prompt.
-                    Box::pin(orchestrator.continue_run(
-                        session,
-                        task_request,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        None,
-                        handler,
-                        approval_handler,
-                    ))
-                }
-                (_, Some(_), Some(_)) => {
-                    return Err(anyhow!(
-                        "task continuation supplied conflicting guidance authorities"
-                    ));
-                }
-            }
-        };
-    Ok(future)
-}
-
-fn validate_continuation_guidance_authority(
-    execution_route: ResolvedTaskExecutionRoute,
-    guidance: Option<&str>,
-    guidance_promotion: Option<&TaskGuidancePromotedEntry>,
-    continuation_guidance_receipt: Option<&TaskContinuationSelectedEntry>,
-) -> Result<bool> {
-    if execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
-        if guidance_promotion.is_some()
-            || continuation_guidance_receipt.is_some_and(|receipt| {
-                receipt.plan_version.is_some() || receipt.plan_status.is_some()
-            })
-        {
-            return Err(anyhow!(
-                "initial task guidance cannot use an accepted-plan authority"
-            ));
-        }
-        return Ok(continuation_guidance_receipt.is_none());
-    }
-    match (guidance, guidance_promotion, continuation_guidance_receipt) {
-        (Some(_), Some(_), None) | (Some(_), None, Some(_)) => Ok(false),
-        (_, None, None) => Ok(true),
-        (None, Some(_), None) => Err(anyhow!(
-            "task guidance promotion is missing its guidance material"
-        )),
-        (None, None, Some(_)) => Ok(false),
-        (_, Some(_), Some(_)) => Err(anyhow!(
-            "task continuation supplied conflicting guidance authorities"
-        )),
-    }
-}
-
-fn append_explicit_task_run_target<H>(
-    session: &mut Session,
-    handler: &mut H,
-    task_id: &TaskId,
-    run_scope_id: &str,
-) -> Result<()>
-where
-    H: EventHandler,
-{
-    let latest_bound_scope = session
-        .entries()
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
-                if &binding.task_id == task_id =>
-            {
-                Some(binding.run_scope_id.as_str())
-            }
-            _ => None,
-        });
-    if latest_bound_scope != Some(run_scope_id) {
-        return Err(anyhow!(
-            "explicit task continuation cancellation scope is not durably bound to the selected task"
-        ));
-    }
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(task_id)
-        .ok_or_else(|| anyhow!("explicit task continuation target is no longer present"))?;
-    let plan_status = task
-        .latest_plan_version
-        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-    let selected = TaskRunTargetSelectedEntry::new(
-        task_id.clone(),
-        run_scope_id,
-        task.status,
-        task.latest_plan_version,
-        plan_status,
-    );
-    if let Some(existing) = session.entries().iter().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(existing))
-            if existing.selection_id == selected.selection_id =>
-        {
-            Some(existing)
-        }
-        _ => None,
-    }) {
-        if existing != &selected {
-            return Err(anyhow!(
-                "explicit task continuation selection has conflicting durable facts"
-            ));
-        }
-        return Ok(());
-    }
-    handler.commit_controls(session, vec![ControlEntry::TaskRunTargetSelected(selected)])?;
-    Ok(())
+        ..
+    } = build_task_role_runtime(
+        &root_config,
+        &options,
+        &base_registry,
+        agent_supervisor,
+        role_provider_builder,
+        verification_execution_port,
+    )
+    .await
+    .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
+    let direct_task_runtime = direct_task_runtime.with_cancellation(cancellation_handle);
+    let direct_task_runtime = match tool_artifact_read_budget {
+        Some(budget) => direct_task_runtime.with_tool_artifact_read_budget(budget),
+        None => direct_task_runtime,
+    };
+    let output = direct_task_runtime
+        .continue_direct_run(
+            session,
+            DirectTaskRequest {
+                task_id: task.task_id,
+                parent_session_ref: task.parent_session_ref,
+                objective: task.objective,
+            },
+            executor_options,
+            direct_guidance,
+            handler,
+            approval_handler,
+        )
+        .await?;
+    Ok(output.status)
 }
 
 /// Runs an admitted handoff task and atomically claims the shared root terminal.
@@ -1298,48 +739,6 @@ pub fn finalize_task_root(
     let Err(error) = &result else {
         return result;
     };
-    // A provider-turn terminal has already been classified from durable physical-attempt and
-    // effect evidence.  It is deliberately an error to stop the current async owner, but it is
-    // not a Task failure unless the policy explicitly called it irrecoverable.  Keep this
-    // guard at the root terminal so a future orchestration path cannot accidentally collapse a
-    // recoverable blocker back into `TaskRunStatus::Failed`.
-    if let Some(recovery) = error.downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
-    {
-        let status = match recovery.disposition {
-            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Blocked
-            | sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused => {
-                TaskRunStatus::Paused
-            }
-            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled => {
-                TaskRunStatus::Cancelled
-            }
-            sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Irrecoverable => {
-                TaskRunStatus::Failed
-            }
-        };
-        let current_status = session
-            .task_state_projection()
-            .tasks
-            .get(task_id)
-            .map(|task| task.status);
-        if matches!(
-            current_status,
-            Some(TaskRunStatus::Started | TaskRunStatus::Running)
-        ) {
-            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-                task_id: task_id.clone(),
-                parent_session_ref: parent_session_ref.clone(),
-                objective: safe_persistence_text(objective),
-                title: None,
-                status,
-                reason: Some(safe_persistence_text(&format!(
-                    "provider turn recovery {:?}: {}",
-                    recovery.disposition, recovery.reason_code
-                ))),
-            }))?;
-        }
-        return Ok(status);
-    }
     // Verification and role-runtime preparation are zero-dispatch boundaries: no participant
     // provider request or tool effect has started. Keep the admitted Task resumable so repairing
     // configuration or credentials and pressing Continue can retry the same durable authority.
@@ -1362,6 +761,15 @@ pub fn finalize_task_root(
         }
         return Ok(TaskRunStatus::Paused);
     }
+    let disposition = sigil_kernel::agent::execution::execution_failure_disposition(error);
+    let terminal_status = match disposition {
+        sigil_kernel::agent::execution::ExecutionDisposition::Blocked => TaskRunStatus::Paused,
+        sigil_kernel::agent::execution::ExecutionDisposition::Cancelled => TaskRunStatus::Cancelled,
+        sigil_kernel::agent::execution::ExecutionDisposition::Interrupted => {
+            TaskRunStatus::Interrupted
+        }
+        _ => TaskRunStatus::Failed,
+    };
     let status = session
         .task_state_projection()
         .tasks
@@ -1376,13 +784,17 @@ pub fn finalize_task_root(
             parent_session_ref: parent_session_ref.clone(),
             objective: safe_persistence_text(objective),
             title: None,
-            status: TaskRunStatus::Failed,
+            status: terminal_status,
             reason: Some(safe_persistence_text(&format!(
                 "task orchestration failed before a terminal state: {error:#}"
             ))),
         }))?;
     }
-    result
+    if terminal_status == TaskRunStatus::Failed {
+        result
+    } else {
+        Ok(terminal_status)
+    }
 }
 
 /// Downgrades an unsupported root completion claim to the resumable terminal selected by the
@@ -1398,14 +810,10 @@ fn normalize_completed_task_terminal(
     if status != TaskRunStatus::Completed {
         return Ok(status);
     }
-    let Some(evaluation) = session.task_state_projection().evaluate_root_terminal(
-        task_id,
-        TaskRunStatus::Completed,
-        None,
-    ) else {
-        // Keep legacy callers that do not yet have a durable direct/DAG authority unchanged.
-        return Ok(status);
-    };
+    let evaluation = session
+        .task_state_projection()
+        .evaluate_root_terminal(task_id, TaskRunStatus::Completed, None)
+        .ok_or_else(|| anyhow!("Task has no current direct execution authority"))?;
     if evaluation.allows_completed() {
         return Ok(status);
     }
@@ -1435,10 +843,10 @@ fn normalize_completed_task_terminal(
 
 /// Finalizes one continuation without turning admission/re-entry failures into Task failure.
 ///
-/// A continuation can fail before it starts a new role attempt (for example because sensitive
-/// guidance must be re-entered after restart). Such an error belongs to the conversation attempt,
-/// not to the durable Task. Once a new participant attempt has started, the ordinary root
-/// finalizer retains its fail-safe terminal behavior.
+/// A continuation can fail before it starts a new direct-execution attempt (for example because
+/// sensitive guidance must be re-entered after restart). Such an error belongs to the conversation
+/// attempt, not to the durable Task. Once a new direct-execution attempt has started, the ordinary
+/// root finalizer retains its fail-safe terminal behavior.
 pub fn finalize_task_continuation_root(
     session: &mut Session,
     task_id: &TaskId,
@@ -1448,19 +856,19 @@ pub fn finalize_task_continuation_root(
     continuation_entry_frontier: usize,
     result: Result<TaskRunStatus>,
 ) -> Result<TaskRunStatus> {
-    let participant_started = session
+    let direct_execution_started = session
         .entries()
         .iter()
         .skip(continuation_entry_frontier)
         .any(|entry| {
             matches!(
                 entry,
-                SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
+                SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))
                     if &attempt.task_id == task_id
-                        && attempt.status == TaskParticipantAttemptStatus::Started
+                        && attempt.status == TaskExecutionAttemptStatus::Started
             )
         });
-    if result.is_ok() || participant_started {
+    if result.is_ok() || direct_execution_started {
         return finalize_task_root(
             session,
             task_id,
@@ -1538,28 +946,18 @@ where
         }
     }
 
-    let required_checks = entries
-        .iter()
-        .map(|entry| entry.trusted_check.check_spec.clone())
-        .collect::<Vec<_>>();
-    let policy = VerificationPolicy {
-        required_checks,
-        completion_criteria: CompletionCriteria::AllRequiredChecks,
-        verification_scope: root_config
+    // Configuration supplies runnable candidates; only an explicit policy or an accepted
+    // contract makes a check mandatory. Existing policy authority survives catalog refresh.
+    if projection.latest_policy(&scope).is_none() {
+        let mut policy =
+            VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+        policy.verification_scope = root_config
             .verification
-            .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
-        sandbox_profile: SandboxProfileRequirement::None,
-        workspace_trust_requirement: check_spec_entries_workspace_trust_requirement(&entries),
-        allow_unverified_completion: false,
-        timeout_ms: None,
-        auto_run: root_config.verification.auto_run,
-    };
-    let policy_entry = VerificationPolicyChangedEntry::new(scope.clone(), policy, source_event_id)?;
-    let needs_policy_append = projection
-        .latest_policy(&scope)
-        .is_none_or(|current| current.policy_hash != policy_entry.policy_hash);
-    if needs_policy_append {
-        controls.push(ControlEntry::VerificationPolicyChanged(policy_entry));
+            .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+        policy.auto_run = root_config.verification.auto_run;
+        controls.push(ControlEntry::VerificationPolicyChanged(
+            VerificationPolicyChangedEntry::new(scope, policy, source_event_id)?,
+        ));
     }
 
     if !controls.is_empty() {
@@ -1568,28 +966,134 @@ where
     Ok(())
 }
 
-fn check_spec_entries_workspace_trust_requirement(
-    entries: &[CheckSpecRecordedEntry],
-) -> WorkspaceTrustRequirement {
-    if entries.iter().any(|entry| {
-        matches!(
-            entry.trusted_check.promoted_by,
-            CheckPromotion::WorkspaceTrusted { .. }
-        )
-    }) {
-        return WorkspaceTrustRequirement::Trusted;
-    }
-    if entries.iter().any(|entry| {
-        matches!(
-            entry.trusted_check.promoted_by,
-            CheckPromotion::UserApproved { .. } | CheckPromotion::Sandboxed { .. }
-        )
-    }) {
-        return WorkspaceTrustRequirement::ApprovalOrSandbox;
-    }
-    WorkspaceTrustRequirement::None
-}
-
 #[cfg(test)]
-#[path = "tests/task_execution_tests.rs"]
-mod tests;
+mod task_execution_tests {
+    use super::*;
+
+    fn promotion(
+        session: &Session,
+        task_id: TaskId,
+        exact_guidance: &str,
+    ) -> Result<TaskGuidancePromotedEntry> {
+        let projected = sigil_kernel::project_conversation_prompt_for_persistence(exact_guidance);
+        Ok(TaskGuidancePromotedEntry {
+            queue_id: sigil_kernel::ConversationInputQueueId::new("queued_guidance")?,
+            expected_queue_revision: sigil_kernel::ConversationQueueRevision {
+                stream_sequence: 1,
+                event_id: "queue_event_1".to_owned(),
+            },
+            task_id,
+            source_turn: ConversationTurnRef::new(
+                session.session_scope_id(),
+                "queued_guidance_message",
+                "queued_guidance_run",
+            )?,
+            prompt_hash: projected.prompt_hash,
+            exact_prompt_required: projected.exact_prompt_required,
+            guidance: projected.safe_prompt,
+            dispatch_run_id: "queued_guidance_run".to_owned(),
+            promoted_at_ms: 1,
+        })
+    }
+
+    #[test]
+    fn task_guidance_promotion_requires_exact_task_durable_event_and_process_prompt() -> Result<()>
+    {
+        let mut session = Session::new("test", "model");
+        let task_id = TaskId::new("direct_task")?;
+        let exact_guidance = "continue with the durable queue binding";
+        let promotion = promotion(&session, task_id.clone(), exact_guidance)?;
+        session.record_durably_appended_task_guidance_promotion(promotion.clone())?;
+
+        let source = resolve_task_guidance_promotion_source(
+            &session,
+            &task_id,
+            &promotion,
+            Some(exact_guidance),
+        )?;
+        assert_eq!(source, promotion.source_turn);
+        assert!(
+            resolve_task_guidance_promotion_source(
+                &session,
+                &TaskId::new("different_task")?,
+                &promotion,
+                Some(exact_guidance),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_task_guidance_promotion_source(
+                &session,
+                &task_id,
+                &promotion,
+                Some("different prompt"),
+            )
+            .is_err()
+        );
+
+        let empty_session = Session::new("test", "model");
+        assert!(
+            resolve_task_guidance_promotion_source(
+                &empty_session,
+                &task_id,
+                &promotion,
+                Some(exact_guidance),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_failure_after_direct_attempt_uses_task_root_finalizer() -> Result<()> {
+        let mut session = Session::new("test", "model");
+        let task_id = TaskId::new("direct_task")?;
+        let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+        let objective = "continue the admitted task";
+        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }))?;
+        let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            objective,
+            1,
+        );
+        session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            admission.clone(),
+        ))?;
+        let continuation_entry_frontier = session.entries().len();
+        session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(
+            sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1),
+        ))?;
+
+        let result = finalize_task_continuation_root(
+            &mut session,
+            &task_id,
+            &parent_session_ref,
+            objective,
+            &sigil_kernel::RunCancellationOwner::new().handle(),
+            continuation_entry_frontier,
+            Err(anyhow!("direct execution failed after dispatch")),
+        );
+
+        assert!(
+            result.is_err(),
+            "execution failure remains visible to the caller"
+        );
+        assert_eq!(
+            session
+                .task_state_projection()
+                .tasks
+                .get(&task_id)
+                .map(|task| task.status),
+            Some(TaskRunStatus::Failed),
+            "a persisted direct attempt means execution crossed the resumable preflight boundary"
+        );
+        Ok(())
+    }
+}

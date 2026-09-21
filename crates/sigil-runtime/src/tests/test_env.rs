@@ -18,15 +18,6 @@ pub(crate) struct EnvScope {
 }
 
 impl EnvScope {
-    pub(crate) fn remove(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: the caller holds `lock` until this scope has restored the variable.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-
     pub(crate) fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         let previous = std::env::var_os(key);
         // SAFETY: runtime tests serialize environment mutations through `lock`.

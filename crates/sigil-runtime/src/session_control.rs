@@ -53,10 +53,11 @@ pub fn append_session_control_entries_and_track_detached(
     context: &str,
 ) -> Result<Vec<SessionLogEntry>> {
     if let Some(session) = current_session.as_mut() {
-        for control in controls {
+        let controls = controls.into_iter().collect::<Vec<_>>();
+        if !controls.is_empty() {
             session
-                .append_control(control)
-                .with_context(|| format!("failed to append {context} control"))?;
+                .append_controls(controls)
+                .with_context(|| format!("failed to append {context} control transition"))?;
         }
         return Ok(session.entries().to_vec());
     }

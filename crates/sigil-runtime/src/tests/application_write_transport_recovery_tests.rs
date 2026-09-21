@@ -79,10 +79,6 @@ impl Provider for WriteTransportProvider {
                     "transport-recovery-completion",
                 ))))
             }
-            3 => Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta(FINAL_TEXT.to_owned())),
-                Ok(ProviderChunk::Done),
-            ]))),
             stage => anyhow::bail!("unexpected provider resend at stage {stage}"),
         }
     }
@@ -125,6 +121,8 @@ async fn direct_task_write_then_transport_failure_restarts_without_repeating_mut
     let task_id = TaskId::new("write-transport-task")?;
     let objective = "Write settled.txt once, then report the completed mutation";
     let parent_session_ref = prepared.execution.parent_session_ref.clone();
+    let admission =
+        crate::direct_plan_fixture::append(&mut prepared.execution.session, &task_id, objective)?;
     prepared.execution.session.append_controls(vec![
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
@@ -134,15 +132,7 @@ async fn direct_task_write_then_transport_failure_restarts_without_repeating_mut
             status: TaskRunStatus::Paused,
             reason: Some("approved Direct Task ready".to_owned()),
         }),
-        ControlEntry::TaskDirectExecutionAdmittedV1(
-            sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
-                task_id.clone(),
-                objective,
-                sigil_kernel::PlanId::new("write-transport-plan")?,
-                format!("sha256:{}", "c".repeat(64)),
-                1,
-            ),
-        ),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
     ])?;
     drop(prepared);
     let continuation = |run: &str| ApplicationTaskContinuationRequest {
@@ -218,7 +208,11 @@ async fn direct_task_write_then_transport_failure_restarts_without_repeating_mut
     .await?;
     assert_eq!(output.task_status, TaskRunStatus::Completed);
     drop(control);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "the settled write and ambiguous attempt are followed by one resumed final answer"
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("settled.txt"))?,
         FILE_TEXT

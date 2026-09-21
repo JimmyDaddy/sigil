@@ -124,51 +124,26 @@ pub fn build_plan_prompt_tool_registry(
     registry.scoped(role_tool_scope(root_config, AgentRole::Planner).union(&agent_tool_scope()))
 }
 
-/// Hardcoded fail-closed read-only scope for automatic and explicit plan review runs.
+/// Builds the tool view for plan review.
 ///
-/// The host owns plan acceptance authority: a plan review run must never expose a mutation tool,
-/// even when the planner role allowlist grants one. The effective scope is the intersection of the
-/// frozen read-only surface with whatever the configured planner allowlist admits, so configured
-/// write tools are dropped instead of being trusted to a prompt.
+/// The model sees the tools available to a normal run (or the explicit planner allowlist). The
+/// review run itself uses read-only permission mode, which evaluates each concrete call's
+/// declared effects and rejects writes, unknown effects, and unproven execution. Tool names are
+/// not used as a substitute for that per-call decision.
 pub fn build_plan_review_tool_registry(
     registry: &ToolRegistry,
     root_config: &RootConfig,
 ) -> ScopedToolRegistry {
-    let read_only =
-        read_only_role_tool_scope().intersection(&role_tool_scope(root_config, AgentRole::Planner));
-    registry.scoped_with_denies(read_only, plan_review_deny_scope())
-}
-
-/// Frozen mutation families denied from every plan review run regardless of allowlist content.
-fn plan_review_deny_scope() -> ToolRegistryScope {
-    ToolRegistryScope::from_names_and_prefixes(
-        [
-            "bash",
-            "shell",
-            "write_file",
-            "edit_file",
-            "delete_file",
-            "apply_patch",
-            "apply_changeset",
-            "terminal_start",
-            "terminal_input",
-            "terminal_stop",
-            "webfetch",
-            "websearch",
-            "mcp_call",
-        ],
-        [
-            "write_",
-            "edit_",
-            "delete_",
-            "terminal_",
-            "mcp_",
-            "web_",
-            "changeset_",
-            "patch_",
-            "exec_",
-        ],
-    )
+    let planner_allowlist = &root_config.task.planner.tools;
+    let scope = if configured_allowlist_is_empty(planner_allowlist) {
+        ToolRegistryScope {
+            allow_all: true,
+            ..ToolRegistryScope::default()
+        }
+    } else {
+        role_tool_scope(root_config, AgentRole::Planner)
+    };
+    registry.scoped(scope)
 }
 
 /// Builds the current agent registry further constrained by a loaded skill descriptor.

@@ -96,7 +96,6 @@ impl ModelRecommendation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ModelCatalogEntry {
     pub model_ref: ModelRef,
     pub display_name: String,

@@ -102,7 +102,27 @@ async fn fresh_session_rejects_config_selection_drift_before_namespace_admission
     same_selection.agent.max_turns = Some(3);
     std::fs::write(&config_path, same_selection.persisted_toml()?)?;
     let prepared = Box::pin(prepare_application_run(request(), &services)).await?;
-    assert!(prepared.terminal_control().is_none());
+    assert!(
+        prepared.terminal_control().is_some(),
+        "core exec tools must retain their persistent terminal control: {:?}",
+        prepared.terminal_control()
+    );
+    let bound_composition = prepared
+        .execution
+        .session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot)) => {
+                Some(snapshot)
+            }
+            _ => None,
+        })
+        .expect("fresh session must retain the admitted composition");
+    assert_eq!(
+        bound_composition.capabilities,
+        same_selection.selected_capabilities()
+    );
     assert_eq!(prepared.run_options().max_turns, Some(3));
     assert_eq!(
         prepared.session_log_path(),
@@ -188,11 +208,8 @@ impl Provider for QuestionThenFileProvider {
                 "continuation-question",
                 sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
                 serde_json::json!({
-                    "prompt": "Choose a mode before writing",
                     "questions": [{
-                        "id": "mode", "header": "Mode", "question": "Which mode?",
-                        "required": true,
-                        "field": {"kind": "text", "multiline": false, "max_chars": 32}
+                        "id": "mode", "question": "Which mode?"
                     }]
                 }),
             ),
@@ -279,6 +296,7 @@ async fn submitted_answer_continuation_executes_real_managed_write_and_read() ->
     assert!(!root.path().join("answer.txt").exists());
     let decision = Box::pin(prepare_application_user_input_decision(
         ApplicationUserInputDecisionRequest {
+            application_operation: None,
             config_path,
             launch_cwd: root.path().to_path_buf(),
             session_path: session_path.clone(),
@@ -393,12 +411,6 @@ impl Provider for ReadingTaskProvider {
                     "continued-task-completion",
                 )
             }
-            2 => vec![
-                Ok(ProviderChunk::TextDelta(
-                    "task file read complete".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ],
             _ => anyhow::bail!("unexpected Task executor turn"),
         };
         Ok(Box::pin(stream::iter(chunks)))
@@ -441,6 +453,16 @@ async fn task_continuation_executes_real_managed_file_read() -> Result<()> {
             status: TaskRunStatus::Paused,
             reason: Some("restart before the first task step".to_owned()),
         }))?;
+    prepared
+        .execution
+        .session
+        .append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+                task_id.clone(),
+                "read the task fixture",
+                1,
+            ),
+        ))?;
     drop(prepared);
     let continued = Box::pin(prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
@@ -467,8 +489,8 @@ async fn task_continuation_executes_real_managed_file_read() -> Result<()> {
     assert_eq!(output.task_status, TaskRunStatus::Completed);
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        3,
-        "the Task must consume one real read result and one claim follow-up"
+        2,
+        "the Task must consume one real managed read result and finish directly"
     );
     drop(control);
     Ok(())

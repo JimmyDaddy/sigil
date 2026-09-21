@@ -76,7 +76,7 @@ pub struct ApplicationTaskIntegrationAcceptanceView {
     pub promotion_status: sigil_kernel::IntegrationPromotionStatus,
     /// Authoritative parent verdict, when promotion reached the parent-check barrier.
     pub parent_verdict: Option<sigil_kernel::VerificationVerdict>,
-    /// Whether the exact Task may now continue into synthesis.
+    /// Whether the exact Task may now continue its model-owned execution.
     pub can_continue: bool,
     /// Safe cleanup diagnostic for a runtime-owned promotion candidate.
     pub promotion_cleanup_error: Option<String>,

@@ -28,6 +28,14 @@ use sigil_application::{
 /// snapshots and pages.  They must not expose paths, provider payloads, or physical authority
 /// objects through the application contract.
 pub trait RuntimeApplicationProjectionSource: Send + Sync {
+    /// Checks the host-owned scope without requiring the projection or command journal to
+    /// be readable. Recovery remains available when either projection cannot be opened.
+    fn validate_recovery_scope(
+        &self,
+        _scope: &sigil_application::ApplicationScope,
+    ) -> Result<(), ApplicationError> {
+        Err(ApplicationError::Unavailable)
+    }
     fn delivery_batch(
         &self,
         _request: sigil_application::DurableDeliveryRequest,
@@ -67,6 +75,22 @@ pub enum RuntimeApplicationDispatch {
 /// The service reserves the command before calling this trait.  An executor error is therefore
 /// converted to an `Uncertain` receipt instead of being treated as proof that no effect happened.
 pub trait RuntimeApplicationCommandExecutor: Send + Sync {
+    /// Reads the original Intent binding for an existing runtime transition. Implementations
+    /// must not create an Intent, change a gate, or accept another command kind here.
+    fn session_runtime_resume_binding(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    /// Queries the original domain owner's causal commit. This must never dispatch a command
+    /// or infer success from a matching current value, channel send, or elapsed time.
+    fn reconcile(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<Option<RuntimeApplicationDispatch>, ApplicationError>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Asks the concrete domain owner to durably bind the command before any physical effect.
     /// Implementations must return an error when they cannot prove such a binding; there is no
     /// default or process-local fallback.
@@ -112,6 +136,46 @@ pub enum RuntimeApplicationReservationAdmission {
 
 /// Durable application reservation store supplied by the runtime composition root.
 pub trait RuntimeApplicationReservationStore: Send + Sync {
+    /// Publishes an explicit retry gate for an existing runtime transition with unchanged K/F
+    /// and owner Intent. Ordinary uncertain commands cannot use this transition.
+    fn resume_session_runtime_effect(
+        &self,
+        _key: CommandReservationKey,
+        _fingerprint: String,
+        _binding: CommandEffectBinding,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    fn recover_control_log(
+        &self,
+        _action: sigil_application::ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<sigil_application::ControlLogRecoveryOutcome, ApplicationError>>
+    {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    fn forward_guard(
+        &self,
+        _request: &ApplicationCommandRequest,
+    ) -> Result<
+        Option<Box<dyn sigil_kernel::managed_storage::ManagedStorageForwardGuardV1>>,
+        ApplicationError,
+    > {
+        Ok(None)
+    }
+    fn command_journal_binding(
+        &self,
+    ) -> Result<Option<sigil_application::CommandJournalBinding>, ApplicationError> {
+        Ok(None)
+    }
+    fn original_command_context(
+        &self,
+        _key: CommandReservationKey,
+    ) -> BoxFuture<
+        'static,
+        Result<Option<sigil_application::OriginalCommandContext>, ApplicationError>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
     fn reserve(
         &self,
         key: CommandReservationKey,
@@ -276,8 +340,38 @@ impl RuntimeApplicationService {
             &request.envelope.command,
             sigil_application::ApplicationCommand::Run(
                 sigil_application::RunCommand::CancelTerminalTask { .. }
+                    | sigil_application::RunCommand::Cancel { .. }
             )
         )
+    }
+
+    async fn stop_after_journal_failure(
+        executor: &Arc<dyn RuntimeApplicationCommandExecutor>,
+        request: &ApplicationCommandRequest,
+        error: ApplicationError,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        if !Self::exact_fail_safe_stop(request)
+            || !matches!(
+                error,
+                ApplicationError::Unavailable | ApplicationError::CorruptProjection(_)
+            )
+        {
+            return Err(error);
+        }
+        // Only the exact authenticated stop owner can confirm this fail-safe lane. A failed
+        // ledger write cannot manufacture a durable receipt, nor authorize a forward effect.
+        match executor.request_safety_stop(request.clone()).await? {
+            SafetyStopDisposition::ForwardGateClosed => {
+                Ok(ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(
+                    SafetyStopRequestedButUnrecorded {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reason: error.to_string(),
+                    },
+                ))
+            }
+            SafetyStopDisposition::Uncertain => Err(ApplicationError::Unavailable),
+        }
     }
 
     async fn persist_uncertain_after_dispatch(
@@ -310,6 +404,32 @@ impl RuntimeApplicationService {
 }
 
 impl ApplicationPort for RuntimeApplicationService {
+    fn recover_control_log(
+        &self,
+        scope: sigil_application::ApplicationScope,
+        action: sigil_application::ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<sigil_application::ControlLogRecoveryOutcome, ApplicationError>>
+    {
+        if let Err(error) = self.projection.validate_recovery_scope(&scope) {
+            return Box::pin(async move { Err(error) });
+        }
+        self.reservations.recover_control_log(action)
+    }
+    fn command_journal_binding(
+        &self,
+    ) -> Result<Option<sigil_application::CommandJournalBinding>, ApplicationError> {
+        self.reservations.command_journal_binding()
+    }
+    fn original_command_context(
+        &self,
+        key: CommandReservationKey,
+    ) -> BoxFuture<
+        'static,
+        Result<Option<sigil_application::OriginalCommandContext>, ApplicationError>,
+    > {
+        self.reservations.original_command_context(key)
+    }
+
     fn delivery_batch(
         &self,
         request: sigil_application::DurableDeliveryRequest,
@@ -438,10 +558,49 @@ impl ApplicationPort for RuntimeApplicationService {
         &self,
         request: ApplicationCommandRequest,
     ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+        self.execute_admitted(request, false)
+    }
+
+    fn resume_session_runtime_transition(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+        self.execute_admitted(request, true)
+    }
+}
+
+impl RuntimeApplicationService {
+    fn execute_admitted(
+        &self,
+        request: ApplicationCommandRequest,
+        resume_runtime_transition: bool,
+    ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
         let executor = Arc::clone(&self.executor);
         let reservations = Arc::clone(&self.reservations);
         Box::pin(async move {
             request.validate()?;
+            let resume_binding = if resume_runtime_transition {
+                if !matches!(
+                    &request.envelope.command,
+                    sigil_application::ApplicationCommand::Provider(
+                        sigil_application::ProviderCommand::SelectRoute { .. }
+                    )
+                ) {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                Some(
+                    executor
+                        .session_runtime_resume_binding(request.clone())
+                        .await?,
+                )
+            } else {
+                None
+            };
+            // Fail early for a sealed generation, then release the namespace guard before a
+            // journal append takes that same lock. Acquire it again immediately before dispatch.
+            if resume_runtime_transition {
+                drop(reservations.forward_guard(&request)?);
+            }
             let fingerprint = command_fingerprint(&request)?;
             let key = request
                 .admission
@@ -451,36 +610,75 @@ impl ApplicationPort for RuntimeApplicationService {
                 .await
             {
                 Ok(admission) => admission,
-                Err(error) if Self::exact_fail_safe_stop(&request) => {
-                    // A durable command receipt cannot be claimed while the ledger is corrupt,
-                    // but an already authenticated exact root must still close its forward gate
-                    // through its real owner. This lane never admits a new forward effect, and
-                    // a normal dispatch result is not evidence that the gate was closed.
-                    match executor.request_safety_stop(request.clone()).await {
-                        Ok(SafetyStopDisposition::ForwardGateClosed) => {
-                            return Ok(
-                                ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(
-                                    SafetyStopRequestedButUnrecorded {
-                                        command_id: request.envelope.command_id.clone(),
-                                        command_kind: request.envelope.command.kind().to_owned(),
-                                        reason: error.to_string(),
-                                    },
-                                ),
-                            );
-                        }
-                        Ok(SafetyStopDisposition::Uncertain) => {
-                            return Err(ApplicationError::Unavailable);
-                        }
-                        Err(error) => return Err(error),
-                    }
+                Err(error) => {
+                    return Self::stop_after_journal_failure(&executor, &request, error).await;
                 }
-                Err(error) => return Err(error),
             };
+            let unresolved = matches!(
+                &admission,
+                RuntimeApplicationReservationAdmission::InFlight(_)
+            ) || matches!(&admission, RuntimeApplicationReservationAdmission::Existing(receipt)
+                    if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_)
+                        | ApplicationCommandReceipt::ReplayedUncertain(_)));
+            // Explicit owner resume also restores the live gate. A read-only historical
+            // Activated receipt is not evidence that this physical worker accepts commands.
+            if unresolved && !resume_runtime_transition {
+                match executor.reconcile(request.clone()).await? {
+                    Some(RuntimeApplicationDispatch::Settled(domain)) => {
+                        let ApplicationCommandReceipt::Settled(domain) =
+                            Self::validate_settled_receipt(&request, domain)?
+                        else {
+                            return Err(ApplicationError::Unavailable);
+                        };
+                        // The domain source remains authoritative even if the old command
+                        // generation has already been sealed and cannot accept another record.
+                        if reservations
+                            .mark_domain_committed(key.clone(), fingerprint.clone(), domain.clone())
+                            .await
+                            .is_ok()
+                        {
+                            let _ = reservations
+                                .settle(
+                                    key,
+                                    fingerprint,
+                                    ApplicationCommandReceipt::Settled(domain.clone()),
+                                )
+                                .await;
+                        }
+                        return Ok(ApplicationCommandReceipt::Replayed(domain));
+                    }
+                    Some(RuntimeApplicationDispatch::ConfirmedNoEffect { proof, .. }) => {
+                        proof.validate()?;
+                        if proof.source.key != key || proof.reservation_fingerprint != fingerprint {
+                            return Err(ApplicationError::ScopeMismatch);
+                        }
+                        let _ = reservations
+                            .mark_confirmed_no_effect(key, fingerprint, proof.clone())
+                            .await;
+                        return Ok(ApplicationCommandReceipt::ConfirmedNoEffect(proof));
+                    }
+                    _ => (),
+                }
+            }
             match admission {
+                RuntimeApplicationReservationAdmission::Reserved if resume_runtime_transition => {
+                    return Err(ApplicationError::Unavailable);
+                }
                 RuntimeApplicationReservationAdmission::Reserved => {}
+                RuntimeApplicationReservationAdmission::InFlight(_)
+                    if resume_runtime_transition => {}
                 RuntimeApplicationReservationAdmission::InFlight(receipt) => {
                     return Ok(ApplicationCommandReceipt::InFlight(receipt));
                 }
+                RuntimeApplicationReservationAdmission::Existing(ref receipt)
+                    if resume_runtime_transition
+                        && matches!(
+                            receipt.as_ref(),
+                            ApplicationCommandReceipt::Uncertain(_)
+                                | ApplicationCommandReceipt::ReplayedUncertain(_)
+                                | ApplicationCommandReceipt::Settled(_)
+                                | ApplicationCommandReceipt::Replayed(_)
+                        ) => {}
                 RuntimeApplicationReservationAdmission::Existing(receipt) => {
                     return Ok(match *receipt {
                         ApplicationCommandReceipt::Settled(domain) => {
@@ -497,15 +695,43 @@ impl ApplicationPort for RuntimeApplicationService {
                 }
             }
 
-            reservations
-                .mark_dispatch_started(key.clone(), fingerprint.clone())
-                .await?;
-            let effect_binding = match executor
-                .bind_effect(request.clone(), key.clone(), fingerprint.clone())
-                .await
-            {
-                Ok(binding) => binding,
-                Err(_) => {
+            if let Some(binding) = resume_binding {
+                binding.validate()?;
+                if binding.recovery.key != key
+                    || binding.reservation_fingerprint != fingerprint
+                    || binding.command_id != request.envelope.command_id
+                    || binding.command_kind != request.envelope.command.kind()
+                    || binding.recovery.phase != CommandLifecyclePhase::EffectStarted
+                {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                reservations
+                    .resume_session_runtime_effect(key.clone(), fingerprint.clone(), binding)
+                    .await?;
+            } else {
+                if let Err(error) = reservations
+                    .mark_dispatch_started(key.clone(), fingerprint.clone())
+                    .await
+                {
+                    return Self::stop_after_journal_failure(&executor, &request, error).await;
+                }
+                let effect_binding = match executor
+                    .bind_effect(request.clone(), key.clone(), fingerprint.clone())
+                    .await
+                {
+                    Ok(binding) => binding,
+                    Err(_) => {
+                        return Self::persist_uncertain_after_dispatch(
+                            &reservations,
+                            &request,
+                            key,
+                            fingerprint,
+                            CommandLifecyclePhase::DispatchStarted,
+                        )
+                        .await;
+                    }
+                };
+                if effect_binding.validate().is_err() {
                     return Self::persist_uncertain_after_dispatch(
                         &reservations,
                         &request,
@@ -515,34 +741,35 @@ impl ApplicationPort for RuntimeApplicationService {
                     )
                     .await;
                 }
-            };
-            if effect_binding.validate().is_err() {
-                return Self::persist_uncertain_after_dispatch(
-                    &reservations,
-                    &request,
-                    key,
-                    fingerprint,
-                    CommandLifecyclePhase::DispatchStarted,
-                )
-                .await;
+                if effect_binding.recovery.key != key
+                    || effect_binding.reservation_fingerprint != fingerprint
+                {
+                    return Self::persist_uncertain_after_dispatch(
+                        &reservations,
+                        &request,
+                        key,
+                        fingerprint,
+                        CommandLifecyclePhase::DispatchStarted,
+                    )
+                    .await;
+                }
+                if let Err(error) = reservations
+                    .mark_effect_started(key.clone(), fingerprint.clone(), effect_binding)
+                    .await
+                {
+                    return Self::stop_after_journal_failure(&executor, &request, error).await;
+                }
             }
-            if effect_binding.recovery.key != key
-                || effect_binding.reservation_fingerprint != fingerprint
-            {
-                return Self::persist_uncertain_after_dispatch(
-                    &reservations,
-                    &request,
-                    key,
-                    fingerprint,
-                    CommandLifecyclePhase::DispatchStarted,
-                )
-                .await;
-            }
-            reservations
-                .mark_effect_started(key.clone(), fingerprint.clone(), effect_binding)
-                .await?;
 
-            let outcome = match executor.dispatch(request.clone()).await {
+            let forward_guard = match reservations.forward_guard(&request) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    return Self::stop_after_journal_failure(&executor, &request, error).await;
+                }
+            };
+            let dispatch = executor.dispatch(request.clone()).await;
+            drop(forward_guard);
+            let outcome = match dispatch {
                 Ok(RuntimeApplicationDispatch::Settled(receipt)) => {
                     match Self::validate_settled_receipt(&request, receipt) {
                         Ok(receipt) => receipt,

@@ -106,11 +106,11 @@ impl AgentSupervisor {
         invocation_mode: AgentInvocationMode,
         parent_depth: usize,
         mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), super::AgentReservationError> {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
+            .map_err(|_| super::AgentReservationError::StateLockPoisoned)?;
         if let Some(active) = state.active_threads.get_mut(thread_id) {
             if active.batch_reserved
                 && active.profile_id == *profile_id
@@ -121,21 +121,25 @@ impl AgentSupervisor {
                 active.mailbox_tx = mailbox_tx;
                 return Ok(());
             }
-            return Err(format!(
-                "agent thread {} is already active",
-                thread_id.as_str()
-            ));
+            return Err(super::AgentReservationError::AlreadyActive {
+                thread_id: thread_id.as_str().to_owned(),
+            });
         }
         if state.active_threads.len() >= self.budget.max_subagents {
-            return Err(format!(
-                "agent thread budget exceeded: [task].max_subagents={}",
-                self.budget.max_subagents
+            return Err(super::AgentReservationError::Budget(
+                super::AgentBudgetDenial::ActiveThreadLimit {
+                    active_threads: state.active_threads.len(),
+                    requested_threads: 1,
+                    max_subagents: self.budget.max_subagents,
+                },
             ));
         }
         if parent_depth >= self.budget.max_depth {
-            return Err(format!(
-                "agent depth budget exceeded: max_depth={}",
-                self.budget.max_depth
+            return Err(super::AgentReservationError::Budget(
+                super::AgentBudgetDenial::DepthLimit {
+                    parent_depth,
+                    max_depth: self.budget.max_depth,
+                },
             ));
         }
         state.active_threads.insert(

@@ -11,6 +11,7 @@ fn spawn_scope_overlap_warning_detects_parent_child_path_overlap() -> Result<()>
         objective: "inspect crates/sigil-kernel/src/permission.rs".to_owned(),
         prompt: "read permission implementation".to_owned(),
         mode: AgentInvocationMode::JoinBeforeFinal,
+        isolation: None,
         display_name_hint: None,
     };
 
@@ -30,6 +31,7 @@ fn spawn_scope_overlap_warning_ignores_unrelated_scopes() -> Result<()> {
         objective: "inspect crates/sigil-kernel/src/permission.rs".to_owned(),
         prompt: "read permission implementation".to_owned(),
         mode: AgentInvocationMode::JoinBeforeFinal,
+        isolation: None,
         display_name_hint: None,
     };
 

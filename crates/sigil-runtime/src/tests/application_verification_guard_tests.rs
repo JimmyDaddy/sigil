@@ -2,9 +2,9 @@
 use super::*;
 use sigil_kernel::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry,
-    CompletionCriteria, EvidenceScope, ReceiptStatus, TaskDirectExecutionAdmittedV1, ToolEffect,
-    VerificationAutoRunPolicy, VerificationCheckRunRequest, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationVerdict, WorkspaceTrust,
+    CompletionCriteria, EvidenceScope, ReceiptStatus, ToolEffect, VerificationAutoRunPolicy,
+    VerificationCheckRunRequest, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationVerdict, WorkspaceTrust,
 };
 
 struct VerificationProviderBuilder {
@@ -46,7 +46,7 @@ impl Provider for VerificationProvider {
             vec![
                 Ok(ProviderChunk::ToolCallStart {
                     id: "pipeline-wrapper".to_owned(),
-                    name: "bash".to_owned(),
+                    name: "exec_command".to_owned(),
                 }),
                 Ok(ProviderChunk::ToolCallArgsDelta {
                     id: "pipeline-wrapper".to_owned(),
@@ -54,7 +54,7 @@ impl Provider for VerificationProvider {
                 }),
                 Ok(ProviderChunk::ToolCallComplete(ToolCall {
                     id: "pipeline-wrapper".to_owned(),
-                    name: "bash".to_owned(),
+                    name: "exec_command".to_owned(),
                     args_json,
                 })),
                 Ok(ProviderChunk::Done),
@@ -92,6 +92,11 @@ fn services(root: &Path, wrapper: bool) -> Result<(std::path::PathBuf, Applicati
     Ok((config_path, services))
 }
 fn seed_task(session: &mut Session, parent: SessionRef, task: &TaskId) -> Result<()> {
+    let admission = crate::direct_plan_fixture::append(
+        session,
+        task,
+        "Evaluate only declared verification evidence",
+    )?;
     session.append_controls(vec![
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: task.clone(),
@@ -101,13 +106,7 @@ fn seed_task(session: &mut Session, parent: SessionRef, task: &TaskId) -> Result
             status: TaskRunStatus::Paused,
             reason: None,
         }),
-        ControlEntry::TaskDirectExecutionAdmittedV1(TaskDirectExecutionAdmittedV1::approved_plan(
-            task.clone(),
-            "Evaluate only declared verification evidence",
-            sigil_kernel::PlanId::new("approved-verification")?,
-            format!("sha256:{}", "b".repeat(64)),
-            1,
-        )),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
     ])
 }
 fn check(
@@ -233,7 +232,12 @@ async fn real_pipeline_wrapper_zero_does_not_become_passed_verification() -> Res
                 _ => None,
             })
             .expect("real wrapper result");
-        assert_eq!(wrapper_result.facts.exit_code, Some(0));
+        assert_eq!(
+            wrapper_result.facts.exit_code,
+            Some(0),
+            "wrapper facts: {:?}",
+            wrapper_result.facts
+        );
         assert_eq!(wrapper_result.facts.status, "ok");
         let projection = session.verification_state_projection();
         let readiness = projection

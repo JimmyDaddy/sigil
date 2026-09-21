@@ -1,4 +1,5 @@
 use super::*;
+use crate::AgentToolBackgroundRuns;
 
 #[test]
 fn attachment_is_exclusive_and_released_on_drop() -> anyhow::Result<()> {
@@ -101,5 +102,22 @@ fn attachment_shares_route_authority_with_live_execution_owners() -> anyhow::Res
             .route_mutation_authority("session-scope-b")
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn attachment_returns_one_shared_background_agent_owner() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session-background-owner.jsonl");
+    let attachment = InteractiveSessionAttachmentLease::acquire(&session_path)?;
+
+    let first = attachment.agent_tool_background_runs()?;
+    let second = attachment.agent_tool_background_runs()?;
+
+    assert!(first.shares_owner_with(&second));
+    let replacement = AgentToolBackgroundRuns::default();
+    attachment.bind_agent_tool_background_runs(replacement.clone())?;
+    let rebound = attachment.agent_tool_background_runs()?;
+    assert!(rebound.shares_owner_with(&replacement));
     Ok(())
 }

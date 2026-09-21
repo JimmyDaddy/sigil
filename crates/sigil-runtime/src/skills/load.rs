@@ -77,15 +77,14 @@ impl Tool for LoadSkillTool {
             name: LOAD_SKILL_TOOL_NAME.to_owned(),
             description: model_visible_skill_index_description(&self.snapshot),
             input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Stable id of a trusted model-invocable skill to load."
-                    }
-                },
-                "required": ["id"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Stable id of a trusted model-invocable skill to load."
+                }
+            },
+            "required": ["id"],
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,

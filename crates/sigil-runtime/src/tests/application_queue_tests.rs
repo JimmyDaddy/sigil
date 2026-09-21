@@ -647,7 +647,7 @@ async fn application_assembly_freezes_exact_first_request_without_persisting_it(
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> Result<()> {
+async fn auto_routed_queue_assembly_freezes_ordinary_tools_and_optional_handoffs() -> Result<()> {
     let _environment_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let root = tempfile::tempdir()?;
@@ -685,28 +685,32 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
         .expect("frozen request contains the effective base system prompt");
     assert!(system_prompt.contains("Writable memory is available"));
     assert!(!system_prompt.contains("Writable memory tools are unavailable"));
-    assert_eq!(
-        request
-            .tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
-            sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
-            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-            sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
-            sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
-        ]
-    );
+    let tool_names = request
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
+        sigil_kernel::START_TASK_TOOL_NAME,
+        sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
+        sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+        sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
+        "read_file",
+    ] {
+        assert!(
+            tool_names.contains(&expected),
+            "missing ordinary Auto tool {expected}"
+        );
+    }
     let routing_index = request
         .messages
         .iter()
         .position(|message| {
             message.content.as_deref()
-                == Some(sigil_kernel::conversation_route_routing_contract_material())
+                == Some(sigil_kernel::conversation_auto_execution_contract_material())
         })
-        .expect("frozen request contains the routing-only system contract");
+        .expect("frozen request contains the ordinary Auto execution contract");
     let exact_user_index = request
         .messages
         .iter()

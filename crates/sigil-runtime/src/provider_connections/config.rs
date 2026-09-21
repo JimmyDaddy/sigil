@@ -150,7 +150,7 @@ impl<'de> Deserialize<'de> for CredentialId {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "source", rename_all = "snake_case")]
 pub enum CredentialRefConfig {
     Environment { name: String },
     Stored { id: CredentialId },
@@ -201,7 +201,6 @@ impl fmt::Debug for ProviderConnectionConfig {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ProviderConnectionWire {
     label: String,
     provider: ProviderFamily,

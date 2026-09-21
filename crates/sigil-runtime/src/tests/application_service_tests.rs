@@ -83,6 +83,7 @@ impl RuntimeApplicationCommandExecutor for SettlingExecutor {
             settlement: request.envelope.command.policy().settlement,
             summary: "settled in test executor".to_owned(),
             domain_commit: ApplicationDomainCommitRef {
+                source_session_scope_id: None,
                 source_event_id: "test-domain-event".to_owned(),
                 source_sequence: 1,
                 source_digest: "a".repeat(64),
@@ -155,6 +156,24 @@ struct TestReservationStore {
     fail_mark: bool,
     fail_reserve: bool,
     fail_settle: bool,
+    injected_failure: Option<(TestJournalFailureStage, ApplicationError)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TestJournalFailureStage {
+    Reserve,
+    Dispatch,
+    Effect,
+    Guard,
+}
+
+impl TestReservationStore {
+    fn failure(&self, stage: TestJournalFailureStage) -> Option<ApplicationError> {
+        self.injected_failure
+            .as_ref()
+            .filter(|(at, _)| *at == stage)
+            .map(|(_, error)| error.clone())
+    }
 }
 
 enum TestReservationState {
@@ -167,12 +186,28 @@ enum TestReservationState {
 }
 
 impl RuntimeApplicationReservationStore for TestReservationStore {
+    fn forward_guard(
+        &self,
+        _request: &ApplicationCommandRequest,
+    ) -> Result<
+        Option<Box<dyn sigil_kernel::managed_storage::ManagedStorageForwardGuardV1>>,
+        ApplicationError,
+    > {
+        match self.failure(TestJournalFailureStage::Guard) {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
     fn reserve(
         &self,
         key: CommandReservationKey,
         fingerprint: String,
         request: ApplicationCommandRequest,
     ) -> BoxFuture<'static, Result<RuntimeApplicationReservationAdmission, ApplicationError>> {
+        if let Some(error) = self.failure(TestJournalFailureStage::Reserve) {
+            return Box::pin(async move { Err(error) });
+        }
         if self.fail_reserve {
             return Box::pin(async { Err(ApplicationError::Unavailable) });
         }
@@ -250,6 +285,9 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
         key: CommandReservationKey,
         fingerprint: String,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        if let Some(error) = self.failure(TestJournalFailureStage::Dispatch) {
+            return Box::pin(async move { Err(error) });
+        }
         if self.fail_mark {
             return Box::pin(async { Err(ApplicationError::Unavailable) });
         }
@@ -284,6 +322,9 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
         fingerprint: String,
         _binding: CommandEffectBinding,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        if let Some(error) = self.failure(TestJournalFailureStage::Effect) {
+            return Box::pin(async move { Err(error) });
+        }
         let result = (|| {
             let mut entries = self
                 .entries
@@ -672,6 +713,75 @@ fn runtime_service_rejects_unconfirmed_safety_stop_without_normal_dispatch() {
     assert!(matches!(error, ApplicationError::Unavailable));
     assert_eq!(safety_stop_calls.load(Ordering::SeqCst), 1);
     assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn exact_stop_survives_each_pre_dispatch_journal_failure_without_bypassing_scope_or_conflict() {
+    for stage in [
+        TestJournalFailureStage::Reserve,
+        TestJournalFailureStage::Dispatch,
+        TestJournalFailureStage::Effect,
+        TestJournalFailureStage::Guard,
+    ] {
+        for error in [
+            ApplicationError::Unavailable,
+            ApplicationError::ScopeMismatch,
+        ] {
+            for exact_stop in [true, false] {
+                let dispatch_calls = Arc::new(AtomicUsize::new(0));
+                let safety_stop_calls = Arc::new(AtomicUsize::new(0));
+                let reservations = Arc::new(TestReservationStore {
+                    injected_failure: Some((stage, error.clone())),
+                    ..TestReservationStore::default()
+                });
+                let service = RuntimeApplicationService::new(
+                    Arc::new(UnavailableProjection),
+                    Arc::new(SafetyStopExecutor {
+                        dispatch_calls: Arc::clone(&dispatch_calls),
+                        safety_stop_calls: Arc::clone(&safety_stop_calls),
+                        disposition: SafetyStopDisposition::ForwardGateClosed,
+                    }),
+                    reservations.clone(),
+                    Arc::new(Acker),
+                );
+                let mut request = request("forward", 1);
+                if exact_stop {
+                    request.envelope.command = ApplicationCommand::Run(RunCommand::Cancel {
+                        binding: "run".to_owned(),
+                        reason: None,
+                    });
+                }
+                let result = futures::executor::block_on(service.execute(request.clone()));
+                let safe = exact_stop && error == ApplicationError::Unavailable;
+                if safe {
+                    assert!(
+                        matches!(
+                            result,
+                            Ok(ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(
+                                _
+                            ))
+                        ),
+                        "{stage:?}: {result:?}"
+                    );
+                } else {
+                    assert_eq!(result, Err(error.clone()), "{stage:?}");
+                }
+                assert_eq!(safety_stop_calls.load(Ordering::SeqCst), usize::from(safe));
+                assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+                if stage != TestJournalFailureStage::Reserve {
+                    request.envelope.command = ApplicationCommand::Run(RunCommand::Cancel {
+                        binding: "different-run".to_owned(),
+                        reason: None,
+                    });
+                    assert!(matches!(
+                        futures::executor::block_on(service.execute(request)),
+                        Ok(ApplicationCommandReceipt::PayloadConflict(_))
+                    ));
+                    assert_eq!(safety_stop_calls.load(Ordering::SeqCst), usize::from(safe));
+                }
+            }
+        }
+    }
 }
 
 #[test]

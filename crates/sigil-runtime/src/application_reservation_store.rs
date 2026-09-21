@@ -23,8 +23,46 @@ use crate::{
 };
 
 const APPLICATION_RESERVATION_SCHEMA_VERSION: u16 = 3;
-const MAX_APPLICATION_RESERVATION_ENTRIES: usize = 4096;
-const MAX_APPLICATION_RESERVATION_BYTES: usize = 16 * 1024 * 1024;
+
+mod index;
+mod recovery;
+use index::ReservationIndex;
+
+/// Admission acquired during a fallible operation. Dropping it releases the live holder,
+/// retaining the physical storage charge even when the journal tail cannot be finalized.
+struct PendingNamespace {
+    writer: Arc<ManagedStorageWriterAdapterV1>,
+    lease: Option<ManagedStorageWriterLeaseV1>,
+}
+
+impl PendingNamespace {
+    fn acquire(
+        writer: &Arc<ManagedStorageWriterAdapterV1>,
+        channel: StorageWriterChannelV1,
+        key: &str,
+    ) -> Result<Self, ApplicationError> {
+        let lease = writer
+            .acquire_named(channel, key)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(Self {
+            writer: Arc::clone(writer),
+            lease: Some(lease),
+        })
+    }
+    fn get(&self) -> Result<&ManagedStorageWriterLeaseV1, ApplicationError> {
+        self.lease.as_ref().ok_or(ApplicationError::Unavailable)
+    }
+    fn take(mut self) -> Result<ManagedStorageWriterLeaseV1, ApplicationError> {
+        self.lease.take().ok_or(ApplicationError::Unavailable)
+    }
+}
+impl Drop for PendingNamespace {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            let _ = self.writer.detach(lease);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,29 +77,33 @@ enum DurableReservationState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DurableReservationJournalEntry {
     schema_version: u16,
     operation: DurableReservationOperation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 enum DurableReservationOperation {
     Reserve {
         key: CommandReservationKey,
         fingerprint: String,
+    },
+    ReserveWithContextV1 {
+        key: CommandReservationKey,
+        fingerprint: String,
+        request: Box<ApplicationCommandRequest>,
     },
     DispatchStarted {
         key: CommandReservationKey,
         fingerprint: String,
     },
     EffectStarted {
+        key: CommandReservationKey,
+        fingerprint: String,
+        binding: Box<CommandEffectBinding>,
+    },
+    SessionRuntimeEffectResumedV1 {
         key: CommandReservationKey,
         fingerprint: String,
         binding: Box<CommandEffectBinding>,
@@ -88,18 +130,26 @@ enum DurableReservationOperation {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReservationRecord {
     fingerprint: String,
     state: DurableReservationState,
+    #[serde(default)]
+    request: Option<Box<ApplicationCommandRequest>>,
+    #[serde(default)]
+    effect_binding: Option<Box<CommandEffectBinding>>,
 }
 
 /// Production application reservation authority for one managed application-control namespace.
 pub struct ManagedApplicationReservationStore {
     writer: Arc<ManagedStorageWriterAdapterV1>,
     lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
-    entries: Mutex<BTreeMap<CommandReservationKey, ReservationRecord>>,
-    durable_bytes: Mutex<usize>,
+    index_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+    entries: Mutex<ReservationIndex>,
+    recovery_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
+    logical_key: String,
+    logical_journal_id: sigil_kernel::resource::CanonicalHash,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for ManagedApplicationReservationStore {
@@ -118,63 +168,186 @@ impl ManagedApplicationReservationStore {
         writer: Arc<ManagedStorageWriterAdapterV1>,
         key: &str,
     ) -> Result<Self, ApplicationError> {
-        let lease = writer
-            .acquire_named(StorageWriterChannelV1::ApplicationControlLog, key)
+        let logical_journal_id = ManagedStorageWriterAdapterV1::named_namespace_digest(
+            StorageWriterChannelV1::ApplicationControlLog,
+            key,
+        );
+        let recovery_lease = PendingNamespace::acquire(
+            &writer,
+            StorageWriterChannelV1::ApplicationControlRecovery,
+            key,
+        )?;
+        let recovery_state = writer
+            .control_log_recovery_state(recovery_lease.get()?)
             .map_err(|_| ApplicationError::Unavailable)?;
-        let bytes = writer
-            .read_record_bytes(&lease, MAX_APPLICATION_RESERVATION_BYTES)
-            .map_err(|_| ApplicationError::Unavailable)?;
-        let entries = decode_entries(&bytes)?;
+        let generation = recovery_state.as_ref().map_or(0, |state| {
+            if state.phase == sigil_kernel::managed_storage::ControlLogRecoveryPhaseV1::Activated {
+                state.preview.request.successor_generation
+            } else {
+                state.preview.request.from_generation
+            }
+        });
+        let epoch_key = recovery::generation_key(key, generation);
+        let lease = PendingNamespace::acquire(
+            &writer,
+            StorageWriterChannelV1::ApplicationControlLog,
+            &epoch_key,
+        )?;
+        let index_lease = PendingNamespace::acquire(
+            &writer,
+            StorageWriterChannelV1::ApplicationCommandIndex,
+            &epoch_key,
+        )?;
+        let binding = sigil_application::CommandJournalBinding {
+            logical_journal_id: logical_journal_id.to_hex(),
+            command_generation: generation,
+        };
+        let recovering = recovery_state.is_some_and(|state| {
+            state.phase != sigil_kernel::managed_storage::ControlLogRecoveryPhaseV1::Activated
+        });
+        let entries = ReservationIndex::open(
+            &writer,
+            lease.get()?,
+            index_lease.get()?,
+            binding,
+            recovering,
+        )?;
         Ok(Self {
             writer,
-            lease: Mutex::new(Some(lease)),
+            lease: Mutex::new(Some(lease.take()?)),
+            index_lease: Mutex::new(Some(index_lease.take()?)),
             entries: Mutex::new(entries),
-            durable_bytes: Mutex::new(bytes.len()),
+            recovery_lease: Mutex::new(Some(recovery_lease.take()?)),
+            logical_key: key.to_owned(),
+            logical_journal_id,
+            generation: std::sync::atomic::AtomicU64::new(generation),
         })
     }
 
     fn append_operation(
         &self,
+        entries: &mut ReservationIndex,
         operation: DurableReservationOperation,
     ) -> Result<(), ApplicationError> {
-        let entry = DurableReservationJournalEntry {
-            schema_version: APPLICATION_RESERVATION_SCHEMA_VERSION,
-            operation,
-        };
-        let bytes = serde_json::to_vec(&entry).map_err(|_| {
-            ApplicationError::CorruptProjection(
-                "application reservation journal entry could not be encoded".to_owned(),
-            )
-        })?;
-        let record_bytes = bytes.len().checked_add(1).ok_or_else(|| {
-            ApplicationError::InvalidRequest("reservation journal overflow".to_owned())
-        })?;
-        let mut durable_bytes = self
-            .durable_bytes
+        let lease = self
+            .lease
             .lock()
             .map_err(|_| ApplicationError::Unavailable)?;
-        let next_bytes = durable_bytes.checked_add(record_bytes).ok_or_else(|| {
-            ApplicationError::InvalidRequest("reservation journal overflow".to_owned())
-        })?;
-        if next_bytes > MAX_APPLICATION_RESERVATION_BYTES {
-            return Err(ApplicationError::InvalidRequest(
-                "application reservation store exceeds its byte bound".to_owned(),
-            ));
+        let index_lease = self
+            .index_lease
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        entries.append(
+            &self.writer,
+            lease.as_ref().ok_or(ApplicationError::Unavailable)?,
+            index_lease.as_ref().ok_or(ApplicationError::Unavailable)?,
+            operation,
+        )
+    }
+
+    fn transition(&self, operation: DurableReservationOperation) -> Result<(), ApplicationError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        self.append_operation(&mut entries, operation)
+    }
+}
+
+impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
+    fn recover_control_log(
+        &self,
+        action: sigil_application::ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<sigil_application::ControlLogRecoveryOutcome, ApplicationError>>
+    {
+        use sigil_application::{
+            ControlLogRecoveryAction as Action, ControlLogRecoveryOutcome as Outcome,
+        };
+        let result = match action {
+            Action::Preview => self
+                .preview_control_log_recovery()
+                .map(Box::new)
+                .map(Outcome::Preview),
+            Action::SealAndRotate { preview } => self
+                .seal_and_rotate_control_log(&preview)
+                .map(Outcome::Activated),
+        };
+        Box::pin(ready(result))
+    }
+    fn forward_guard(
+        &self,
+        request: &ApplicationCommandRequest,
+    ) -> Result<
+        Option<Box<dyn sigil_kernel::managed_storage::ManagedStorageForwardGuardV1>>,
+        ApplicationError,
+    > {
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if !entries.is_writable() {
+            return Err(ApplicationError::Unavailable);
+        }
+        let generation = request
+            .admission
+            .command_journal
+            .as_ref()
+            .map_or(0, |binding| binding.command_generation);
+        if generation != self.binding().command_generation {
+            return Err(ApplicationError::ScopeMismatch);
         }
         let lease = self
             .lease
             .lock()
             .map_err(|_| ApplicationError::Unavailable)?;
-        let lease = lease.as_ref().ok_or(ApplicationError::Unavailable)?;
         self.writer
-            .write_record(lease, &bytes)
-            .map_err(|_| ApplicationError::Unavailable)?;
-        *durable_bytes = next_bytes;
-        Ok(())
+            .command_forward_guard(lease.as_ref().ok_or(ApplicationError::Unavailable)?)
+            .map(Some)
+            .map_err(|_| ApplicationError::Unavailable)
     }
-}
+    fn command_journal_binding(
+        &self,
+    ) -> Result<Option<sigil_application::CommandJournalBinding>, ApplicationError> {
+        Ok(Some(self.binding()))
+    }
 
-impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
+    fn original_command_context(
+        &self,
+        key: CommandReservationKey,
+    ) -> BoxFuture<
+        'static,
+        Result<Option<sigil_application::OriginalCommandContext>, ApplicationError>,
+    > {
+        let result = (|| {
+            key.validate()?;
+            let entries = self
+                .entries
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            match self.find_record(&entries, &key)? {
+                Some((generation, record)) => record
+                    .request
+                    .map(|request| {
+                        Some(sigil_application::OriginalCommandContext {
+                            expected_frontier: request.envelope.expected_frontier,
+                            command_journal: Some(sigil_application::CommandJournalBinding {
+                                logical_journal_id: self.logical_journal_id.to_hex(),
+                                command_generation: generation,
+                            }),
+                        })
+                    })
+                    .ok_or_else(|| {
+                        ApplicationError::InvalidRequest(
+                            "original command context is unknown; supply the original request"
+                                .to_owned(),
+                        )
+                    }),
+                None => Ok(None),
+            }
+        })();
+        Box::pin(ready(result))
+    }
+
     fn reserve(
         &self,
         key: CommandReservationKey,
@@ -186,31 +359,48 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
                 .entries
                 .lock()
                 .map_err(|_| ApplicationError::Unavailable)?;
-            let Some(record) = entries.get(&key) else {
-                self.append_operation(DurableReservationOperation::Reserve {
-                    key: key.clone(),
-                    fingerprint: fingerprint.clone(),
-                })?;
-                entries.insert(
-                    key,
-                    ReservationRecord {
+            let requested_generation = match &request.admission.command_journal {
+                Some(binding) if binding.logical_journal_id == self.logical_journal_id.to_hex() => {
+                    binding.command_generation
+                }
+                Some(_) => return Err(ApplicationError::ScopeMismatch),
+                None => 0,
+            };
+            let current_generation = self.generation.load(std::sync::atomic::Ordering::Acquire);
+            if requested_generation > current_generation {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            let found = if requested_generation == current_generation {
+                self.find_record(&entries, &key)?
+            } else {
+                self.historical_record(requested_generation, &key)?
+                    .map(|record| (requested_generation, record))
+            };
+            let Some((_generation, record)) = found else {
+                if requested_generation != current_generation {
+                    return Err(ApplicationError::Unavailable);
+                }
+                self.append_operation(
+                    &mut entries,
+                    DurableReservationOperation::ReserveWithContextV1 {
+                        key,
                         fingerprint,
-                        state: DurableReservationState::Reserved,
+                        request: Box::new(request),
                     },
-                );
+                )?;
                 return Ok(RuntimeApplicationReservationAdmission::Reserved);
             };
             if record.fingerprint != fingerprint {
                 return Ok(RuntimeApplicationReservationAdmission::Conflict(
                     CommandConflict {
                         command_id: request.envelope.command_id,
-                        original_fingerprint: record.fingerprint.clone(),
+                        original_fingerprint: record.fingerprint,
                         received_fingerprint: fingerprint,
                     },
                 ));
             }
             Ok(existing_admission(
-                record,
+                &record,
                 &key,
                 request.envelope.command_id,
                 request.envelope.command.kind().to_owned(),
@@ -225,31 +415,24 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         key: CommandReservationKey,
         fingerprint: String,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            match &record.state {
-                DurableReservationState::Reserved => {
-                    self.append_operation(DurableReservationOperation::DispatchStarted {
-                        key,
-                        fingerprint: fingerprint.clone(),
-                    })?;
-                    record.state = DurableReservationState::DispatchStarted;
-                    Ok(())
-                }
-                DurableReservationState::DispatchStarted => Ok(()),
-                _ => Err(ApplicationError::InvalidRequest(
-                    "application reservation cannot dispatch after lifecycle progressed".to_owned(),
-                )),
-            }
-        })();
-        Box::pin(ready(result))
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::DispatchStarted { key, fingerprint },
+        )))
+    }
+
+    fn resume_session_runtime_effect(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        binding: CommandEffectBinding,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::SessionRuntimeEffectResumedV1 {
+                key,
+                fingerprint,
+                binding: Box::new(binding),
+            },
+        )))
     }
 
     fn mark_effect_started(
@@ -258,37 +441,13 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         fingerprint: String,
         binding: CommandEffectBinding,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            binding.validate()?;
-            if binding.recovery.key != key || binding.reservation_fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            match &record.state {
-                DurableReservationState::DispatchStarted => {
-                    self.append_operation(DurableReservationOperation::EffectStarted {
-                        key,
-                        fingerprint: fingerprint.clone(),
-                        binding: Box::new(binding.clone()),
-                    })?;
-                    record.state = DurableReservationState::EffectStarted(Box::new(binding));
-                    Ok(())
-                }
-                DurableReservationState::EffectStarted(previous) if **previous == binding => Ok(()),
-                _ => Err(ApplicationError::InvalidRequest(
-                    "application reservation cannot start an effect from its current lifecycle phase"
-                        .to_owned(),
-                )),
-            }
-        })();
-        Box::pin(ready(result))
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::EffectStarted {
+                key,
+                fingerprint,
+                binding: Box::new(binding),
+            },
+        )))
     }
 
     fn mark_domain_committed(
@@ -297,35 +456,13 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         fingerprint: String,
         receipt: ApplicationDomainReceipt,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            receipt.validate_for(&key)?;
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            match &record.state {
-                DurableReservationState::EffectStarted(_) => {
-                    self.append_operation(DurableReservationOperation::DomainCommitted {
-                        key,
-                        fingerprint: fingerprint.clone(),
-                        receipt: Box::new(receipt.clone()),
-                    })?;
-                    record.state = DurableReservationState::DomainCommitted(Box::new(receipt));
-                    Ok(())
-                }
-                DurableReservationState::DomainCommitted(previous) if **previous == receipt => {
-                    Ok(())
-                }
-                _ => Err(ApplicationError::InvalidRequest(
-                    "application reservation domain commit is not monotonic".to_owned(),
-                )),
-            }
-        })();
-        Box::pin(ready(result))
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::DomainCommitted {
+                key,
+                fingerprint,
+                receipt: Box::new(receipt),
+            },
+        )))
     }
 
     fn mark_confirmed_no_effect(
@@ -334,38 +471,13 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         fingerprint: String,
         proof: CommandNoEffectProof,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            proof.validate()?;
-            if proof.source.key != key || proof.reservation_fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            match &record.state {
-                DurableReservationState::EffectStarted(_) => {
-                    self.append_operation(DurableReservationOperation::ConfirmedNoEffect {
-                        key,
-                        fingerprint: fingerprint.clone(),
-                        proof: Box::new(proof.clone()),
-                    })?;
-                    record.state = DurableReservationState::ConfirmedNoEffect(Box::new(proof));
-                    Ok(())
-                }
-                DurableReservationState::ConfirmedNoEffect(previous) if **previous == proof => {
-                    Ok(())
-                }
-                _ => Err(ApplicationError::InvalidRequest(
-                    "application reservation no-effect proof is not monotonic".to_owned(),
-                )),
-            }
-        })();
-        Box::pin(ready(result))
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::ConfirmedNoEffect {
+                key,
+                fingerprint,
+                proof: Box::new(proof),
+            },
+        )))
     }
 
     fn mark_uncertain(
@@ -374,37 +486,13 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         fingerprint: String,
         receipt: UncertainCommandReceipt,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            receipt.validate()?;
-            if receipt.recovery.key != key || receipt.reservation_fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            match &record.state {
-                DurableReservationState::DispatchStarted
-                | DurableReservationState::EffectStarted(_) => {
-                    self.append_operation(DurableReservationOperation::Uncertain {
-                        key,
-                        fingerprint: fingerprint.clone(),
-                        receipt: Box::new(receipt.clone()),
-                    })?;
-                    record.state = DurableReservationState::Uncertain(Box::new(receipt));
-                    Ok(())
-                }
-                DurableReservationState::Uncertain(previous) if **previous == receipt => Ok(()),
-                _ => Err(ApplicationError::InvalidRequest(
-                    "application reservation uncertainty is not monotonic".to_owned(),
-                )),
-            }
-        })();
-        Box::pin(ready(result))
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::Uncertain {
+                key,
+                fingerprint,
+                receipt: Box::new(receipt),
+            },
+        )))
     }
 
     fn settle(
@@ -413,93 +501,61 @@ impl RuntimeApplicationReservationStore for ManagedApplicationReservationStore {
         fingerprint: String,
         receipt: ApplicationCommandReceipt,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
-        let result = (|| {
-            let mut entries = self
-                .entries
-                .lock()
-                .map_err(|_| ApplicationError::Unavailable)?;
-            let record = entries.get_mut(&key).ok_or(ApplicationError::Unavailable)?;
-            if record.fingerprint != fingerprint {
-                return Err(ApplicationError::ScopeMismatch);
-            }
-            if matches!(
-                &receipt,
-                ApplicationCommandReceipt::PayloadConflict(_)
-                    | ApplicationCommandReceipt::InFlight(_)
-                    | ApplicationCommandReceipt::Replayed(_)
-                    | ApplicationCommandReceipt::ReplayedUncertain(_)
-                    | ApplicationCommandReceipt::ConfirmedNoEffect(_)
-                    | ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_)
-            ) {
-                return Err(ApplicationError::InvalidRequest(
-                    "non-terminal replay response cannot be persisted".to_owned(),
-                ));
-            }
-            match &record.state {
-                DurableReservationState::DomainCommitted(domain) if matches!(&receipt, ApplicationCommandReceipt::Settled(settled) if settled == domain.as_ref()) =>
-                    {}
-                DurableReservationState::ConfirmedNoEffect(_)
-                    if matches!(&receipt, ApplicationCommandReceipt::Rejected(_)) => {}
-                DurableReservationState::Uncertain(uncertain) if matches!(&receipt, ApplicationCommandReceipt::Uncertain(stored) if stored == uncertain.as_ref()) =>
-                    {}
-                DurableReservationState::Settled(previous) if **previous == receipt => {
-                    return Ok(());
-                }
-                _ => {
-                    return Err(ApplicationError::InvalidRequest(
-                        "application reservation settlement is not backed by its lifecycle state"
-                            .to_owned(),
-                    ));
-                }
-            }
-            self.append_operation(DurableReservationOperation::Settled {
+        Box::pin(ready(self.transition(
+            DurableReservationOperation::Settled {
                 key,
                 fingerprint,
-                receipt: Box::new(receipt.clone()),
-            })?;
-            record.state = DurableReservationState::Settled(Box::new(receipt));
-            Ok(())
-        })();
-        Box::pin(ready(result))
+                receipt: Box::new(receipt),
+            },
+        )))
+    }
+}
+
+impl ManagedApplicationReservationStore {
+    fn find_record(
+        &self,
+        current: &ReservationIndex,
+        key: &CommandReservationKey,
+    ) -> Result<Option<(u64, ReservationRecord)>, ApplicationError> {
+        let generation = self.generation.load(std::sync::atomic::Ordering::Acquire);
+        if let Some(record) = current.get(key)? {
+            return Ok(Some((generation, record)));
+        }
+        for historical in (0..generation).rev() {
+            if let Some(record) = self.historical_record(historical, key)? {
+                return Ok(Some((historical, record)));
+            }
+        }
+        Ok(None)
     }
 }
 
 impl Drop for ManagedApplicationReservationStore {
     fn drop(&mut self) {
-        let Ok(mut lease) = self.lease.lock() else {
-            return;
-        };
-        if let Some(lease) = lease.take() {
-            let _ = self.writer.finalize(lease);
+        // The index connection closes before RA measures its physical object.
+        if let Ok(index) = self.entries.get_mut() {
+            index.close();
+        }
+        for slot in [&self.lease, &self.index_lease, &self.recovery_lease] {
+            if let Ok(mut slot) = slot.lock()
+                && let Some(lease) = slot.take()
+            {
+                let _ = self.writer.detach(lease);
+            }
         }
     }
 }
 
+#[cfg(test)]
 fn decode_entries(
     bytes: &[u8],
 ) -> Result<BTreeMap<CommandReservationKey, ReservationRecord>, ApplicationError> {
-    if bytes.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    if bytes.len() > MAX_APPLICATION_RESERVATION_BYTES {
-        return Err(ApplicationError::CorruptProjection(
-            "application reservation journal exceeds its byte bound".to_owned(),
-        ));
-    }
-
     let mut entries = BTreeMap::new();
-    let mut saw_record = false;
     for line in bytes
         .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty() && !line.iter().all(u8::is_ascii_whitespace))
+        .filter(|line| !line.is_empty())
     {
-        saw_record = true;
-        let line = std::str::from_utf8(line).map_err(|_| {
-            ApplicationError::CorruptProjection(
-                "application reservation journal is corrupt".to_owned(),
-            )
-        })?;
-        let entry = serde_json::from_str::<DurableReservationJournalEntry>(line).map_err(|_| {
+        let entry: DurableReservationJournalEntry = serde_json::from_slice(line).map_err(|_| {
             ApplicationError::CorruptProjection(
                 "application reservation journal is corrupt".to_owned(),
             )
@@ -510,16 +566,6 @@ fn decode_entries(
             ));
         }
         apply_journal_operation(&mut entries, entry.operation)?;
-        if entries.len() > MAX_APPLICATION_RESERVATION_ENTRIES {
-            return Err(ApplicationError::CorruptProjection(
-                "application reservation journal exceeds its entry bound".to_owned(),
-            ));
-        }
-    }
-    if !saw_record {
-        return Err(ApplicationError::CorruptProjection(
-            "application reservation journal is corrupt".to_owned(),
-        ));
     }
     Ok(entries)
 }
@@ -605,9 +651,48 @@ fn apply_journal_operation(
                     ReservationRecord {
                         fingerprint,
                         state: DurableReservationState::Reserved,
+                        request: None,
+                        effect_binding: None,
                     },
                 );
             }
+        }
+        DurableReservationOperation::ReserveWithContextV1 {
+            key,
+            fingerprint,
+            request,
+        } => {
+            if request
+                .admission
+                .reservation_key(&request.envelope.command_id)
+                != key
+                || sigil_application::command_fingerprint(&request)? != fingerprint
+            {
+                return Err(corrupt_reservation(ApplicationError::ScopeMismatch));
+            }
+            let existing = entries.get(&key);
+            if let Some(previous) = existing.and_then(|entry| entry.request.as_ref()) {
+                if previous.envelope != request.envelope
+                    || previous
+                        .admission
+                        .reservation_key(&previous.envelope.command_id)
+                        != key
+                {
+                    return Err(corrupt_reservation(ApplicationError::ScopeMismatch));
+                }
+                return Ok(());
+            }
+            if existing.is_none() {
+                apply_journal_operation(
+                    entries,
+                    DurableReservationOperation::Reserve {
+                        key: key.clone(),
+                        fingerprint: fingerprint.clone(),
+                    },
+                )?;
+            }
+            let record = checked_record(entries, &key, &fingerprint, "restore original context")?;
+            record.request = Some(request);
         }
         DurableReservationOperation::DispatchStarted { key, fingerprint } => {
             transition_record(
@@ -629,6 +714,9 @@ fn apply_journal_operation(
                 return Err(corrupt_reservation(ApplicationError::ScopeMismatch));
             }
             let previous_binding = binding.clone();
+            let stored_binding = binding.clone();
+            let stored_key = key.clone();
+            let stored_fingerprint = fingerprint.clone();
             transition_with_payload(
                 entries,
                 key,
@@ -643,6 +731,68 @@ fn apply_journal_operation(
                 },
                 DurableReservationState::EffectStarted(binding),
             )?;
+            checked_record(
+                entries,
+                &stored_key,
+                &stored_fingerprint,
+                "bind owner effect",
+            )?
+            .effect_binding = Some(stored_binding);
+        }
+        DurableReservationOperation::SessionRuntimeEffectResumedV1 {
+            key,
+            fingerprint,
+            binding,
+        } => {
+            binding.validate().map_err(corrupt_reservation)?;
+            let record = checked_record(entries, &key, &fingerprint, "resume runtime effect")?;
+            let request = record
+                .request
+                .as_ref()
+                .ok_or(ApplicationError::Unavailable)?;
+            if !matches!(
+                &request.envelope.command,
+                sigil_application::ApplicationCommand::Provider(
+                    sigil_application::ProviderCommand::SelectRoute { .. }
+                )
+            ) || binding.recovery.key != key
+                || binding.reservation_fingerprint != fingerprint
+                || binding.command_id != request.envelope.command_id
+                || binding.command_kind != request.envelope.command.kind()
+                || binding.recovery.phase != CommandLifecyclePhase::EffectStarted
+                || record
+                    .effect_binding
+                    .as_ref()
+                    .is_some_and(|original| original != &binding)
+            {
+                return Err(corrupt_reservation(ApplicationError::ScopeMismatch));
+            }
+            let may_resume = match &record.state {
+                DurableReservationState::DispatchStarted => true,
+                DurableReservationState::EffectStarted(original) => original == &binding,
+                DurableReservationState::Uncertain(receipt) => matches!(
+                    receipt.recovery.phase,
+                    CommandLifecyclePhase::DispatchStarted | CommandLifecyclePhase::EffectStarted
+                ),
+                DurableReservationState::DomainCommitted(_) => record.effect_binding.is_some(),
+                DurableReservationState::Settled(receipt) => match receipt.as_ref() {
+                    ApplicationCommandReceipt::Settled(_)
+                    | ApplicationCommandReceipt::Replayed(_) => record.effect_binding.is_some(),
+                    ApplicationCommandReceipt::Uncertain(uncertain)
+                    | ApplicationCommandReceipt::ReplayedUncertain(uncertain) => matches!(
+                        uncertain.recovery.phase,
+                        CommandLifecyclePhase::DispatchStarted
+                            | CommandLifecyclePhase::EffectStarted
+                    ),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !may_resume {
+                return Err(corrupt_reservation(ApplicationError::Unavailable));
+            }
+            record.effect_binding = Some(binding.clone());
+            record.state = DurableReservationState::EffectStarted(binding);
         }
         DurableReservationOperation::DomainCommitted {
             key,
@@ -656,7 +806,13 @@ fn apply_journal_operation(
                 key,
                 fingerprint,
                 "domain commit",
-                |state| matches!(state, DurableReservationState::EffectStarted(_)),
+                |state| {
+                    matches!(
+                        state,
+                        DurableReservationState::EffectStarted(_)
+                            | DurableReservationState::Uncertain(_)
+                    ) || matches!(state, DurableReservationState::Settled(receipt) if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_)))
+                },
                 |state| match state {
                     DurableReservationState::DomainCommitted(previous) => {
                         previous == &previous_receipt
@@ -681,7 +837,13 @@ fn apply_journal_operation(
                 key,
                 fingerprint,
                 "no-effect proof",
-                |state| matches!(state, DurableReservationState::EffectStarted(_)),
+                |state| {
+                    matches!(
+                        state,
+                        DurableReservationState::EffectStarted(_)
+                            | DurableReservationState::Uncertain(_)
+                    ) || matches!(state, DurableReservationState::Settled(receipt) if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_)))
+                },
                 |state| match state {
                     DurableReservationState::ConfirmedNoEffect(previous) => {
                         previous == &previous_proof

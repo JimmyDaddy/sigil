@@ -50,7 +50,7 @@ pub const NATIVE_COMPACTION_RESUME_ENABLED: bool = false;
 
 /// Exact economics rendered before the user confirms a portable compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionEconomics {
     pub before_input_tokens: u64,
     pub target_input_tokens: u64,
@@ -72,7 +72,7 @@ pub struct ApplicationCompactionEconomics {
 
 /// Admission result of one non-activating application compaction review.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ApplicationCompactionAdmission {
     Prepared {
         standalone_tool_output_shrink_available: bool,
@@ -91,7 +91,7 @@ pub enum ApplicationCompactionAdmission {
 
 /// User-facing policy evidence shared by TUI, serve, and Desktop compaction previews.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionPolicyView {
     pub strategy: CompactionStrategy,
     pub phase: CompactionPressureStateV1,
@@ -104,7 +104,7 @@ pub struct ApplicationCompactionPolicyView {
 
 /// One exact active constraint shown before compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionConstraintView {
     pub text: String,
     pub source_event_id: String,
@@ -113,7 +113,7 @@ pub struct ApplicationCompactionConstraintView {
 
 /// One bounded, recoverable historical tool-output candidate shown before compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionToolArtifactView {
     pub source_event_id: String,
     pub content_sha256: String,
@@ -130,7 +130,7 @@ pub struct ApplicationCompactionToolArtifactView {
 
 /// Bounded continuity, tail, cache and protection facts shared by every graphical surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionDetailsView {
     pub active_objective: String,
     pub objective_source_event_id: String,
@@ -155,7 +155,7 @@ pub struct ApplicationCompactionDetailsView {
 
 /// Safe, bounded preview shown before a user confirms portable compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionReview {
     pub preview_id: Option<String>,
     pub folded_event_count: usize,
@@ -168,7 +168,7 @@ pub struct ApplicationCompactionReview {
 
 /// Durable receipt returned after a successfully applied portable compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationCompactionReceipt {
     pub compaction_id: String,
     pub attempt_id: String,
@@ -182,7 +182,7 @@ pub struct ApplicationCompactionReceipt {
 
 /// Receipt for a local-only large tool-output projection epoch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationToolOutputShrinkReceipt {
     pub context_epoch_id: String,
     pub projected_output_count: usize,

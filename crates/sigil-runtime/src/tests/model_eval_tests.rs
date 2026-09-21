@@ -11,15 +11,11 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, ConversationTurnRef, DisclosurePresentationError, DisclosurePresentationReceipt,
     EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, ReceiptStatus, Session,
-    SessionRef, TaskAdmissionReason, TaskAdmissionTrigger, TaskFinalAnswerCommittedEntry,
-    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
-    ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
-    changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
-    conversation_route_routing_contract_material,
-    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
-    runtime_context_v2_contract_material, task_participant_finalization_prompt_contract_material,
-    task_participant_system_prompt_contract_material, write_file_with_mutation,
+    SessionRef, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
+    changeset_only_child_contract_prompt, runtime_context_v2_contract_material,
+    write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -28,15 +24,16 @@ use tokio::{
 };
 
 use crate::{
-    agent_supervisor::task_discovery_system_prompt,
     application_run::ApplicationRunServices,
     model_eval::{
-        ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalOrchestrationRouteContractV1,
-        ModelEvalRouteContractBuildRequest, ModelEvalRunExecutionStatus,
-        build_model_eval_orchestration_route_contract, load_model_eval_fixture,
-        materialize_model_eval_fixture, materialized_model_eval_fixture_file_matches_source,
-        model_eval_reservation_microusd, orchestration_eval_observation, run_model_eval_campaign,
-        verify_model_eval_run, write_isolated_model_eval_config,
+        MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION, ModelEvalCampaignRequest,
+        ModelEvalCostConfidence, ModelEvalExpectedTerminal, ModelEvalFixtureAssertionKind,
+        ModelEvalOrchestrationRouteContractV1, ModelEvalRouteContractBuildRequest,
+        ModelEvalRunExecutionStatus, build_model_eval_orchestration_route_contract,
+        load_model_eval_fixture, materialize_model_eval_fixture,
+        materialized_model_eval_fixture_file_matches_source, model_eval_reservation_microusd,
+        orchestration_eval_observation, run_model_eval_campaign, verify_model_eval_run,
+        write_isolated_model_eval_config,
     },
 };
 
@@ -104,12 +101,12 @@ fn orchestration_fixture_roots() -> Vec<std::path::PathBuf> {
 fn orchestration_route_contract() -> ModelEvalOrchestrationRouteContractV1 {
     let digest = format!("sha256:{}", "1".repeat(64));
     ModelEvalOrchestrationRouteContractV1 {
-        schema_version: 1,
+        schema_version: MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION,
         provider_kind: "openai_compat".to_owned(),
         endpoint_family: "openai-compatible-chat".to_owned(),
         canonical_model_version: "test-v1@fp-test".to_owned(),
         routing_prompt_digest: digest.clone(),
-        planner_prompt_digest: digest.clone(),
+        direct_task_prompt_digest: digest.clone(),
         system_prompt_digest: digest.clone(),
         tool_profile_contract_digest: digest,
         sigil_commit: "test-commit".to_owned(),
@@ -128,7 +125,7 @@ fn orchestration_observation_uses_typed_durable_facts() {
         handoff_id: handoff_id.clone(),
         source_turn,
         trigger: TaskAdmissionTrigger::ModelRequested,
-        reason_codes: vec![TaskAdmissionReason::CrossLayer],
+        title: None,
         recovery_objective: None,
         policy_snapshot_hash: "sha256:policy".to_owned(),
         requested_at_ms: 1,
@@ -160,20 +157,6 @@ fn orchestration_observation_uses_typed_durable_facts() {
             reason: None,
         }))
         .expect("append task start");
-    let final_answer = TaskFinalAnswerCommittedEntry {
-        task_id,
-        plan_version: 1,
-        synthesis_attempt_id: TaskParticipantAttemptId::new("synthesis-1")
-            .expect("synthesis attempt"),
-        message_id: "final-1".to_owned(),
-        content_hash: "sha256:final".to_owned(),
-    };
-    session
-        .append_control(ControlEntry::TaskFinalAnswerCommitted(final_answer.clone()))
-        .expect("append final answer");
-    session
-        .append_control(ControlEntry::TaskFinalAnswerCommitted(final_answer))
-        .expect("append duplicate final answer");
     session
         .append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
             call_id: "wait-1".to_owned(),
@@ -192,7 +175,6 @@ fn orchestration_observation_uses_typed_durable_facts() {
 
     assert!(observation.automatic_task_created);
     assert_eq!(observation.duplicate_handoffs, 1);
-    assert_eq!(observation.duplicate_parent_child_finals, 1);
     assert_eq!(observation.model_polling_turns, 1);
     assert_eq!(observation.duplicate_spawns, 0);
     assert_eq!(observation.duplicate_continuations, 0);
@@ -284,7 +266,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     );
     for digest in [
         &first.routing_prompt_digest,
-        &first.planner_prompt_digest,
+        &first.direct_task_prompt_digest,
         &first.system_prompt_digest,
         &first.tool_profile_contract_digest,
     ] {
@@ -294,12 +276,16 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     let mut expected_routing_material = b"sigil-orchestration-routing-prompt-v1\0".to_vec();
     expected_routing_material.extend(
         serde_json::to_vec(&serde_json::json!({
-            "system_prompt": conversation_route_routing_contract_material(),
-            "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
-            "tools": [
-                request_task_planning_tool_spec(),
-                continue_without_task_planning_tool_spec(),
-            ],
+            "system_prompt": sigil_kernel::conversation_auto_execution_contract_material(),
+            "tools": sigil_kernel::conversation_tool_specs_for_bound_context(
+                Vec::new(), sigil_kernel::AutomaticRouteCapability::DirectTask, false, false, false,
+            ),
+            "continuation_tools": sigil_kernel::route_surface_tool_specs_for_bound_context(
+                sigil_kernel::AutomaticRouteCapability::DirectTask, false, true, false,
+            ),
+            "pending_plan_tools": sigil_kernel::route_surface_tool_specs_for_bound_context(
+                sigil_kernel::AutomaticRouteCapability::DirectTask, false, false, true,
+            ),
         }))
         .expect("serialize routing contract material"),
     );
@@ -307,14 +293,14 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
         first.routing_prompt_digest,
         format!("sha256:{:x}", Sha256::digest(expected_routing_material))
     );
-    let mut expected_system_material = b"sigil-orchestration-system-prompt-v1\0".to_vec();
+    let mut expected_system_material = b"sigil-orchestration-system-prompt-v2\0".to_vec();
     expected_system_material.extend(
         serde_json::to_vec(&serde_json::json!({
             "runtime_context": runtime_context_v2_contract_material(),
             "changeset_only_child": changeset_only_child_contract_prompt(),
-            "planner_discovery": task_discovery_system_prompt(),
-            "task_participant": task_participant_system_prompt_contract_material(),
-            "task_participant_finalization": task_participant_finalization_prompt_contract_material(),
+            "plan_review": sigil_kernel::plan_review_system_prompt_contract_material(),
+            "plan_review_parent_context":
+                sigil_kernel::plan_review_parent_context_contract_material(),
         }))
         .expect("serialize system prompt contract material"),
     );
@@ -322,7 +308,6 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
         first.system_prompt_digest,
         format!("sha256:{:x}", Sha256::digest(expected_system_material))
     );
-    assert!(task_discovery_system_prompt().contains("never add a leading slash"));
     assert!(first.sigil_build.ends_with(&first.sigil_commit));
 }
 
@@ -352,10 +337,69 @@ fn committed_model_eval_fixtures_load_and_materialize() {
             cargo_manifest.get("workspace").is_some(),
             "fixture {id} must remain independent from parent Cargo workspaces"
         );
-        assert!(!materialized.tool_scope.allows("bash"));
+        assert!(!materialized.tool_scope.allows("exec_command"));
         assert!(!materialized.tool_scope.allows("websearch"));
         assert!(materialized.orchestration.is_none());
     }
+}
+
+#[test]
+fn limited_read_only_symbol_case_has_search_tools_and_completes() {
+    let fixture =
+        load_model_eval_fixture(fixture_root("orchestration-v1/negative/orch-neg-symbol-06"))
+            .expect("load symbol clarification fixture");
+    assert!(
+        fixture
+            .manifest
+            .allowed_tools
+            .iter()
+            .any(|tool| tool == "read_file")
+    );
+    assert!(
+        fixture
+            .manifest
+            .allowed_tools
+            .iter()
+            .any(|tool| tool == "grep")
+    );
+    assert_eq!(
+        fixture.manifest.expected_terminal,
+        [ModelEvalExpectedTerminal::Completed]
+    );
+    assert!(!fixture.manifest.assertions.iter().any(|assertion| {
+        matches!(
+            assertion.assertion,
+            ModelEvalFixtureAssertionKind::UserInputPending
+        )
+    }));
+}
+
+#[test]
+fn limited_read_only_question_case_has_discovery_tools_and_completes() {
+    let fixture = load_model_eval_fixture(fixture_root(
+        "orchestration-v1/negative/orch-neg-question-02",
+    ))
+    .expect("load read-only question fixture");
+    for required_tool in ["read_file", "glob", "grep"] {
+        assert!(
+            fixture
+                .manifest
+                .allowed_tools
+                .iter()
+                .any(|tool| tool == required_tool),
+            "question fixture must expose {required_tool}"
+        );
+    }
+    assert_eq!(
+        fixture.manifest.expected_terminal,
+        [ModelEvalExpectedTerminal::Completed]
+    );
+    assert!(!fixture.manifest.assertions.iter().any(|assertion| {
+        matches!(
+            assertion.assertion,
+            ModelEvalFixtureAssertionKind::UserInputPending
+        )
+    }));
 }
 
 #[test]
@@ -379,6 +423,28 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
     for path in fixture_paths {
         let fixture = load_model_eval_fixture(&path).expect("load orchestration fixture");
         assert!(ids.insert(fixture.manifest.id.clone()));
+        if fixture.manifest.id.starts_with("orch-neg-symbol-") {
+            assert!(
+                fixture
+                    .manifest
+                    .allowed_tools
+                    .iter()
+                    .any(|tool| tool == "grep")
+            );
+        }
+        if fixture.manifest.id.starts_with("orch-neg-question-") {
+            for required_tool in ["read_file", "glob", "grep"] {
+                assert!(
+                    fixture
+                        .manifest
+                        .allowed_tools
+                        .iter()
+                        .any(|tool| tool == required_tool),
+                    "question fixture {} must expose discovery tool {required_tool}",
+                    fixture.manifest.id
+                );
+            }
+        }
         if fixture.manifest.id.starts_with("orch-pos-cross-layer-") {
             assert!(
                 fixture
@@ -600,7 +666,7 @@ fn model_eval_fixture_rejects_digest_drift() {
 }
 
 #[test]
-fn model_eval_fixture_rejects_unknown_fields_and_tools() {
+fn model_eval_fixture_ignores_unknown_fields_but_rejects_unknown_tools() {
     let source = fixture_root("small-code-edit");
     let temp = tempdir().expect("temp dir");
     copy_directory(&source, temp.path());
@@ -610,13 +676,23 @@ fn model_eval_fixture_rejects_unknown_fields_and_tools() {
         &manifest_path,
         manifest.replace(
             "allowed_tools = [\"read_file\", \"edit_file\"]",
-            "allowed_tools = [\"read_file\", \"bash\"]\nunknown = true",
+            "allowed_tools = [\"read_file\", \"edit_file\"]\nunknown = true",
         ),
     )
     .expect("write manifest");
 
-    let error = load_model_eval_fixture(temp.path()).expect_err("unknown field must fail");
-    assert!(error.to_string().contains("failed to parse"));
+    load_model_eval_fixture(temp.path()).expect("unknown fields are ignored");
+
+    fs::write(
+        &manifest_path,
+        manifest.replace(
+            "allowed_tools = [\"read_file\", \"edit_file\"]",
+            "allowed_tools = [\"read_file\", \"bash\"]",
+        ),
+    )
+    .expect("write invalid tool manifest");
+    let error = load_model_eval_fixture(temp.path()).expect_err("unknown tool must fail");
+    assert!(error.to_string().contains("unsupported tool"));
 }
 
 #[cfg(unix)]
@@ -680,6 +756,33 @@ fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
     assert_ne!(
         isolated.isolated_config_digest,
         second.isolated_config_digest
+    );
+}
+
+#[test]
+fn agent_delegation_fixture_enables_only_manual_model_directed_delegation() {
+    let fixture = load_model_eval_fixture(fixture_root("agent-collaboration-v1"))
+        .expect("load agent collaboration fixture");
+    assert!(fixture.manifest.agent_delegation);
+
+    let temp = tempdir().expect("temp dir");
+    let run_root = temp.path().join("run");
+    fs::create_dir(&run_root).expect("run root");
+    let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+        .expect("materialize agent collaboration fixture");
+    assert!(materialized.tool_scope.allows("spawn_agents"));
+
+    let source_config = temp.path().join("source.toml");
+    write_source_config(&source_config, "http://127.0.0.1:9", "auto-edit");
+    let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+        .expect("write isolated delegation config");
+    let config = sigil_kernel::RootConfig::load(&isolated.config_path).expect("load config");
+
+    assert!(config.task.enabled);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(
+        config.task.multi_agent_mode,
+        sigil_kernel::MultiAgentMode::Proactive
     );
 }
 
@@ -929,8 +1032,8 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         assert!(request.contains(r#""max_tokens":4096"#));
         assert!(request.contains(r#""name":"read_file""#));
         assert!(request.contains(r#""name":"edit_file""#));
-        assert!(!request.contains(r#""name":"request_task_planning""#));
-        assert!(!request.contains(r#""name":"bash""#));
+        assert!(!request.contains(r#""name":"start_task""#));
+        assert!(!request.contains(r#""name":"exec_command""#));
         assert!(!request.contains("websearch"));
         assert_eq!(requests.lock().expect("requests lock").len(), 2);
     });
@@ -1057,20 +1160,26 @@ corpus_version = "rfc-0063-v1"
                 .expect("digest rollout task policy")
         );
         let requests = requests.lock().expect("requests lock");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
         // Evaluation uses the same runtime capability as user routes: an attached executor
         // exposes direct task routing even without a release-qualified endpoint.
         assert!(requests[0].contains(r#""name":"request_plan_review""#));
-        assert!(requests[0].contains(r#""name":"continue_without_task_planning""#));
-        assert!(requests[0].contains(r#""name":"request_task_planning""#));
+        assert!(requests[0].contains(r#""name":"start_task""#));
         assert!(requests[0].contains("Writable memory tools are unavailable"));
         assert!(!requests[0].contains("Writable memory is available"));
-        assert!(!requests[1].contains(r#""name":"request_plan_review""#));
+        assert!(requests[0].contains(r#""name":"request_user_input""#));
     });
 }
 
 #[test]
 fn model_eval_verification_records_pass_then_durable_stale_mutation() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_verification_records_pass_then_durable_stale_mutation",
+        "SIGIL_TEST_MODEL_EVAL_STALE_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1130,7 +1239,11 @@ fn model_eval_verification_records_pass_then_durable_stale_mutation() {
         .await
         .expect("verify fixture");
 
-        assert_eq!(verification.verdict, VerificationVerdict::Stale);
+        assert_eq!(
+            verification.verdict,
+            VerificationVerdict::Stale,
+            "fixture verification must succeed before its post-run mutation: {verification:#?}"
+        );
         assert!(verification.post_run_mutation_recorded);
         assert_eq!(verification.receipts.len(), 1);
         assert_eq!(
@@ -1262,7 +1375,7 @@ fn all_committed_model_eval_fixtures_satisfy_structured_acceptance() {
             );
             let requests = requests.lock().expect("requests lock");
             assert_eq!(requests.len(), 2, "case {case_id}");
-            assert!(!requests[0].contains(r#""name":"bash""#));
+            assert!(!requests[0].contains(r#""name":"exec_command""#));
             assert!(!requests[0].contains("websearch"));
         }
     });
@@ -1387,7 +1500,7 @@ async fn spawn_direct_routing_eval_server(
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move {
-        for index in 0..2 {
+        loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
@@ -1407,32 +1520,7 @@ async fn spawn_direct_routing_eval_server(
                 .lock()
                 .expect("requests lock")
                 .push(String::from_utf8_lossy(&bytes).into_owned());
-            let envelope = if index == 0 {
-                serde_json::json!({
-                    "choices": [{
-                        "delta": {
-                            "tool_calls": [{
-                                "index": 0,
-                                "id": "call-direct-routing",
-                                "function": {
-                                    "name": "continue_without_task_planning",
-                                    "arguments": serde_json::json!({
-                                        "reason": "does_not_meet_task_planning_criteria"
-                                    }).to_string()
-                                }
-                            }]
-                        },
-                        "finish_reason": "tool_calls"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 10,
-                        "completion_tokens": 5,
-                        "prompt_cache_hit_tokens": 0,
-                        "prompt_cache_miss_tokens": 10
-                    },
-                    "system_fingerprint": "fp-test"
-                })
-            } else {
+            let envelope = {
                 serde_json::json!({
                     "choices": [{
                         "delta": {"content": "done"},

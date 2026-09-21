@@ -41,7 +41,7 @@ const DEEPSEEK_BETA_BASE_URL: &str = "https://api.deepseek.com/beta";
 
 /// Safe release artifact derived from a qualified RFC-0053 evaluation report.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct OrchestrationRolloutManifestV1 {
     pub schema_version: u16,
     pub source_campaign_id: String,
@@ -567,7 +567,7 @@ fn validate_route_identity(
         ),
         (
             "planner prompt digest",
-            identity.planner_prompt_digest.as_str(),
+            identity.direct_task_prompt_digest.as_str(),
         ),
         (
             "system prompt digest",

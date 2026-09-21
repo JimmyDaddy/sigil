@@ -317,6 +317,7 @@ impl RuntimeManagedExtensionExecutionRouteV1 {
             service.start_persistent(bundle, prepared.request).await,
             execution_temp,
         )
+        .await
     }
 }
 
@@ -332,11 +333,12 @@ struct PreparedManagedExtensionLaunchV1 {
 /// Keeps one authority-owned ExecutionTemp generation alive for exactly the persistent process
 /// lifetime and settles it before the terminal receipt becomes observable.
 struct RuntimeManagedProcessWithExecutionTempV1 {
+    observer: Option<sigil_kernel::RunCancellationHandle>,
     inner: Box<dyn ManagedProcessHandleV1>,
     execution_temp: ExecutionTempGenerationV1,
 }
 
-fn wrap_persistent_launch(
+async fn wrap_persistent_launch(
     result: Result<
         Box<dyn ManagedProcessHandleV1>,
         sigil_kernel::managed_execution::ManagedExecutionErrorV1,
@@ -346,11 +348,12 @@ fn wrap_persistent_launch(
 {
     match result {
         Ok(inner) => Ok(Box::new(RuntimeManagedProcessWithExecutionTempV1 {
+            observer: None,
             inner,
             execution_temp,
         })),
         Err(error) => {
-            let _ = execution_temp.finalize();
+            let _ = finalize_execution_temp(execution_temp, None).await;
             Err(error)
         }
     }
@@ -358,6 +361,11 @@ fn wrap_persistent_launch(
 
 #[async_trait::async_trait]
 impl ManagedProcessHandleV1 for RuntimeManagedProcessWithExecutionTempV1 {
+    fn observe_cleanup(&mut self, observer: sigil_kernel::RunCancellationHandle) {
+        self.inner.observe_cleanup(observer.clone());
+        self.observer = Some(observer);
+    }
+
     fn process_ref(&self) -> sigil_kernel::resource::ReflectiveOpaqueProcessRef {
         self.inner.process_ref()
     }
@@ -423,24 +431,43 @@ impl ManagedProcessHandleV1 for RuntimeManagedProcessWithExecutionTempV1 {
         let Self {
             inner,
             execution_temp,
+            observer,
         } = *self;
         match inner.wait_and_finalize().await {
             Ok(mut receipt) => {
-                receipt.resources.cleanup_status = finalize_execution_temp(execution_temp);
+                receipt.resources.cleanup_status =
+                    finalize_execution_temp(execution_temp, observer).await;
                 Ok(receipt)
             }
             Err(error) => {
-                let _ = execution_temp.finalize();
+                let _ = finalize_execution_temp(execution_temp, observer).await;
                 Err(error)
             }
         }
     }
 }
 
-fn finalize_execution_temp(
+async fn finalize_execution_temp(
     execution_temp: ExecutionTempGenerationV1,
+    observer: Option<sigil_kernel::RunCancellationHandle>,
 ) -> sigil_kernel::resource::ResourceCleanupStatusV1 {
-    match execution_temp.finalize() {
+    let stage = observer.as_ref().map(|observer| {
+        observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ResourceSettlement)
+    });
+    let result = match sigil_sandbox::managed::OwnedBlockingWork::spawn(
+        "sigil-execution-temp-settle",
+        move || execution_temp.finalize(),
+    ) {
+        Ok(work) => work
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string())),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Some(stage) = stage {
+        stage.finish(result.is_ok());
+    }
+    match result {
         Ok(()) => sigil_kernel::resource::ResourceCleanupStatusV1::Released,
         Err(error) => sigil_kernel::resource::ResourceCleanupStatusV1::CleanupIncomplete {
             evidence_digest: crate::r71_shadow_planner::canonical_digest(
@@ -1033,6 +1060,12 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
         sigil_kernel::managed_execution::ManagedExecutionErrorV1,
     > {
+        let max_runtime_secs = request.max_runtime_secs.unwrap_or(24 * 60 * 60);
+        if !(1..=24 * 60 * 60).contains(&max_runtime_secs) {
+            return Err(
+                sigil_kernel::managed_execution::ManagedExecutionErrorV1::AdmissionMismatch,
+            );
+        }
         let argv = std::iter::once(OsString::from(&request.program))
             .chain(request.args.iter().map(OsString::from))
             .collect::<Vec<_>>();
@@ -1054,7 +1087,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         };
         let limits = ExecutionResourceLimits {
             max_output_bytes: 64 * 1024 * 1024,
-            max_runtime_ms: 24 * 60 * 60 * 1000,
+            max_runtime_ms: max_runtime_secs * 1000,
             max_children: 64,
             max_fds: 1024,
             pty_required: pty_requested,
@@ -1125,6 +1158,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             service.start_persistent(bundle, managed_request).await,
             execution_temp,
         )
+        .await
     }
 
     async fn start_managed_code_intel(
@@ -1227,6 +1261,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             service.start_persistent(bundle, managed_request).await,
             execution_temp,
         )
+        .await
         .map_err(|error| anyhow!("managed code-intel launch failed: {error}"))?;
         let mut output = process
             .take_output_stream()
@@ -1382,16 +1417,17 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             service
         };
         let managed_result = service
-            .execute_once_with_cancellation(bundle, managed_request, cancellation)
+            .execute_once_with_cancellation(bundle, managed_request, cancellation.clone())
             .await;
         let mut managed_receipt = match managed_result {
             Ok(receipt) => receipt,
             Err(error) => {
-                let _ = execution_temp.finalize();
+                let _ = finalize_execution_temp(execution_temp, None).await;
                 return Err(anyhow!("managed one-shot execution failed: {error}"));
             }
         };
-        managed_receipt.resources.cleanup_status = finalize_execution_temp(execution_temp);
+        managed_receipt.resources.cleanup_status =
+            finalize_execution_temp(execution_temp, cancellation).await;
         let process = &managed_receipt.process;
         let output = ExecutionOutputReceipt {
             schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
@@ -1649,6 +1685,13 @@ fn terminal_command_digest(
         bytes.push(b'=');
         bytes.extend_from_slice(value.as_bytes());
     }
+    bytes.push(0);
+    bytes.extend_from_slice(
+        &request
+            .max_runtime_secs
+            .unwrap_or(24 * 60 * 60)
+            .to_le_bytes(),
+    );
     crate::r71_shadow_planner::canonical_digest(&bytes)
 }
 

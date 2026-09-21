@@ -122,6 +122,11 @@ pub(super) fn build_agent_child_session(
     parent_session: &Session,
     child_ref: &SessionRef,
 ) -> Result<Session> {
+    if let Some(mut child) = parent_session.application_operation_child(child_ref)? {
+        crate::attach_session_url_capability_store(&mut child)?;
+        crate::session_composition::inherit_session_composition(parent_session, &mut child)?;
+        return Ok(child);
+    }
     if let Some(parent_path) = parent_session.store_path() {
         let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
         let store = JsonlSessionStore::new(child_ref.resolve(parent_dir))?;
@@ -169,10 +174,14 @@ pub(super) fn child_status_from_outcome(
     final_text: &str,
     outcome: &sigil_kernel::AgentRunOutcome,
 ) -> TaskChildSessionStatus {
-    // Child execution classification has one runtime owner.  Chat and background adapters only
-    // map their materialized result into that shared decision; they must not maintain a second
-    // error-kind policy that can drift from task supervision.
-    crate::agent_supervisor::task_child_status_from_outcome(final_text, outcome)
+    use sigil_kernel::agent::execution::ExecutionDisposition;
+    match outcome.execution_disposition(final_text) {
+        ExecutionDisposition::Completed => TaskChildSessionStatus::Completed,
+        ExecutionDisposition::Blocked => TaskChildSessionStatus::Blocked,
+        ExecutionDisposition::Interrupted => TaskChildSessionStatus::Interrupted,
+        ExecutionDisposition::Cancelled => TaskChildSessionStatus::Cancelled,
+        ExecutionDisposition::Failed => TaskChildSessionStatus::Failed,
+    }
 }
 
 pub(super) fn bounded_summary(summary: &str, max_chars: usize) -> String {
@@ -182,6 +191,7 @@ pub(super) fn bounded_summary(summary: &str, max_chars: usize) -> String {
 pub(super) fn terminal_status_label(status: AgentThreadTerminalStatus) -> &'static str {
     match status {
         AgentThreadTerminalStatus::Completed => "completed",
+        AgentThreadTerminalStatus::Blocked => "blocked",
         AgentThreadTerminalStatus::Failed => "failed",
         AgentThreadTerminalStatus::Cancelled => "cancelled",
         AgentThreadTerminalStatus::Interrupted => "interrupted",

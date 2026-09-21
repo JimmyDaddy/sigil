@@ -20,7 +20,6 @@ fn recent_store_lock() -> &'static Mutex<()> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecentModelsWire {
     version: u32,
     models: Vec<ModelRef>,

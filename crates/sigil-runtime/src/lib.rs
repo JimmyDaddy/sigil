@@ -1,5 +1,7 @@
 use std::{env, path::PathBuf, sync::Arc};
 
+pub mod session_runtime_controller;
+
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -73,6 +75,10 @@ where
 mod mcp_config_macros;
 
 #[cfg(test)]
+#[path = "tests/direct_plan_fixture.rs"]
+pub(crate) mod direct_plan_fixture;
+
+#[cfg(test)]
 #[path = "tests/test_env.rs"]
 pub(crate) mod test_env;
 
@@ -106,7 +112,6 @@ pub use session_composition::{
     bind_session_composition, validate_boot_composition, validate_session_composition,
 };
 mod run_options; // shared run options and scoped tool registry views.
-mod task_completion_progress; // process-local task completion arrival diagnostics.
 
 mod agent_completion;
 pub mod agent_profile_registry;
@@ -117,6 +122,7 @@ pub mod application_compaction;
 pub mod application_delivery_ack_store;
 pub mod application_host;
 pub mod application_intent_stack;
+pub mod application_operation_owner;
 pub mod application_projection;
 pub mod application_queue;
 pub mod application_recovery;
@@ -150,6 +156,7 @@ pub mod mcp_oauth;
 pub mod mcp_oauth_flow;
 pub mod mcp_oauth_http;
 pub mod model_eval;
+mod network_grant_binding;
 pub mod paths;
 pub mod pending_input;
 pub mod plan_review_coordinator;
@@ -189,17 +196,15 @@ pub use agent_profile_registry::{
 pub use agent_supervisor::{
     AgentBudgetPolicy, AgentChatChildStart, AgentChatChildThread, AgentInterruptedThread,
     AgentMailboxMessage, AgentSupervisor, AgentSupervisorChange, AgentSupervisorEventSink,
-    AgentSupervisorTaskChildRunner, AgentTaskChildStart, AgentTaskChildThread,
-    ForegroundCancelImpact, MAX_TASK_DISCOVERY_PROBES, REQUEST_TASK_DISCOVERY_TOOL_NAME,
-    chat_agent_thread_id_for_call,
+    AgentSupervisorTaskChildRunner, ForegroundCancelImpact, chat_agent_thread_id_for_call,
 };
 pub use agent_tools::{
     AgentToolBackgroundEventSink, AgentToolBackgroundRuns, AgentToolProviderFactory,
-    AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME, LIST_AGENTS_TOOL_NAME,
-    MESSAGE_AGENT_TOOL_NAME, ManualAgentInvocationResult, READ_AGENT_RESULT_TOOL_NAME,
-    REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME,
-    WAIT_AGENT_TOOL_NAME, close_agent_thread, register_agent_tools,
-    register_agent_tools_with_registry, register_agent_tools_with_workspace,
+    AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
+    INTEGRATE_AGENT_CHANGES_TOOL_NAME, LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
+    ManualAgentInvocationResult, READ_AGENT_RESULT_TOOL_NAME, REQUEST_AGENT_DELEGATION_TOOL_NAME,
+    SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread,
+    register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
 pub use application_catalog::{
@@ -290,11 +295,11 @@ pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
     PlanApprovalReceiptV2, PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator,
     PlanReviewRetryCommand, PlanReviewRetryReceipt, PlanReviewRunOutcome, PlanReviewRunRequest,
-    RejectPlanRequest, RejectedPlan, TaskAdmissionProbeContext, admit_adopted_task,
-    application_plan_decision, application_plan_review_research_input_decision,
-    application_plan_revision_guidance_decision, build_task_admission_probes, now_ms,
-    plan_handoff_workspace_snapshot_id, plan_review_context_digest_for_attempt,
-    plan_run_rejection_message,
+    RejectPlanRequest, RejectedPlan, application_plan_decision,
+    application_plan_review_research_input_decision,
+    application_plan_review_research_input_decision_bound,
+    application_plan_revision_guidance_decision, now_ms, plan_handoff_workspace_snapshot_id,
+    plan_review_context_digest_for_attempt, plan_run_rejection_message,
 };
 pub use plugins::{
     ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,
@@ -398,10 +403,6 @@ pub use streamable_http::{
     QueuedRuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpAttempt,
     RuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpDestinationAuthorizer,
     RuntimeMcpTransportAttemptFactory,
-};
-pub use task_completion_progress::{
-    TaskCompletionOutcome, TaskCompletionProgress, TaskCompletionProgressMember,
-    TaskCompletionProgressSnapshot,
 };
 pub use terminal_lifecycle::{
     ApplicationTerminalLifecycleHandler, ApplicationTerminalLifecycleRouter,

@@ -58,7 +58,12 @@ fn assert_core_tools_only(registry: &ToolRegistry) {
         "glob",
         "grep",
         "vcs_inspect",
-        "bash",
+        "exec_command",
+        "exec_read",
+        "exec_wait",
+        "exec_input",
+        "exec_resize",
+        "exec_cancel",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -88,7 +93,7 @@ async fn core_public_builders_apply_selection_before_optional_configuration() ->
         WorkspaceTrust::Trusted,
     )?;
     assert_core_tools_only(&surface.registry);
-    assert!(surface.terminal_control.is_none());
+    assert!(surface.terminal_control.is_some());
     assert!(!surface.context_resolver.has_shared_code_intelligence());
     assert!(config.memory.writable && config.skills.enabled && config.code_intelligence.enabled);
     let eager = build_tool_registry(&config, &capabilities, workspace.clone()).await?;

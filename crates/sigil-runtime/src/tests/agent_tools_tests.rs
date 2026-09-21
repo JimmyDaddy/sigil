@@ -3,6 +3,7 @@ use std::{
     fs,
     path::PathBuf,
     pin::Pin,
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -41,13 +42,37 @@ use super::{
     AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundEventSink,
     AgentToolBackgroundRuns, AgentToolProviderFactory, AgentToolRuntime, BackgroundChatAgentHandle,
     BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME,
-    CLOSE_AGENT_TOOL_NAME, LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
-    READ_AGENT_RESULT_TOOL_NAME, REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME,
-    SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
-    child_status_from_outcome, hash_text, register_agent_tools,
+    CLOSE_AGENT_TOOL_NAME, INTEGRATE_AGENT_CHANGES_TOOL_NAME, LIST_AGENTS_TOOL_NAME,
+    MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME, REQUEST_AGENT_DELEGATION_TOOL_NAME,
+    SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
+    chat_agent_thread_id_for_call, child_status_from_outcome, hash_text, register_agent_tools,
     register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
     tool_batch_allows_host_join,
 };
+
+struct UnusedManagedFileAccess;
+
+impl sigil_kernel::managed_file_access::ManagedFileAccessServiceV1 for UnusedManagedFileAccess {
+    fn access(
+        &self,
+        _request: sigil_kernel::managed_file_access::ManagedFileAccessRequestV1,
+        _token: sigil_kernel::managed_file_access::ManagedFileAccessAdmissionTokenV1,
+    ) -> std::result::Result<
+        sigil_kernel::managed_file_access::ManagedFileAccessResultV1,
+        sigil_kernel::managed_file_access::ManagedFileAccessErrorV1,
+    > {
+        Err(
+            sigil_kernel::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+        )
+    }
+}
+
+fn test_tool_authority() -> Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1> {
+    Arc::new(sigil_kernel::tool_authority::KernelToolAuthorityV1::new(
+        Arc::new(UnusedManagedFileAccess),
+        Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+    ))
+}
 
 #[test]
 fn final_answer_blocked_child_is_not_reported_as_completed() {
@@ -56,15 +81,19 @@ fn final_answer_blocked_child_is_not_reported_as_completed() {
         ..AgentRunOutcome::default()
     };
 
-    assert_eq!(
-        child_status_from_outcome("", &outcome),
-        sigil_kernel::TaskChildSessionStatus::Failed
-    );
+    for text in ["", "a final report cannot resolve the active blocker"] {
+        assert_eq!(
+            child_status_from_outcome(text, &outcome),
+            sigil_kernel::TaskChildSessionStatus::Blocked
+        );
+    }
 }
 
 #[test]
-fn child_status_uses_shared_policy_for_blocking_tool_errors_even_with_text() {
-    let outcome = AgentRunOutcome {
+fn child_status_uses_shared_policy_for_recovered_denials_and_unresolved_effects() {
+    let mut outcome = AgentRunOutcome {
+        terminal_reason: sigil_kernel::AgentRunTerminalReason::FinalAnswer,
+        approval_denials: 1,
         tool_errors: vec![sigil_kernel::ToolError {
             kind: sigil_kernel::ToolErrorKind::PermissionDenied,
             message: "write was denied".to_owned(),
@@ -75,8 +104,30 @@ fn child_status_uses_shared_policy_for_blocking_tool_errors_even_with_text() {
     };
 
     assert_eq!(
-        child_status_from_outcome("the requested change is complete", &outcome),
-        sigil_kernel::TaskChildSessionStatus::Failed
+        child_status_from_outcome("delivered through the approved alternative", &outcome),
+        sigil_kernel::TaskChildSessionStatus::Completed
+    );
+    assert_eq!(
+        child_status_from_outcome("", &outcome),
+        sigil_kernel::TaskChildSessionStatus::Blocked
+    );
+    outcome.tool_errors.push(sigil_kernel::ToolError {
+        kind: sigil_kernel::ToolErrorKind::EffectReconciliationRequired,
+        message: "effect still requires its owner's reconciliation".to_owned(),
+        retryable: true,
+        details: serde_json::Value::Null,
+    });
+    for active in [serde_json::Value::Null, json!({"active": true})] {
+        outcome.tool_errors[1].details = active;
+        assert_eq!(
+            child_status_from_outcome("a final report cannot settle an unknown effect", &outcome),
+            sigil_kernel::TaskChildSessionStatus::Blocked
+        );
+    }
+    outcome.tool_errors[1].details = json!({"active": false});
+    assert_eq!(
+        child_status_from_outcome("delivered after owner reconciliation", &outcome),
+        sigil_kernel::TaskChildSessionStatus::Completed
     );
 }
 
@@ -115,7 +166,10 @@ fn completion_ready_background_handle(
             isolation: TaskIsolationMode::SharedReadOnly,
         },
         handle: task,
+        collection_supervisor: supervisor(&root_config())?
+            .with_background_runs(AgentToolBackgroundRuns::default()),
         cancellation_owner: RunCancellationOwner::new(),
+        write_owner: None,
     })
 }
 
@@ -581,6 +635,7 @@ fn child_permission_config_profile_command_allow_cannot_widen_parent_ask() -> Re
 fn production_child_permission_materialization_preserves_ancestor_role_and_profile_caps()
 -> Result<()> {
     let mut parent = run_options(std::env::temp_dir());
+    parent.tool_authority = Some(test_tool_authority());
     parent.permission_config.mode = PermissionMode::AutoEdit;
     parent
         .permission_context
@@ -609,6 +664,16 @@ fn production_child_permission_materialization_preserves_ancestor_role_and_profi
     );
 
     assert_eq!(child.permission_config, parent.permission_config);
+    let parent_authority = parent
+        .tool_authority
+        .as_ref()
+        .expect("parent has the boot-owned tool authority");
+    assert!(
+        child
+            .tool_authority
+            .as_ref()
+            .is_some_and(|authority| Arc::ptr_eq(authority, parent_authority))
+    );
     assert_eq!(
         child.permission_context.delegated_policy_constraints.len(),
         4
@@ -628,6 +693,30 @@ fn production_child_permission_materialization_preserves_ancestor_role_and_profi
     )?;
     assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
+}
+
+#[test]
+fn recovered_child_constraints_preserve_parent_tool_authority() {
+    let mut parent = run_options(std::env::temp_dir());
+    parent.tool_authority = Some(test_tool_authority());
+    let mut child = run_options(std::env::temp_dir());
+
+    super::apply_recovered_readonly_child_constraints(
+        &mut child,
+        &parent,
+        PermissionConfig::default(),
+    );
+
+    let parent_authority = parent
+        .tool_authority
+        .as_ref()
+        .expect("parent has the boot-owned tool authority");
+    assert!(
+        child
+            .tool_authority
+            .as_ref()
+            .is_some_and(|authority| Arc::ptr_eq(authority, parent_authority))
+    );
 }
 
 #[test]
@@ -1285,6 +1374,20 @@ async fn wait_until_agent_result_available(
     handler: &mut RecordingEventHandler,
     approval: &mut AutoApproveHandler,
 ) -> Result<serde_json::Value> {
+    let wait =
+        wait_until_agent_result_tool(runtime, session, thread_id, options, handler, approval)
+            .await?;
+    parse_agent_tool_payload(&wait)
+}
+
+async fn wait_until_agent_result_tool(
+    runtime: &mut AgentToolRuntime,
+    session: &mut Session,
+    thread_id: &sigil_kernel::AgentThreadId,
+    options: &AgentRunOptions,
+    handler: &mut RecordingEventHandler,
+    approval: &mut AutoApproveHandler,
+) -> Result<ToolResult> {
     for index in 0..50 {
         let wait = runtime
             .handle_agent_tool_call(
@@ -1301,8 +1404,35 @@ async fn wait_until_agent_result_available(
             .await?
             .expect("wait_agent handled");
         let payload = parse_agent_tool_payload(&wait)?;
-        if payload["result_available"] == true {
-            return Ok(payload);
+        if payload["result_available"] == true || payload["page"].is_object() {
+            return Ok(wait);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!(
+        "agent thread {} did not produce a result in time",
+        thread_id.as_str()
+    )
+}
+
+async fn collect_until_agent_result_recorded(
+    runtime: &mut AgentToolRuntime,
+    session: &mut Session,
+    thread_id: &sigil_kernel::AgentThreadId,
+    handler: &mut RecordingEventHandler,
+) -> Result<()> {
+    for _ in 0..50 {
+        runtime
+            .collect_finished_background_runs(session, handler)
+            .await?;
+        if session
+            .agent_thread_state_projection()
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.result.as_ref())
+            .is_some()
+        {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1520,6 +1650,7 @@ impl Provider for ParentPreToolTextSpawnProvider {
 
 struct ParentReadAgentResultProvider {
     thread_id: sigil_kernel::AgentThreadId,
+    result_tool_name: &'static str,
     page_text_marker: String,
     observed_second_request: Arc<Mutex<Option<ReadAgentResultRequestObservation>>>,
 }
@@ -1576,16 +1707,11 @@ impl Provider for ParentReadAgentResultProvider {
                 Ok(ProviderChunk::Done),
             ])));
         }
-        let args = json!({
-            "thread_id": self.thread_id.as_str(),
-            "offset_chars": 0,
-            "max_chars": 4_000
-        })
-        .to_string();
+        let args = json!({"thread_id": self.thread_id.as_str()}).to_string();
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ToolCallComplete(ToolCall {
                 id: "call-read-page".to_owned(),
-                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                name: self.result_tool_name.to_owned(),
                 args_json: args,
             })),
             Ok(ProviderChunk::Done),
@@ -1634,20 +1760,13 @@ impl Provider for UserInputThenTextProvider {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
             let args = json!({
-                "prompt": "Choose the compatibility boundary.",
                 "questions": [{
                     "id": "compatibility",
-                    "header": "Compatibility",
                     "question": "Which compatibility target should be preserved?",
-                    "required": true,
-                    "field": {
-                        "kind": "single_select",
-                        "options": [
-                            {"id": "current", "label": "Current release"},
-                            {"id": "legacy", "label": "Legacy sessions"}
-                        ],
-                        "allow_other": false
-                    }
+                    "options": [
+                        {"label": "Current release"},
+                        {"label": "Legacy sessions"}
+                    ]
                 }]
             })
             .to_string();
@@ -2027,6 +2146,147 @@ struct RecordingTextProviderFactory {
     observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
 }
 
+struct WorktreeWritingProviderFactory {
+    calls: Arc<AtomicUsize>,
+    tool_results: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+struct WorktreeWritingProvider {
+    calls: Arc<AtomicUsize>,
+    tool_results: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl Provider for WorktreeWritingProvider {
+    fn name(&self) -> &str {
+        "worktree-writing-child"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            return Ok(boxed_provider_chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-worktree-write".to_owned(),
+                    name: "write_file".to_owned(),
+                    args_json: json!({
+                        "path": "README.md",
+                        "content": "new\n"
+                    })
+                    .to_string(),
+                }),
+                ProviderChunk::Done,
+            ]));
+        }
+        if let Ok(mut results) = self.tool_results.lock() {
+            results.extend(
+                request
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == MessageRole::Tool)
+                    .map(|message| message.content.clone()),
+            );
+        }
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta("worktree child finished".to_owned()),
+            ProviderChunk::Done,
+        ]))
+    }
+}
+
+#[async_trait]
+impl AgentToolProviderFactory for WorktreeWritingProviderFactory {
+    async fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(WorktreeWritingProvider {
+            calls: self.calls.clone(),
+            tool_results: self.tool_results.clone(),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct WorktreeWriteTool;
+
+#[async_trait]
+impl Tool for WorktreeWriteTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write_file".to_owned(),
+            description: "test worktree write".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::Controlled
+    }
+
+    fn permission_plan(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<ToolPermissionPlanDraft> {
+        declared_tool_permission_plan(
+            &self.spec(),
+            _args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Write,
+                operation: ToolOperation::OverwriteFile,
+                network_effect: None,
+                subjects: Vec::new(),
+                tool_default_mode: None,
+                managed_file_access: None,
+            },
+        )
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("missing path"))?;
+        let content = args
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("missing content"))?;
+        fs::write(ctx.workspace_root.join(path), content)?;
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "written",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[async_trait]
 impl AgentToolProviderFactory for RecordingTextProviderFactory {
     async fn build_provider(
@@ -2069,6 +2329,10 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     assert!(spec.description.contains("foreground_merge_required"));
     assert!(spec.description.contains("Changeset-only foreground"));
     assert!(spec.input_schema["properties"].get("profile_id").is_some());
+    assert_eq!(
+        spec.input_schema["properties"]["isolation"]["enum"],
+        json!(["shared_read_only", "changeset_only", "worktree"])
+    );
     assert!(
         spec.input_schema["required"]
             .as_array()
@@ -2122,10 +2386,7 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
         .spec_for(LIST_AGENTS_TOOL_NAME)
         .expect("list_agents registered");
     assert!(list_spec.description.contains("List current agent threads"));
-    assert_eq!(
-        list_spec.input_schema["additionalProperties"],
-        serde_json::Value::Bool(false)
-    );
+    assert!(list_spec.input_schema.get("additionalProperties").is_none());
     let cancel_spec = registry
         .spec_for(CANCEL_AGENT_TOOL_NAME)
         .expect("cancel_agent registered");
@@ -3029,7 +3290,7 @@ fn append_duplicate_task_handoff(session: &mut Session) -> Result<()> {
             "source-run",
         )?,
         trigger: sigil_kernel::TaskAdmissionTrigger::ModelRequested,
-        reason_codes: vec![sigil_kernel::TaskAdmissionReason::MultiStageChange],
+        title: None,
         recovery_objective: None,
         policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
         requested_at_ms: 1,
@@ -3055,7 +3316,6 @@ async fn presentation_diagnostics_preserve_proactive_spawn() -> Result<()> {
         Arc::new(StaticProviderFactory),
     );
     let mut session = Session::new("parent", "model");
-    append_duplicate_task_final(&mut session)?;
     let result = invoke_explore_spawn(&mut runtime, &mut session, "diagnostic-proactive").await?;
     assert!(!result.is_error(), "{}", result.content);
     assert!(!session.agent_thread_state_projection().threads.is_empty());
@@ -3063,22 +3323,6 @@ async fn presentation_diagnostics_preserve_proactive_spawn() -> Result<()> {
         entry,
         SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
     )));
-    Ok(())
-}
-
-fn append_duplicate_task_final(session: &mut Session) -> Result<()> {
-    let entry =
-        ControlEntry::TaskFinalAnswerCommitted(sigil_kernel::TaskFinalAnswerCommittedEntry {
-            task_id: TaskId::new("task_duplicate_final")?,
-            plan_version: 1,
-            synthesis_attempt_id: sigil_kernel::TaskParticipantAttemptId::new(
-                "attempt_duplicate_final",
-            )?,
-            message_id: "message-duplicate-final".to_owned(),
-            content_hash: format!("sha256:{}", "a".repeat(64)),
-        });
-    session.append_control(entry.clone())?;
-    session.append_control(entry)?;
     Ok(())
 }
 
@@ -3093,6 +3337,17 @@ fn spawn_agent_args_default_to_join_before_final() -> Result<()> {
     assert_eq!(
         parsed.mode,
         sigil_kernel::AgentInvocationMode::JoinBeforeFinal
+    );
+    assert!(parsed.isolation.is_none());
+    let explicit = super::surface::SpawnAgentArgs::parse(&json!({
+        "profile_id": "worker",
+        "objective": "propose",
+        "prompt": "propose",
+        "isolation": "changeset_only"
+    }))?;
+    assert_eq!(
+        explicit.isolation,
+        Some(super::surface::SpawnIsolation::ChangesetOnly)
     );
     Ok(())
 }
@@ -3932,7 +4187,7 @@ async fn background_child_user_input_recovery_scenario(uncertain_attempt: bool) 
             answers: vec![sigil_kernel::UserInputAnswerV1 {
                 question_id: "compatibility".to_owned(),
                 value: sigil_kernel::UserInputAnswerValueV1::SingleSelect {
-                    option_id: Some("legacy".to_owned()),
+                    option_id: Some("option-2".to_owned()),
                     other: None,
                 },
             }],
@@ -4001,9 +4256,30 @@ async fn background_child_user_input_recovery_scenario(uncertain_attempt: bool) 
         );
         return Ok(());
     }
+    let operation = sigil_kernel::ApplicationOperationBindingV1::new(
+        session.session_scope_id().to_owned(),
+        "a".repeat(64),
+        "b".repeat(64),
+        sigil_kernel::ApplicationOperationTargetV1::UserInputDecision {
+            request_id: command.identity.request_id.as_str().to_owned(),
+            generation: command.identity.generation,
+            request_hash: command.request_hash.clone(),
+            command_id: command.command_id.as_str().to_owned(),
+        },
+    )?;
+    session.application_operation_owner()?.prepare(&operation)?;
+    session.bind_application_operation(operation.clone())?;
     let decision = runtime
         .apply_background_user_input_decision(&mut session, command.clone(), &options, &mut handler)
         .await?;
+    let proof = session
+        .application_operation_owner()?
+        .reconcile(&operation)?
+        .expect("actual background child answer commit");
+    assert_eq!(
+        proof.source_session_scope_id(),
+        command.identity.session_scope_id.as_str()
+    );
     assert!(decision.continuation_started);
     assert_eq!(
         sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?
@@ -4119,7 +4395,11 @@ async fn spawn_agents_background_registration_failure_dispatches_no_provider() -
                 isolation: TaskIsolationMode::SharedReadOnly,
             },
             handle: existing_handle,
+            collection_supervisor: supervisor
+                .clone()
+                .with_background_runs(AgentToolBackgroundRuns::default()),
             cancellation_owner: existing_cancellation,
+            write_owner: None,
         },
     )?;
     let mut runtime = user_authorized_runtime_with_provider_factory(
@@ -4256,6 +4536,24 @@ async fn spawn_agents_capacity_failure_starts_no_member() -> Result<()> {
 
     assert!(result.is_error());
     assert!(result.content.contains("requested=2"));
+    let model_content: serde_json::Value = serde_json::from_str(&result.to_model_content())?;
+    assert_eq!(
+        model_content["error"]["details"]["capacity"]["currently_active"],
+        0
+    );
+    assert_eq!(
+        model_content["error"]["details"]["capacity"]["requested"],
+        2
+    );
+    assert_eq!(model_content["error"]["details"]["capacity"]["limit"], 1);
+    assert_eq!(
+        model_content["error"]["details"]["retryable_after_slot_available"], false,
+        "this two-member batch cannot fit even if all current slots are released"
+    );
+    assert_eq!(
+        model_content["error"]["details"]["accepted_or_started_members"],
+        json!([])
+    );
     assert!(!started.load(Ordering::SeqCst));
     assert!(supervisor_probe.active_profile_ids().is_empty());
     assert!(session.agent_thread_state_projection().threads.is_empty());
@@ -4392,10 +4690,15 @@ async fn join_context_remains_uncompleted_when_max_turns_prevents_delivery() -> 
             .values()
             .all(|status| *status == sigil_kernel::AgentResultContinuationStatus::Started)
     );
-    let blocker = agent_delegate
-        .final_answer_blocker(&mut session)?
-        .expect("undelivered join results must still block a later final answer");
-    assert!(blocker.contains("join_before_final_agent_result_unread"));
+    assert!(agent_delegate.final_answer_blocker(&mut session)?.is_none());
+    assert!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .values()
+            .all(|thread| !thread.result_fully_delivered),
+        "optional reading must not fabricate delivery receipts"
+    );
     Ok(())
 }
 
@@ -4792,12 +5095,16 @@ async fn wait_and_close_agent_use_bounded_thread_projection() -> Result<()> {
     let wait_payload: serde_json::Value = serde_json::from_str(&wait.content)?;
     assert_eq!(wait_payload["status"], "completed");
     assert_eq!(wait_payload["result_available"], true);
-    assert_eq!(
-        wait_payload["result_ref"]["read_tool"],
-        READ_AGENT_RESULT_TOOL_NAME
-    );
+    assert_eq!(wait_payload["terminal"], true);
+    assert_eq!(wait_payload["page"]["truncated"], false);
     assert!(wait_payload.get("summary").is_none());
-    assert!(!wait.content.contains("child summary only"));
+    assert_eq!(wait.transient_context.len(), 1);
+    assert!(
+        wait.transient_context[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("child summary only"))
+    );
     assert!(!wait.content.contains("system:base"));
 
     let close = runtime
@@ -5330,6 +5637,677 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
 }
 
 #[tokio::test]
+async fn cancelling_direct_task_durably_stops_its_owned_background_child() -> Result<()> {
+    let config = root_config();
+    let child_supervisor =
+        supervisor(&config)?.with_background_runs(AgentToolBackgroundRuns::default());
+    let background_runs = AgentToolBackgroundRuns::default();
+    let state = tempfile::tempdir()?;
+    let mut session = Session::new("parent", "model").with_store(JsonlSessionStore::new(
+        state.path().join("cancel-direct-task-child.jsonl"),
+    )?);
+    let task_id = TaskId::new("task_cancel_owned_child")?;
+    session.append_control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "cancel the task and its child".to_owned(),
+        title: None,
+        status: sigil_kernel::TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    let task_admission = sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+        task_id.clone(),
+        "cancel the task and its child",
+        1,
+    );
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        task_admission.clone(),
+    ))?;
+
+    let thread_id = AgentThreadId::new("agent_cancel_owned_child")?;
+    let profile_id = AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_cancel_child")?;
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: SessionRef::new_relative("children/cancel-child.jsonl")?,
+            profile_id: profile_id.clone(),
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "test".to_owned(),
+                model: "test".to_owned(),
+                model_ref: None,
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                effective_tool_scope_hash: "sha256:tools".to_owned(),
+                effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                provider_capability_hash: "sha256:provider".to_owned(),
+                model_visible_agent_index_hash: None,
+                budget_policy_hash: "sha256:budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "cancel me".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            display_name: None,
+            created_at_ms: Some(1),
+        },
+    ))?;
+    let tool_contract_fingerprint = format!("sha256:{}", "c".repeat(64));
+    let grant = sigil_kernel::AgentInvocationGrantRecord {
+        grant_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        source: AgentInvocationGrantSource::DirectTask {
+            task_id: task_id.clone(),
+        },
+        authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+            task_id: task_id.clone(),
+        },
+        profile_id: profile_id.clone(),
+        role: sigil_kernel::AgentRole::SubagentRead,
+        isolation: TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        network_upper_bound: NetworkPolicy::Deny,
+        tool_contract_fingerprint: tool_contract_fingerprint.clone(),
+        workspace_snapshot_id: None,
+        root_run_fingerprint: format!("sha256:{}", "d".repeat(64)),
+        root_cancellation_scope_fingerprint: format!("sha256:{}", "e".repeat(64)),
+        expires_at_ms: 100,
+    };
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: thread_id.clone(),
+            profile_id: profile_id.clone(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                task_id: task_id.clone(),
+            },
+            objective_hash: format!("sha256:{}", "f".repeat(64)),
+            tool_contract_fingerprint,
+            invocation_grant: Some(grant),
+            admitted_at_ms: Some(2),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: AgentThreadStatus::Running,
+            reason: None,
+            updated_at_ms: Some(3),
+        },
+    ))?;
+
+    let cancellation_owner = RunCancellationOwner::new();
+    let child_cancellation = cancellation_owner.handle();
+    let child_task_guard = child_cancellation.register_task()?;
+    let waiting_child_cancellation = child_cancellation.clone();
+    let child_handle = BackgroundChatAgentTask::spawn(thread_id.clone(), None, async move {
+        let _child_task_guard = child_task_guard;
+        waiting_child_cancellation.cancelled().await;
+        Err(anyhow!("child stopped after its owner cancelled it"))
+    });
+    background_runs.insert(
+        thread_id.clone(),
+        BackgroundChatAgentHandle {
+            thread: BackgroundChatAgentThreadRecord {
+                thread_id: thread_id.clone(),
+                attempt_id: AgentRunAttemptId::new("attempt_cancel_owned_child")?,
+                batch_id: None,
+                profile_id,
+                parent_thread_id: AgentThreadId::new("main")?,
+                child_session_ref: SessionRef::new_relative("children/cancel-child.jsonl")?,
+                budget_scope_id: TaskId::new("budget_cancel_owned_child")?,
+                isolation: TaskIsolationMode::SharedReadOnly,
+            },
+            handle: child_handle,
+            collection_supervisor: child_supervisor,
+            cancellation_owner,
+            write_owner: None,
+        },
+    )?;
+
+    let mut event_handler = RecordingEventHandler::default();
+    background_runs
+        .cancel_direct_task_agents_durably(
+            &mut session,
+            &task_id,
+            "parent Task cancelled",
+            &mut event_handler,
+        )
+        .await?;
+
+    assert!(!background_runs.contains(&thread_id));
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .expect("cancelled child projection")
+            .status,
+        AgentThreadStatus::Cancelled
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(entry, SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status))
+            if status.thread_id == thread_id && status.status == AgentThreadStatus::Cancelled)
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_ownerless_blocked_direct_task_revokes_child_user_input() -> Result<()> {
+    cancel_direct_task_user_input(false, AgentThreadStatus::Blocked).await
+}
+
+#[tokio::test]
+async fn cancelling_owned_blocked_direct_task_revokes_child_user_input() -> Result<()> {
+    cancel_direct_task_user_input(true, AgentThreadStatus::Blocked).await
+}
+
+#[tokio::test]
+async fn cancelling_restored_interrupted_direct_task_revokes_child_user_input() -> Result<()> {
+    cancel_direct_task_user_input(false, AgentThreadStatus::Interrupted).await
+}
+
+async fn cancel_direct_task_user_input(
+    owner_present: bool,
+    child_status: AgentThreadStatus,
+) -> Result<()> {
+    let state = tempfile::tempdir()?;
+    let parent_path = state.path().join("parent.jsonl");
+    let child_ref = SessionRef::new_relative("children/blocked-input.jsonl")?;
+    let child_path = child_ref.resolve(state.path());
+    fs::create_dir_all(child_path.parent().expect("child session parent"))?;
+    let mut child = Session::new("test", "model").with_store(JsonlSessionStore::new(&child_path)?);
+    child.append_control(ControlEntry::SessionIdentity {
+        provider_name: "test".to_owned(),
+        model_name: "model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    let task_id = TaskId::new("task_cancel_ownerless_input")?;
+    let thread_id = AgentThreadId::new("agent_cancel_ownerless_input")?;
+    let attempt_id = AgentRunAttemptId::new("attempt_cancel_ownerless_input")?;
+    let profile_id = AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_ownerless_input")?;
+
+    let call = ToolCall {
+        id: "request-input-ownerless".to_owned(),
+        name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+        args_json: r#"{"questions":[{"id":"scope","question":"Which scope?"}]}"#.to_owned(),
+    };
+    let assistant = sigil_kernel::ModelMessage::assistant(None, vec![call.clone()]);
+    let request = sigil_kernel::UserInputRequestedV1::new(sigil_kernel::UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: sigil_kernel::UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new(child.session_scope_id())?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new("ownerless-input-root")?,
+            source_thread_id: thread_id.clone(),
+            request_id: sigil_kernel::UserInputRequestId::new("ownerless-input-request")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "1".repeat(64)),
+        },
+        source: sigil_kernel::UserInputSourceV1::Agent,
+        purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+        prompt: "Choose a scope".to_owned(),
+        questions: vec![sigil_kernel::UserInputQuestionV1 {
+            id: "scope".to_owned(),
+            question: "Which scope?".to_owned(),
+            description: None,
+            required: true,
+            options: Vec::new(),
+            multiple: false,
+        }],
+        allowed_actions: vec![
+            sigil_kernel::UserInputActionV1::Submit,
+            sigil_kernel::UserInputActionV1::CancelRun,
+        ],
+        requested_at_unix_ms: 10,
+        continuation: Some(sigil_kernel::UserInputContinuationBindingV1 {
+            assistant_message_id: assistant.id.clone(),
+            tool_call_id: call.id.clone(),
+            provider_name: "test".to_owned(),
+            model_name: "model".to_owned(),
+        }),
+    })?;
+    child.append_assistant_message(assistant)?;
+    child.append_controls(vec![
+        ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: call.id,
+            tool_name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        })),
+        sigil_kernel::UserInputLifecycleEntryV1::Requested(Box::new(request.clone()))
+            .into_control(),
+    ])?;
+
+    let mut session =
+        Session::new("test", "model").with_store(JsonlSessionStore::new(&parent_path)?);
+    session.append_control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "cancel the blocked task".to_owned(),
+        title: None,
+        status: sigil_kernel::TaskRunStatus::Interrupted,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "cancel the blocked task",
+            1,
+        ),
+    ))?;
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(AgentThreadId::new("main")?),
+            batch_id: None,
+            batch_member_key: None,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: child_ref.clone(),
+            profile_id: profile_id.clone(),
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "test".to_owned(),
+                model: "model".to_owned(),
+                model_ref: None,
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                effective_tool_scope_hash: "sha256:tools".to_owned(),
+                effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                provider_capability_hash: "sha256:provider".to_owned(),
+                model_visible_agent_index_hash: None,
+                budget_policy_hash: "sha256:budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "wait for the user's scope".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            display_name: None,
+            created_at_ms: Some(2),
+        },
+    ))?;
+    let tool_contract_fingerprint = format!("sha256:{}", "2".repeat(64));
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: thread_id.clone(),
+            profile_id: profile_id.clone(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                task_id: task_id.clone(),
+            },
+            objective_hash: "sha256:objective".to_owned(),
+            tool_contract_fingerprint: tool_contract_fingerprint.clone(),
+            invocation_grant: Some(sigil_kernel::AgentInvocationGrantRecord {
+                grant_fingerprint: format!("sha256:{}", "3".repeat(64)),
+                source: AgentInvocationGrantSource::DirectTask {
+                    task_id: task_id.clone(),
+                },
+                authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                    task_id: task_id.clone(),
+                },
+                profile_id: profile_id.clone(),
+                role: sigil_kernel::AgentRole::SubagentRead,
+                isolation: TaskIsolationMode::SharedReadOnly,
+                permission_upper_bound_fingerprint: format!("sha256:{}", "4".repeat(64)),
+                network_upper_bound: NetworkPolicy::Deny,
+                tool_contract_fingerprint,
+                workspace_snapshot_id: None,
+                root_run_fingerprint: format!("sha256:{}", "5".repeat(64)),
+                root_cancellation_scope_fingerprint: format!("sha256:{}", "6".repeat(64)),
+                expires_at_ms: 100,
+            }),
+            admitted_at_ms: Some(3),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentUserInputRoute(
+        sigil_kernel::AgentUserInputRouteEntryV1 {
+            schema_version: sigil_kernel::AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
+            route_id: sigil_kernel::AgentRouteId::new("ownerless-input-route")?,
+            source_thread_id: thread_id.clone(),
+            source_attempt_id: attempt_id.clone(),
+            profile_id,
+            parent_thread_id: AgentThreadId::new("main")?,
+            batch_id: None,
+            budget_scope_id: TaskId::new("budget-ownerless-input")?,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            child_session_ref: child_ref,
+            request: sigil_kernel::UserInputRequestStateV1 {
+                requested: request,
+                status: sigil_kernel::UserInputStatusV1::Requested,
+                decision: None,
+                claim: None,
+                continuation: None,
+                resolution: None,
+            }
+            .public_view(),
+            status: sigil_kernel::AgentRouteStatus::Requested,
+            updated_at_unix_ms: 10,
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: child_status,
+            reason: Some(match child_status {
+                AgentThreadStatus::Blocked => "waiting for user input".to_owned(),
+                AgentThreadStatus::Interrupted => "owner was lost during restart".to_owned(),
+                _ => unreachable!("fixture only exercises blocked or interrupted children"),
+            }),
+            updated_at_ms: Some(10),
+        },
+    ))?;
+    assert_eq!(
+        session
+            .task_state_projection()
+            .direct_task_background_agents(&task_id),
+        vec![thread_id.clone()],
+        "fixture must durably bind the blocked child to this Direct Task"
+    );
+    assert_eq!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .expect("task projection")
+            .status,
+        sigil_kernel::TaskRunStatus::Interrupted
+    );
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .expect("thread projection")
+            .status,
+        child_status
+    );
+
+    let background_runs = AgentToolBackgroundRuns::default();
+    if owner_present {
+        let config = root_config();
+        let collection_supervisor =
+            supervisor(&config)?.with_background_runs(AgentToolBackgroundRuns::default());
+        let cancellation_owner = RunCancellationOwner::new();
+        let cancellation_handle = cancellation_owner.handle();
+        let cancellation_task_guard = cancellation_handle.register_task()?;
+        let waiting_cancellation = cancellation_handle.clone();
+        let handle = BackgroundChatAgentTask::spawn(thread_id.clone(), None, async move {
+            let _cancellation_task_guard = cancellation_task_guard;
+            waiting_cancellation.cancelled().await;
+            Err(anyhow!("blocked child stopped after parent cancellation"))
+        });
+        background_runs.insert(
+            thread_id.clone(),
+            BackgroundChatAgentHandle {
+                thread: BackgroundChatAgentThreadRecord {
+                    thread_id: thread_id.clone(),
+                    attempt_id,
+                    batch_id: None,
+                    profile_id: AgentProfileId::new("explore")?,
+                    parent_thread_id: AgentThreadId::new("main")?,
+                    child_session_ref: SessionRef::new_relative("children/blocked-input.jsonl")?,
+                    budget_scope_id: TaskId::new("budget-ownerless-input")?,
+                    isolation: TaskIsolationMode::SharedReadOnly,
+                },
+                handle,
+                collection_supervisor,
+                cancellation_owner,
+                write_owner: None,
+            },
+        )?;
+    }
+
+    background_runs
+        .cancel_direct_task_agents_durably(
+            &mut session,
+            &task_id,
+            "parent Task cancelled",
+            &mut RecordingEventHandler::default(),
+        )
+        .await?;
+
+    let routes =
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?;
+    let route = routes
+        .routes_for_thread(&thread_id)
+        .next()
+        .expect("durable blocked input route");
+    assert_eq!(route.status, sigil_kernel::AgentRouteStatus::Cancelled);
+    assert_eq!(
+        route.request.status,
+        sigil_kernel::UserInputStatusV1::Resolved
+    );
+    assert_eq!(
+        route.request.resolution,
+        Some(sigil_kernel::UserInputResolutionV1::RunCancelled)
+    );
+    let child = Session::load_from_store("test", "model", JsonlSessionStore::new(&child_path)?)?;
+    let child_request = child
+        .user_input_projection()?
+        .request(&route.request.identity)
+        .cloned()
+        .expect("child request lifecycle is durable");
+    assert_eq!(
+        child_request.status,
+        sigil_kernel::UserInputStatusV1::Resolved
+    );
+    assert_eq!(
+        child_request
+            .resolution
+            .expect("cancel resolution")
+            .resolution,
+        sigil_kernel::UserInputResolutionV1::RunCancelled
+    );
+    let expected_thread_status = match child_status {
+        AgentThreadStatus::Blocked => AgentThreadStatus::Cancelled,
+        AgentThreadStatus::Interrupted => AgentThreadStatus::Interrupted,
+        _ => unreachable!("fixture only exercises blocked or interrupted children"),
+    };
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .expect("cancelled thread projection")
+            .status,
+        expected_thread_status,
+        "revoking a blocked request cancels the child thread; an already interrupted child stays interrupted"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_worktree_background_child_cleans_its_git_worktree() -> Result<()> {
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.permission.mode = PermissionMode::DangerFullAccess;
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let provider_started = Arc::new(AtomicBool::new(false));
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(SlowTextProviderFactory {
+            delay: Duration::from_secs(5),
+            started: provider_started.clone(),
+        }),
+    );
+
+    let workspace = tempfile::tempdir()?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "sigil-tests@example.invalid"],
+        vec!["config", "user.name", "Sigil Tests"],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(workspace.path())
+                .status()?
+                .success()
+        );
+    }
+    fs::write(workspace.path().join("README.md"), "baseline\n")?;
+    assert!(
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(workspace.path())
+            .status()?
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-qm", "baseline"])
+            .current_dir(workspace.path())
+            .status()?
+            .success()
+    );
+
+    let state = tempfile::tempdir()?;
+    let mut session = Session::new("parent", "model").with_store(JsonlSessionStore::new(
+        state.path().join("cancel-worktree-session.jsonl"),
+    )?);
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let mut options = run_options(workspace.path().to_path_buf());
+    options.permission_config.mode = PermissionMode::DangerFullAccess;
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-cancel-worktree".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "worker",
+                    "objective": "edit in isolation",
+                    "prompt": "work on the requested isolated change",
+                    "mode": "background",
+                    "isolation": "worktree"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("background worktree spawn should be handled");
+    assert!(!spawn.is_error(), "{}", spawn.content);
+
+    let thread_id =
+        chat_agent_thread_id_for_call("call-cancel-worktree", &AgentProfileId::new("worker")?)?;
+    let start_deadline = Instant::now() + Duration::from_secs(3);
+    while !provider_started.load(Ordering::SeqCst) && Instant::now() < start_deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(provider_started.load(Ordering::SeqCst));
+    let worktrees_before_cancel = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(workspace.path())
+        .output()?;
+    assert!(worktrees_before_cancel.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&worktrees_before_cancel.stdout)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        2
+    );
+
+    let cancelled = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-cancel-worktree-agent".to_owned(),
+                name: CANCEL_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "reason": "cancel isolated work"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("cancel_agent should be handled");
+    assert!(!cancelled.is_error(), "{}", cancelled.content);
+    let cancellation: serde_json::Value = serde_json::from_str(&cancelled.content)?;
+    assert_eq!(cancellation["status"], "cancelled");
+    assert_eq!(cancellation["cleanup_complete"], true);
+
+    let worktrees_after_cancel = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(workspace.path())
+        .output()?;
+    assert!(worktrees_after_cancel.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&worktrees_after_cancel.stdout)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(entry, SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(cleanup))
+            if cleanup.status == sigil_kernel::IsolatedWorkspaceCleanupStatus::Removed)
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn background_agent_returns_running_handle_and_wait_collects_result() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
@@ -5664,7 +6642,7 @@ async fn wait_agent_unavailable_join_before_final_thread_unblocks_final_answer()
 }
 
 #[test]
-fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()> {
+fn final_answer_blocker_leaves_completed_result_reading_to_the_model() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -5699,29 +6677,8 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
         },
     ))?;
 
-    let blocker = runtime
-        .final_answer_blocker(&mut session)?
-        .expect("completed unread join-before-final result should block final answer");
-    let payload: serde_json::Value = serde_json::from_str(&blocker)?;
-
-    assert_eq!(payload["error"], "join_before_final_agent_result_unread");
-    assert!(payload.get("session_facts").is_none());
-    assert_eq!(
-        payload["unread_threads"][0]["thread_id"],
-        thread_id.as_str()
-    );
-    assert_eq!(
-        payload["unread_threads"][0]["required_action"]["tool"],
-        READ_AGENT_RESULT_TOOL_NAME
-    );
-    assert_eq!(
-        payload["unread_threads"][0]["required_action"]["args"],
-        json!({
-            "thread_id": thread_id.as_str(),
-            "offset_chars": 0,
-            "max_chars": 40_000
-        })
-    );
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    assert!(!session.agent_thread_state_projection().threads[&thread_id].result_fully_delivered);
 
     session.append_control(ControlEntry::AgentThreadResultDelivered(
         sigil_kernel::AgentThreadResultDeliveredEntry {
@@ -5735,18 +6692,10 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
             delivered_at_ms: None,
         },
     ))?;
-    let blocker = runtime
-        .final_answer_blocker(&mut session)?
-        .expect("partial child result page should still block final answer");
-    let payload: serde_json::Value = serde_json::from_str(&blocker)?;
-    assert_eq!(
-        payload["unread_threads"][0]["required_action"]["args"],
-        json!({
-            "thread_id": thread_id.as_str(),
-            "offset_chars": 10,
-            "max_chars": 40_000
-        })
-    );
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(projection.threads[&thread_id].result_delivered_chars, 10);
+    assert!(!projection.threads[&thread_id].result_fully_delivered);
 
     session.append_control(ControlEntry::AgentThreadResultDelivered(
         sigil_kernel::AgentThreadResultDeliveredEntry {
@@ -5768,7 +6717,7 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
 }
 
 #[test]
-fn final_answer_blocker_ignores_unread_results_from_an_earlier_root_run() -> Result<()> {
+fn final_answer_blocker_allows_unread_results_from_current_and_earlier_roots() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -5795,12 +6744,10 @@ fn final_answer_blocker_ignores_unread_results_from_an_earlier_root_run() -> Res
     )?;
     append_agent_admission_for_root(&mut session, &current, "root-run-current")?;
     append_test_agent_result(&mut session, &current)?;
-    let blocker = runtime
-        .final_answer_blocker(&mut session)?
-        .expect("current-root unread result should still block final answer");
-
-    assert!(blocker.contains(current.as_str()));
-    assert!(!blocker.contains(earlier.as_str()));
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    let projection = session.agent_thread_state_projection();
+    assert!(!projection.threads[&current].result_fully_delivered);
+    assert!(!projection.threads[&earlier].result_fully_delivered);
     Ok(())
 }
 
@@ -6115,12 +7062,8 @@ async fn final_answer_context_includes_same_task_previous_attempt_without_claimi
     let mut session = Session::load_from_store("parent", "model", store.clone())?;
     let task_id = sigil_kernel::TaskId::new("facts-task")?;
     let objective = "finish the original work";
-    let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::planner_fallback(
-        task_id.clone(),
-        objective,
-        "facts-planner",
-        1,
-    );
+    let admission =
+        sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), objective, 1);
     let previous = sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1);
     let current = sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 2);
     let old_run = sigil_kernel::task_direct_execution_logical_run_id(&previous.attempt_id);
@@ -6135,7 +7078,7 @@ async fn final_answer_context_includes_same_task_previous_attempt_without_claimi
     }))?;
     session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
     let mut previous = previous;
-    previous.status = sigil_kernel::TaskParticipantAttemptStatus::Interrupted;
+    previous.status = sigil_kernel::TaskExecutionAttemptStatus::Interrupted;
     session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(previous))?;
     session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(current))?;
     runtime.set_root_logical_run_id(Some(&current_run));
@@ -6821,12 +7764,13 @@ async fn final_answer_context_distinguishes_policy_allow_user_approval_and_sessi
             subjects: Vec::new(),
             facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Local],
             scope: sigil_kernel::ToolApprovalSessionGrantScope::ExactSubjects,
-            containment_binding: sigil_kernel::ExecutionContainmentBindingV2 {
+            containment_binding: Some(sigil_kernel::ExecutionContainmentBindingV2 {
                 requested: sigil_kernel::ExecutionContainmentRequest::default(),
                 backend_identity_hash: "0".repeat(64),
                 backend_profile_hash: "1".repeat(64),
                 environment_binding_hash: "2".repeat(64),
-            },
+            }),
+            network_binding: None,
             policy_version: "policy-test".to_owned(),
             expires: sigil_kernel::ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
@@ -7552,9 +8496,9 @@ async fn worker_changeset_only_invocation_records_merge_review_without_parent_mu
     ],
     "validations": []
   },
-  "artifact": {
+    "artifact": {
     "media_type": "text/x-diff",
-    "content": "--- current/README.md\n+++ proposed/README.md\n@@\n-old\n+new\n"
+    "content": "--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+new\n"
   }
 }"#;
     let mut runtime = user_authorized_runtime_with_provider_factory(
@@ -7567,9 +8511,11 @@ async fn worker_changeset_only_invocation_records_merge_review_without_parent_mu
         }),
     );
     let temp = tempfile::tempdir()?;
+    let session_temp = tempfile::tempdir()?;
     let readme = temp.path().join("README.md");
     fs::write(&readme, "old\n")?;
-    let mut session = Session::new("parent", "model");
+    let store = JsonlSessionStore::new(session_temp.path().join("parent-session.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store);
     session.append_user_message(sigil_kernel::ModelMessage::user("update README wording"))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
@@ -7670,28 +8616,268 @@ async fn worker_changeset_only_invocation_records_merge_review_without_parent_mu
             .tool_names
             .contains(&"apply_changeset".to_owned())
     );
-    assert!(!observation.tool_names.contains(&"bash".to_owned()));
+    assert!(!observation.tool_names.contains(&"exec_command".to_owned()));
+
+    let integration = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-integrate-worker".to_owned(),
+                name: INTEGRATE_AGENT_CHANGES_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": invocation.thread_id.as_str(),
+                    "decision": "accepted"
+                })
+                .to_string(),
+            },
+            &run_options(temp.path().to_path_buf()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("integrate changes handled");
+    assert!(!integration.is_error(), "{}", integration.content);
+    assert_eq!(fs::read_to_string(&readme)?, "new\n");
+    let resolved_projection = session.write_isolation_projection();
+    let resolved = resolved_projection
+        .merge_reviews
+        .get(&review.review_id)
+        .expect("worker merge review should remain projected")
+        .resolved
+        .as_ref()
+        .expect("worker merge review should be resolved");
+    assert_eq!(resolved.decision, sigil_kernel::MergeDecision::Accepted);
     assert_parent_agent_thread_controls_forwarded(&handler);
     Ok(())
 }
 
 #[tokio::test]
-async fn worker_background_spawn_is_rejected_without_creating_thread() -> Result<()> {
-    let config = root_config();
+async fn worker_background_worktree_isolates_changes_and_persists_merge_artifact() -> Result<()> {
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.permission.mode = PermissionMode::DangerFullAccess;
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
+    registry.register(Arc::new(WorktreeWriteTool));
     let supervisor = supervisor(&config)?;
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let tool_results = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
-        Arc::new(RejectingProviderFactory),
+        Arc::new(WorktreeWritingProviderFactory {
+            calls: provider_calls.clone(),
+            tool_results: tool_results.clone(),
+        }),
     );
-    let mut session = Session::new("parent", "model");
+    let workspace = tempfile::tempdir()?;
+    let session_home = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "old\n")?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "sigil-tests@example.invalid"],
+        vec!["config", "user.name", "Sigil Tests"],
+    ] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(workspace.path())
+            .status()?;
+        assert!(status.success());
+    }
+    assert!(
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(workspace.path())
+            .status()?
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-qm", "initial"])
+            .current_dir(workspace.path())
+            .status()?
+            .success()
+    );
+
+    let store = JsonlSessionStore::new(session_home.path().join("parent-session.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store);
+    session.append_user_message(sigil_kernel::ModelMessage::user("update README"))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let mut options = run_options(workspace.path().to_path_buf());
+    options.permission_config.mode = PermissionMode::DangerFullAccess;
+    let invocation = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-worktree-spawn".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "worker",
+                    "objective": "Update README",
+                    "prompt": "change README",
+                    "mode": "background",
+                    "isolation": "worktree"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("worktree spawn should be handled");
+    assert!(!invocation.is_error(), "{}", invocation.content);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("README.md"))?,
+        "old\n"
+    );
+    let thread_id = AgentThreadId::new(
+        invocation
+            .metadata
+            .details
+            .get("thread_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("spawn result should include thread id"),
+    )?;
+    let waited = wait_until_agent_result_tool(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
+    assert!(!waited.is_error(), "{}", waited.content);
+
+    let projection = session.write_isolation_projection();
+    let isolated = projection
+        .isolated_changesets
+        .values()
+        .find(|entry| entry.source_isolation == sigil_kernel::WriteIsolationMode::Worktree);
+    assert!(
+        isolated.is_some(),
+        "worktree child should produce an isolated changeset; status={:?}, result={:?}, provider_calls={}, tool_results={:?}",
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .map(|thread| thread.status),
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.as_ref()),
+        provider_calls.load(Ordering::SeqCst),
+        tool_results
+            .lock()
+            .map(|results| results.clone())
+            .unwrap_or_default()
+    );
+    let isolated = isolated.expect("checked above");
+    let changeset_id = isolated.changeset_id.clone();
+    assert!(
+        isolated
+            .artifact_ref
+            .as_deref()
+            .is_some_and(|artifact| !artifact.starts_with("inline:"))
+    );
+    assert!(projection.isolated_workspace_states.values().any(|state| {
+        state
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.status.is_terminal())
+    }));
+
+    let integration = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-integrate-worktree".to_owned(),
+                name: INTEGRATE_AGENT_CHANGES_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": invocation
+                        .metadata
+                        .details
+                        .get("thread_id")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("spawn result should include thread id"),
+                    "decision": "accepted"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("integrate changes handled");
+    assert!(!integration.is_error(), "{}", integration.content);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("README.md"))?,
+        "new\n"
+    );
+    assert!(
+        session
+            .changeset_projection()
+            .changesets
+            .get(&changeset_id)
+            .and_then(|state| state.result.as_ref())
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_background_changeset_is_owned_until_merge_review() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let child_output = r#"{
+  "change_set": {
+    "id": "background-note",
+    "title": "Update README",
+    "summary": "Update the README wording.",
+    "risk": "low",
+    "files": [
+      {
+        "path": "README.md",
+        "action": "update",
+        "risk": "low",
+        "additions": 1,
+        "deletions": 1
+      }
+    ],
+    "validations": []
+  },
+  "artifact": {
+    "media_type": "text/x-diff",
+    "content": "--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+  }
+}"#;
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RecordingTextProviderFactory {
+            text: child_output.to_owned(),
+            observed_request: Arc::new(Mutex::new(None)),
+        }),
+    );
+    let workspace = tempfile::tempdir()?;
+    let session_home = tempfile::tempdir()?;
+    let readme = workspace.path().join("README.md");
+    fs::write(&readme, "old\n")?;
+    let store = JsonlSessionStore::new(session_home.path().join("parent-session.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store);
+    session.append_user_message(sigil_kernel::ModelMessage::user("update README"))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
-    let result = runtime
+    let spawn = runtime
         .handle_agent_tool_call(
             &mut session,
             &ToolCall {
@@ -7699,31 +8885,88 @@ async fn worker_background_spawn_is_rejected_without_creating_thread() -> Result
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
                 args_json: json!({
                     "profile_id": "worker",
-                    "objective": "edit files",
-                    "prompt": "edit files",
+                    "objective": "Update README",
+                    "prompt": "Propose the README update.",
+                    "isolation": "changeset_only",
                     "mode": "background"
                 })
                 .to_string(),
             },
-            &run_options(std::env::temp_dir()),
+            &run_options(workspace.path().to_path_buf()),
             &mut handler,
             &mut approval,
         )
         .await?
         .expect("spawn handled");
-
-    assert!(result.is_error());
-    assert!(
-        result
-            .content
-            .contains("unsupported_write_background_without_isolation")
+    assert!(!spawn.is_error(), "{}", spawn.content);
+    let thread_id =
+        chat_agent_thread_id_for_call("call-worker-background", &AgentProfileId::new("worker")?)?;
+    let waited = wait_until_agent_result_tool(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &run_options(workspace.path().to_path_buf()),
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
+    assert!(!waited.is_error(), "{}", waited.content);
+    assert_eq!(fs::read_to_string(&readme)?, "old\n");
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .map(|thread| thread.status),
+        Some(AgentThreadStatus::Completed)
     );
-    assert!(session.agent_thread_state_projection().threads.is_empty());
+    let changeset_id = sigil_kernel::ChangeSetId::new("background-note")?;
+    let write_projection = session.write_isolation_projection();
+    let review = write_projection
+        .merge_reviews
+        .values()
+        .find(|review| {
+            review
+                .requested
+                .as_ref()
+                .is_some_and(|requested| requested.changeset_id == changeset_id)
+        })
+        .expect("background changeset should have a durable merge review");
+    assert!(review.is_pending());
+
+    let integration = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-integrate-background-worker".to_owned(),
+                name: INTEGRATE_AGENT_CHANGES_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "decision": "accepted"
+                })
+                .to_string(),
+            },
+            &run_options(workspace.path().to_path_buf()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("integration handled");
+    assert!(!integration.is_error(), "{}", integration.content);
+    assert_eq!(fs::read_to_string(&readme)?, "new\n");
+    assert!(
+        session
+            .changeset_projection()
+            .changesets
+            .get(&changeset_id)
+            .and_then(|state| state.result.as_ref())
+            .is_some()
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result<()> {
+async fn wait_agent_delivers_one_bounded_result_page_without_repeating_it() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -7757,7 +9000,7 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
         .expect("spawn handled");
     let thread_id =
         chat_agent_thread_id_for_call(&call.id, &sigil_kernel::AgentProfileId::new("explore")?)?;
-    wait_until_agent_result_available(
+    let wait = wait_until_agent_result_tool(
         &mut runtime,
         &mut session,
         &thread_id,
@@ -7766,6 +9009,7 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
         &mut approval,
     )
     .await?;
+    let payload = parse_agent_tool_payload(&wait)?;
     let projection = session.agent_thread_state_projection();
     let result = projection
         .threads
@@ -7776,128 +9020,318 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
     assert!(result.summary_truncated);
     assert_eq!(result.original_summary_chars, Some(5_001));
 
-    let wait = runtime
+    assert_eq!(payload["status"], "completed");
+    assert_eq!(payload["result_available"], true);
+    assert_eq!(payload["page"]["offset_chars"], 0);
+    assert_eq!(payload["page"]["returned_chars"], 4_000);
+    assert_eq!(payload["page"]["truncated"], false);
+    assert!(payload["next_read_args"].is_null());
+    assert_eq!(wait.transient_context.len(), 1);
+    assert!(
+        wait.transient_context[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains(&"x".repeat(200)))
+    );
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("thread should remain projected after wait delivery");
+    assert!(thread.result_delivered);
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 4_000);
+
+    let repeated = runtime
         .handle_agent_tool_call(
             &mut session,
             &ToolCall {
-                id: "call-wait-long".to_owned(),
+                id: "call-wait-long-repeat".to_owned(),
                 name: WAIT_AGENT_TOOL_NAME.to_owned(),
-                args_json: json!({
-                    "thread_id": thread_id.as_str()
-                })
-                .to_string(),
+                args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
             },
             &run_options(std::env::temp_dir()),
             &mut handler,
             &mut approval,
         )
         .await?
-        .expect("wait handled");
-    let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
-    assert_eq!(payload["status"], "completed");
-    assert_eq!(payload["result_available"], true);
-    assert_eq!(payload["result_ref"]["summary_truncated"], true);
-    assert_eq!(payload["result_ref"]["original_summary_chars"], 5_001);
-    assert_eq!(
-        payload["result_ref"]["read_args"]["max_chars"],
-        serde_json::Value::from(40_000)
-    );
-    assert_eq!(
-        payload["result_ref"]["max_page_chars"],
-        serde_json::Value::from(40_000)
-    );
-    assert_eq!(
-        payload["result_ref"]["next_action"],
-        "call read_agent_result with result_ref.read_args exactly; do not estimate max_chars from char_count"
-    );
-    assert!(payload.get("summary").is_none());
-    assert!(!wait.content.contains(&"x".repeat(200)));
+        .expect("repeated wait handled");
+    let repeated_payload: serde_json::Value = serde_json::from_str(&repeated.content)?;
+    assert_eq!(repeated_payload["already_delivered"], true);
+    assert_eq!(repeated_payload["result_fully_delivered"], true);
+    assert_eq!(repeated_payload["page"]["returned_chars"], 0);
+    assert!(repeated.transient_context.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn read_agent_result_pages_full_child_result_from_child_session() -> Result<()> {
+async fn wait_agent_does_not_repeat_empty_result_delivery() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let full_text = format!("alpha\n{}\nomega", "x".repeat(3_200));
+    let mut runtime = user_authorized_runtime(supervisor, config, registry);
+    let mut session = Session::new("parent", "model");
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_chat_empty_result",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Completed,
+        None,
+    )?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/agent_chat_empty_result.jsonl",
+                )?,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: String::new(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: super::hash_text(""),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let first = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-empty-wait-1".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("first wait handled");
+    let first_payload = parse_agent_tool_payload(&first)?;
+    assert_eq!(first_payload["page"]["returned_chars"], 0);
+    assert_eq!(first_payload["page"]["truncated"], false);
+    assert_eq!(first.transient_context.len(), 1);
+
+    let second = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-empty-wait-2".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("second wait handled");
+    let second_payload = parse_agent_tool_payload(&second)?;
+    assert_eq!(second_payload["already_delivered"], true);
+    assert_eq!(second_payload["result_fully_delivered"], true);
+    assert_eq!(second_payload["page"]["returned_chars"], 0);
+    assert!(second.transient_context.is_empty());
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("empty result thread should remain projected");
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 0);
+    assert_eq!(
+        thread.result_delivery_call_ids,
+        vec!["call-empty-wait-1".to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_agent_pages_full_child_result_from_child_session() -> Result<()> {
+    assert_wait_agent_pages_full_child_result(false, false).await
+}
+
+#[tokio::test]
+async fn wait_agent_restarts_paging_after_session_recovery() -> Result<()> {
+    assert_wait_agent_pages_full_child_result(true, false).await
+}
+
+#[tokio::test]
+async fn wait_agent_does_not_reread_a_tail_delivered_before_the_prefix() -> Result<()> {
+    assert_wait_agent_pages_full_child_result(false, true).await
+}
+
+async fn assert_wait_agent_pages_full_child_result(
+    recover_after_first_page: bool,
+    read_tail_first: bool,
+) -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let full_text = format!("alpha\n{}\nomega", "x".repeat(40_500));
     let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
         Arc::new(TextProviderFactory {
-            text: full_text.clone(),
+            text: String::new(),
         }),
     );
     let temp = tempfile::tempdir()?;
-    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
-    let spawn_call = ToolCall {
-        id: "call-page".to_owned(),
-        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
-        args_json: json!({
-            "profile_id": "explore",
-            "objective": "inspect",
-            "prompt": "inspect",
-            "mode": "background"
-        })
-        .to_string(),
-    };
-
-    let spawn_result = runtime
-        .handle_agent_tool_call(
-            &mut session,
-            &spawn_call,
-            &run_options(workspace.clone()),
-            &mut handler,
-            &mut approval,
-        )
-        .await?
-        .expect("spawn handled");
-    let spawn_payload = parse_agent_tool_payload(&spawn_result)?;
-    assert_eq!(spawn_payload["status"], "running");
-    assert_eq!(spawn_payload["terminal"], false);
-    assert_eq!(spawn_payload["result_available"], false);
-    let thread_id = chat_agent_thread_id_for_call(
-        &spawn_call.id,
-        &sigil_kernel::AgentProfileId::new("explore")?,
+    let options = run_options(temp.path().to_path_buf());
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_chat_wait_page",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Completed,
+        None,
     )?;
-    let mut wait_payload = None;
-    for _ in 0..50 {
-        let wait_result = runtime
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative(format!("children/{}.jsonl", thread_id.as_str()))?;
+    let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
+    let mut child_session = Session::load_from_store("child", "model", child_store)?;
+    let child_final_message = sigil_kernel::ModelMessage::assistant_with_kind(
+        Some(full_text.clone()),
+        Vec::new(),
+        sigil_kernel::AssistantMessageKind::FinalAnswer,
+    );
+    let output_hash = super::hash_text(&full_text);
+    let final_answer_ref = sigil_kernel::AgentFinalAnswerRef {
+        session_ref: child_session_ref.clone(),
+        message_id: child_final_message.id.clone(),
+        content_hash: output_hash.clone(),
+        char_count: full_text.chars().count(),
+    };
+    child_session.append_assistant_message(child_final_message)?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: child_session_ref,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: full_text.chars().take(4_000).collect(),
+                summary_truncated: true,
+                original_summary_chars: Some(full_text.chars().count()),
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash,
+                final_answer_ref: Some(final_answer_ref),
+            },
+        },
+    ))?;
+
+    if read_tail_first {
+        let tail = runtime
             .handle_agent_tool_call(
                 &mut session,
                 &ToolCall {
-                    id: "call-page-wait".to_owned(),
-                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
-                    args_json: json!({
-                        "thread_id": thread_id.as_str()
-                    })
-                    .to_string(),
+                    id: "call-page-tail-first".to_owned(),
+                    name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                    args_json: json!({"thread_id": thread_id.as_str(), "offset_chars": 40_000})
+                        .to_string(),
                 },
-                &run_options(workspace.clone()),
+                &options,
                 &mut handler,
                 &mut approval,
             )
             .await?
-            .expect("wait handled");
-        let payload = parse_agent_tool_payload(&wait_result)?;
-        if payload["result_available"] == true {
-            wait_payload = Some(payload);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+            .expect("tail read handled");
+        assert_eq!(tail.transient_context.len(), 1);
+        let payload = parse_agent_tool_payload(&tail)?;
+        assert_eq!(payload["page"]["offset_chars"], 40_000);
+        assert_eq!(payload["page"]["truncated"], false);
+        assert_eq!(payload["result_fully_delivered"], false);
+        assert_eq!(payload["next_read_args"]["offset_chars"], 0);
+        assert!(runtime.final_answer_blocker(&mut session)?.is_none());
     }
-    let wait_payload = wait_payload.expect("wait_agent should collect child result");
-    assert_eq!(wait_payload["result_ref"]["summary_truncated"], false);
-    assert_eq!(
-        wait_payload["result_ref"]["read_tool"],
-        READ_AGENT_RESULT_TOOL_NAME
+
+    let wait_result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-page-wait".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("wait handled");
+    let wait_payload = parse_agent_tool_payload(&wait_result)?;
+    assert_eq!(wait_payload["page"]["offset_chars"], 0);
+    assert_eq!(wait_payload["page"]["returned_chars"], 40_000);
+    assert_eq!(wait_payload["page"]["truncated"], true);
+    if read_tail_first {
+        assert!(wait_payload["next_read_args"].is_null());
+        assert_eq!(wait_payload["result_fully_delivered"], true);
+    } else {
+        assert_eq!(wait_payload["next_read_args"]["offset_chars"], 40_000);
+        assert_eq!(wait_payload["result_fully_delivered"], false);
+    }
+    assert_eq!(wait_result.transient_context.len(), 1);
+    assert!(
+        wait_result.transient_context[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("alpha"))
     );
+
+    if recover_after_first_page {
+        let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+        session = Session::load_from_store("parent", "model", store)?;
+        let config = root_config();
+        runtime = user_authorized_runtime(self::supervisor(&config)?, config, ToolRegistry::new());
+        assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+        let recovered = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-recovered-page-wait".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
+                },
+                &options,
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("recovered wait handled");
+        let recovered_payload = parse_agent_tool_payload(&recovered)?;
+        assert_eq!(recovered_payload["page"]["offset_chars"], 0);
+        assert_eq!(recovered_payload["page"]["returned_chars"], 40_000);
+        assert_eq!(recovered.transient_context.len(), 1);
+        let original_page = wait_result.transient_context[0]
+            .content
+            .as_deref()
+            .and_then(|content| content.split_once('\n'))
+            .expect("transient page has a tool call header")
+            .1;
+        assert!(
+            recovered.transient_context[0]
+                .content
+                .as_deref()
+                .is_some_and(|content| content.ends_with(original_page))
+        );
+    }
 
     let read_result = runtime
         .handle_agent_tool_call(
@@ -7905,24 +9339,39 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
             &ToolCall {
                 id: "call-page-read".to_owned(),
                 name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
-                args_json: json!({
-                    "thread_id": thread_id.as_str(),
-                    "offset_chars": 2_900,
-                    "max_chars": 800
-                })
-                .to_string(),
+                args_json: if read_tail_first {
+                    json!({"thread_id": thread_id.as_str(), "offset_chars": 40_000}).to_string()
+                } else {
+                    serde_json::to_string(&wait_payload["next_read_args"])?
+                },
             },
-            &run_options(temp.path().to_path_buf()),
+            &options,
             &mut handler,
             &mut approval,
         )
         .await?
         .expect("read handled");
     let read_payload = parse_agent_tool_payload(&read_result)?;
+    if read_tail_first {
+        assert_eq!(read_payload["already_delivered"], true);
+        assert_eq!(read_payload["result_fully_delivered"], true);
+        assert_eq!(read_payload["page"]["returned_chars"], 512);
+        assert!(read_result.transient_context.is_empty());
+        assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+        let projection = session.agent_thread_state_projection();
+        let thread = &projection.threads[&thread_id];
+        assert!(thread.result_fully_delivered);
+        assert_eq!(thread.result_delivered_chars, full_text.chars().count());
+        assert_eq!(
+            thread.result_delivery_call_ids,
+            vec!["call-page-tail-first", "call-page-wait"]
+        );
+        return Ok(());
+    }
     assert!(read_payload.get("summary").is_none());
     let page = &read_payload["page"];
 
-    assert_eq!(page["offset_chars"], 2_900);
+    assert_eq!(page["offset_chars"], 40_000);
     assert_eq!(page["total_chars"], full_text.chars().count());
     assert!(page.get("text").is_none());
     assert_eq!(page["text_omitted"], true);
@@ -7942,12 +9391,27 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         .get(&thread_id)
         .expect("thread should remain projected after read_agent_result");
     assert!(thread.result_delivered);
-    assert!(!thread.result_fully_delivered);
-    assert_eq!(thread.result_delivered_chars, 0);
-    assert_eq!(
-        thread.result_delivery_call_ids,
-        vec!["call-page-read".to_owned()]
-    );
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, full_text.chars().count());
+    let expected_calls = if recover_after_first_page {
+        vec![
+            "call-page-wait",
+            "call-recovered-page-wait",
+            "call-page-read",
+        ]
+    } else {
+        vec!["call-page-wait", "call-page-read"]
+    };
+    assert_eq!(thread.result_delivery_call_ids, expected_calls);
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    if recover_after_first_page {
+        runtime.begin_result_context();
+        let result = thread.result.as_ref().expect("recorded result");
+        let coverage = runtime.result_delivery_in_context(&session, result);
+        assert_eq!(coverage.contiguous_chars(), 0);
+        assert!(coverage.fully_delivered_receipt().is_none());
+        assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    }
     assert!(handler.events.iter().any(|event| matches!(
         event,
         RunEvent::Control(ControlEntry::AgentThreadResultDelivered(entry))
@@ -7957,7 +9421,66 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
 }
 
 #[tokio::test]
-async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read() -> Result<()> {
+async fn wait_agent_without_final_answer_returns_terminal_status_without_read_loop() -> Result<()> {
+    let config = root_config();
+    let mut runtime = user_authorized_runtime(supervisor(&config)?, config, ToolRegistry::new());
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", store)?;
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_without_final_answer",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        AgentThreadStatus::Completed,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
+    append_test_agent_result(&mut session, &thread_id)?;
+    let options = run_options(temp.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let wait = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "wait-without-final-answer".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({"thread_id": thread_id.as_str()}).to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("wait handled");
+    let payload = parse_agent_tool_payload(&wait)?;
+    assert_eq!(payload["terminal"], true);
+    assert_eq!(payload["result_available"], true);
+    assert_eq!(payload["page_available"], false);
+    assert!(payload["result_ref"]["read_args"].is_null());
+    assert!(
+        payload["next_action"]
+            .as_str()
+            .is_some_and(|text| text.contains("no result page"))
+    );
+    assert!(wait.transient_context.is_empty());
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+    assert!(!session.agent_thread_state_projection().threads[&thread_id].result_fully_delivered);
+    let list = runtime.list_agents(
+        &session,
+        &ToolCall {
+            id: "list-without-final-answer".to_owned(),
+            name: LIST_AGENTS_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        },
+    );
+    let list_payload = parse_agent_tool_payload(&list)?;
+    assert!(list_payload["agents"][0]["result_ref"]["read_args"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_agent_result_clamps_oversized_page_and_offers_optional_tail() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -8068,22 +9591,7 @@ async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read()
     assert!(thread.result_delivered);
     assert!(!thread.result_fully_delivered);
     assert_eq!(thread.result_delivered_chars, 40_000);
-    let blocker = runtime
-        .final_answer_blocker(&mut session)?
-        .expect("partial result page should still block final answer");
-    let blocker_payload: serde_json::Value = serde_json::from_str(&blocker)?;
-    assert_eq!(
-        blocker_payload["error"],
-        "join_before_final_agent_result_unread"
-    );
-    assert_eq!(
-        blocker_payload["unread_threads"][0]["required_action"]["args"],
-        json!({
-            "thread_id": thread_id.as_str(),
-            "offset_chars": 40_000,
-            "max_chars": 40_000
-        })
-    );
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
 
     let second = runtime
         .handle_agent_tool_call(
@@ -8173,7 +9681,7 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
-    wait_until_agent_result_available(
+    let wait = wait_until_agent_result_tool(
         &mut runtime,
         &mut session,
         &thread_id,
@@ -8232,7 +9740,12 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         )
         .await?
         .expect("read handled");
-    let payload = parse_agent_tool_payload(&read)?;
+    let repeated_payload = parse_agent_tool_payload(&read)?;
+    assert_eq!(repeated_payload["page"]["offset_chars"], 0);
+    assert!(read.transient_context.is_empty());
+    assert_eq!(repeated_payload["already_delivered"], true);
+    assert_eq!(repeated_payload["page"]["text_omitted"], true);
+    let payload = parse_agent_tool_payload(&wait)?;
     assert_eq!(payload["page"]["truncated"], false);
     assert!(payload["next_read_args"].is_null());
     assert!(
@@ -8240,11 +9753,11 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
             .as_u64()
             .is_some_and(|chars| chars < full_text.chars().count() as u64)
     );
-    let transient_text = read
+    let transient_text = wait
         .transient_context
         .first()
         .and_then(|message| message.content.as_deref())
-        .expect("read page should be transient");
+        .expect("wait page should be transient");
     assert!(transient_text.contains("full_result_artifact"));
     assert!(!transient_text.contains(tail_marker));
     assert!(
@@ -8255,7 +9768,73 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
 }
 
 #[tokio::test]
-async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Result<()> {
+async fn wait_agent_retries_body_after_delivery_receipt_publication_fails() -> Result<()> {
+    struct FailDeliveryPublication;
+    impl EventHandler for FailDeliveryPublication {
+        fn handle(&mut self, event: RunEvent) -> Result<()> {
+            if matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadResultDelivered(_))
+            ) {
+                anyhow::bail!("delivery publication failed after append");
+            }
+            Ok(())
+        }
+    }
+
+    let config = root_config();
+    let mut runtime = user_authorized_runtime(supervisor(&config)?, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "delivery-publication-failure",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        AgentThreadStatus::Completed,
+        None,
+    )?;
+    append_test_agent_result(&mut session, &thread_id)?;
+    let args = json!({"thread_id": thread_id.as_str()});
+    let call = ToolCall {
+        id: "failed-delivery".to_owned(),
+        name: WAIT_AGENT_TOOL_NAME.to_owned(),
+        args_json: args.to_string(),
+    };
+    let failed = runtime
+        .wait_agent(&mut session, &call, &args, &mut FailDeliveryPublication)
+        .await;
+    assert!(failed.is_error());
+    assert!(failed.transient_context.is_empty());
+    assert!(
+        session.agent_thread_state_projection().threads[&thread_id].result_fully_delivered,
+        "the audit append succeeded before publication failed"
+    );
+
+    let retry = runtime
+        .wait_agent(
+            &mut session,
+            &ToolCall {
+                id: "retry-delivery".to_owned(),
+                ..call
+            },
+            &args,
+            &mut RecordingEventHandler::default(),
+        )
+        .await;
+    assert!(!retry.is_error());
+    assert_eq!(retry.transient_context.len(), 1);
+    let payload = parse_agent_tool_payload(&retry)?;
+    assert_eq!(payload["page"]["offset_chars"], 0);
+    assert_eq!(payload["result_fully_delivered"], true);
+    assert!(payload.get("already_delivered").is_none());
+    assert_eq!(
+        session.agent_thread_state_projection().threads[&thread_id].result_delivery_call_ids,
+        vec!["failed-delivery", "retry-delivery"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_agent_result_omits_a_page_already_delivered_in_context() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -8302,27 +9881,8 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
-    for _ in 0..50 {
-        let wait = runtime
-            .handle_agent_tool_call(
-                &mut session,
-                &ToolCall {
-                    id: "call-repeat-wait".to_owned(),
-                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
-                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
-                },
-                &options,
-                &mut handler,
-                &mut approval,
-            )
-            .await?
-            .expect("wait handled");
-        let payload = parse_agent_tool_payload(&wait)?;
-        if payload["result_available"] == true {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    collect_until_agent_result_recorded(&mut runtime, &mut session, &thread_id, &mut handler)
+        .await?;
 
     let first = runtime
         .handle_agent_tool_call(
@@ -8343,8 +9903,8 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         )
         .await?
         .expect("first read handled");
-    assert_eq!(first.transient_context.len(), 1);
     let first_payload = parse_agent_tool_payload(&first)?;
+    assert_eq!(first.transient_context.len(), 1);
     assert_eq!(first_payload["page"]["truncated"], false);
     assert!(first_payload["next_read_args"].is_null());
     assert_eq!(
@@ -8385,9 +9945,10 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         .await?
         .expect("second read handled");
     let second_payload = parse_agent_tool_payload(&second)?;
-    assert_eq!(second_payload["already_delivered"], true);
-    assert_eq!(second_payload["rerun_not_needed"], true);
+    assert_eq!(second_payload["page"]["offset_chars"], 0);
     assert!(second.transient_context.is_empty());
+    assert_eq!(second_payload["already_delivered"], true);
+    assert_eq!(second_payload["page"]["text_omitted"], true);
     let delivered_events_after = handler
         .events
         .iter()
@@ -8460,15 +10021,8 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
-    wait_until_agent_result_available(
-        &mut runtime,
-        &mut session,
-        &thread_id,
-        &options,
-        &mut handler,
-        &mut approval,
-    )
-    .await?;
+    collect_until_agent_result_recorded(&mut runtime, &mut session, &thread_id, &mut handler)
+        .await?;
     let child_path = {
         let projection = session.agent_thread_state_projection();
         let result = projection
@@ -8526,6 +10080,17 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
 
 #[tokio::test]
 async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> Result<()> {
+    assert_result_page_is_transient_and_available_on_new_run(READ_AGENT_RESULT_TOOL_NAME).await
+}
+
+#[tokio::test]
+async fn wait_agent_page_text_is_transient_and_available_on_new_run() -> Result<()> {
+    assert_result_page_is_transient_and_available_on_new_run(WAIT_AGENT_TOOL_NAME).await
+}
+
+async fn assert_result_page_is_transient_and_available_on_new_run(
+    result_tool_name: &'static str,
+) -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -8572,7 +10137,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
-    wait_until_agent_result_available(
+    let earlier_wait = wait_until_agent_result_tool(
         &mut agent_delegate,
         &mut session,
         &thread_id,
@@ -8581,6 +10146,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         &mut approval,
     )
     .await?;
+    assert_eq!(earlier_wait.transient_context.len(), 1);
     let projection = session.agent_thread_state_projection();
     let child_result = projection
         .threads
@@ -8597,6 +10163,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
     let agent = Agent::new(
         ParentReadAgentResultProvider {
             thread_id,
+            result_tool_name,
             page_text_marker: page_text_marker.to_owned(),
             observed_second_request: Arc::clone(&observed_second_request),
         },
@@ -8606,7 +10173,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
     let output = agent
         .run_with_approval_input_and_agent_delegate(
             &mut session,
-            AgentRunInput::user("read the child page"),
+            AgentRunInput::user("read the child page").with_logical_run_id("test-root-logical-run"),
             options,
             &mut handler,
             &mut approval,
@@ -8804,13 +10371,35 @@ async fn spawn_agent_enforces_max_subagents() -> Result<()> {
             .get("requires_user_decision")
             .is_none()
     );
+    assert!(
+        model_content["error"]["details"]
+            .get("do_not_self_complete_delegated_scope")
+            .is_none()
+    );
     assert_eq!(
-        model_content["error"]["details"]["do_not_self_complete_delegated_scope"],
-        true
+        model_content["error"]["details"]["retryable_after_slot_available"],
+        false
     );
     assert_eq!(
         model_content["error"]["details"]["config_paths"][0],
         "[task].max_subagents"
+    );
+    assert_eq!(
+        model_content["error"]["details"]["capacity"]["kind"],
+        "active_thread_limit"
+    );
+    assert_eq!(model_content["error"]["details"]["capacity"]["limit"], 0);
+    assert_eq!(
+        model_content["error"]["details"]["capacity"]["currently_active"],
+        0
+    );
+    assert_eq!(
+        model_content["error"]["details"]["capacity"]["requested"],
+        1
+    );
+    assert_eq!(
+        model_content["error"]["details"]["accepted_or_started_members"],
+        json!([])
     );
     assert!(
         result

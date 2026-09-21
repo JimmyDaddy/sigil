@@ -269,6 +269,7 @@ async fn r71_managed_terminal_route_seals_and_owns_persistent_process() {
     let (program, args) = output_command("terminal-route");
     let mut handle = route
         .start_persistent(ManagedTerminalStartRequestV1 {
+            max_runtime_secs: None,
             program: program.to_string_lossy().into_owned(),
             args,
             cwd: root.path().to_path_buf(),
@@ -321,6 +322,7 @@ async fn r71_managed_terminal_route_supports_pty_control_and_receipt() {
     let mut handle = tokio::time::timeout(
         Duration::from_secs(30),
         route.start_persistent(ManagedTerminalStartRequestV1 {
+            max_runtime_secs: None,
             program,
             args,
             cwd: root.path().to_path_buf(),
@@ -437,6 +439,7 @@ async fn r71_managed_terminal_route_accepts_runtime_shell_environment_and_readin
     let (program, args) = readiness_command(readiness);
     let mut handle = route
         .start_persistent(ManagedTerminalStartRequestV1 {
+            max_runtime_secs: None,
             program,
             args,
             cwd: root.path().to_path_buf(),
@@ -518,5 +521,67 @@ async fn r71_managed_terminal_manager_cancel_waits_for_persistent_receipt() -> a
         cancelled.status,
         sigil_kernel::TerminalTaskStatus::Cancelled
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_command_deadline_stops_silent_pipe_and_pty_without_model_polling()
+-> anyhow::Result<()> {
+    for pty in [false, true] {
+        let root = tempfile::tempdir()?;
+        let artifacts = tempfile::tempdir()?;
+        let execution_temp = tempfile::tempdir()?;
+        let route = Arc::new(
+            RuntimeManagedCommandExecutionRouteV1::new(
+                Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
+                    crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+                )),
+                Arc::new(sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new()),
+                execution_temp.path().to_path_buf(),
+            )
+            .with_process_inventory(test_process_inventory()),
+        );
+        let manager = sigil_tools_builtin::TerminalProcessManager::new_with_artifact_root(
+            root.path(),
+            artifacts.path(),
+            "state/artifacts/tasks",
+        )?
+        .with_managed_execution(route);
+        let (command, shell) = manager_persistent_command();
+        let request = sigil_tools_builtin::TerminalStartRequest {
+            command,
+            shell: Some(shell),
+            max_runtime_secs: Some(1),
+            ..Default::default()
+        };
+        let entry = if pty {
+            manager.start_pty(request, None).await?
+        } else {
+            manager.start(request).await?
+        };
+        // Subscribe to lifecycle, without exec_read/exec_wait or output polling. The existing
+        // capture worker drives the runtime deadline independently of the model.
+        let mut lifecycle = manager.subscribe(&entry.handle.task_id).await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if lifecycle.borrow_and_update().status.is_terminal() {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                lifecycle.changed().await?;
+            }
+        })
+        .await??;
+        let final_entry = manager.snapshot(&entry.handle.task_id).await?.entry;
+        assert!(
+            matches!(final_entry.status, sigil_kernel::TerminalTaskStatus::Failed { ref reason } if reason.contains("timed out")),
+            "pty={pty}: {:?}",
+            final_entry.status
+        );
+        assert_eq!(
+            std::fs::read_dir(execution_temp.path())?.count(),
+            0,
+            "deadline must release the exact managed temp generation"
+        );
+    }
     Ok(())
 }

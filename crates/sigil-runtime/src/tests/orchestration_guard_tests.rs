@@ -16,7 +16,7 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
         handoff_id: TaskHandoffId::new("handoff-1")?,
         source_turn: source,
         trigger: sigil_kernel::TaskAdmissionTrigger::ModelRequested,
-        reason_codes: vec![sigil_kernel::TaskAdmissionReason::MultiStageChange],
+        title: None,
         recovery_objective: None,
         policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
         requested_at_ms: 1,
@@ -213,7 +213,7 @@ fn duplicate_handoff_entry(session: &Session) -> Result<ControlEntry> {
                 "run-1",
             )?,
             trigger: sigil_kernel::TaskAdmissionTrigger::ModelRequested,
-            reason_codes: vec![sigil_kernel::TaskAdmissionReason::MultiStageChange],
+            title: None,
             recovery_objective: None,
             policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
             requested_at_ms: 1,
@@ -224,34 +224,25 @@ fn duplicate_handoff_entry(session: &Session) -> Result<ControlEntry> {
 #[test]
 fn presentation_and_polling_diagnostics_do_not_disable_execution() -> Result<()> {
     let mut session = Session::new("provider", "model");
-    let duplicate = duplicate_final_entry()?;
-    session.append_control(duplicate.clone())?;
-    session.append_control(duplicate)?;
     let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
     assert!(guard.enforce(&mut session, 2)?.is_none());
     assert!(!guard.direct_task_blocked(&session));
     assert!(
         super::first_orchestration_hard_invariant(&sigil_kernel::OrchestrationEvalObservationV1 {
             model_polling_turns: 1,
-            duplicate_parent_child_finals: 1,
             ..sigil_kernel::OrchestrationEvalObservationV1::default()
         })
         .is_none()
     );
-    for invariant in [
-        OrchestrationHardInvariant::ParentChildDuplicateFinal,
-        OrchestrationHardInvariant::ModelPollingTurn,
-    ] {
-        session.append_control(ControlEntry::OrchestrationRouteDisabled(
-            sigil_kernel::OrchestrationRouteDisabledEntry {
-                route_fingerprint: guard.route_fingerprint().to_owned(),
-                sigil_build: guard.sigil_build().to_owned(),
-                invariant,
-                report_handle: "session:diagnostic".to_owned(),
-                disabled_at_ms: 2,
-            },
-        ))?;
-    }
+    session.append_control(ControlEntry::OrchestrationRouteDisabled(
+        sigil_kernel::OrchestrationRouteDisabledEntry {
+            route_fingerprint: guard.route_fingerprint().to_owned(),
+            sigil_build: guard.sigil_build().to_owned(),
+            invariant: OrchestrationHardInvariant::ModelPollingTurn,
+            report_handle: "session:diagnostic".to_owned(),
+            disabled_at_ms: 2,
+        },
+    ))?;
     assert!(guard.enforce(&mut session, 3)?.is_none());
     assert!(!guard.direct_task_blocked(&session));
     assert_eq!(
@@ -265,16 +256,4 @@ fn presentation_and_polling_diagnostics_do_not_disable_execution() -> Result<()>
     assert!(guard.enforce(&mut session, 4)?.is_some());
     assert!(guard.direct_task_blocked(&session));
     Ok(())
-}
-
-fn duplicate_final_entry() -> Result<ControlEntry> {
-    Ok(ControlEntry::TaskFinalAnswerCommitted(
-        sigil_kernel::TaskFinalAnswerCommittedEntry {
-            task_id: sigil_kernel::TaskId::new("task-1")?,
-            plan_version: 1,
-            synthesis_attempt_id: sigil_kernel::TaskParticipantAttemptId::new("synthesis-1")?,
-            message_id: "message-final".to_owned(),
-            content_hash: format!("sha256:{}", "a".repeat(64)),
-        },
-    ))
 }

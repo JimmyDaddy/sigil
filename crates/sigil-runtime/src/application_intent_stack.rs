@@ -29,7 +29,7 @@ pub const APPLICATION_INTENT_DROP_CONFIRMATION_TTL_MS: u64 = 5 * 60 * 1_000;
 /// The command intentionally contains no path, patch bytes, current file hash, permission policy
 /// or approval authority. TUI, HTTP, Desktop and automation adapters all submit this same shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum ApplicationIntentStackCommandV1 {
     Inspect,
     PreviewDrop { intent_ref: IntentVersionRef },
@@ -38,7 +38,7 @@ pub enum ApplicationIntentStackCommandV1 {
 
 /// Adapter-neutral result of one Intent Stack command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum ApplicationIntentStackCommandOutputV1 {
     Projection {
         state: PublicIntentStackStateV1,

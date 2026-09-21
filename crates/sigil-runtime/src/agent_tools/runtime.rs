@@ -1,6 +1,31 @@
 use super::*;
 use sigil_kernel::NetworkEffect;
 
+pub(crate) async fn collect_finished_background_runs_for_owner(
+    background_runs: &AgentToolBackgroundRuns,
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+) -> Result<Vec<AgentThreadId>> {
+    let finished = background_runs.take_finished();
+    let mut thread_ids = Vec::new();
+    for background in finished {
+        thread_ids
+            .push(super::chat::record_finished_background_run(session, handler, background).await?);
+    }
+    Ok(thread_ids)
+}
+
+impl AgentToolBackgroundRuns {
+    /// Collects finished child results through the exact supervisor retained at child admission.
+    pub async fn collect_finished_background_runs(
+        &self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Vec<AgentThreadId>> {
+        collect_finished_background_runs_for_owner(self, session, handler).await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct AgentToolAuthorization {
     call_id: String,
@@ -30,6 +55,8 @@ pub struct AgentToolRuntime {
     pub(super) next_join_sequence: u64,
     pub(super) join_batch_eligible: bool,
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
+    // Session log cuts for transient-context deduplication only, never durable authority.
+    pub(super) result_context_frontiers: BTreeMap<String, usize>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) root_logical_run_id: Option<String>,
     pub(super) delegation_run_context: Option<AgentDelegationRunContext>,
@@ -54,17 +81,19 @@ impl AgentToolRuntime {
         root_config: RootConfig,
         base_registry: ToolRegistry,
     ) -> Self {
+        let background_runs = supervisor.background_runs();
         Self {
             supervisor,
             root_config,
             base_registry,
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
-            background_runs: AgentToolBackgroundRuns::default(),
+            background_runs,
             join_dependencies: Vec::new(),
             pending_join_contexts: BTreeMap::new(),
             next_join_sequence: 0,
             join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
+            result_context_frontiers: BTreeMap::new(),
             run_cancellation: None,
             root_logical_run_id: None,
             delegation_run_context: None,
@@ -83,17 +112,19 @@ impl AgentToolRuntime {
         base_registry: ToolRegistry,
         provider_factory: Arc<dyn AgentToolProviderFactory>,
     ) -> Self {
+        let background_runs = supervisor.background_runs();
         Self {
             supervisor,
             root_config,
             base_registry,
             provider_factory,
-            background_runs: AgentToolBackgroundRuns::default(),
+            background_runs,
             join_dependencies: Vec::new(),
             pending_join_contexts: BTreeMap::new(),
             next_join_sequence: 0,
             join_batch_eligible: false,
             pending_waits: BTreeMap::new(),
+            result_context_frontiers: BTreeMap::new(),
             run_cancellation: None,
             root_logical_run_id: None,
             delegation_run_context: None,
@@ -157,10 +188,9 @@ impl AgentToolRuntime {
                     plan_version: *plan_version,
                     step_id: step_id.clone(),
                 },
-                DelegationAuthority::TaskOrchestrator { task_id, phase } => {
-                    AgentInvocationGrantSource::TaskOrchestrator {
+                DelegationAuthority::DirectTask { task_id } => {
+                    AgentInvocationGrantSource::DirectTask {
                         task_id: task_id.clone(),
-                        phase: *phase,
                     }
                 }
                 DelegationAuthority::UserExplicit | DelegationAuthority::ModelProactive => {
@@ -218,15 +248,9 @@ impl AgentToolRuntime {
         session: &mut Session,
         handler: &mut (dyn EventHandler + Send),
     ) -> Result<Vec<AgentThreadId>> {
-        let finished = self.background_runs.take_finished();
-        let mut thread_ids = Vec::new();
-        for background in finished {
-            thread_ids.push(
-                self.record_finished_background_run(session, handler, background)
-                    .await?,
-            );
-        }
-        Ok(thread_ids)
+        self.background_runs
+            .collect_finished_background_runs(session, handler)
+            .await
     }
 
     pub(super) fn resolve_spawn_profile(
@@ -445,6 +469,10 @@ impl AgentToolProviderFactory for DefaultAgentToolProviderFactory {
 
 #[async_trait]
 impl AgentToolDelegate for AgentToolRuntime {
+    fn begin_result_context(&mut self) {
+        self.result_context_frontiers.clear();
+    }
+
     fn set_run_cancellation(&mut self, cancellation: Option<sigil_kernel::RunCancellationHandle>) {
         self.run_cancellation = cancellation;
     }
@@ -525,6 +553,9 @@ impl AgentToolDelegate for AgentToolRuntime {
             AgentToolKind::Cancel => self.cancel_agent(session, call, &args, handler).await,
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
+            AgentToolKind::IntegrateChanges => {
+                integrate_agent_changes(self, session, call, &args, options)
+            }
         };
         Ok(Some(result))
     }
@@ -568,7 +599,6 @@ impl AgentToolDelegate for AgentToolRuntime {
 
     fn final_answer_blocker(&mut self, session: &mut Session) -> Result<Option<String>> {
         let projection = session.agent_thread_state_projection();
-        let continuations = session.agent_result_continuation_projection();
         let current_run_thread_ids =
             current_run_agent_thread_ids(session, self.root_logical_run_id.as_deref());
         let pending = projection
@@ -601,51 +631,6 @@ impl AgentToolDelegate for AgentToolRuntime {
                     "error": "join_before_final_agent_pending",
                     "message": "A join-before-final child agent is still running. Do not give the final answer yet; wait for the agent result or read the result if it is ready.",
                     "pending_threads": pending
-                })
-                .to_string(),
-            ));
-        }
-        let unread_results = projection
-            .threads
-            .values()
-            .filter(|thread| {
-                current_run_thread_ids
-                    .as_ref()
-                    .is_none_or(|thread_ids| thread_ids.contains(&thread.thread_id))
-                    && thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
-                    && thread.status.is_terminal()
-                    && thread.result.is_some()
-                    && !thread.result_fully_delivered
-                    && !agent_thread_is_backgrounded(thread)
-                    && continuations.statuses.get(&thread.thread_id)
-                        != Some(&AgentResultContinuationStatus::Completed)
-            })
-            .map(|thread| {
-                let offset_chars = thread.result_delivered_chars;
-                json!({
-                    "thread_id": thread.thread_id.as_str(),
-                    "display_name": thread.display_name.as_deref(),
-                    "status": thread_status_label(thread.status),
-                    "objective": &thread.objective,
-                    "result_delivered_chars": thread.result_delivered_chars,
-                    "result_fully_delivered": thread.result_fully_delivered,
-                    "required_action": {
-                        "tool": READ_AGENT_RESULT_TOOL_NAME,
-                        "args": {
-                            "thread_id": thread.thread_id.as_str(),
-                            "offset_chars": offset_chars,
-                            "max_chars": MAX_RESULT_PAGE_LIMIT
-                        }
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        if !unread_results.is_empty() {
-            return Ok(Some(
-                json!({
-                    "error": "join_before_final_agent_result_unread",
-                    "message": "A join-before-final child agent finished, but its result has not been read yet. Do not give the final answer until read_agent_result has delivered the child result.",
-                    "unread_threads": unread_results
                 })
                 .to_string(),
             ));

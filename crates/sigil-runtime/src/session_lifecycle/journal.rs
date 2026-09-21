@@ -2,6 +2,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -15,6 +17,26 @@ use super::{digest_serializable, harden_private_open_file, sync_directory};
 pub const LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
 const MAX_LIFECYCLE_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LIFECYCLE_JOURNAL_RECORDS: usize = 200_000;
+const JOURNAL_FILE_LOCK_WAIT: Duration = Duration::from_millis(250);
+const JOURNAL_FILE_LOCK_RETRY: Duration = Duration::from_millis(2);
+
+fn acquire_file_lock(file: &File, shared: bool) -> std::result::Result<(), std::fs::TryLockError> {
+    let deadline = Instant::now() + JOURNAL_FILE_LOCK_WAIT;
+    loop {
+        let result = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(JOURNAL_FILE_LOCK_RETRY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 /// Source/export binding retained without copying transcript or raw external destination paths.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,7 +201,7 @@ impl LocalSessionLifecycleJournal {
         reject_symlink(&self.path, "lifecycle journal")?;
         let mut file = File::open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
-        file.try_lock_shared().with_context(|| {
+        acquire_file_lock(&file, true).with_context(|| {
             format!(
                 "local session lifecycle journal is busy: {}",
                 self.path.display()
@@ -221,7 +243,7 @@ impl LocalSessionLifecycleJournal {
             .open(&lease_path)
             .with_context(|| format!("failed to open {}", lease_path.display()))?;
         harden_private_open_file(&lease, &lease_path, "lifecycle journal writer lease")?;
-        lease.try_lock().with_context(|| {
+        acquire_file_lock(&lease, false).with_context(|| {
             format!(
                 "local session lifecycle journal writer is busy: {}",
                 self.path.display()
@@ -237,7 +259,7 @@ impl LocalSessionLifecycleJournal {
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         harden_private_open_file(&file, &self.path, "lifecycle journal")?;
-        file.try_lock().with_context(|| {
+        acquire_file_lock(&file, false).with_context(|| {
             format!(
                 "local session lifecycle journal data file is busy: {}",
                 self.path.display()

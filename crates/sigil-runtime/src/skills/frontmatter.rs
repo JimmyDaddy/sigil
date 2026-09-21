@@ -429,7 +429,7 @@ fn compatibility_tool_name(value: &str) -> Option<String> {
         "list" | "ls" => "ls",
         "glob" => "glob",
         "grep" | "search" => "grep",
-        "bash" | "shell" => "bash",
+        "bash" | "shell" | "exec_command" => "exec_command",
         "websearch" | "web_search" => "websearch",
         "webfetch" | "web_fetch" => "webfetch",
         "task" | "agent" | "spawnagent" | "spawn_agent" => "spawn_agent",

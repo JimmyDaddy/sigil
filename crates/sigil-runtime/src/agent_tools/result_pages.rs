@@ -46,6 +46,14 @@ pub(super) fn optional_usize_arg(args: &Value, key: &str) -> Result<Option<usize
         .ok_or_else(|| anyhow!("{key} must be an integer"))
 }
 
+pub(super) fn agent_result_has_page_source(session: &Session, result: &AgentThreadResult) -> bool {
+    session.store_path().is_none()
+        || result
+            .final_answer_ref
+            .as_ref()
+            .is_some_and(|reference| reference.char_count > 0)
+}
+
 pub(super) fn read_agent_result_page(
     parent_session: &Session,
     result: &AgentThreadResult,
@@ -76,6 +84,29 @@ pub(super) fn read_agent_result_page(
     Ok(slice_result_page(&final_text, request))
 }
 
+pub(super) fn read_agent_final_answer_text(
+    parent_session: &Session,
+    result: &AgentThreadResult,
+) -> Result<String> {
+    let page = read_agent_result_page(
+        parent_session,
+        result,
+        ResultPageRequest {
+            offset_chars: 0,
+            requested_max_chars: Some(MAX_RESULT_PAGE_LIMIT),
+            max_chars: MAX_RESULT_PAGE_LIMIT,
+            max_chars_clamped: false,
+        },
+    )?;
+    if page.truncated {
+        anyhow::bail!(
+            "child agent changeset output exceeds the maximum integration page size of {} characters",
+            MAX_RESULT_PAGE_LIMIT
+        );
+    }
+    Ok(page.text)
+}
+
 pub(super) fn agent_final_text_from_ref(
     entries: &[SessionLogEntry],
     final_answer_ref: &sigil_kernel::AgentFinalAnswerRef,
@@ -102,6 +133,15 @@ pub(super) fn agent_final_text_from_ref(
         return Err(anyhow!(
             "child agent final answer hash mismatch for message {}",
             final_answer_ref.message_id
+        ));
+    }
+    let char_count = content.chars().count();
+    if char_count != final_answer_ref.char_count {
+        return Err(anyhow!(
+            "child agent final answer character count mismatch for message {}: expected {}, found {}",
+            final_answer_ref.message_id,
+            final_answer_ref.char_count,
+            char_count
         ));
     }
     Ok(content.clone())
@@ -218,10 +258,12 @@ pub(super) fn agent_result_tool_result(
 }
 
 pub(super) fn agent_status_tool_result(
+    session: &Session,
     call: &ToolCall,
     thread: &AgentThreadProjection,
 ) -> ToolResult {
     let result = thread.result.as_ref();
+    let page_available = result.is_some_and(|result| agent_result_has_page_source(session, result));
     let retry_after_ms =
         (!thread.status.is_terminal()).then_some(WAIT_AGENT_RUNNING_RETRY_AFTER_MS);
     let next_poll_after_unix_ms = retry_after_ms.map(|retry| unix_time_ms().saturating_add(retry));
@@ -229,7 +271,7 @@ pub(super) fn agent_status_tool_result(
     let polling_recommended = retry_after_ms.is_some() && wait_available;
     let next_action = if thread.status == AgentThreadStatus::Unavailable && result.is_none() {
         "report that this agent result is unavailable in the current process; do not call wait_agent again for this thread"
-    } else if thread.status.is_terminal() && result.is_some() {
+    } else if thread.status.is_terminal() && page_available {
         "use result_ref/read_args when more detail is needed"
     } else if thread.status.is_terminal() {
         "report this terminal agent status; no result page is available and wait_agent should not be called again"
@@ -243,6 +285,7 @@ pub(super) fn agent_status_tool_result(
         "terminal": thread.status.is_terminal(),
         "reason": &thread.reason,
         "result_available": result.is_some(),
+        "page_available": page_available,
         "wait_available": wait_available,
         "polling_recommended": polling_recommended,
         "rerun_not_needed": thread.status == AgentThreadStatus::Unavailable && result.is_none(),
@@ -266,14 +309,14 @@ pub(super) fn agent_status_tool_result(
                 "content_hash": reference.content_hash,
                 "char_count": reference.char_count
             })),
-            "read_tool": READ_AGENT_RESULT_TOOL_NAME,
-            "read_args": {
+            "read_tool": page_available.then_some(READ_AGENT_RESULT_TOOL_NAME),
+            "read_args": page_available.then(|| json!({
                 "thread_id": result.thread_id.as_str(),
                 "offset_chars": 0,
                 "max_chars": MAX_RESULT_PAGE_LIMIT
-            },
+            })),
             "max_page_chars": MAX_RESULT_PAGE_LIMIT,
-            "next_action": "call read_agent_result with result_ref.read_args exactly; do not estimate max_chars from char_count"
+            "next_action": next_action
         })),
     });
     ToolResult::ok(
@@ -287,6 +330,7 @@ pub(super) fn agent_status_tool_result(
                 "display_name": thread.display_name.as_deref(),
                 "status": thread_status_label(thread.status),
                 "result_available": result.is_some(),
+                "page_available": page_available,
                 "wait_available": wait_available,
                 "polling_recommended": polling_recommended,
                 "rerun_not_needed": thread.status == AgentThreadStatus::Unavailable && result.is_none(),
@@ -349,18 +393,20 @@ pub(super) fn agent_result_page_tool_result(
     call: &ToolCall,
     result: &AgentThreadResult,
     page: &ResultPage,
+    coverage: &AgentResultDeliveryCoverage,
 ) -> ToolResult {
-    let next_read_args = page.next_offset_chars.map(|offset_chars| {
+    let result_fully_delivered = coverage.fully_delivered_receipt().is_some();
+    let next_read_args = (!result_fully_delivered).then(|| {
         json!({
             "thread_id": result.thread_id.as_str(),
-            "offset_chars": offset_chars,
+            "offset_chars": coverage.contiguous_chars(),
             "max_chars": MAX_RESULT_PAGE_LIMIT,
         })
     });
-    let next_action = if page.truncated {
-        "call read_agent_result with next_read_args to read the next page; do not increase max_chars"
+    let next_action = if result_fully_delivered {
+        "all child result characters are available in this run's context"
     } else {
-        "this child result page reaches the end; do not call read_agent_result again for this result"
+        "additional pages are available through next_read_args when more detail is useful"
     };
     let request = json!({
         "offset_chars": page.offset_chars,
@@ -373,6 +419,8 @@ pub(super) fn agent_result_page_tool_result(
     let persistent_payload = json!({
         "thread_id": result.thread_id.as_str(),
         "status": terminal_status_label(result.status),
+        "terminal": true,
+        "result_available": true,
         "session_ref": result.session_ref.as_path().display().to_string(),
         "output_hash": result.output_hash,
         "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
@@ -391,12 +439,15 @@ pub(super) fn agent_result_page_tool_result(
             "text_delivery": "transient_context"
         },
         "request": request.clone(),
+        "result_fully_delivered": result_fully_delivered,
         "next_read_args": next_read_args.clone(),
         "next_action": next_action,
     });
     let transient_payload = json!({
         "thread_id": result.thread_id.as_str(),
         "status": terminal_status_label(result.status),
+        "terminal": true,
+        "result_available": true,
         "session_ref": result.session_ref.as_path().display().to_string(),
         "output_hash": result.output_hash,
         "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
@@ -414,6 +465,7 @@ pub(super) fn agent_result_page_tool_result(
             "truncated": page.truncated
         },
         "request": request,
+        "result_fully_delivered": result_fully_delivered,
         "next_read_args": next_read_args,
         "next_action": next_action,
     });
@@ -449,89 +501,141 @@ pub(super) fn agent_result_page_tool_result(
     ))])
 }
 
-pub(super) fn agent_result_already_delivered_tool_result(
+pub(super) fn agent_result_page_already_delivered_tool_result(
+    parent_session: &Session,
     call: &ToolCall,
     result: &AgentThreadResult,
-    delivered: &AgentThreadResultDeliveredEntry,
-) -> ToolResult {
+    request: &ResultPageRequest,
+    coverage: &AgentResultDeliveryCoverage,
+) -> Option<ToolResult> {
+    let total_chars = if parent_session.store_path().is_none() {
+        result.summary.chars().count()
+    } else {
+        result.final_answer_ref.as_ref().map_or_else(
+            || result.summary.chars().count(),
+            |reference| reference.char_count,
+        )
+    };
+    let returned_chars = total_chars
+        .saturating_sub(request.offset_chars)
+        .min(request.max_chars);
+    if !coverage.page_was_delivered(request.offset_chars, returned_chars, total_chars) {
+        return None;
+    }
+
+    let result_fully_delivered = coverage.fully_delivered_receipt().is_some();
+    let next_read_args = (!result_fully_delivered).then(|| {
+        json!({
+            "thread_id": result.thread_id.as_str(),
+            "offset_chars": coverage.contiguous_chars(),
+            "max_chars": MAX_RESULT_PAGE_LIMIT,
+        })
+    });
     let payload = json!({
         "thread_id": result.thread_id.as_str(),
         "status": terminal_status_label(result.status),
+        "terminal": true,
+        "result_available": true,
         "session_ref": result.session_ref.as_path().display().to_string(),
         "output_hash": result.output_hash,
-        "already_delivered": true,
-        "rerun_not_needed": true,
-        "previous_delivery": {
-            "call_id": delivered.call_id,
-            "offset_chars": delivered.offset_chars,
-            "returned_chars": delivered.returned_chars,
-            "total_chars": delivered.total_chars,
-            "truncated": delivered.truncated,
+        "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
+            "session_ref": reference.session_ref.as_path().display().to_string(),
+            "message_id": reference.message_id,
+            "content_hash": reference.content_hash,
+            "char_count": reference.char_count
+        })),
+        "page": {
+            "offset_chars": request.offset_chars,
+            "returned_chars": returned_chars,
+            "total_chars": total_chars,
+            "next_offset_chars": (request.offset_chars.saturating_add(returned_chars) < total_chars)
+                .then_some(request.offset_chars.saturating_add(returned_chars)),
+            "truncated": false,
+            "text_omitted": true,
+            "text_delivery": "already_delivered"
         },
-        "next_action": "Use the previously delivered child result already in context; do not call read_agent_result again only to re-read the same full result."
+        "request": {
+            "offset_chars": request.offset_chars,
+            "requested_max_chars": request.requested_max_chars,
+            "max_chars": request.max_chars,
+            "max_chars_clamped": request.max_chars_clamped,
+            "min_page_chars": MIN_RESULT_SUMMARY_LIMIT,
+            "max_page_chars": MAX_RESULT_PAGE_LIMIT,
+        },
+        "already_delivered": true,
+        "result_fully_delivered": result_fully_delivered,
+        "next_read_args": next_read_args,
+        "next_action": if result_fully_delivered {
+            "this page was already delivered in the current run context; do not request it again"
+        } else {
+            "this page was already delivered; use next_read_args to request the first unread page if more detail is useful"
+        }
     });
-    ToolResult::ok(
+    Some(ToolResult::ok(
         call.id.clone(),
         call.name.clone(),
         serde_json::to_string(&payload)
-            .unwrap_or_else(|error| format!("failed to serialize delivered agent result: {error}")),
+            .unwrap_or_else(|error| format!("failed to serialize agent result page: {error}")),
         ToolResultMeta {
             details: json!({
                 "thread_id": result.thread_id.as_str(),
-                "status": terminal_status_label(result.status),
-                "output_hash": result.output_hash,
+                "offset_chars": request.offset_chars,
+                "returned_chars": returned_chars,
+                "total_chars": total_chars,
                 "already_delivered": true,
-                "previous_call_id": delivered.call_id,
-                "rerun_not_needed": true,
+                "result_fully_delivered": result_fully_delivered,
             }),
             ..ToolResultMeta::default()
         },
-    )
+    ))
 }
 
 pub(super) fn agent_spawn_denied_tool_result(call: &ToolCall, reason: String) -> ToolResult {
-    let Some(details) = agent_budget_denied_details(&reason) else {
-        return ToolResult::error(
-            call.id.clone(),
-            call.name.clone(),
-            ToolErrorKind::PermissionDenied,
-            reason,
-        );
-    };
+    ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::PermissionDenied,
+        reason,
+    )
+}
+
+pub(super) fn agent_budget_denied_tool_result(
+    call: &ToolCall,
+    denial: &crate::agent_supervisor::AgentBudgetDenial,
+) -> ToolResult {
+    let details = json!({
+        "reason": denial.to_string(),
+        "capacity": {
+            "scope": match denial.kind() {
+                "active_thread_limit" => "active_subagent_threads",
+                _ => "delegation_depth",
+            },
+            "kind": denial.kind(),
+            "currently_active": denial.active_threads(),
+            "requested": denial.requested_threads(),
+            "current_depth": denial.current_depth(),
+            "limit": denial.limit(),
+            "config_path": denial.config_path(),
+        },
+        "retryable_after_slot_available": denial.retryable_after_slot_available(),
+        "config_paths": [denial.config_path()],
+        "accepted_or_started_members": [],
+        "existing_thread_refs": [],
+        "next_action": "choose how to continue within the user's requested scope and permissions"
+    });
     let content = serde_json::to_string(&details)
         .unwrap_or_else(|error| format!("failed to serialize agent budget denial: {error}"));
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
         ToolErrorKind::PermissionDenied,
-        reason,
+        denial.to_string(),
     )
     .with_error_details(false, details.clone());
     result.content = content;
     result.metadata.details = details;
     result
 }
-
-pub(super) fn agent_budget_denied_details(reason: &str) -> Option<Value> {
-    if !reason.contains("agent budget denied") && !reason.contains("agent budget exceeded") {
-        return None;
-    }
-    Some(json!({
-        "reason": reason,
-        "retryable_after_slot_available": true,
-        "do_not_self_complete_delegated_scope": true,
-        "config_paths": agent_budget_denied_config_paths(reason),
-        "next_action": "report the delegated agent could not be started; ask whether to retry after a slot is available or change the task budget instead of completing that delegated scope in the parent"
-    }))
-}
-
-pub(super) fn agent_budget_denied_config_paths(reason: &str) -> Vec<&'static str> {
-    let mut paths = Vec::new();
-    if reason.contains("[task].max_subagents") || reason.contains("agent thread budget") {
-        paths.push("[task].max_subagents");
-    }
-    if paths.is_empty() {
-        paths.push("[task]");
-    }
-    paths
-}
+#[cfg(test)]
+#[path = "tests/result_pages_tests.rs"]
+mod tests;

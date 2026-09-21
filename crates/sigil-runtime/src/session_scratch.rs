@@ -57,32 +57,6 @@ impl sigil_tools_builtin::ScratchNamespaceProvider for AuthorityScratchNamespace
             .map_err(authority_error)?;
         Ok(sigil_tools_builtin::SessionScratchProvision {
             dir: provision.directory,
-            usage: sigil_tools_builtin::ScratchUsage {
-                session_bytes: provision.usage.session_bytes,
-                workspace_bytes: provision.usage.workspace_bytes,
-                session_entry_count: provision.usage.session_entry_count,
-                workspace_entry_count: provision.usage.workspace_entry_count,
-            },
-        })
-    }
-
-    fn ensure_session_namespace_for_command(
-        &self,
-        session_scope_id: Option<&str>,
-        quota: &sigil_tools_builtin::ScratchQuota,
-    ) -> Result<sigil_tools_builtin::SessionScratchProvision> {
-        let provision = self
-            .authority
-            .ensure_session_namespace(session_scope_id, quota.per_session_bytes)
-            .map_err(authority_error)?;
-        Ok(sigil_tools_builtin::SessionScratchProvision {
-            dir: provision.directory,
-            usage: sigil_tools_builtin::ScratchUsage {
-                session_bytes: provision.usage.session_bytes,
-                workspace_bytes: provision.usage.workspace_bytes,
-                session_entry_count: provision.usage.session_entry_count,
-                workspace_entry_count: provision.usage.workspace_entry_count,
-            },
         })
     }
 
@@ -127,6 +101,9 @@ impl sigil_tools_builtin::ScratchNamespaceProvider for AuthorityScratchNamespace
             quarantined: report.quarantined,
             deleted_bytes: report.deleted_bytes,
             workspace_usage_bytes: report.workspace_usage_bytes,
+            workspace_known_subtotal_bytes: report.workspace_known_subtotal_bytes,
+            unknown_owners: report.unknown_owners,
+            observed_at_ms: report.observed_at_ms,
             diagnostics: report.diagnostics,
         })
     }
@@ -160,9 +137,6 @@ fn authority_error(
     error: sigil_resource_authority::session_scratch::SessionScratchErrorV1,
 ) -> anyhow::Error {
     match error {
-        sigil_resource_authority::session_scratch::SessionScratchErrorV1::QuotaExceeded(
-            payload,
-        ) => payload.into(),
         sigil_resource_authority::session_scratch::SessionScratchErrorV1::EntryLimitExceeded {
             limit,
             observed,

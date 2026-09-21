@@ -438,8 +438,7 @@ fn conversation_display_index_rejects_an_indivisible_over_budget_summary() -> Re
             "id": format!("option-{option}"), "label": format!("Option {option}"), "description": "界".repeat(240)
         })).collect::<Vec<_>>();
         let questions = (0..2).map(|question| json!({
-            "id": format!("question-{question}"), "header": "Choice", "question": "Choose one option", "required": true,
-            "field": {"kind": "single_select", "options": options, "allow_other": false}
+            "id": format!("question-{question}"), "question": "Choose one option", "options": options, "multiple": false
         })).collect::<Vec<_>>();
         let requested = sigil_kernel::UserInputRequestedV1::new(serde_json::from_value(json!({
             "schema_version": 1,
@@ -499,10 +498,9 @@ fn conversation_display_index_preserves_input_queue_lifecycle_at_old_frontiers()
         AgentProfileId, AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentThreadId,
         AgentUserInputRouteEntryV1, LogicalRunId, SessionScopeId, UserInputActionV1,
         UserInputCommandId, UserInputContinuationBindingV1, UserInputDecisionAcceptedV1,
-        UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1, UserInputPurposeV1,
-        UserInputQuestionV1, UserInputRequestId, UserInputRequestStateV1, UserInputRequestV1,
-        UserInputRequestedV1, UserInputResolutionV1, UserInputResolvedV1, UserInputSourceV1,
-        UserInputStatusV1,
+        UserInputDecisionV1, UserInputIdentityV1, UserInputPurposeV1, UserInputQuestionV1,
+        UserInputRequestId, UserInputRequestStateV1, UserInputRequestV1, UserInputRequestedV1,
+        UserInputResolutionV1, UserInputResolvedV1, UserInputSourceV1, UserInputStatusV1,
     };
     let request = UserInputRequestedV1::new(UserInputRequestV1 {
         schema_version: 1,
@@ -519,14 +517,11 @@ fn conversation_display_index_preserves_input_queue_lifecycle_at_old_frontiers()
         prompt: "Direct request prompt".to_owned(),
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
-            header: "Scope".to_owned(),
             question: "Which scope?".to_owned(),
             description: None,
             required: true,
-            field: UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 256,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![UserInputActionV1::Submit, UserInputActionV1::Decline],
         requested_at_unix_ms: 10,
@@ -2062,7 +2057,6 @@ fn plan_review_pending_inputs_follow_each_attempt_latest_generation_and_status()
             explicit_objective: Some("Resolve the plan question".to_owned()),
             route_decision_id: None,
             child_session_ref: sigil_kernel::plan_review_child_session_ref(&review, &attempt),
-            finalizer_session_ref: None,
             revision_request_id: None,
             attempt_ordinal: 1,
             base_plan_id: None,
@@ -2099,14 +2093,11 @@ fn plan_review_pending_inputs_follow_each_attempt_latest_generation_and_status()
                 prompt: format!("Question generation {generation}"),
                 questions: vec![sigil_kernel::UserInputQuestionV1 {
                     id: "scope".to_owned(),
-                    header: "Scope".to_owned(),
                     question: "Which scope?".to_owned(),
                     description: None,
                     required: true,
-                    field: sigil_kernel::UserInputFieldKindV1::Text {
-                        multiline: false,
-                        max_chars: 256,
-                    },
+                    options: Vec::new(),
+                    multiple: false,
                 }],
                 allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
                 requested_at_unix_ms: u64::from(generation),
@@ -2220,7 +2211,6 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
             source_turn: source.clone(),
             route_decision_id: None,
             child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
-            finalizer_session_ref: None,
             revision_request_id: None,
             attempt_ordinal: 1,
             base_plan_id: None,
@@ -2285,7 +2275,6 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
                     &review_id,
                     &attempt_id,
                 ),
-                finalizer_session_ref: None,
                 revision_request_id: None,
                 attempt_ordinal: 1,
                 base_plan_id: None,
@@ -2412,7 +2401,6 @@ fn legacy_plan_review_fixture_entries() -> Result<(
                     &review_id,
                     &attempt_id,
                 ),
-                finalizer_session_ref: None,
                 revision_request_id: None,
                 attempt_ordinal: 1,
                 base_plan_id: None,
@@ -2541,15 +2529,6 @@ fn old_plan_revision_is_rejected_instead_of_recovering_a_synthetic_request() -> 
 fn current_plan_revision_keeps_its_exact_request_and_base_after_terminal_failure() -> Result<()> {
     let (fixture, mut entries) = legacy_plan_review_fixture_entries()?;
     let request_id = sigil_kernel::UserInputRequestId::new("current-revision-request")?;
-    for entry in &mut entries {
-        if let SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) = entry {
-            attempt.finalizer_session_ref = Some(sigil_kernel::plan_review_finalizer_session_ref(
-                &attempt.plan_review_id,
-                &attempt.attempt_id,
-                1,
-            ));
-        }
-    }
     for entry in &mut entries[4..] {
         let SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) = entry else {
             anyhow::bail!("revision fixture lost its attempt");
@@ -2597,5 +2576,310 @@ fn current_plan_revision_keeps_its_exact_request_and_base_after_terminal_failure
         revision.status,
         sigil_kernel::PublicPlanRevisionStatusV1::Failed
     );
+    Ok(())
+}
+
+#[test]
+fn canonical_command_restore_hydrates_safe_input_and_retains_execution_state() -> Result<()> {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../apps/desktop/src/features/conversation/fixtures/restored-command.json"
+    ))?;
+    for suffix in [
+        String::new(),
+        format!(
+            "\nprintf token=sk-test-secret\n{}",
+            "printf row\n".repeat(600)
+        ),
+    ] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        session
+            .conversation_run_lifecycle_recorder()?
+            .append_started(&ConversationRunStartedEntryV1::new("run-restored", 10)?)?;
+        let command = format!(
+            "{}{}",
+            fixture["input"].as_str().expect("fixture command"),
+            suffix
+        );
+        session.append_assistant_message(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: "restore-call".to_owned(),
+                name: "exec_command".to_owned(),
+                args_json: json!({"command":command}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        ))?;
+        let result = ToolResult::ok(
+            "restore-call",
+            "exec_command",
+            "",
+            ToolResultMeta {
+                details: json!({"execution_id":fixture["executionId"], "status":"running",
+                "generation":1, "started_at_ms":1000, "updated_at_ms":2000, "output_preview":null,
+                "call":{"summary":format!("command={command}")}, "large_detail":"x".repeat(10_000)}),
+                ..ToolResultMeta::default()
+            },
+        );
+        let (recorded, _) = ToolResultRecordedV3::capture(
+            &result,
+            session.tool_artifact_store().as_ref(),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+        // A one-row page must hydrate its off-page ToolCall, including after index cache eviction.
+        let page = conversation_display_page(store.path(), &scope, None, 1, None)?;
+        let item = page.items.first().expect("restored command row");
+        assert_eq!(item.status, ConversationDisplayStatusV1::Running);
+        let ConversationDisplayContentV1::Tool {
+            input,
+            execution_id,
+            execution_started_at_ms,
+            execution_updated_at_ms,
+            ..
+        } = &item.content
+        else {
+            panic!("expected command row");
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some(sigil_kernel::safe_persistence_text(&command).as_str())
+        );
+        assert_eq!(execution_id.as_deref(), fixture["executionId"].as_str());
+        assert_eq!(
+            *execution_started_at_ms,
+            fixture["executionStartedAtMs"].as_u64()
+        );
+        assert_eq!(
+            *execution_updated_at_ms,
+            fixture["executionUpdatedAtMs"].as_u64()
+        );
+        assert!(!serde_json::to_string(&page)?.contains("sk-test-secret"));
+        let final_message = ModelMessage::assistant_with_kind(
+            Some("started".to_owned()),
+            vec![],
+            AssistantMessageKind::FinalAnswer,
+        );
+        let final_id = final_message.id.clone();
+        session.append_assistant_message(final_message)?;
+        let finalized = ConversationRunFinalizedEntryV1::new(
+            "run-restored",
+            ConversationRunTerminalStatusV1::Succeeded,
+            Some(final_id),
+            None,
+            3000,
+            &SecretRedactor::empty(),
+        )?;
+        session
+            .conversation_run_lifecycle_recorder()?
+            .append_finalized_with_outbox(
+                &finalized,
+                &terminal_outbox(
+                    &scope,
+                    "run-restored",
+                    1,
+                    PublicRunEventKind::RunFinished {
+                        final_text: "started".to_owned(),
+                    },
+                )?,
+            )?;
+        session.append_control(ControlEntry::TerminalTask(restored_terminal_entry(
+            sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+            2,
+        )?))?;
+        let settled = conversation_display_page(store.path(), &scope, None, 1, None)?;
+        let final_item = settled.items.first().expect("settled execution row");
+        assert_eq!(final_item.status, ConversationDisplayStatusV1::Completed);
+        assert_eq!(final_item.run_id.as_deref(), Some("run-restored"));
+        assert_eq!(final_item.reconciles, Some(vec![item.display_id.clone()]));
+        let ConversationDisplayContentV1::Tool {
+            input,
+            execution_started_at_ms,
+            execution_updated_at_ms,
+            ..
+        } = &final_item.content
+        else {
+            panic!("expected settled command");
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some(sigil_kernel::safe_persistence_text(&command).as_str())
+        );
+        assert_eq!(*execution_started_at_ms, Some(1000));
+        assert_eq!(*execution_updated_at_ms, Some(4000));
+    }
+    Ok(())
+}
+
+fn restored_terminal_entry(
+    status: sigil_kernel::TerminalTaskStatus,
+    generation: u64,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
+        generation,
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new("execution-restored")?,
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "sh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:execution-restored".to_owned(),
+            created_at_ms: 900,
+            execution_backend: None,
+            execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
+        },
+        status,
+        readiness: sigil_kernel::TerminalReadinessStatus::None,
+        output_preview: None,
+        output_hash: None,
+        output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
+        cleanup: Some(sigil_kernel::ExecutionCleanupReceipt::completed(
+            "process reaped",
+        )),
+        updated_at_ms: 4000,
+    })
+}
+
+#[test]
+fn canonical_terminal_before_receipt_survives_stale_cross_run_followup() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    for (index, (run_id, call_id, tool_name)) in [
+        ("run-origin", "origin", "exec_command"),
+        ("run-followup", "followup", "exec_wait"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        session
+            .conversation_run_lifecycle_recorder()?
+            .append_started(&ConversationRunStartedEntryV1::new(
+                run_id,
+                10 + index as u64 * 100,
+            )?)?;
+        session.append_assistant_message(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.to_owned(),
+                name: tool_name.to_owned(),
+                args_json: if index == 0 {
+                    json!({"command":"printf ready\nsleep 60"}).to_string()
+                } else {
+                    json!({"execution_id":"execution-restored"}).to_string()
+                },
+            }],
+            AssistantMessageKind::ToolPreamble,
+        ))?;
+        if index == 0 {
+            session.append_control(ControlEntry::TerminalTask(restored_terminal_entry(
+                sigil_kernel::TerminalTaskStatus::Interrupted,
+                3,
+            )?))?;
+        }
+        let result = ToolResult::ok(
+            call_id,
+            tool_name,
+            "",
+            ToolResultMeta {
+                details: json!({"execution_id":"execution-restored", "status":"running", "generation": index + 1,
+                "started_at_ms":1000, "updated_at_ms":4000, "output_preview":null}),
+                ..ToolResultMeta::default()
+            },
+        );
+        let (recorded, _) = ToolResultRecordedV3::capture(
+            &result,
+            session.tool_artifact_store().as_ref(),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+        let page = conversation_display_page(store.path(), &scope, None, 1, None)?;
+        let row = &page.items[0];
+        assert_eq!(row.status, ConversationDisplayStatusV1::Interrupted);
+        assert_eq!(
+            row.run_id.as_deref(),
+            Some(run_id),
+            "follow-up keeps its actual run audit"
+        );
+        let ConversationDisplayContentV1::Tool {
+            input,
+            tool_name,
+            execution_updated_at_ms,
+            ..
+        } = &row.content
+        else {
+            panic!("command row");
+        };
+        assert_eq!(input.as_deref(), Some("printf ready\nsleep 60"));
+        assert_eq!(tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(*execution_updated_at_ms, Some(4000));
+        if index == 0 {
+            let final_message = ModelMessage::assistant_with_kind(
+                Some("started".to_owned()),
+                vec![],
+                AssistantMessageKind::FinalAnswer,
+            );
+            let final_id = final_message.id.clone();
+            session.append_assistant_message(final_message)?;
+            session
+                .conversation_run_lifecycle_recorder()?
+                .append_finalized_with_outbox(
+                    &ConversationRunFinalizedEntryV1::new(
+                        run_id,
+                        ConversationRunTerminalStatusV1::Succeeded,
+                        Some(final_id),
+                        None,
+                        20,
+                        &SecretRedactor::empty(),
+                    )?,
+                    &terminal_outbox(
+                        &scope,
+                        run_id,
+                        1,
+                        PublicRunEventKind::RunFinished {
+                            final_text: "started".to_owned(),
+                        },
+                    )?,
+                )?;
+        }
+    }
+    let mut newest = restored_terminal_entry(sigil_kernel::TerminalTaskStatus::Interrupted, 4)?;
+    newest.output_truncated = true;
+    newest.output_total_bytes = 16;
+    session.append_control(ControlEntry::TerminalTask(newest))?;
+    let newest_page = conversation_display_page(store.path(), &scope, None, 1, None)?;
+    // A delayed, older snapshot cannot undo the later owner's status, body, or display identity.
+    let mut stale = restored_terminal_entry(
+        sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+        2,
+    )?;
+    stale.output_truncated = false;
+    stale.output_total_bytes = 99;
+    session.append_control(ControlEntry::TerminalTask(stale))?;
+    let page = conversation_display_page(store.path(), &scope, None, 1, None)?;
+    assert_eq!(
+        page.items, newest_page.items,
+        "stale generation cannot replace output counters or identity"
+    );
+    assert_eq!(
+        page.items[0].status,
+        ConversationDisplayStatusV1::Interrupted
+    );
+    let ConversationDisplayContentV1::Tool {
+        truncated,
+        original_content_bytes,
+        ..
+    } = &page.items[0].content
+    else {
+        panic!("command row");
+    };
+    assert!(*truncated);
+    assert_eq!(*original_content_bytes, 16);
     Ok(())
 }

@@ -162,7 +162,6 @@ pub fn orchestration_observation(session: &Session) -> OrchestrationEvalObservat
     let mut spawn_identities = BTreeSet::new();
     let mut started_continuations = BTreeSet::new();
     let mut merge_effects = BTreeSet::new();
-    let mut committed_finals = BTreeSet::new();
 
     for entry in session.entries() {
         let SessionLogEntry::Control(control) = entry else {
@@ -249,11 +248,6 @@ pub fn orchestration_observation(session: &Session) -> OrchestrationEvalObservat
                 let identity = format!("promotion:{}", promotion.plan_id.as_str());
                 if !merge_effects.insert(identity) {
                     increment(&mut observation.duplicate_merges);
-                }
-            }
-            ControlEntry::TaskFinalAnswerCommitted(final_answer) => {
-                if !committed_finals.insert(final_answer.task_id.clone()) {
-                    increment(&mut observation.duplicate_parent_child_finals);
                 }
             }
             ControlEntry::ToolExecution(execution)

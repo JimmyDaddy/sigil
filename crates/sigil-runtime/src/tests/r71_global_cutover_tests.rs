@@ -235,7 +235,10 @@ fn core_probe_does_not_admit_unselected_storage_or_claim_optional_readiness() {
         1,
         &selected,
     );
-    assert_eq!(probes.len(), 13);
+    assert_eq!(probes.len(), 14);
+    assert!(probes.iter().any(|probe| {
+        probe.adapter == MandatoryAdapterKindV1::ExecutionTerminal && !probe.passed
+    }));
     let attempts = storage.attempted.lock().expect("attempts").clone();
     assert_eq!(attempts.len(), 6);
     assert!(
@@ -245,8 +248,7 @@ fn core_probe_does_not_admit_unselected_storage_or_claim_optional_readiness() {
     );
     assert!(!probes.iter().any(|probe| matches!(
         probe.adapter,
-        MandatoryAdapterKindV1::ExecutionTerminal
-            | MandatoryAdapterKindV1::ExecutionExtension
+        MandatoryAdapterKindV1::ExecutionExtension
             | MandatoryAdapterKindV1::StorageMemory
             | MandatoryAdapterKindV1::ProductStateUpdater
             | MandatoryAdapterKindV1::BorrowedReleaseOutput

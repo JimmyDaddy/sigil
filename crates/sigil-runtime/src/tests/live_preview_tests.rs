@@ -42,7 +42,6 @@ fn durable_publication_count_and_final_bytes_are_independent_of_delta_partition(
                 final_text: full_text.clone(),
                 tool_calls: 0,
                 final_message_id: Some(message_id),
-                completion_claim: None,
             },
             outcome: sigil_kernel::AgentRunOutcome::default(),
         })?;
@@ -246,7 +245,7 @@ fn preview_final_replaces_slot_new_attempt_resets_content_and_terminal_rejects_l
     )?;
     let current = source.reader().poll_updates()?;
     assert_eq!(current[0].preview.as_str(), "new");
-    assert_eq!(current[0].attempt_id, "attempt-2");
+    assert_eq!(current[0].attempt_id.as_deref(), Some("attempt-2"));
     assert_eq!(current[0].live_revision, 2);
     source.apply_committed(
         &PublicRunEventKind::RunFinished {
@@ -273,7 +272,16 @@ fn preview_final_replaces_slot_new_attempt_resets_content_and_terminal_rejects_l
 #[test]
 fn tool_progress_keeps_latest_state_and_execution_identity() -> Result<()> {
     let source = RuntimeLivePreviewSource::new("session", "run", false);
-    source.begin_attempt("attempt")?;
+    source.apply_committed(
+        &PublicRunEventKind::ToolCallCompleted {
+            call: sigil_kernel::ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                args_json: "{}".into(),
+            },
+        },
+        false,
+    );
     for sequence in 1..=1_000 {
         source.apply_delta(
             &PublicRunEventKind::ToolProgress {
@@ -470,5 +478,175 @@ fn discarded_attempt_stays_closed_until_a_different_physical_attempt() -> Result
         source.reader().poll_updates()?[0].preview.as_str(),
         "recovered"
     );
+    Ok(())
+}
+
+#[test]
+fn tool_execution_snapshots_survive_provider_retry_and_reject_unbound_or_changed_identity()
+-> Result<()> {
+    let source = RuntimeLivePreviewSource::new("session", "run", false);
+    let mut progress = ToolProgressEvent {
+        execution_id: ToolExecutionId::new("execution").map_err(anyhow::Error::msg)?,
+        call_id: "call".into(),
+        tool_name: "exec_command".into(),
+        sequence: 1,
+        status: "running".into(),
+        message: Some("command is running".into()),
+        output_preview: None,
+        output_log_ref: None,
+        total_bytes: Some(0),
+        updated_at_ms: None,
+        details: serde_json::json!({ "started_at_ms":42 }),
+    };
+    source.apply_delta(
+        &PublicRunEventKind::ToolProgress {
+            progress: progress.clone(),
+        },
+        1,
+    )?;
+    assert!(
+        source.reader().poll_updates()?.is_empty(),
+        "progress cannot invent an admitted call"
+    );
+    source.apply_committed(
+        &PublicRunEventKind::ToolCallCompleted {
+            call: sigil_kernel::ToolCall {
+                id: "call".into(),
+                name: "exec_command".into(),
+                args_json: "{}".into(),
+            },
+        },
+        false,
+    );
+    source.apply_delta(
+        &PublicRunEventKind::ToolProgress {
+            progress: progress.clone(),
+        },
+        1,
+    )?;
+    let initial = source.reader().poll_updates()?;
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].attempt_id, None);
+    assert_eq!(initial[0].slot_id, "execution");
+    assert_eq!(
+        initial[0]
+            .tool_progress
+            .as_ref()
+            .expect("metadata")
+            .started_at_ms,
+        Some(42)
+    );
+    assert!(
+        !initial[0]
+            .tool_progress
+            .as_ref()
+            .expect("metadata")
+            .preview_is_output
+    );
+    source.begin_attempt("first-provider-attempt")?;
+    source.apply_delta(
+        &PublicRunEventKind::TextDelta {
+            text: "discarded text".into(),
+        },
+        1,
+    )?;
+    source.apply_committed(
+        &PublicRunEventKind::ProviderTurnPartialOutputDiscarded {
+            output: sigil_kernel::PublicProviderTurnPartialOutputDiscardedViewV1 {
+                text_discarded: true,
+                reasoning_discarded: false,
+                tool_request_discarded: false,
+            },
+        },
+        false,
+    );
+    source.begin_attempt("next-provider-attempt")?;
+    assert_eq!(
+        source.reader().poll_updates()?,
+        initial,
+        "retry replaces provider previews without retiring running commands"
+    );
+    progress.execution_id = ToolExecutionId::new("wrong-execution").map_err(anyhow::Error::msg)?;
+    progress.output_preview = Some("wrong output".into());
+    source.apply_delta(&PublicRunEventKind::ToolProgress { progress }, 2)?;
+    assert_eq!(source.reader().poll_updates()?, initial);
+    Ok(())
+}
+
+#[test]
+fn execution_progress_retains_bounded_latest_snapshots_and_releases_completed_bindings()
+-> Result<()> {
+    let source = RuntimeLivePreviewSource::new("session", "run", false);
+    for index in 0..100 {
+        let call_id = format!("call-{index}");
+        source.apply_committed(
+            &PublicRunEventKind::ToolCallCompleted {
+                call: sigil_kernel::ToolCall {
+                    id: call_id.clone(),
+                    name: "exec_command".into(),
+                    args_json: "{}".into(),
+                },
+            },
+            false,
+        );
+        source.apply_delta(
+            &PublicRunEventKind::ToolProgress {
+                progress: ToolProgressEvent {
+                    execution_id: ToolExecutionId::new(format!("execution-{index}"))
+                        .map_err(anyhow::Error::msg)?,
+                    call_id: call_id.clone(),
+                    tool_name: "exec_command".into(),
+                    sequence: 1,
+                    status: "running".into(),
+                    message: None,
+                    output_preview: Some("你".repeat(MAX_SAFE_TEXT_BYTES)),
+                    output_log_ref: None,
+                    total_bytes: None,
+                    updated_at_ms: None,
+                    details: serde_json::Value::Null,
+                },
+            },
+            1,
+        )?;
+        let snapshots = source.reader().poll_updates()?;
+        assert!(snapshots.len() <= MAX_LIVE_PREVIEW_SLOTS);
+        assert!(
+            snapshots
+                .iter()
+                .all(|update| update.truncated
+                    && update.preview.as_str().len() <= MAX_SAFE_TEXT_BYTES)
+        );
+    }
+    let latest = source.reader().poll_updates()?;
+    assert_eq!(latest.len(), MAX_LIVE_PREVIEW_SLOTS);
+    assert!(latest.iter().all(|update| {
+        [
+            "execution-96",
+            "execution-97",
+            "execution-98",
+            "execution-99",
+        ]
+        .contains(&update.slot_id.as_str())
+    }));
+    for index in 0..100 {
+        let call_id = format!("call-{index}");
+        source.apply_committed(
+            &PublicRunEventKind::ToolResult {
+                result: sigil_kernel::ToolResult::ok(
+                    call_id,
+                    "exec_command",
+                    "done",
+                    sigil_kernel::ToolResultMeta::default(),
+                ),
+            },
+            false,
+        );
+    }
+    let state = source
+        .state
+        .lock()
+        .map_err(|_| anyhow!("test source poisoned"))?;
+    assert!(state.executions.is_empty());
+    assert!(state.execution_slots.is_empty());
     Ok(())
 }

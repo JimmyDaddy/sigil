@@ -14,12 +14,11 @@ use sigil_kernel::{
     PlanPermissionGrantedEntry, PlanReviewAttemptEntry, PlanReviewAttemptId,
     PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
     PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
-    PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind, RunEvent, Session,
-    SessionLogEntry, SessionRef, StartPlanReviewAction, TaskCreatedFromPlanEntry, TaskId,
-    TaskRunEntry, TaskRunStatus, TaskStepId, build_workspace_snapshot,
+    ProviderPhysicalAttemptPurpose, PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind,
+    RunEvent, Session, SessionLogEntry, SessionRef, StartPlanReviewAction,
+    TaskCreatedFromPlanEntry, TaskId, TaskRunEntry, TaskRunStatus, build_workspace_snapshot,
     plain_text_plan_draft_entry_with_plan_id, plan_review_attempt_id_for_review,
-    plan_review_child_session_ref, plan_review_finalizer_session_ref,
-    plan_review_id_for_explicit_command, plan_review_no_draft_retry_contract_material,
+    plan_review_child_session_ref, plan_review_id_for_explicit_command,
     plan_review_plan_id_for_attempt, plan_review_system_prompt_contract_material,
     plan_task_input_from_draft, plan_text_hash, safe_persistence_text, stable_event_uuid,
     stable_workspace_id, task_id_from_plan_draft,
@@ -35,8 +34,10 @@ use crate::managed_storage_writer::{
 };
 use crate::{RootConfig, attach_session_url_capability_store};
 
-const PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS: usize = 1;
 const MAX_MANAGED_PLAN_REVIEW_RECOVERY_LOG_BYTES: usize = 16 * 1024 * 1024;
+
+#[path = "plan_review_application_operation.rs"]
+mod application_operation;
 
 /// Host-owned outcome of one plan review run.
 #[derive(Debug, Clone)]
@@ -53,7 +54,6 @@ pub enum PlanReviewRunOutcome {
     Blocked(String),
     Paused(String),
     Failed(String),
-    SubmitOnlyProtocolViolation(String),
 }
 
 /// Keeps child-owned controls in the child session while retaining the parent's existing
@@ -85,6 +85,8 @@ where
 /// Host-bound request describing one read-only plan review run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReviewRunRequest {
+    /// Host-only continuation operation; the managed child consumes it at its actual start.
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     pub plan_review_id: PlanReviewId,
     pub attempt_id: PlanReviewAttemptId,
     pub plan_id: PlanId,
@@ -92,7 +94,6 @@ pub struct PlanReviewRunRequest {
     pub source_turn: ConversationTurnRef,
     pub route_decision_id: Option<sigil_kernel::ConversationRouteDecisionId>,
     pub child_session_ref: SessionRef,
-    pub finalizer_session_ref: SessionRef,
     pub revision_request_id: Option<sigil_kernel::UserInputRequestId>,
     /// Accepted guidance generation. Persisted attempts recover it from their immutable source
     /// prefix; it is never inferred from guidance text or the mutable base-plan decision.
@@ -251,12 +252,12 @@ impl CurrentSchemaPlanReviewExistingResearchSessionV1 {
     /// Opens, verifies, and mutates the exact child session only while the writer retains the
     /// existing authority physical lock. The Session itself cannot escape this callback; the
     /// parent receives only the typed decision receipt after the child write has completed.
-    fn with_child_session(
+    fn with_child_session<T>(
         &self,
         parent: &Session,
         expected_session_scope_id: &str,
-        operation: impl FnOnce(&mut Session) -> Result<sigil_kernel::UserInputDecisionReceiptV1>,
-    ) -> Result<sigil_kernel::UserInputDecisionReceiptV1> {
+        operation: impl FnOnce(&mut Session) -> Result<T>,
+    ) -> Result<T> {
         let lease = self
             .session_log_lease
             .as_ref()
@@ -694,7 +695,7 @@ impl PlanReviewCoordinator {
     /// Maps one revision-domain final outcome to the exact public terminal payload.
     ///
     /// `AwaitingUserInput` deliberately has no value here: the same review attempt may resume
-    /// from `WaitingForInput`, so it is not a revision finalizer and remains on the nonterminal
+    /// from `WaitingForInput`, so it is not a revision commit and remains on the nonterminal
     /// delivery boundary.
     #[must_use]
     pub fn revision_terminal_public_event(
@@ -705,7 +706,7 @@ impl PlanReviewCoordinator {
                 final_text: format!("Plan ready: {}", draft.summary),
             }),
             PlanReviewRunOutcome::CompletedWithoutDraft => Some(PublicRunEventKind::RunFinished {
-                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
+                final_text: "Plan review closed without a ready draft or Task. Any unconfirmed candidate remains review-only; make an explicit decision before execution.".to_owned(),
             }),
             PlanReviewRunOutcome::AwaitingUserInput { .. } => None,
             PlanReviewRunOutcome::Cancelled => Some(PublicRunEventKind::RunCancelled),
@@ -718,12 +719,9 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Paused(reason) => Some(PublicRunEventKind::RunPaused {
                 reason: reason.clone(),
             }),
-            PlanReviewRunOutcome::Failed(error)
-            | PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
-                Some(PublicRunEventKind::RunFailed {
-                    error: error.clone(),
-                })
-            }
+            PlanReviewRunOutcome::Failed(error) => Some(PublicRunEventKind::RunFailed {
+                error: error.clone(),
+            }),
         }
     }
 
@@ -759,7 +757,6 @@ impl PlanReviewCoordinator {
             || attempt.source_turn != request.source_turn
             || attempt.route_decision_id != request.route_decision_id
             || attempt.child_session_ref != request.child_session_ref
-            || attempt.finalizer_session_ref.as_ref() != Some(&request.finalizer_session_ref)
             || attempt.revision_request_id != request.revision_request_id
             || attempt.attempt_ordinal != request.attempt_ordinal
             || attempt.base_plan_id != request.base_plan_id
@@ -821,7 +818,7 @@ impl PlanReviewCoordinator {
     /// Reconstructs a resumable revision suspension from its exact durable attempt/outbox pair.
     ///
     /// Unlike a terminal result, this only remains recoverable while the same attempt is still
-    /// `WaitingForInput`. A later answer or finalizer must not let an old suspension reopen the
+    /// `WaitingForInput`. A later answer or submission must not let an old suspension reopen the
     /// review.
     ///
     /// # Errors
@@ -1085,18 +1082,6 @@ impl PlanReviewCoordinator {
                 "revision failed",
                 now_ms,
             )?,
-            PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => {
-                revision_failure_terminal_entries(
-                    parent,
-                    request,
-                    base_plan_id,
-                    base_plan_hash,
-                    PlanReviewAttemptStatus::Failed,
-                    Some(PlanReviewTerminalReason::SubmitOnlyProtocolViolation),
-                    "revision submit-only protocol violation",
-                    now_ms,
-                )?
-            }
             PlanReviewRunOutcome::AwaitingUserInput { .. } => {
                 unreachable!("waiting input was rejected before terminal facts were constructed")
             }
@@ -1169,9 +1154,8 @@ impl PlanReviewCoordinator {
         }
         let attempt_id = plan_review_attempt_id_for_review(&action.plan_review_id);
         let child_session_ref = plan_review_child_session_ref(&action.plan_review_id, &attempt_id);
-        let finalizer_session_ref =
-            plan_review_finalizer_session_ref(&action.plan_review_id, &attempt_id, 1);
         let request = PlanReviewRunRequest {
+            application_operation: None,
             plan_review_id: action.plan_review_id.clone(),
             attempt_id,
             plan_id: action.plan_id.clone(),
@@ -1180,7 +1164,6 @@ impl PlanReviewCoordinator {
             route_decision_id: Some(action.decision_id.clone()),
             workspace_snapshot_id,
             child_session_ref,
-            finalizer_session_ref,
             revision_request_id: None,
             revision_generation: None,
             attempt_ordinal: 1,
@@ -1231,6 +1214,7 @@ impl PlanReviewCoordinator {
             );
         }
         let request = PlanReviewRunRequest {
+            application_operation: None,
             plan_review_id: plan_review_id.clone(),
             attempt_id: attempt_id.clone(),
             plan_id: plan_id.clone(),
@@ -1238,11 +1222,6 @@ impl PlanReviewCoordinator {
             source_turn,
             route_decision_id: None,
             child_session_ref: plan_review_child_session_ref(&plan_review_id, &attempt_id),
-            finalizer_session_ref: plan_review_finalizer_session_ref(
-                &plan_review_id,
-                &attempt_id,
-                1,
-            ),
             revision_request_id: None,
             revision_generation: None,
             attempt_ordinal: 1,
@@ -1258,13 +1237,15 @@ impl PlanReviewCoordinator {
     /// Runs the read-only plan review child session.
     ///
     /// The child uses the read-only tool registry and keeps provider/tool controls isolated. A
-    /// complete untyped response is copied as bounded candidate evidence to the parent, while a
-    /// typed draft is committed later by the normal parent coordinator. Research uses the
-    /// caller's ordinary `AgentRunOptions` budget without a Plan-specific turn clamp. If research
-    /// finishes without a typed draft or loses a provider stream at a typed recoverable boundary,
-    /// the host continues the same child in submit-only mode. Unclassified final prose remains
-    /// Unknown evidence; only a typed result or an already Complete candidate's user adoption
-    /// can make the Plan ready.
+    /// nonempty final prose is copied as bounded unconfirmed candidate evidence to the parent and
+    /// closes without a ready draft, while a typed draft is committed later by the normal parent
+    /// coordinator. Research uses the
+    /// caller's ordinary `AgentRunOptions` budget without a Plan-specific turn clamp. Conversation
+    /// requests already durably spent by this attempt are deducted after child-session recovery.
+    /// If research finishes without a typed draft or loses a provider stream at a typed
+    /// recoverable boundary, the same model loop can continue with its available tools.
+    /// Unclassified final prose remains Unknown evidence; only a typed result or an already
+    /// Complete candidate's user adoption can make the Plan ready.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_plan_review<H, A>(
@@ -1414,6 +1395,15 @@ impl PlanReviewCoordinator {
         let parent_context = plan_review_parent_context(parent_session, request)?;
         let mut child_session =
             build_plan_review_child_session(parent_session, request, child_bundle.as_ref())?;
+        if let Some(binding) = request.application_operation.as_ref() {
+            if child_bundle.is_none() {
+                bail!("application research continuation requires its managed child bundle");
+            }
+            parent_session.delegate_application_operation_to_child(
+                &mut child_session,
+                binding.clone(),
+            )?;
+        }
         let draft_context = sigil_kernel::PlanReviewDraftContext {
             plan_review_id: request.plan_review_id.clone(),
             attempt_id: request.attempt_id.clone(),
@@ -1463,11 +1453,11 @@ impl PlanReviewCoordinator {
         }
 
         let mut research_options = options.clone();
+        apply_remaining_plan_review_turn_budget(&mut research_options, &child_session)?;
         if let Some(bundle) = child_bundle.as_ref() {
             research_options = research_options.with_tool_authority(bundle.tool_authority());
         }
         let mut continuation_resolution = None;
-        let mut research_logical_run_id = request.child_logical_run_id();
         let skip_research_cause = existing_research_input.as_ref().and_then(|state| {
             match state.resolution.as_ref().map(|entry| &entry.resolution) {
                 Some(sigil_kernel::UserInputResolutionV1::Declined) => {
@@ -1516,11 +1506,6 @@ impl PlanReviewCoordinator {
                     &physical_attempt_id,
                     now_ms(),
                 )?;
-                research_logical_run_id = prepared
-                    .continuation
-                    .continuation_logical_run_id
-                    .as_str()
-                    .to_owned();
                 continuation_resolution = Some((
                     state.requested.request.identity.clone(),
                     state.requested.request_hash.clone(),
@@ -1538,8 +1523,6 @@ impl PlanReviewCoordinator {
                     &draft_context,
                     &cancellation,
                     &parent_context,
-                    None,
-                    None,
                 )
             };
             let mut child_handler = PlanReviewChildEventHandler { inner: handler };
@@ -1578,445 +1561,130 @@ impl PlanReviewCoordinator {
                 )?;
             }
         }
-        let recovery_cause = match research {
-            None => skip_research_cause,
-            Some(research) => {
-                match research {
-                    Ok(_) if cancellation.is_cancel_requested() => {
-                        return Ok(PlanReviewRunOutcome::Cancelled);
+        let outcome = match research {
+            None => {
+                if let Some(reason) = skip_research_cause {
+                    record_plan_review_candidate_in_parent(
+                        parent_session,
+                        request,
+                        &reason,
+                        None,
+                        sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                        handler,
+                        now_ms(),
+                    )?;
+                    PlanReviewRunOutcome::CompletedWithoutDraft
+                } else {
+                    PlanReviewRunOutcome::Paused(
+                        "plan review ended without a typed draft".to_owned(),
+                    )
+                }
+            }
+            Some(Err(error)) => {
+                if cancellation.is_cancel_requested() {
+                    return Ok(PlanReviewRunOutcome::Cancelled);
+                }
+                return Err(error.context("plan review provider run failed"));
+            }
+            Some(Ok(output)) => {
+                if cancellation.is_cancel_requested() {
+                    return Ok(PlanReviewRunOutcome::Cancelled);
+                }
+                let mut unconfirmed_candidate_recorded = false;
+                if output.disposition == AgentRunDisposition::FinalAnswer
+                    && !output.result.final_text.trim().is_empty()
+                {
+                    let source_event_id = output.result.final_message_id.clone();
+                    let candidate_text = record_plan_review_candidate(
+                        &mut child_session,
+                        request,
+                        &output.result.final_text,
+                        source_event_id.clone(),
+                        sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
+                        now_ms(),
+                    )?;
+                    if let Some(content) = candidate_text.as_deref() {
+                        record_plan_review_candidate_in_parent(
+                            parent_session,
+                            request,
+                            content,
+                            source_event_id,
+                            sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
+                            handler,
+                            now_ms(),
+                        )?;
+                        unconfirmed_candidate_recorded = true;
                     }
-                    Ok(output) => {
-                        if output.disposition == AgentRunDisposition::FinalAnswer
-                            && !output.result.final_text.trim().is_empty()
-                        {
-                            let source_event_id = output.result.final_message_id.clone();
-                            let candidate_text = match record_plan_review_candidate(
-                                &mut child_session,
-                                request,
-                                &output.result.final_text,
-                                source_event_id.clone(),
-                                sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
-                                now_ms(),
-                            ) {
-                                Ok(candidate) => candidate,
-                                Err(error) => {
-                                    handler.handle(RunEvent::Notice(format!(
-                                        "Plan review candidate could not be durably preserved: {error:#}"
-                                    )))?;
-                                    return complete_plan_review_run(
-                                        &cancellation,
-                                        PlanReviewRunOutcome::Paused(
-                                            "Plan review candidate requires durable managed storage before confirmation"
-                                                .to_owned(),
-                                        ),
-                                    );
-                                }
-                            };
-                            if let Some(content) = candidate_text.as_deref()
-                                && let Err(error) = record_plan_review_candidate_in_parent(
-                                    parent_session,
-                                    request,
-                                    content,
-                                    source_event_id,
-                                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
-                                    handler,
-                                    now_ms(),
-                                )
-                            {
-                                handler.handle(RunEvent::Notice(format!(
-                                    "Plan review candidate could not be mirrored to the parent session: {error:#}"
-                                )))?;
-                                return complete_plan_review_run(
-                                    &cancellation,
-                                    PlanReviewRunOutcome::Paused(
-                                        "Plan review candidate requires durable parent storage before confirmation"
-                                            .to_owned(),
-                                    ),
-                                );
-                            }
-                        }
-                        if let Some(reason) = plan_review_no_plan_reason(&child_session) {
-                            record_plan_review_candidate_in_parent(
-                                parent_session,
-                                request,
-                                &reason,
-                                None,
-                                sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
-                                handler,
-                                now_ms(),
-                            )?;
-                            handler.handle(RunEvent::Notice(format!(
-                                "Plan review completed without a draft: {reason}"
-                            )))?;
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::CompletedWithoutDraft,
-                            );
-                        }
-                        match output.disposition {
+                }
+                if let Some(reason) = plan_review_no_plan_reason(&child_session) {
+                    record_plan_review_candidate_in_parent(
+                        parent_session,
+                        request,
+                        &reason,
+                        None,
+                        sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                        handler,
+                        now_ms(),
+                    )?;
+                    handler.handle(RunEvent::Notice(format!(
+                        "Plan review completed without a draft: {reason}"
+                    )))?;
+                    PlanReviewRunOutcome::CompletedWithoutDraft
+                } else {
+                    match output.disposition {
                         AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
-                            let outcome =
-                                plan_review_draft_ready_outcome(&child_session, &action.plan_id)?;
-                            return complete_plan_review_run(&cancellation, outcome);
+                            plan_review_draft_ready_outcome(&child_session, &action.plan_id)?
                         }
-                        AgentRunDisposition::FinalAnswer => None,
+                        AgentRunDisposition::FinalAnswer if unconfirmed_candidate_recorded => {
+                            handler.handle(RunEvent::Notice(
+                                "Plan review finished with an unconfirmed candidate; no ready Plan or Task was created".to_owned(),
+                            ))?;
+                            PlanReviewRunOutcome::CompletedWithoutDraft
+                        }
+                        AgentRunDisposition::FinalAnswer => PlanReviewRunOutcome::Paused(
+                            "plan review ended without a typed result or readable candidate"
+                                .to_owned(),
+                        ),
                         AgentRunDisposition::AwaitingUserInput(request_ref) => {
                             let request = child_session
-                        .user_input_projection()?
-                        .request(&request_ref.identity)
-                        .filter(|state| {
-                            state.requested.request_hash == request_ref.request_hash
-                                && matches!(
-                                    state.requested.request.source,
-                                    sigil_kernel::UserInputSourceV1::PlanReviewResearch {
-                                        ref plan_review_id,
-                                        ref attempt_id,
-                                    } if plan_review_id == &request.plan_review_id
-                                        && attempt_id == &request.attempt_id
-                                )
-                        })
-                        .map(sigil_kernel::UserInputRequestStateV1::public_view)
-                        .context("plan review research suspension lost its exact durable request")?;
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::AwaitingUserInput {
-                                    request: Box::new(request),
-                                },
-                            );
+                                .user_input_projection()?
+                                .request(&request_ref.identity)
+                                .filter(|state| {
+                                    state.requested.request_hash == request_ref.request_hash
+                                        && matches!(
+                                            state.requested.request.source,
+                                            sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                                                ref plan_review_id,
+                                                ref attempt_id,
+                                            } if plan_review_id == &request.plan_review_id
+                                                && attempt_id == &request.attempt_id
+                                        )
+                                })
+                                .map(sigil_kernel::UserInputRequestStateV1::public_view)
+                                .context("plan review research suspension lost its exact durable request")?;
+                            PlanReviewRunOutcome::AwaitingUserInput {
+                                request: Box::new(request),
+                            }
                         }
-                        AgentRunDisposition::Interrupted => {
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::Interrupted(
-                                    "plan review run was interrupted before a draft".to_owned(),
-                                ),
-                            );
-                        }
-                        AgentRunDisposition::Blocked => {
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::Blocked(
-                                    "plan review run was blocked before a draft".to_owned(),
-                                ),
-                            );
-                        }
+                        AgentRunDisposition::Interrupted => PlanReviewRunOutcome::Interrupted(
+                            "plan review run was interrupted before a draft".to_owned(),
+                        ),
+                        AgentRunDisposition::Blocked => PlanReviewRunOutcome::Blocked(
+                            "plan review run was blocked before a draft".to_owned(),
+                        ),
                         AgentRunDisposition::StartDurableTask(_)
                         | AgentRunDisposition::ContinueDurableTask(_)
                         | AgentRunDisposition::RunPendingPlan(_)
-                        | AgentRunDisposition::PendingPlanDecisionRequired(_)
-                        | AgentRunDisposition::TaskPlanAccepted => {
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::Failed(
-                                    "plan review run attempted an out-of-scope handoff".to_owned(),
-                                ),
-                            );
-                        }
-                        AgentRunDisposition::StartPlanReview(_) => {
-                            return complete_plan_review_run(
-                                &cancellation,
-                                PlanReviewRunOutcome::Failed(
-                                    "plan review run requested a nested plan review".to_owned(),
-                                ),
-                            );
-                        }
-                        }
-                    }
-                    Err(error) => {
-                        if cancellation.is_cancel_requested() {
-                            return Ok(PlanReviewRunOutcome::Cancelled);
-                        }
-                        let recovery_allowed =
-                            match plan_review_provider_terminal_allows_submit_only_recovery(
-                                &child_session,
-                                &research_logical_run_id,
-                            ) {
-                                Ok(recovery_allowed) => recovery_allowed,
-                                Err(projection_error) => {
-                                    return Err(error.context(format!(
-                        "plan review provider failure could not be classified from durable physical-attempt evidence: {projection_error:#}"
-                    )));
-                                }
-                            };
-                        if !recovery_allowed {
-                            return Err(error);
-                        }
-                        handler.handle(RunEvent::Notice(
-                    "Plan review provider stream ended before a durable result; continuing with one submit-only finalization turn from the recorded read-only evidence."
-                        .to_owned(),
-                ))?;
-                        Some(format!("{error:#}"))
+                        | AgentRunDisposition::StartPlanReview(_) => PlanReviewRunOutcome::Failed(
+                            "plan review run attempted an out-of-scope handoff".to_owned(),
+                        ),
                     }
                 }
             }
         };
-
-        if cancellation.is_cancel_requested() {
-            return Ok(PlanReviewRunOutcome::Cancelled);
+        complete_plan_review_run(&cancellation, outcome)
         }
-        if request.revision_request_id.is_some() {
-            append_revision_attempt_status(
-                parent_session,
-                request,
-                PlanReviewAttemptStatus::Finalizing,
-                None,
-                now_ms(),
-            )?;
-        } else {
-            append_attempt_status(
-                parent_session,
-                request,
-                handler,
-                PlanReviewAttemptStatus::Finalizing,
-                None,
-                now_ms(),
-            )?;
-        }
-        let mut last_violation = None;
-        let mut last_violation_digest = None;
-        for corrective_ordinal in 1..=2 {
-            if cancellation.is_cancel_requested() {
-                return Ok(PlanReviewRunOutcome::Cancelled);
-            }
-            let completed_model_turns = child_session
-                .entries()
-                .iter()
-                .filter(|entry| matches!(entry, SessionLogEntry::Assistant(_)))
-                .count();
-            if options
-                .max_turns
-                .is_some_and(|max_turns| completed_model_turns >= max_turns)
-            {
-                return complete_plan_review_run(
-                    &cancellation,
-                    PlanReviewRunOutcome::Paused(
-                        "plan review reached the configured model-turn budget before result confirmation"
-                            .to_owned(),
-                    ),
-                );
-            }
-            let finalization = async {
-            let mut finalization_options = options.clone();
-            if let Some(bundle) = child_bundle.as_ref() {
-                finalization_options =
-                    finalization_options.with_tool_authority(bundle.tool_authority());
-            }
-            finalization_options.max_turns = Some(
-                options
-                    .max_turns
-                    .map(|max_turns| {
-                        max_turns
-                            .saturating_sub(completed_model_turns)
-                            .min(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS)
-                    })
-                    .unwrap_or(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS),
-            );
-            let finalization_input = plan_review_run_input(
-                request,
-                &draft_context,
-                &cancellation,
-                &parent_context,
-                Some(corrective_ordinal),
-                last_violation.as_deref(),
-            );
-            let finalization_entry_start = child_session.entries().len();
-            let mut child_handler = PlanReviewChildEventHandler { inner: handler };
-            let finalization = agent
-                .run_with_approval_input_and_tool_registry(
-                    &mut child_session,
-                    finalization_input,
-                    finalization_options,
-                    sigil_kernel::ToolRegistry::new(),
-                    &mut child_handler,
-                    approval_handler,
-                )
-                .await;
-            let output = match finalization {
-                Ok(_) if cancellation.is_cancel_requested() => {
-                    return Ok(Some(PlanReviewRunOutcome::Cancelled));
-                }
-                Ok(output) => output,
-                Err(_) if cancellation.is_cancel_requested() => {
-                    return Ok(Some(PlanReviewRunOutcome::Cancelled));
-                }
-                Err(error) => {
-                    let context = recovery_cause.as_deref().map_or_else(
-                        || "plan review submit-only finalization failed".to_owned(),
-                        |cause| {
-                            format!(
-                                "plan review submit-only recovery failed after research stream ended early ({cause})"
-                            )
-                        },
-                    );
-                    return Err(error.context(context));
-                }
-            };
-            if output.disposition == AgentRunDisposition::FinalAnswer
-                && !output.result.final_text.trim().is_empty()
-            {
-                let source_event_id = output.result.final_message_id.clone();
-                if let Err(error) = record_plan_review_candidate(
-                    &mut child_session,
-                    request,
-                    &output.result.final_text,
-                    source_event_id.clone(),
-                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
-                    now_ms(),
-                ) {
-                    handler.handle(RunEvent::Notice(format!(
-                        "Plan review finalizer candidate could not be durably preserved: {error:#}"
-                    )))?;
-                    return complete_plan_review_run(
-                        &cancellation,
-                        PlanReviewRunOutcome::Paused(
-                            "Plan review candidate requires durable managed storage before confirmation"
-                                .to_owned(),
-                        ),
-                    )
-                    .map(Some);
-                }
-                if let Err(error) = record_plan_review_candidate_in_parent(
-                    parent_session,
-                    request,
-                    &output.result.final_text,
-                    source_event_id,
-                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
-                    handler,
-                    now_ms(),
-                ) {
-                    handler.handle(RunEvent::Notice(format!(
-                        "Plan review finalizer candidate could not be mirrored to the parent session: {error:#}"
-                    )))?;
-                    return complete_plan_review_run(
-                        &cancellation,
-                        PlanReviewRunOutcome::Paused(
-                            "Plan review candidate requires durable parent storage before confirmation"
-                                .to_owned(),
-                        ),
-                    )
-                    .map(Some);
-                }
-            }
-            if let Some(reason) = plan_review_no_plan_reason(&child_session) {
-                record_plan_review_candidate_in_parent(
-                    parent_session,
-                    request,
-                    &reason,
-                    None,
-                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
-                    handler,
-                    now_ms(),
-                )?;
-                handler.handle(RunEvent::Notice(format!(
-                    "Plan review completed without a draft: {reason}"
-                )))?;
-                return complete_plan_review_run(
-                    &cancellation,
-                    PlanReviewRunOutcome::CompletedWithoutDraft,
-                )
-                .map(Some);
-            }
-            // The kernel has already committed a successful typed draft and rejected every
-            // unavailable side call before dispatch. Do not regenerate that immutable draft
-            // merely because the same batch also contained a rejected call.
-            let draft_submitted = matches!(
-                &output.disposition,
-                AgentRunDisposition::PlanReviewDraftSubmitted(_)
-            );
-            if !draft_submitted && child_session.entries()[finalization_entry_start..].iter().any(|entry| {
-                matches!(
-                    entry,
-                    SessionLogEntry::Assistant(message)
-                        if message.tool_calls.iter().any(|call| {
-                            call.name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
-                        })
-                )
-            }) {
-                let reason = "submit-only finalizer attempted a non-submit tool".to_owned();
-                last_violation = Some(reason.clone());
-                if corrective_ordinal == 1 {
-                    handler.handle(RunEvent::Notice(
-                        "Plan finalization attempted an unavailable research tool; retrying once in the same submit-only conversation."
-                            .to_owned(),
-                    ))?;
-                    return Ok(None);
-                }
-                return complete_plan_review_run(
-                    &cancellation,
-                    PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
-                ).map(Some);
-            }
-            if !draft_submitted && let Some(reason) = invalid_plan_draft_submission_reason(&child_session.entries()[finalization_entry_start..]) {
-                let digest = sigil_kernel::stable_event_hash(reason.as_bytes());
-                if last_violation_digest.as_deref() == Some(digest.as_str()) {
-                    return complete_plan_review_run(
-                        &cancellation,
-                        PlanReviewRunOutcome::Paused(
-                            "plan finalization repeated the same validation error; retry requires an explicit new allowance"
-                                .to_owned(),
-                        ),
-                    )
-                    .map(Some);
-                }
-                last_violation_digest = Some(digest);
-                last_violation = Some(reason.clone());
-                if corrective_ordinal == 1 {
-                    handler.handle(RunEvent::Notice(
-                        "Plan finalization produced an invalid typed draft; retrying once in the same submit-only conversation."
-                            .to_owned(),
-                    ))?;
-                    return Ok(None);
-                }
-                return complete_plan_review_run(
-                    &cancellation,
-                    PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
-                ).map(Some);
-            }
-            let outcome = match output.disposition {
-                AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
-                    plan_review_draft_ready_outcome(&child_session, &action.plan_id)?
-                }
-                AgentRunDisposition::FinalAnswer => {
-                    PlanReviewRunOutcome::Paused(
-                        "Plan review text was preserved as unconfirmed evidence; submit a typed result to make a Plan ready"
-                            .to_owned(),
-                    )
-                }
-                AgentRunDisposition::AwaitingUserInput(_) => PlanReviewRunOutcome::Failed(
-                    "plan review finalization exposed an unsupported user-input suspension"
-                        .to_owned(),
-                ),
-                AgentRunDisposition::Interrupted => PlanReviewRunOutcome::Interrupted(
-                    "plan review finalization was interrupted before a draft".to_owned(),
-                ),
-                AgentRunDisposition::Blocked => PlanReviewRunOutcome::Blocked(
-                    "plan review finalization was blocked before a draft".to_owned(),
-                ),
-                AgentRunDisposition::StartDurableTask(_)
-                | AgentRunDisposition::ContinueDurableTask(_)
-                | AgentRunDisposition::RunPendingPlan(_)
-                | AgentRunDisposition::PendingPlanDecisionRequired(_)
-                | AgentRunDisposition::TaskPlanAccepted => PlanReviewRunOutcome::Failed(
-                    "plan review finalization attempted an out-of-scope handoff".to_owned(),
-                ),
-                AgentRunDisposition::StartPlanReview(_) => PlanReviewRunOutcome::Failed(
-                    "plan review finalization requested a nested plan review".to_owned(),
-                ),
-            };
-            complete_plan_review_run(&cancellation, outcome).map(Some)
-            }.await;
-            let finalization = finalization?;
-            if let Some(outcome) = finalization {
-                return Ok(outcome);
-            }
-        }
-        complete_plan_review_run(
-            &cancellation,
-            PlanReviewRunOutcome::SubmitOnlyProtocolViolation(
-                last_violation.unwrap_or_else(|| "submit-only finalizer failed".to_owned()),
-            ),
-        )
-        }.await;
+        .await;
         combine_child_resource_settlement(
             outcome,
             child_bundle.map(|bundle| bundle.finish()).unwrap_or(Ok(())),
@@ -2172,14 +1840,6 @@ impl PlanReviewCoordinator {
                 handler,
                 PlanReviewAttemptStatus::Failed,
                 Some(PlanReviewTerminalReason::RunFailed),
-                now_ms,
-            ),
-            PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => append_attempt_status(
-                session,
-                request,
-                handler,
-                PlanReviewAttemptStatus::Failed,
-                Some(PlanReviewTerminalReason::SubmitOnlyProtocolViolation),
                 now_ms,
             ),
         };
@@ -2385,7 +2045,6 @@ impl PlanReviewCoordinator {
                 prompt: "What should change in this plan?".to_owned(),
                 questions: vec![sigil_kernel::UserInputQuestionV1 {
                     id: "revision_guidance".to_owned(),
-                    header: "Revision guidance".to_owned(),
                     question: "Describe the changes you want before a new plan is prepared."
                         .to_owned(),
                     description: Some(
@@ -2393,10 +2052,8 @@ impl PlanReviewCoordinator {
                             .to_owned(),
                     ),
                     required: true,
-                    field: sigil_kernel::UserInputFieldKindV1::Text {
-                        multiline: true,
-                        max_chars: 2_000,
-                    },
+                    options: Vec::new(),
+                    multiple: false,
                 }],
                 allowed_actions: vec![
                     sigil_kernel::UserInputActionV1::Submit,
@@ -2456,6 +2113,7 @@ impl PlanReviewCoordinator {
             safe_persistence_text(guidance)
         );
         Ok(PlanReviewRunRequest {
+            application_operation: None,
             plan_review_id: base.plan_review_id.clone(),
             attempt_id: attempt_id.clone(),
             plan_id: next_plan_id,
@@ -2463,11 +2121,6 @@ impl PlanReviewCoordinator {
             source_turn: base.source_turn,
             route_decision_id: base.route_decision_id,
             child_session_ref: plan_review_child_session_ref(&base.plan_review_id, &attempt_id),
-            finalizer_session_ref: plan_review_finalizer_session_ref(
-                &base.plan_review_id,
-                &attempt_id,
-                1,
-            ),
             revision_request_id: Some(revision_request_id),
             revision_generation: Some(revision_generation),
             attempt_ordinal: ordinal,
@@ -2702,6 +2355,68 @@ impl PlanReviewCoordinator {
         .map(Some)
     }
 
+    /// Reads the exact child identity selected by accepted revision guidance. This does not
+    /// register, resume or dispatch a run; the adapter must separately verify its actual owner.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing or changed input identity, hash, source, or revision lineage.
+    pub fn accepted_revision_child_run_id(
+        session: &Session,
+        identity: &sigil_kernel::UserInputIdentityV1,
+        request_hash: &str,
+    ) -> Result<Option<String>> {
+        let inputs = session.user_input_projection()?;
+        let state = inputs
+            .request(identity)
+            .context("revision receipt has no original input")?;
+        if state.requested.request_hash != request_hash {
+            bail!("revision receipt source hash changed");
+        }
+        if !matches!(
+            state.requested.request.source,
+            sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+        ) {
+            bail!("revision receipt belongs to another input source");
+        }
+        let Some(accepted) = state.decision.as_ref() else {
+            return Ok(None);
+        };
+        if !matches!(
+            accepted.decision,
+            sigil_kernel::UserInputDurableDecisionV1::Submitted { .. }
+        ) {
+            return Ok(None);
+        }
+        let accepted_at = session
+            .entries()
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+                    SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(entry))
+                    if entry.identity == *identity && entry.request_hash == request_hash
+                        && entry.command_id == accepted.command_id
+                )
+            })
+            .context("revision receipt lost its original accepted decision")?;
+        // Use the first attempt owned by this original answer, never a later retry selected by
+        // another command. Reconstructing a request only reads its immutable source generation.
+        for entry in &session.entries()[accepted_at + 1..] {
+            if let SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) = entry
+                && attempt.revision_request_id.as_ref() == Some(&identity.request_id)
+            {
+                let request = plan_review_request_from_attempt(session, attempt)?;
+                if request.revision_generation == Some(identity.generation) {
+                    return Ok(Some(request.child_logical_run_id()));
+                }
+            }
+        }
+        Ok(
+            Self::recover_unstarted_revision_request(session, state, None)?
+                .map(|request| request.child_logical_run_id()),
+        )
+    }
+
     /// Records a confirmed failure to start an accepted revision before its attempt exists.
     ///
     /// The caller owns the rejected dispatch. This restores the original Plan without creating
@@ -2899,6 +2614,7 @@ impl PlanReviewCoordinator {
         let successor_plan_id =
             plan_review_plan_id_for_attempt(&latest.plan_review_id, &successor_id);
         let successor_request = PlanReviewRunRequest {
+            application_operation: None,
             plan_review_id: latest.plan_review_id.clone(),
             attempt_id: successor_id.clone(),
             plan_id: successor_plan_id,
@@ -2906,11 +2622,6 @@ impl PlanReviewCoordinator {
             source_turn: latest.source_turn.clone(),
             route_decision_id: latest.route_decision_id.clone(),
             child_session_ref: plan_review_child_session_ref(&latest.plan_review_id, &successor_id),
-            finalizer_session_ref: plan_review_finalizer_session_ref(
-                &latest.plan_review_id,
-                &successor_id,
-                1,
-            ),
             revision_request_id: latest.revision_request_id.clone(),
             revision_generation: request.revision_generation,
             attempt_ordinal: latest.attempt_ordinal.saturating_add(1),
@@ -2929,7 +2640,6 @@ impl PlanReviewCoordinator {
             source_turn: successor_request.source_turn.clone(),
             route_decision_id: successor_request.route_decision_id.clone(),
             child_session_ref: successor_request.child_session_ref.clone(),
-            finalizer_session_ref: Some(successor_request.finalizer_session_ref.clone()),
             revision_request_id: successor_request.revision_request_id.clone(),
             attempt_ordinal: successor_request.attempt_ordinal,
             base_plan_id: successor_request.base_plan_id.clone(),
@@ -3084,11 +2794,22 @@ impl PlanReviewCoordinator {
         let (request, current_waiting_attempt) =
             plan_review_research_input_target(parent, &command)?;
         let expected_scope = command.identity.session_scope_id.as_str().to_owned();
+        let application_operation = parent.application_operation_binding().cloned();
         let bundle = provisioner.mutate_research_session(&request)?;
         let result = bundle.with_child_session(parent, &expected_scope, |child| {
+            if let Some(binding) = application_operation.as_ref() {
+                parent.delegate_application_operation_to_child(child, binding.clone())?;
+            }
             Self::accept_plan_review_research_input_in_child(child, command, now_ms)
         });
         let receipt = combine_child_resource_settlement(result, bundle.finish())?;
+        let mut request = request;
+        request.application_operation = application_operation.filter(|binding| {
+            matches!(
+                binding.target,
+                sigil_kernel::ApplicationOperationTargetV1::UserInputContinuation { .. }
+            )
+        });
         Self::finalize_plan_review_research_input(
             parent,
             receipt,
@@ -3126,10 +2847,7 @@ impl PlanReviewCoordinator {
             return Ok(None);
         };
         validate_revision_attempt_request_binding(attempt, request)?;
-        if !matches!(
-            attempt.status,
-            PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
-        ) {
+        if attempt.status != PlanReviewAttemptStatus::Started {
             return Ok(None);
         }
         let bundle = match provisioner.recover_research_session(request) {
@@ -3180,12 +2898,7 @@ impl PlanReviewCoordinator {
         let attempts = projection
             .reviews()
             .filter_map(|review| review.latest_attempt())
-            .filter(|attempt| {
-                matches!(
-                    attempt.status,
-                    PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
-                )
-            })
+            .filter(|attempt| attempt.status == PlanReviewAttemptStatus::Started)
             .cloned()
             .collect::<Vec<_>>();
         let mut recovered = 0;
@@ -3245,12 +2958,9 @@ impl PlanReviewCoordinator {
             bail!("plan review projection contains conflicts");
         }
         if !projection.reviews().any(|review| {
-            review.latest_attempt().is_some_and(|attempt| {
-                matches!(
-                    attempt.status,
-                    PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
-                )
-            })
+            review
+                .latest_attempt()
+                .is_some_and(|attempt| attempt.status == PlanReviewAttemptStatus::Started)
         }) {
             return Ok(0);
         }
@@ -3618,7 +3328,6 @@ impl PlanReviewCoordinator {
             &candidate.plan_review_id,
             &ready_attempt.attempt_id,
         );
-        ready_attempt.finalizer_session_ref = None;
         ready_attempt.status = PlanReviewAttemptStatus::DraftReady;
         ready_attempt.terminal_reason = None;
         ready_attempt.recorded_at_ms = now_ms;
@@ -3692,28 +3401,6 @@ impl PlanReviewCoordinator {
         let entries = session.entries().to_vec();
         Ok(RejectedPlan { entry, entries })
     }
-}
-
-fn invalid_plan_draft_submission_reason(entries: &[SessionLogEntry]) -> Option<String> {
-    entries.iter().rev().find_map(|entry| {
-        let SessionLogEntry::ToolResultV3(result) = entry else {
-            return None;
-        };
-        if result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
-            || result.facts.status != "error"
-        {
-            return None;
-        }
-        let detail = result
-            .facts
-            .error
-            .as_ref()
-            .map(|error| error.message.as_str())
-            .unwrap_or("typed draft validation failed");
-        Some(format!(
-            "submit-only finalizer produced an invalid draft: {detail}"
-        ))
-    })
 }
 
 /// Recovers the latest successful typed result from its exact assistant tool-call batch.
@@ -4164,7 +3851,6 @@ fn plan_review_started_attempt_entry(
         source_turn: request.source_turn.clone(),
         route_decision_id: request.route_decision_id.clone(),
         child_session_ref: request.child_session_ref.clone(),
-        finalizer_session_ref: Some(request.finalizer_session_ref.clone()),
         revision_request_id: request.revision_request_id.clone(),
         attempt_ordinal: request.attempt_ordinal,
         base_plan_id: request.base_plan_id.clone(),
@@ -4197,26 +3883,6 @@ where
         let projection = PlanReviewProjection::from_entries(session.entries());
         projection.validate_append(&entry)?;
         handler.commit_controls(session, vec![ControlEntry::PlanReviewAttempt(entry)])?;
-    }
-    Ok(())
-}
-
-fn append_revision_attempt_status(
-    session: &mut Session,
-    request: &PlanReviewRunRequest,
-    status: PlanReviewAttemptStatus,
-    terminal_reason: Option<PlanReviewTerminalReason>,
-    now_ms: u64,
-) -> Result<()> {
-    if request.revision_request_id.is_none() {
-        bail!("ordinary plan-review status must use the application control commit hook");
-    }
-    if let Some(entry) =
-        plan_review_attempt_status_entry(session, request, status, terminal_reason, now_ms)?
-    {
-        let projection = PlanReviewProjection::from_entries(session.entries());
-        projection.validate_append(&entry)?;
-        session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
     }
     Ok(())
 }
@@ -4416,7 +4082,6 @@ fn validate_revision_attempt_request_binding(
         || attempt.source_turn != request.source_turn
         || attempt.route_decision_id != request.route_decision_id
         || attempt.child_session_ref != request.child_session_ref
-        || attempt.finalizer_session_ref.as_ref() != Some(&request.finalizer_session_ref)
         || attempt.revision_request_id != request.revision_request_id
         || attempt.attempt_ordinal != request.attempt_ordinal
         || attempt.base_plan_id != request.base_plan_id
@@ -4460,7 +4125,6 @@ fn plan_review_attempt_status_entry(
         source_turn: request.source_turn.clone(),
         route_decision_id: request.route_decision_id.clone(),
         child_session_ref: request.child_session_ref.clone(),
-        finalizer_session_ref: Some(request.finalizer_session_ref.clone()),
         revision_request_id: request.revision_request_id.clone(),
         attempt_ordinal: request.attempt_ordinal,
         base_plan_id: request.base_plan_id.clone(),
@@ -4476,7 +4140,7 @@ fn plan_review_attempt_status_entry(
 }
 
 /// Reconstructs the first committed attempt prefix before any model-context projection.
-fn plan_review_parent_context(
+pub(crate) fn plan_review_parent_context(
     parent_session: &Session,
     request: &PlanReviewRunRequest,
 ) -> Result<Vec<ModelMessage>> {
@@ -4494,51 +4158,117 @@ fn plan_review_parent_context(
         })
         .ok_or(sigil_kernel::SessionContextPrefixError::MissingBoundary)?;
     validate_revision_attempt_request_binding(first_started, request)?;
-    let source_id = (request.source == PlanReviewSource::AutomaticConversationRoute)
-        .then_some(request.source_turn.message_id.as_str());
+    if request.source == PlanReviewSource::AutomaticConversationRoute {
+        // Source identity must remain unique at admission even though inherited work is frozen
+        // at the earlier routing receipt. Later unrelated messages never enter that context.
+        parent_session.context_projection_before_control(
+            &ControlEntry::PlanReviewAttempt(first_started.clone()),
+            Some(&request.source_turn.message_id),
+        )?;
+        let decisions = sigil_kernel::ConversationRouteDecisionProjection::from_entries(
+            parent_session.entries(),
+        );
+        let decision = request
+            .route_decision_id
+            .as_ref()
+            .and_then(|id| decisions.decision(id))
+            .context("automatic plan review context lost its route decision")?;
+        if decisions.has_conflicts()
+            || decision.source_turn != request.source_turn
+            || decision.route != ConversationRoute::PlanReview
+        {
+            bail!("automatic plan review context has a conflicting route decision");
+        }
+        return Ok(parent_session
+            .context_projection_before_control_including_source(
+                &ControlEntry::ConversationRouteDecisionRecorded(decision.clone()),
+                &request.source_turn.message_id,
+            )?
+            .model_messages());
+    }
     Ok(parent_session
         .context_projection_before_control(
             &ControlEntry::PlanReviewAttempt(first_started.clone()),
-            source_id,
+            None,
         )?
         .model_messages())
 }
 
-fn plan_review_run_input(
+fn apply_remaining_plan_review_turn_budget(
+    options: &mut AgentRunOptions,
+    child_session: &Session,
+) -> Result<()> {
+    let Some(total_turn_budget) = options.max_turns else {
+        return Ok(());
+    };
+
+    // A Plan Review child session is the durable scope for one attempt. Count each distinct
+    // conversation request once even if its provider transport had multiple physical attempts.
+    // A terminal connect failure proven to have consumed no model work does not spend a turn;
+    // unfinished and uncertain requests do, so reopening the child cannot reset the budget.
+    let projection = child_session
+        .provider_physical_attempt_projection()
+        .context("failed to inspect durable Plan Review provider-turn budget")?;
+    let consumed_turns = projection
+        .attempts()
+        .into_iter()
+        .filter(|attempt| {
+            attempt.entry.purpose == ProviderPhysicalAttemptPurpose::ConversationGeneration
+                && attempt.terminal.as_ref().is_none_or(|terminal| {
+                    terminal.outcome != ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+                })
+        })
+        .map(|attempt| {
+            (
+                attempt.entry.logical_run_id.clone(),
+                attempt.entry.request_material_fingerprint.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
+    options.max_turns = Some(total_turn_budget.saturating_sub(consumed_turns));
+    Ok(())
+}
+
+pub(crate) fn plan_review_run_input(
     request: &PlanReviewRunRequest,
     draft_context: &sigil_kernel::PlanReviewDraftContext,
     cancellation: &sigil_kernel::RunCancellationHandle,
     parent_context: &[ModelMessage],
-    finalizer_ordinal: Option<u32>,
-    validation_feedback: Option<&str>,
 ) -> AgentRunInput {
-    let mut transient = vec![ModelMessage::system(
-        plan_review_system_prompt_contract_material(),
+    let logical_run_id = request.child_logical_run_id();
+    let bind_message = |mut message: ModelMessage, slot: &str| {
+        message.id = sigil_kernel::stable_event_uuid(
+            "sigil-plan-review-input-v2",
+            &format!("{logical_run_id}:{slot}"),
+        );
+        message
+    };
+    let transient = vec![bind_message(
+        ModelMessage::system(plan_review_system_prompt_contract_material()),
+        "contract",
     )];
     let mut initial_context = Vec::new();
     if !parent_context.is_empty() {
-        initial_context.push(ModelMessage::system(
-            "Frozen parent conversation context follows; preserve its roles and ordering when forming the Plan.",
+        initial_context.push(bind_message(
+            ModelMessage::system(sigil_kernel::plan_review_parent_context_contract_material()),
+            "parent-context",
         ));
         initial_context.extend(parent_context.iter().cloned());
     }
-    // Keep the source objective in the fixed prefix, before the retained child conversation.
-    initial_context.push(ModelMessage::user(request.objective.clone()));
-    if finalizer_ordinal.is_some() {
-        transient.push(ModelMessage::system(
-            plan_review_no_draft_retry_contract_material(),
+    if request.source != PlanReviewSource::AutomaticConversationRoute
+        || !parent_context.iter().any(|message| {
+            message.id == request.source_turn.message_id
+                && message.role == sigil_kernel::MessageRole::User
+        })
+    {
+        initial_context.push(bind_message(
+            ModelMessage::user(request.objective.clone()),
+            "objective",
         ));
     }
-    if let Some(feedback) = validation_feedback {
-        initial_context.push(ModelMessage::user(format!(
-            "Previous submit-only attempt was rejected by host validation. Correct this exact issue and submit one valid typed result; do not use research tools:\n{feedback}"
-        )));
-    }
-    let logical_run_id = finalizer_ordinal.map_or_else(
-        || request.child_logical_run_id(),
-        |ordinal| format!("{}-finalizer-{ordinal}", request.child_logical_run_id()),
-    );
-    let input = AgentRunInput::without_persisted_user_message(transient)
+
+    AgentRunInput::without_persisted_user_message(transient)
         .with_initial_context(initial_context)
         .with_logical_run_id(logical_run_id)
         .with_child_cancellation(cancellation.clone())
@@ -4551,15 +4281,7 @@ fn plan_review_run_input(
                 route_decision_id: request.route_decision_id.clone(),
             },
         ))
-        .with_plan_review_draft(draft_context.clone());
-    if finalizer_ordinal.is_some() {
-        input.with_plan_review_submit_only()
-    } else {
-        input.with_soft_checkpoint(
-            8,
-            "Reassess the evidence gathered so far. Decide whether it supports a typed Plan result or a clarification request; continue using the advertised read-only tools when more evidence is needed.",
-        )
-    }
+        .with_plan_review_draft(draft_context.clone())
 }
 
 fn plan_review_continuation_input(
@@ -4569,20 +4291,13 @@ fn plan_review_continuation_input(
     continuation: &sigil_kernel::UserInputContinuationStartedV1,
     parent_context: &[ModelMessage],
 ) -> AgentRunInput {
-    plan_review_run_input(
-        request,
-        draft_context,
-        cancellation,
-        parent_context,
-        None,
-        None,
-    )
-    .with_logical_run_id(continuation.continuation_logical_run_id.as_str())
-    .with_user_input_continuation_context(
-        continuation.identity.root_logical_run_id.as_str(),
-        continuation.identity.source_thread_id.clone(),
-    )
-    .with_initial_provider_physical_attempt_id(continuation.physical_attempt_id.clone())
+    plan_review_run_input(request, draft_context, cancellation, parent_context)
+        .with_logical_run_id(continuation.continuation_logical_run_id.as_str())
+        .with_user_input_continuation_context(
+            continuation.identity.root_logical_run_id.as_str(),
+            continuation.identity.source_thread_id.clone(),
+        )
+        .with_initial_provider_physical_attempt_id(continuation.physical_attempt_id.clone())
 }
 
 fn plan_review_draft_ready_outcome(
@@ -4616,22 +4331,6 @@ pub(crate) fn complete_plan_review_run(
         bail!("run cancellation won before plan review completion");
     }
     Ok(outcome)
-}
-
-fn plan_review_provider_terminal_allows_submit_only_recovery(
-    child_session: &Session,
-    logical_run_id: &str,
-) -> Result<bool> {
-    let projection = child_session.provider_physical_attempt_projection()?;
-    let outcome = projection
-        .attempts_for_logical_run_id(logical_run_id)
-        .last()
-        .and_then(|attempt| attempt.terminal.as_ref())
-        .map(|terminal| terminal.outcome);
-    Ok(matches!(
-        outcome,
-        Some(ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput)
-    ))
 }
 
 fn plan_review_research_input_target(
@@ -4753,6 +4452,7 @@ fn plan_review_request_from_attempt(
         None
     };
     Ok(PlanReviewRunRequest {
+        application_operation: None,
         plan_review_id: attempt.plan_review_id.clone(),
         attempt_id: attempt.attempt_id.clone(),
         plan_id: attempt.plan_id.clone(),
@@ -4760,9 +4460,6 @@ fn plan_review_request_from_attempt(
         source_turn: attempt.source_turn.clone(),
         route_decision_id: attempt.route_decision_id.clone(),
         child_session_ref: attempt.child_session_ref.clone(),
-        finalizer_session_ref: attempt.finalizer_session_ref.clone().context(
-            "unsupported Plan attempt format: executable attempt has no finalizer binding",
-        )?,
         revision_request_id: attempt.revision_request_id.clone(),
         revision_generation,
         attempt_ordinal: attempt.attempt_ordinal,
@@ -5171,7 +4868,7 @@ pub fn now_ms() -> u64 {
 
 /// Typed plan decision command for one application surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationPlanDecisionCommand {
     pub plan_id: String,
     pub expected_plan_hash: String,
@@ -5207,15 +4904,12 @@ pub struct ApplicationPlanDecisionReceipt {
     /// RFC-0067: semantic Task title shown immediately after a Run receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_title: Option<String>,
-    /// RFC-0067: adopted candidate hash for receipt idempotency.
+    /// Exact preserved candidate hash adopted or bound by a review retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_hash: Option<String>,
-    /// RFC-0067: durable Task phase right after admission (Preparing/Ready/Blocked/Paused).
+    /// Initial direct execution phase after Plan approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_phase: Option<sigil_kernel::TaskExecutionPhaseV1>,
-    /// RFC-0067: typed blocker when admission held the Task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_blocker: Option<sigil_kernel::TaskBlockerV1>,
     /// Durable host-owned guidance request created by a first `Revise` action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_request: Option<sigil_kernel::PublicUserInputRequestV1>,
@@ -5310,9 +5004,7 @@ impl PlanExecutionService {
             )
             .is_err()
         {
-            return Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady {
-                plan_state: projection.plan_ready_state(&command.plan_id),
-            });
+            return Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady);
         }
         let permission_grant = match command.permission {
             sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy => None,
@@ -5372,8 +5064,7 @@ impl PlanExecutionService {
             if decision.plan_hash == command.expected_plan_hash
                 && task.parent_session_ref == parent_session_ref
                 && task.objective == objective
-                && existing_link
-                    .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
+                && existing_link.is_some_and(|link| link.task_id == task_id)
                 && task.direct_execution_admission.as_ref() == Some(&direct_execution)
                 && projection
                     .permission_grants
@@ -5425,9 +5116,6 @@ impl PlanExecutionService {
             plan_id: command.plan_id.clone(),
             plan_hash: command.expected_plan_hash.clone(),
             task_id: task_id.clone(),
-            task_plan_version: 0,
-            step_mapping: Vec::new(),
-            stale_reason: None,
             created_at_ms: now_ms,
         };
         let commit = sigil_kernel::append_plan_approval_task_shell_at_frontier(
@@ -5445,7 +5133,7 @@ impl PlanExecutionService {
                 reason: format!("{error:#}"),
             },
         )?;
-        if commit == sigil_kernel::PlanExecutionAdoptionCommit::CasSkipped {
+        if commit == sigil_kernel::PlanApprovalCommit::CasSkipped {
             let current = session.plan_artifact_projection();
             let current_task = session.task_state_projection();
             if current
@@ -5462,7 +5150,7 @@ impl PlanExecutionService {
                     .tasks_created
                     .get(&command.plan_id)
                     .and_then(|entries| entries.first())
-                    .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
+                    .is_some_and(|link| link.task_id == task_id)
                 && current_task.tasks.get(&task_id).is_some_and(|task| {
                     task.direct_execution_admission.as_ref() == Some(&direct_execution)
                 })
@@ -5496,34 +5184,6 @@ impl PlanExecutionService {
         ))
     }
 
-    /// Returns the immediate transport-facing outcome for an atomically approved direct Task.
-    ///
-    /// No environment probe or model-authored contract is needed at this boundary. Concrete
-    /// provider, permission and tool failures remain recoverable within the normal runner.
-    #[must_use]
-    pub fn direct_execution_outcome(
-        approval: &PlanApprovalReceiptV2,
-        now_ms: u64,
-    ) -> sigil_kernel::TaskAdmissionOutcomeV1 {
-        if approval.start_mode == PlanTaskStartMode::CreatePaused {
-            return sigil_kernel::TaskAdmissionOutcomeV1::Paused(
-                sigil_kernel::TaskPauseReasonV1::CreatePaused,
-            );
-        }
-        sigil_kernel::TaskAdmissionOutcomeV1::Ready(sigil_kernel::TaskRuntimeLeaseBindingV1 {
-            lease_id: sigil_kernel::stable_event_uuid(
-                "sigil-direct-task-execution-lease-v1",
-                &format!(
-                    "{}:{}:{}",
-                    approval.task_id.as_str(),
-                    approval.plan_hash,
-                    approval.command_id
-                ),
-            ),
-            granted_at_ms: now_ms,
-        })
-    }
-
     fn approval_receipt(
         command: &sigil_kernel::PlanRunCommandV1,
         task_id: TaskId,
@@ -5555,318 +5215,6 @@ impl PlanExecutionService {
     }
 }
 
-/// Environment probes supplied by the surface that will actually execute the Task.
-#[derive(Debug, Clone, Default)]
-pub struct TaskAdmissionProbeContext {
-    /// Exact tool/agent/MCP registry capability contracts; `None` when the surface cannot prove
-    /// registry capabilities (the probe then reports no missing capabilities).
-    pub tool_contracts: Option<Vec<sigil_kernel::ToolRuntimeContract>>,
-    pub provider_route_available: bool,
-    pub credential_available: bool,
-    pub permission_profile_ok: bool,
-    pub disk_space_bytes: Option<u64>,
-    pub verification_runner_available: bool,
-    pub external_writer_active: bool,
-}
-
-/// Builds honest environment probes for one Task admission attempt (RFC-0067 6.3, 10.3).
-///
-/// Every probe observes the current environment instead of assuming availability:
-/// - the provider route comes from the configured default connection shape, and credential
-///   availability resolves the exact credential source (environment variable or stored record)
-///   the provider build would use;
-/// - free disk space is measured on the workspace filesystem as an advisory observation;
-/// - the permission profile only blocks when the candidate actually requires workspace writes
-///   and the mode is `read_only`;
-/// - verification auto-run availability is recorded; required checks govern completion, not
-///   whether task execution can begin;
-/// - an active exclusive write lease owned by another actor means an external writer holds the
-///   workspace. Leases owned by this Task's own steps (task:<id>:...) are not external writers.
-///   Session-local lease evidence cannot observe writers in other sessions/processes; that
-///   boundary is documented here and remains a limitation of the durable evidence available.
-pub fn build_task_admission_probes(
-    root_config: &RootConfig,
-    workspace_root: &Path,
-    tool_contracts: Option<Vec<sigil_kernel::ToolRuntimeContract>>,
-    session: &Session,
-    task_id: &TaskId,
-    candidate: &sigil_kernel::ExecutablePlanCandidateV1,
-) -> TaskAdmissionProbeContext {
-    let (route_available, credential_available) = route_and_credential_probe(root_config);
-    let workspace_id = stable_workspace_id(workspace_root).ok();
-    let task_owner_prefix = format!("task:{}:", task_id.as_str());
-    let external_writer_active = workspace_id.is_some_and(|workspace_id| {
-        sigil_kernel::WriteIsolationProjection::from_entries(session.entries())
-            .active_lease_for_workspace(&workspace_id)
-            .and_then(|state| state.acquired.as_ref())
-            .is_some_and(|lease| !lease.owner_agent_id.starts_with(&task_owner_prefix))
-    });
-    let requires_write = candidate
-        .required_capabilities
-        .contains(&sigil_kernel::TaskCapabilityV2::WorkspaceWrite);
-    // The verification runner is a host mechanism (RFC-0003 materializer), not a tool
-    // capability: it is available when the auto-run policy allows checks and the workspace
-    // identity the runner needs can be resolved.
-    let verification_runner_available = !matches!(
-        root_config.verification.auto_run,
-        sigil_kernel::VerificationAutoRunPolicy::Never
-    ) && stable_workspace_id(workspace_root).is_ok();
-    TaskAdmissionProbeContext {
-        tool_contracts,
-        provider_route_available: route_available,
-        credential_available,
-        permission_profile_ok: !requires_write
-            || !matches!(
-                root_config.permission.mode,
-                sigil_kernel::PermissionMode::ReadOnly
-            ),
-        disk_space_bytes: fs2::available_space(workspace_root).ok(),
-        verification_runner_available,
-        external_writer_active,
-    }
-}
-
-/// Resolves route shape and the exact credential the provider build would use.
-///
-/// Route availability only proves the connection configuration is valid; credential
-/// availability separately resolves the configured source (environment variable or stored
-/// record) so a missing API key is discovered at admission instead of at provider startup.
-fn route_and_credential_probe(root_config: &RootConfig) -> (bool, bool) {
-    let loaded = crate::provider_connections::load_provider_connections(root_config);
-    if loaded.mode != crate::provider_connections::ConfigMode::V2 {
-        return (false, false);
-    }
-    let Some(model_ref) = loaded.default_model.as_ref() else {
-        return (false, false);
-    };
-    let route_available =
-        crate::provider_connections::resolve_model_route(root_config, model_ref).is_ok();
-    if !route_available {
-        return (false, false);
-    }
-    let Some(connection) = loaded.connections.get(&model_ref.connection_id) else {
-        return (false, false);
-    };
-    let credential_available = match &connection.credential {
-        crate::provider_connections::LoadedCredentialRef::Config(
-            crate::provider_connections::CredentialRefConfig::Environment { name },
-        ) => {
-            let environment = crate::provider_connections::ProcessCredentialEnvironment;
-            crate::provider_connections::read_configured_environment_credential(
-                &connection.config,
-                name,
-                &environment,
-            )
-            .is_some()
-        }
-        crate::provider_connections::LoadedCredentialRef::Config(
-            crate::provider_connections::CredentialRefConfig::None,
-        ) => true,
-        crate::provider_connections::LoadedCredentialRef::Config(
-            crate::provider_connections::CredentialRefConfig::Stored { id },
-        ) => {
-            let store =
-                crate::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
-                    root_config,
-                );
-            futures::executor::block_on(
-                <crate::provider_connections::ConfiguredProviderCredentialStore as crate::provider_connections::ProviderCredentialStore>::load(
-                    &store,
-                    id,
-                ),
-            )
-            .is_ok_and(|record| record.is_some())
-        }
-    };
-    (true, credential_available)
-}
-
-/// Runs one monotonic admission attempt for an adopted Task (RFC-0067 10.2, 14.2).
-///
-/// Admission observes the current environment and appends a durable
-/// `TaskAdmissionAttemptedV1` with a typed `Ready | Blocked | Paused` outcome. It never executes
-/// tools, never modifies the workspace and never generates a Plan.
-///
-/// # Errors
-///
-/// Returns an error when the admission record cannot be appended.
-pub fn admit_adopted_task(
-    session: &mut Session,
-    root_config: &RootConfig,
-    workspace_root: &Path,
-    task_id: &TaskId,
-    candidate: &sigil_kernel::ExecutablePlanCandidateV1,
-    probes: &TaskAdmissionProbeContext,
-    now_ms: u64,
-) -> Result<sigil_kernel::TaskAdmissionOutcomeV1> {
-    let base_snapshot = candidate.compile_binding.base_workspace_snapshot_id.clone();
-    let current_snapshot = plan_handoff_workspace_snapshot_id(root_config, workspace_root)
-        .ok()
-        .flatten();
-    let workspace_state = match (base_snapshot.as_deref(), current_snapshot.as_deref()) {
-        (Some(base), Some(current)) if base == current => {
-            sigil_kernel::WorkspaceAdmissionStateV1::ExactMatch
-        }
-        (Some(_), Some(_)) => sigil_kernel::WorkspaceAdmissionStateV1::ExternalDrift,
-        _ => sigil_kernel::WorkspaceAdmissionStateV1::SnapshotUnavailable,
-    };
-    let missing_capabilities = probes
-        .tool_contracts
-        .as_ref()
-        .map(|contracts| {
-            let available = contracts
-                .iter()
-                .flat_map(|tool| tool.capabilities.iter().copied())
-                .collect::<BTreeSet<_>>();
-            candidate
-                .required_capabilities
-                .iter()
-                .copied()
-                .filter(|capability| !available.contains(&capability.tool_capability()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let observation = sigil_kernel::TaskAdmissionObservationV1 {
-        base_workspace_snapshot_id: base_snapshot.clone(),
-        current_workspace_snapshot_id: current_snapshot.clone(),
-        workspace_state,
-        missing_capabilities: missing_capabilities.clone(),
-        provider_route_available: probes.provider_route_available,
-        credential_available: probes.credential_available,
-        permission_profile_ok: probes.permission_profile_ok,
-        disk_space_bytes: probes.disk_space_bytes,
-        external_writer_active: probes.external_writer_active,
-        verification_runner_available: probes.verification_runner_available,
-        observed_at_ms: now_ms,
-    };
-    let outcome = if session
-        .task_state_projection()
-        .tasks
-        .get(task_id)
-        .is_some_and(|task| task.status == TaskRunStatus::Paused)
-    {
-        // CreatePaused start mode: the task waits for an explicit resume without probing.
-        sigil_kernel::TaskAdmissionOutcomeV1::Paused(sigil_kernel::TaskPauseReasonV1::CreatePaused)
-    } else {
-        let blocker = |reason_code: sigil_kernel::TaskBlockerReasonCodeV1,
-                       summary: String,
-                       affected_step: Option<TaskStepId>,
-                       affected_capability: Option<sigil_kernel::TaskCapabilityV2>,
-                       actions: &[sigil_kernel::TaskBlockerActionV1]| {
-            sigil_kernel::TaskBlockerV1 {
-                reason_code,
-                summary,
-                affected_step,
-                affected_capability,
-                retryable: true,
-                available_actions: actions.to_vec(),
-                evidence_digest: sigil_kernel::stable_event_hash(
-                    serde_json::to_string(&observation)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                created_at_ms: now_ms,
-                resolved_at_ms: None,
-            }
-        };
-        // Snapshot drift, free-space estimates, and verification auto-run availability are
-        // observations, not execution authority. Real writes enforce capacity/conflict checks;
-        // required verification remains a completion condition in the task runner.
-        match () {
-            _ if !missing_capabilities.is_empty() => {
-                let capability = missing_capabilities.first().copied();
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::MissingRequiredCapability,
-                    format!(
-                        "the tool registry is missing required capabilities: {}",
-                        missing_capabilities
-                            .iter()
-                            .map(|capability| capability.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    None,
-                    capability,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
-            _ if !probes.provider_route_available => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::ProviderUnavailable,
-                    "the configured provider route is unavailable; rebind the route and retry"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[
-                        sigil_kernel::TaskBlockerActionV1::RebindRoute,
-                        sigil_kernel::TaskBlockerActionV1::RetryAdmission,
-                    ],
-                ))
-            }
-            _ if !probes.credential_available => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::CredentialUnavailable,
-                    "the provider credential is unavailable; configure credentials and retry"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
-            _ if !probes.permission_profile_ok => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::PermissionRequired,
-                    "the current permission profile cannot cover the task; grant permission and retry"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[
-                        sigil_kernel::TaskBlockerActionV1::GrantPermission,
-                        sigil_kernel::TaskBlockerActionV1::RetryAdmission,
-                    ],
-                ))
-            }
-            _ if probes.external_writer_active => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::ExternalWriterActive,
-                    "another writer holds the workspace; retry after it releases the workspace"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
-            _ => sigil_kernel::TaskAdmissionOutcomeV1::Ready(
-                sigil_kernel::TaskRuntimeLeaseBindingV1 {
-                    lease_id: sigil_kernel::stable_event_uuid(
-                        "sigil-task-admission-lease-v1",
-                        &format!(
-                            "{}:{}",
-                            task_id.as_str(),
-                            session.task_state_projection().next_admission_ordinal(task_id)
-                        ),
-                    ),
-                    granted_at_ms: now_ms,
-                },
-            ),
-        }
-    };
-    let ordinal = session
-        .task_state_projection()
-        .next_admission_ordinal(task_id);
-    session.append_control(ControlEntry::TaskAdmissionAttemptedV1(
-        sigil_kernel::TaskAdmissionAttemptV1 {
-            task_id: task_id.clone(),
-            plan_version: candidate.task_plan.plan_version,
-            ordinal,
-            candidate_hash: candidate.candidate_hash.clone(),
-            observed_environment: observation,
-            outcome: outcome.clone(),
-        },
-    ))?;
-    Ok(outcome)
-}
-
 /// Builds a bounded, user-safe message for one typed plan run rejection.
 pub fn plan_run_rejection_message(rejection: &sigil_kernel::PlanRunRejectionV1) -> String {
     match rejection {
@@ -5876,18 +5224,8 @@ pub fn plan_run_rejection_message(rejection: &sigil_kernel::PlanRunRejectionV1) 
         sigil_kernel::PlanRunRejectionV1::PlanHashStale { expected, current } => {
             format!("the plan changed since it was shown (expected {expected}, current {current})")
         }
-        sigil_kernel::PlanRunRejectionV1::PlanNotReady { plan_state } => {
-            format!("the plan is not ready to run: {}", plan_state.as_str())
-        }
+        sigil_kernel::PlanRunRejectionV1::PlanNotReady => "the plan is not ready to run".to_owned(),
         sigil_kernel::PlanRunRejectionV1::PlanRejected => "the plan was rejected".to_owned(),
-        sigil_kernel::PlanRunRejectionV1::CandidateMissing => {
-            "the plan has no executable candidate".to_owned()
-        }
-        sigil_kernel::PlanRunRejectionV1::CandidateHashMismatch { expected, current } => {
-            format!(
-                "the plan candidate changed since it was shown (expected {expected}, current {current})"
-            )
-        }
         sigil_kernel::PlanRunRejectionV1::FrontierStale { expected, current } => {
             format!(
                 "the session changed while running (expected {expected}, current {current}); retry the same command"
@@ -5959,7 +5297,6 @@ pub fn application_plan_decision(
                 task_title: None,
                 candidate_hash: Some(expected_candidate_hash.to_owned()),
                 task_phase: None,
-                task_blocker: None,
                 user_input_request: None,
                 revision_request: None,
             }
@@ -5985,7 +5322,6 @@ pub fn application_plan_decision(
                 task_title: None,
                 candidate_hash: expected_candidate_hash.map(str::to_owned),
                 task_phase: None,
-                task_blocker: None,
                 user_input_request: None,
                 revision_request: Some(retry.request),
             }
@@ -6010,7 +5346,6 @@ pub fn application_plan_decision(
                 session_id: session.session_scope_id().to_owned(),
                 plan_id: plan_id.clone(),
                 expected_plan_hash: command.expected_plan_hash.clone(),
-                expected_candidate_hash: String::new(),
                 expected_durable_frontier: session.durable_frontier_sequence(),
                 start_mode: PlanTaskStartMode::CreateAndRun,
                 permission: match command.permission_grant {
@@ -6035,18 +5370,6 @@ pub fn application_plan_decision(
                     plan_run_rejection_message(&rejection)
                 )
             })?;
-            let task_phase =
-                match PlanExecutionService::direct_execution_outcome(&approved, now_ms()) {
-                    sigil_kernel::TaskAdmissionOutcomeV1::Ready(_) => {
-                        Some(sigil_kernel::TaskExecutionPhaseV1::Ready)
-                    }
-                    sigil_kernel::TaskAdmissionOutcomeV1::Paused(_) => {
-                        Some(sigil_kernel::TaskExecutionPhaseV1::Paused)
-                    }
-                    sigil_kernel::TaskAdmissionOutcomeV1::Blocked(_) => unreachable!(
-                        "first-class direct Plan execution has no materialization blocker"
-                    ),
-                };
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
                 plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
@@ -6054,8 +5377,7 @@ pub fn application_plan_decision(
                 task_id: Some(approved.task_id.as_str().to_owned()),
                 task_title: Some(approved.task_title),
                 candidate_hash: None,
-                task_phase,
-                task_blocker: None,
+                task_phase: Some(sigil_kernel::TaskExecutionPhaseV1::Ready),
                 user_input_request: None,
                 revision_request: None,
             }
@@ -6078,7 +5400,6 @@ pub fn application_plan_decision(
                 task_title: None,
                 candidate_hash: None,
                 task_phase: None,
-                task_blocker: None,
                 user_input_request: None,
                 revision_request: None,
             }
@@ -6105,7 +5426,6 @@ pub fn application_plan_decision(
                 task_title: None,
                 candidate_hash: None,
                 task_phase: None,
-                task_blocker: None,
                 user_input_request,
                 revision_request: None,
             }
@@ -6126,7 +5446,6 @@ pub fn application_plan_decision(
                 task_title: None,
                 candidate_hash: None,
                 task_phase: None,
-                task_blocker: None,
                 user_input_request: None,
                 revision_request: None,
             }
@@ -6148,8 +5467,32 @@ pub fn application_plan_revision_guidance_decision(
     sigil_kernel::UserInputDecisionReceiptV1,
     Option<PlanReviewRunRequest>,
 )> {
+    application_plan_revision_guidance_decision_bound(
+        root_config,
+        workspace_root,
+        session_log_path,
+        expected_scope,
+        command,
+        None,
+    )
+}
+
+pub fn application_plan_revision_guidance_decision_bound(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session_log_path: &Path,
+    expected_scope: &str,
+    command: sigil_kernel::UserInputDecisionCommandV1,
+    operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
+) -> Result<(
+    sigil_kernel::UserInputDecisionReceiptV1,
+    Option<PlanReviewRunRequest>,
+)> {
     let mut session =
         crate::application_run::load_application_control_session(session_log_path, expected_scope)?;
+    if let Some(operation) = operation {
+        session.bind_application_operation(operation)?;
+    }
     PlanReviewCoordinator::accept_plan_revision_guidance(
         &mut session,
         command,
@@ -6171,8 +5514,38 @@ pub fn application_plan_review_research_input_decision(
     Option<PlanReviewRunRequest>,
     Option<PublicEventOutboxEntryV1>,
 )> {
+    application_plan_review_research_input_decision_bound(
+        session_log_path,
+        expected_scope,
+        command,
+        child_resource_provisioner,
+        None,
+    )
+}
+
+/// Carries a host-issued operation into the existing RA research bundle before the decision.
+pub fn application_plan_review_research_input_decision_bound(
+    session_log_path: &Path,
+    expected_scope: &str,
+    command: sigil_kernel::UserInputDecisionCommandV1,
+    child_resource_provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+    operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
+) -> Result<(
+    sigil_kernel::UserInputDecisionReceiptV1,
+    Option<PlanReviewRunRequest>,
+    Option<PublicEventOutboxEntryV1>,
+)> {
     let mut session =
         crate::application_run::load_application_control_session(session_log_path, expected_scope)?;
+    if let Some(operation) = operation
+        && !PlanReviewCoordinator::bind_managed_research_application_operation(
+            &mut session,
+            &operation,
+            child_resource_provisioner,
+        )?
+    {
+        bail!("research application operation does not bind the parent attempt");
+    }
     PlanReviewCoordinator::accept_plan_review_research_input_with_resources(
         &mut session,
         command,

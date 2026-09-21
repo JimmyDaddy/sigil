@@ -43,6 +43,15 @@ pub enum ApplicationClientAction {
 /// Exact shared slash-command catalog.
 pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
     ApplicationCommandSpec {
+        canonical: "/control-log",
+        aliases: &[],
+        label: "Recover command history",
+        description: "preview and confirm recovery of a damaged command journal",
+        argument_hint: Some("preview | confirm <preview-digest>"),
+        completes_with_space: true,
+        client_action: Some(ApplicationClientAction::OpenSupport),
+    },
+    ApplicationCommandSpec {
         canonical: "/compact",
         aliases: &[],
         label: "Compact context",

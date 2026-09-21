@@ -34,7 +34,6 @@ fn doctor_reports_current_plan_review_format_without_mutating_sessions() -> Resu
             source_turn: source,
             route_decision_id: None,
             child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
-            finalizer_session_ref: None,
             revision_request_id: None,
             attempt_ordinal: 1,
             base_plan_id: None,

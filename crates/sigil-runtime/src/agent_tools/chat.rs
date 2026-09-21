@@ -1,5 +1,227 @@
 use super::*;
 
+async fn prepare_background_isolated_write_controls(
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+    thread_id: &AgentThreadId,
+    final_text: &str,
+    outcome: &AgentRunOutcome,
+    owner: Option<BackgroundChatAgentWriteOwner>,
+) -> Result<Option<PreparedChatIsolatedChildControls>> {
+    match owner {
+        None => Ok(None),
+        Some(BackgroundChatAgentWriteOwner::ChangesetOnly {
+            base_snapshot_id,
+            workspace_root,
+        }) => prepare_chat_changeset_only_child_controls(
+            session,
+            thread_id,
+            &base_snapshot_id,
+            final_text,
+            outcome,
+            &workspace_root,
+        )
+        .map(PreparedChatIsolatedChildControls::ChangesetOnly)
+        .map(Some),
+        Some(BackgroundChatAgentWriteOwner::Worktree {
+            worktree,
+            workspace_root,
+            objective,
+        }) => {
+            let prepared = prepare_chat_worktree_child_controls(
+                session,
+                thread_id,
+                &worktree,
+                outcome,
+                &workspace_root,
+                &objective,
+            )
+            .await;
+            let cleanup = cleanup_chat_worktree(session, handler, *worktree).await;
+            match (prepared, cleanup) {
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Ok(None), Ok(())) => Ok(None),
+                (Ok(Some(controls)), Ok(())) => {
+                    Ok(Some(PreparedChatIsolatedChildControls::Worktree(controls)))
+                }
+            }
+        }
+    }
+}
+
+pub(super) async fn cleanup_background_isolated_write_owner(
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+    owner: BackgroundChatAgentWriteOwner,
+) -> Result<()> {
+    match owner {
+        BackgroundChatAgentWriteOwner::ChangesetOnly { .. } => Ok(()),
+        BackgroundChatAgentWriteOwner::Worktree { worktree, .. } => {
+            cleanup_chat_worktree(session, handler, *worktree).await
+        }
+    }
+}
+
+pub(super) async fn record_finished_background_run(
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+    background: BackgroundChatAgentHandle,
+) -> Result<AgentThreadId> {
+    let BackgroundChatAgentHandle {
+        thread: thread_record,
+        handle,
+        collection_supervisor,
+        write_owner,
+        ..
+    } = background;
+    let supervisor = &collection_supervisor;
+    let thread = thread_record.to_runtime_thread();
+    let thread_id = thread.thread_id.clone();
+    match handle.finish().await {
+        Ok(Ok(output)) => {
+            supervisor.close_registered_chat_child_user_input_routes(
+                session,
+                handler,
+                &thread_id,
+                AgentRouteStatus::Resolved,
+            )?;
+            let budget_warning = supervisor
+                .validate_usage_budget(&thread.budget_scope_id, &output.usage)
+                .err()
+                .map(|error| format!("{error:#}"));
+            match output.disposition {
+                BackgroundChatAgentDisposition::Finished {
+                    materialized,
+                    status,
+                } => {
+                    let write_controls = match prepare_background_isolated_write_controls(
+                        session,
+                        handler,
+                        &thread_id,
+                        &materialized.final_text,
+                        &output.outcome,
+                        write_owner,
+                    )
+                    .await
+                    {
+                        Ok(controls) => controls,
+                        Err(error) => {
+                            let reason = format!(
+                                "background isolated-write result could not be recorded: {error:#}"
+                            );
+                            supervisor.record_chat_child_failure(
+                                session,
+                                handler,
+                                &thread,
+                                reason.clone(),
+                            )?;
+                            let _ = handler.handle(RunEvent::Notice(format!(
+                                "agent {} failed: {reason}",
+                                thread_id.as_str()
+                            )));
+                            return Ok(thread_id);
+                        }
+                    };
+                    supervisor.record_chat_child_result(
+                        session,
+                        handler,
+                        &thread,
+                        status,
+                        &materialized,
+                        &output.outcome,
+                        Some(output.usage),
+                    )?;
+                    if let Some(controls) = write_controls {
+                        append_prepared_chat_isolated_child_controls(session, handler, controls)?;
+                    }
+                }
+                BackgroundChatAgentDisposition::AwaitingUserInput { request } => {
+                    if let Some(owner) = write_owner {
+                        cleanup_background_isolated_write_owner(session, handler, owner).await?;
+                        supervisor.record_chat_child_failure(
+                            session,
+                            handler,
+                            &thread,
+                            "isolated-write background child cannot suspend for user input; resume in foreground".to_owned(),
+                        )?;
+                    } else {
+                        supervisor.record_chat_child_waiting_for_input(
+                            session, handler, &thread, *request,
+                        )?;
+                    }
+                }
+            }
+            supervisor.record_chat_mailbox_consumed(
+                session,
+                handler,
+                &thread,
+                &output.consumed_mailbox_route_ids,
+            )?;
+            if let Some(warning) = budget_warning {
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent budget warning after child completion: {warning}"
+                )));
+            }
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent {} finished",
+                thread_id.as_str()
+            )));
+        }
+        Ok(Err(error)) => {
+            supervisor.close_registered_chat_child_user_input_routes(
+                session,
+                handler,
+                &thread_id,
+                AgentRouteStatus::Stale,
+            )?;
+            if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>() {
+                if let Some(owner) = write_owner {
+                    cleanup_background_isolated_write_owner(session, handler, owner).await?;
+                }
+                supervisor.record_chat_child_blocked_for_approval(
+                    session,
+                    handler,
+                    &thread,
+                    blocked.route(),
+                )?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} is blocked waiting for approval",
+                    thread_id.as_str()
+                )));
+            } else {
+                if let Some(owner) = write_owner {
+                    cleanup_background_isolated_write_owner(session, handler, owner).await?;
+                }
+                let reason = format!("{error:#}");
+                supervisor.record_chat_child_failure(session, handler, &thread, reason.clone())?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} failed: {reason}",
+                    thread_id.as_str()
+                )));
+            }
+        }
+        Err(error) => {
+            supervisor.close_registered_chat_child_user_input_routes(
+                session,
+                handler,
+                &thread_id,
+                AgentRouteStatus::Stale,
+            )?;
+            let reason = format!("background child agent join failed: {error}");
+            if let Some(owner) = write_owner {
+                cleanup_background_isolated_write_owner(session, handler, owner).await?;
+            }
+            supervisor.record_chat_child_failure(session, handler, &thread, reason.clone())?;
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent {} failed: {reason}",
+                thread_id.as_str()
+            )));
+        }
+    }
+    Ok(thread_id)
+}
+
 impl AgentToolRuntime {
     pub(super) async fn wait_agent(
         &mut self,
@@ -20,9 +242,7 @@ impl AgentToolRuntime {
             }
         };
         if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
-            && let Err(error) = self
-                .record_finished_background_run(session, handler, background)
-                .await
+            && let Err(error) = record_finished_background_run(session, handler, background).await
         {
             return ToolResult::error(
                 call.id.clone(),
@@ -47,9 +267,8 @@ impl AgentToolRuntime {
             let wait_started = Instant::now();
             loop {
                 if let Some(background) = self.background_runs.remove_if_finished(&thread_id) {
-                    if let Err(error) = self
-                        .record_finished_background_run(session, handler, background)
-                        .await
+                    if let Err(error) =
+                        record_finished_background_run(session, handler, background).await
                     {
                         return ToolResult::error(
                             call.id.clone(),
@@ -69,9 +288,7 @@ impl AgentToolRuntime {
             }
         }
         if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
-            && let Err(error) = self
-                .record_finished_background_run(session, handler, background)
-                .await
+            && let Err(error) = record_finished_background_run(session, handler, background).await
         {
             return ToolResult::error(
                 call.id.clone(),
@@ -120,13 +337,28 @@ impl AgentToolRuntime {
         };
         if thread.status.is_terminal() {
             self.pending_waits.remove(&thread_id);
+            if let Some(result) = thread
+                .result
+                .as_ref()
+                .filter(|result| agent_result_has_page_source(session, result))
+            {
+                let offset_chars = self
+                    .result_delivery_in_context(session, result)
+                    .contiguous_chars();
+                let result_args = json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": offset_chars,
+                    "max_chars": MAX_RESULT_PAGE_LIMIT,
+                });
+                return self.read_agent_result(session, call, &result_args, handler);
+            }
         } else {
             if let Some(retry_after) = self.wait_throttle_remaining(&thread_id) {
                 return agent_wait_throttled_tool_result(call, thread, retry_after);
             }
             self.record_pending_wait(&thread_id);
         }
-        agent_status_tool_result(call, thread)
+        agent_status_tool_result(session, call, thread)
     }
 
     fn wait_throttle_remaining(&self, thread_id: &AgentThreadId) -> Option<Duration> {
@@ -138,120 +370,8 @@ impl AgentToolRuntime {
         self.pending_waits.insert(thread_id.clone(), Instant::now());
     }
 
-    pub(super) async fn record_finished_background_run(
-        &mut self,
-        session: &mut Session,
-        handler: &mut (dyn EventHandler + Send),
-        background: BackgroundChatAgentHandle,
-    ) -> Result<AgentThreadId> {
-        let thread = background.thread.to_runtime_thread();
-        let thread_id = thread.thread_id.clone();
-        match background.handle.finish().await {
-            Ok(Ok(output)) => {
-                self.supervisor
-                    .close_registered_chat_child_user_input_routes(
-                        session,
-                        handler,
-                        &thread_id,
-                        AgentRouteStatus::Resolved,
-                    )?;
-                let budget_warning = self
-                    .supervisor
-                    .validate_usage_budget(&thread.budget_scope_id, &output.usage)
-                    .err()
-                    .map(|error| format!("{error:#}"));
-                match output.disposition {
-                    BackgroundChatAgentDisposition::Finished {
-                        materialized,
-                        status,
-                    } => self.supervisor.record_chat_child_result(
-                        session,
-                        handler,
-                        &thread,
-                        status,
-                        &materialized,
-                        &output.outcome,
-                        Some(output.usage),
-                    )?,
-                    BackgroundChatAgentDisposition::AwaitingUserInput { request } => self
-                        .supervisor
-                        .record_chat_child_waiting_for_input(session, handler, &thread, *request)?,
-                }
-                self.supervisor.record_chat_mailbox_consumed(
-                    session,
-                    handler,
-                    &thread,
-                    &output.consumed_mailbox_route_ids,
-                )?;
-                if let Some(warning) = budget_warning {
-                    let _ = handler.handle(RunEvent::Notice(format!(
-                        "agent budget warning after child completion: {warning}"
-                    )));
-                }
-                let _ = handler.handle(RunEvent::Notice(format!(
-                    "agent {} finished",
-                    thread_id.as_str()
-                )));
-            }
-            Ok(Err(error)) => {
-                self.supervisor
-                    .close_registered_chat_child_user_input_routes(
-                        session,
-                        handler,
-                        &thread_id,
-                        AgentRouteStatus::Stale,
-                    )?;
-                if let Some(blocked) = error.downcast_ref::<BackgroundApprovalRequired>() {
-                    self.supervisor.record_chat_child_blocked_for_approval(
-                        session,
-                        handler,
-                        &thread,
-                        blocked.route(),
-                    )?;
-                    let _ = handler.handle(RunEvent::Notice(format!(
-                        "agent {} is blocked waiting for approval",
-                        thread_id.as_str()
-                    )));
-                } else {
-                    let reason = format!("{error:#}");
-                    self.supervisor.record_chat_child_failure(
-                        session,
-                        handler,
-                        &thread,
-                        reason.clone(),
-                    )?;
-                    let _ = handler.handle(RunEvent::Notice(format!(
-                        "agent {} failed: {reason}",
-                        thread_id.as_str()
-                    )));
-                }
-            }
-            Err(error) => {
-                self.supervisor
-                    .close_registered_chat_child_user_input_routes(
-                        session,
-                        handler,
-                        &thread_id,
-                        AgentRouteStatus::Stale,
-                    )?;
-                let reason = format!("background child agent join failed: {error}");
-                self.supervisor.record_chat_child_failure(
-                    session,
-                    handler,
-                    &thread,
-                    reason.clone(),
-                )?;
-                let _ = handler.handle(RunEvent::Notice(format!(
-                    "agent {} failed: {reason}",
-                    thread_id.as_str()
-                )));
-            }
-        }
-        Ok(thread_id)
-    }
-
     pub(super) fn read_agent_result(
-        &self,
+        &mut self,
         session: &mut Session,
         call: &ToolCall,
         args: &Value,
@@ -299,10 +419,15 @@ impl AgentToolRuntime {
                 ),
             );
         };
-        if let Some(delivered) =
-            full_agent_result_delivery(session, &result.thread_id, &result.output_hash)
-        {
-            return agent_result_already_delivered_tool_result(call, result, &delivered);
+        let mut coverage = self.result_delivery_in_context(session, result);
+        if let Some(already_delivered) = agent_result_page_already_delivered_tool_result(
+            session,
+            call,
+            result,
+            &result_page_request,
+            &coverage,
+        ) {
+            return already_delivered;
         }
         let result_page = match read_agent_result_page(session, result, result_page_request) {
             Ok(page) => page,
@@ -315,7 +440,7 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let delivery = ControlEntry::AgentThreadResultDelivered(AgentThreadResultDeliveredEntry {
+        let delivery = AgentThreadResultDeliveredEntry {
             thread_id: result.thread_id.clone(),
             call_id: call.id.clone(),
             output_hash: result.output_hash.clone(),
@@ -324,8 +449,17 @@ impl AgentToolRuntime {
             total_chars: result_page.total_chars,
             truncated: result_page.truncated,
             delivered_at_ms: None,
-        });
-        if let Err(error) = handler.commit_controls(session, vec![delivery]) {
+        };
+        if let Err(error) = handler.commit_controls(
+            session,
+            vec![ControlEntry::AgentThreadResultDelivered(delivery.clone())],
+        ) {
+            // A publication error can follow a successful append. No body is returned on this
+            // path, so conservatively restart this session's transient delivery accounting.
+            self.result_context_frontiers.insert(
+                session.session_scope_id().to_owned(),
+                session.entries().len(),
+            );
             return ToolResult::error(
                 call.id.clone(),
                 call.name.clone(),
@@ -333,7 +467,23 @@ impl AgentToolRuntime {
                 error.to_string(),
             );
         }
-        agent_result_page_tool_result(call, result, &result_page)
+        coverage.record(&delivery);
+        agent_result_page_tool_result(call, result, &result_page, &coverage)
+    }
+
+    pub(super) fn result_delivery_in_context(
+        &mut self,
+        session: &Session,
+        result: &AgentThreadResult,
+    ) -> AgentResultDeliveryCoverage {
+        let entries = session.entries();
+        let frontier = self
+            .result_context_frontiers
+            .entry(session.session_scope_id().to_owned())
+            .or_insert(entries.len());
+        // Reloading an earlier log frontier cannot retain delivery from the discarded tail.
+        *frontier = (*frontier).min(entries.len());
+        session.agent_result_delivery_since(&result.thread_id, &result.output_hash, *frontier)
     }
 
     pub(super) fn list_agents(&self, session: &Session, call: &ToolCall) -> ToolResult {
@@ -343,6 +493,7 @@ impl AgentToolRuntime {
             .values()
             .map(|thread| {
                 let result_ref = thread.result.as_ref().map(|result| {
+                    let page_available = agent_result_has_page_source(session, result);
                     json!({
                         "thread_id": result.thread_id.as_str(),
                         "status": terminal_status_label(result.status),
@@ -350,12 +501,13 @@ impl AgentToolRuntime {
                         "original_summary_chars": result.original_summary_chars,
                         "changed_paths_count": result.changed_paths.len(),
                         "artifact_count": result.artifacts.len(),
-                        "read_tool": READ_AGENT_RESULT_TOOL_NAME,
-                        "read_args": {
+                        "page_available": page_available,
+                        "read_tool": page_available.then_some(READ_AGENT_RESULT_TOOL_NAME),
+                        "read_args": page_available.then(|| json!({
                             "thread_id": result.thread_id.as_str(),
                             "offset_chars": 0,
                             "max_chars": MAX_RESULT_PAGE_LIMIT,
-                        }
+                        }))
                     })
                 });
                 let approval_pending = projection.approval_routes.values().any(|route| {
@@ -439,67 +591,9 @@ impl AgentToolRuntime {
                 ),
             );
         }
-        const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
-        let recorder = match session.run_cancellation_recorder() {
-            Ok(recorder) => recorder,
-            Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::Internal,
-                    error.to_string(),
-                );
-            }
-        };
-        let run_scope_id = match self.background_runs.reserve_cancellation_scope(&thread_id) {
-            Ok(Some(run_scope_id)) => run_scope_id,
-            Ok(None) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::Unsupported,
-                    format!(
-                        "agent thread {} has no cancellable runtime handle",
-                        thread_id.as_str()
-                    ),
-                );
-            }
-            Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::Internal,
-                    error.to_string(),
-                );
-            }
-        };
-        let request_id = format!("cancel-{run_scope_id}");
-        let requested_at_ms = unix_time_ms();
-        if let Err(error) = recorder.append_requested(&RunCancellationRequestedEntry {
-            request_id: request_id.clone(),
-            run_scope_id: run_scope_id.clone(),
-            target: RunCancellationTarget::AgentThread {
-                thread_id: thread_id.as_str().to_owned(),
-            },
-            reason: reason.clone(),
-            requested_at_ms,
-            quiescence_deadline_ms: requested_at_ms
-                .saturating_add(QUIESCENCE_TIMEOUT.as_millis() as u64),
-        }) {
-            let _ = self
-                .background_runs
-                .cancel(&thread_id, QUIESCENCE_TIMEOUT)
-                .await;
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::Internal,
-                error.to_string(),
-            );
-        }
         let cancellation = match self
             .background_runs
-            .cancel(&thread_id, QUIESCENCE_TIMEOUT)
+            .cancel_agent_thread_durably(session, &thread_id, reason, handler)
             .await
         {
             Ok(Some(cancellation)) => cancellation,
@@ -523,63 +617,14 @@ impl AgentToolRuntime {
                 );
             }
         };
-        self.supervisor.release_runtime_thread(&thread_id);
-        let (thread_status, status_label, terminal_reason) = match cancellation.outcome {
-            RunCancellationTerminalOutcome::Cancelled => {
-                (AgentThreadStatus::Cancelled, "cancelled", reason.clone())
-            }
-            RunCancellationTerminalOutcome::Interrupted => (
-                AgentThreadStatus::Interrupted,
-                "interrupted",
-                "cancellation deadline exceeded; cleanup could not be confirmed".to_owned(),
-            ),
-        };
-        if let Err(error) = recorder.append_finalized(&RunCancellationFinalizedEntry {
-            request_id,
-            run_scope_id: cancellation.run_scope_id,
-            outcome: cancellation.outcome,
-            cleanup_complete: cancellation.cleanup_complete,
-            active_effects: cancellation.active_effects,
-            active_tasks: cancellation.active_tasks,
-            reason: terminal_reason.clone(),
-            finalized_at_ms: unix_time_ms(),
-        }) {
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::Internal,
-                error.to_string(),
-            );
-        }
-        let interrupted = ControlEntry::AgentRunInterrupted(AgentRunInterruptedEntry {
-            thread_id: thread_id.clone(),
-            attempt_id: cancellation.thread.attempt_id,
-            reason: terminal_reason.clone(),
-        });
-        let terminal = ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-            thread_id: thread_id.clone(),
-            status: thread_status,
-            reason: Some(terminal_reason.clone()),
-            updated_at_ms: Some(unix_time_ms()),
-        });
-        for control in [terminal, interrupted] {
-            if let Err(error) = handler.commit_controls(session, vec![control]) {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::Internal,
-                    error.to_string(),
-                );
-            }
-        }
         ToolResult::ok(
             call.id.clone(),
             call.name.clone(),
             serde_json::to_string(&json!({
                 "thread_id": thread_id.as_str(),
-                "previous_status": thread_status_label(previous_status),
-                "status": status_label,
-                "reason": terminal_reason,
+                "previous_status": thread_status_label(cancellation.previous_status),
+                "status": cancellation.status_label,
+                "reason": cancellation.reason,
                 "cleanup_complete": cancellation.cleanup_complete,
                 "next_action": "do not wait for this agent; report the durable terminal status"
             }))
@@ -587,8 +632,8 @@ impl AgentToolRuntime {
             ToolResultMeta {
                 details: json!({
                     "thread_id": thread_id.as_str(),
-                    "previous_status": thread_status_label(previous_status),
-                    "status": status_label,
+                    "previous_status": thread_status_label(cancellation.previous_status),
+                    "status": thread_status_label(cancellation.status),
                     "cleanup_complete": cancellation.cleanup_complete,
                 }),
                 ..ToolResultMeta::default()
@@ -791,37 +836,6 @@ impl AgentToolRuntime {
     ) -> ToolResult {
         close_agent_from_args(session, call, args)
     }
-}
-
-fn full_agent_result_delivery(
-    session: &Session,
-    thread_id: &AgentThreadId,
-    output_hash: &str,
-) -> Option<AgentThreadResultDeliveredEntry> {
-    let mut delivered_chars = 0usize;
-    let mut full_delivery = None;
-    for entry in session.entries() {
-        let SessionLogEntry::Control(ControlEntry::AgentThreadResultDelivered(delivered)) = entry
-        else {
-            continue;
-        };
-        if delivered.thread_id != *thread_id || delivered.output_hash != output_hash {
-            continue;
-        }
-        let page_end = delivered
-            .offset_chars
-            .saturating_add(delivered.returned_chars);
-        if delivered.offset_chars <= delivered_chars {
-            delivered_chars = delivered_chars.max(page_end);
-        }
-        if !delivered.truncated
-            && delivered.total_chars > 0
-            && delivered_chars >= delivered.total_chars
-        {
-            full_delivery = Some(delivered.clone());
-        }
-    }
-    full_delivery
 }
 
 pub(super) fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {

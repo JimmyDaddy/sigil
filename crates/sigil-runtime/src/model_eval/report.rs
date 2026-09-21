@@ -213,7 +213,7 @@ fn build_orchestration_eval_report_record(
                 canonical_model_version: observed_canonical_model_version(execution, contract),
                 route_fingerprint,
                 routing_prompt_digest: contract.routing_prompt_digest.clone(),
-                planner_prompt_digest: contract.planner_prompt_digest.clone(),
+                direct_task_prompt_digest: contract.direct_task_prompt_digest.clone(),
                 system_prompt_digest: contract.system_prompt_digest.clone(),
                 tool_profile_contract_digest: contract.tool_profile_contract_digest.clone(),
                 task_config_digest,
@@ -284,7 +284,7 @@ fn build_model_eval_report_record(
         .map(expected_verification_verdict)
         .collect::<Vec<_>>();
     let (tool_calls, changed_files, approval_count) = session_activity(&session);
-    let assertion_results = evaluate_fixture_assertions(execution, &tool_calls);
+    let assertion_results = evaluate_fixture_assertions(execution, &session, &tool_calls);
     let mut mismatch_reasons = Vec::new();
     if !expected_run_statuses.contains(&run_status) {
         mismatch_reasons.push(format!("unexpected terminal run status: {run_status:?}"));
@@ -465,6 +465,7 @@ fn expected_run_status(expected: ModelEvalExpectedTerminal) -> RunStatus {
         ModelEvalExpectedTerminal::Completed => RunStatus::Completed,
         ModelEvalExpectedTerminal::Blocked => RunStatus::Blocked,
         ModelEvalExpectedTerminal::Failed => RunStatus::Failed,
+        ModelEvalExpectedTerminal::Paused => RunStatus::Paused,
     }
 }
 
@@ -520,6 +521,7 @@ fn execution_failures(
 
 fn evaluate_fixture_assertions(
     execution: &ModelEvalRunExecution,
+    session: &Session,
     tool_calls: &[EvalToolCallSummary],
 ) -> Vec<ModelEvalAssertionResultV3> {
     execution
@@ -573,6 +575,18 @@ fn evaluate_fixture_assertions(
                     let passed = !tool_calls.iter().any(|call| call.tool_name == *tool_name);
                     (passed, format!("tool {tool_name} must not be called"))
                 }
+                ModelEvalFixtureAssertionKind::AgentBatchSucceeded {
+                    minimum_members,
+                    profile_id,
+                } => {
+                    let passed = agent_batch_succeeded(session, *minimum_members, profile_id);
+                    (
+                        passed,
+                        format!(
+                            "one agent batch must contain at least {minimum_members} completed {profile_id} agents with durably delivered join results"
+                        ),
+                    )
+                }
                 ModelEvalFixtureAssertionKind::PathAbsent { path } => {
                     let relative = path.strip_prefix("..").unwrap_or(path);
                     let resolved = execution
@@ -586,6 +600,16 @@ fn evaluate_fixture_assertions(
                             "bounded external path {} must remain absent",
                             path.display()
                         ),
+                    )
+                }
+                ModelEvalFixtureAssertionKind::UserInputPending => {
+                    let pending = session
+                        .user_input_projection()
+                        .map(|projection| projection.pending().next().is_some())
+                        .unwrap_or(false);
+                    (
+                        pending,
+                        "session must retain a pending durable user-input request".to_owned(),
                     )
                 }
                 ModelEvalFixtureAssertionKind::WorkspaceSourceUnchanged => {
@@ -700,6 +724,29 @@ fn tool_schema_digest(session: &Session) -> String {
                 }
             },
         )
+}
+
+fn agent_batch_succeeded(session: &Session, minimum_members: u8, profile_id: &str) -> bool {
+    let projection = session.agent_thread_state_projection();
+    let continuation_projection = session.agent_result_continuation_projection();
+    projection.batches.values().any(|batch| {
+        !batch.is_degraded()
+            && batch.member_thread_ids.len() >= usize::from(minimum_members)
+            && batch.member_thread_ids.iter().all(|thread_id| {
+                projection.threads.get(thread_id).is_some_and(|thread| {
+                    thread
+                        .profile_id
+                        .as_ref()
+                        .is_some_and(|observed| observed.as_str() == profile_id)
+                        && thread.status == sigil_kernel::AgentThreadStatus::Completed
+                        && thread.result.as_ref().is_some_and(|result| {
+                            result.status == sigil_kernel::AgentThreadTerminalStatus::Completed
+                        })
+                        && continuation_projection.statuses.get(thread_id)
+                            == Some(&sigil_kernel::AgentResultContinuationStatus::Completed)
+                })
+            })
+    })
 }
 
 fn sandbox_backend(execution: &ModelEvalRunExecution) -> String {

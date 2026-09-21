@@ -1,32 +1,17 @@
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentFinalAnswerRef, AgentRole, AgentRunInput, AgentRunPurpose, AssistantMessageKind,
-    AutomaticRouteCapability, ContinueDurableTaskAction, ControlEntry, ConversationRoute,
-    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, DurableEventType, EventClass,
-    EvidenceScope, ImageAttachment, ImageMimeType, JsonlSessionStore, ModelMessage, PlanId,
-    ProviderFailureClassV1, ProviderTurnRecoveryRetryKindV1, ProviderTurnRecoveryScheduledEntry,
-    ReadinessEvaluatedEntry, ReadinessEvaluation, ReadinessReason, RecoveryBudgetProjectionV1,
-    RunCancellationRequestedEntry, RunCancellationTarget, RunStatus, SecretString, Session,
-    SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
-    TaskCompletionClaimStatusV1, TaskCompletionClaimSubjectV1, TaskCompletionRequirementClaimV1,
-    TaskCompletionRequirementOutcomeV1, TaskCompletionRequirementSourceV1, TaskContinuationControl,
-    TaskContinuationControlKind, TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1,
+    AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ControlEntry, ConversationTurnRef,
+    ImageAttachment, ImageMimeType, JsonlSessionStore, ModelMessage, RunCancellationRequestedEntry,
+    RunCancellationTarget, Session, SessionLogEntry, SessionRef, TaskAdmissionTrigger,
     TaskHandoffDecision, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId,
-    TaskIsolationMode, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    VerificationVerdict, VisibleCompletionState, WriteIsolationMode, WriteLeaseAcquired,
-    WriteLeaseId, WriteLeaseScope, conversation_route_decision_id_for_source,
-    durable_task_cancellation_requested, project_conversation_prompt_for_persistence,
-    task_participant_attempt_id, task_participant_logical_run_id, task_participant_session_ref,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, ToolAccess,
+    ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 use tempfile::tempdir;
 
 use super::{
     ConversationCoordinator, automatic_policy_snapshot_hash, handoff_id_for_source,
-    reconcile_committed_planner_attempts, task_id_for_handoff, validate_task_continuation_action,
+    task_id_for_handoff,
 };
 
 fn parent_ref() -> Result<SessionRef> {
@@ -50,61 +35,12 @@ fn append_requested(session: &mut Session, source: &ConversationTurnRef) -> Resu
             handoff_id: handoff_id_for_source(source)?,
             source_turn: source.clone(),
             trigger: TaskAdmissionTrigger::ModelRequested,
-            reason_codes: vec![TaskAdmissionReason::MultiStageChange],
+            title: None,
             recovery_objective: None,
             policy_snapshot_hash: automatic_policy_snapshot_hash(),
             requested_at_ms: 42,
         },
     ))
-}
-
-fn append_durable_provider_recovery_schedule(
-    session: &Session,
-    attempt: &TaskParticipantAttemptEntry,
-) -> Result<()> {
-    let parent_path = session
-        .store_path()
-        .expect("recovery fixture uses a durable parent session");
-    let parent_dir = parent_path
-        .parent()
-        .expect("durable session path has a parent directory");
-    let child_store = JsonlSessionStore::new(attempt.child_session_ref.resolve(parent_dir))?;
-    let schedule = ProviderTurnRecoveryScheduledEntry {
-        schema_version: 1,
-        recovery_id: format!("recovery-{}", attempt.attempt_id.as_str()),
-        logical_run_id: task_participant_logical_run_id(&attempt.attempt_id),
-        failed_physical_attempt_id: "provider-attempt-fixture".to_owned(),
-        next_physical_attempt_ordinal: 2,
-        request_envelope_digest: format!("sha256:{}", "a".repeat(64)),
-        source_frontier: None,
-        failure_class: ProviderFailureClassV1::TransportInterrupted,
-        retry_kind: ProviderTurnRecoveryRetryKindV1::Transport,
-        not_before_unix_ms: 0,
-        retry_after_ms: 0,
-        budget_snapshot: RecoveryBudgetProjectionV1 {
-            retry_count: 1,
-            max_transport_retries: 2,
-            partial_output_retry_count: 0,
-            max_partial_output_retries: 1,
-            cumulative_delay_ms: 0,
-            max_cumulative_delay_ms: 120_000,
-        },
-        recovery_policy_fingerprint: "fixture-recovery-policy-v1".to_owned(),
-    };
-    child_store.append_event(
-        DurableEventType::ProviderTurnRecoveryScheduled,
-        EventClass::Critical,
-        serde_json::to_value(schedule)?,
-    )?;
-    Ok(())
-}
-
-fn sha256_prefixed(value: &str) -> String {
-    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
-}
-
-fn sha256_hex(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 #[test]
@@ -183,7 +119,7 @@ fn auto_routing_exposes_model_handoff_without_classifying_prompt_text() -> Resul
 }
 
 #[test]
-fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Result<()> {
+fn draft_ready_plan_adds_typed_decision_to_ordinary_tool_surface() -> Result<()> {
     let mut session = Session::new("mock", "model");
     let review = crate::PlanReviewCoordinator::prepare_explicit_plan_review(
         &mut session,
@@ -237,23 +173,45 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
     assert_eq!(pending.plan_id, draft.plan_id);
     assert_eq!(pending.plan_hash, draft.plan_hash);
 
+    assert_eq!(
+        coordinator
+            .conversation_contract_for_session(&session, AutomaticRouteCapability::DirectTask),
+        Some(sigil_kernel::conversation_auto_execution_contract_material())
+    );
     let names = coordinator
-        .route_tool_specs_for_session(&session, AutomaticRouteCapability::DirectTask)
+        .conversation_tool_specs_for_session(
+            &session,
+            AutomaticRouteCapability::DirectTask,
+            vec![
+                sigil_kernel::request_user_input_tool_spec(),
+                ToolSpec {
+                    name: "inspect_workspace".to_owned(),
+                    description: "Read one bounded workspace summary".to_owned(),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                    category: ToolCategory::File,
+                    access: ToolAccess::Read,
+                    network_effect: None,
+                    preview: ToolPreviewCapability::None,
+                },
+            ],
+        )
         .into_iter()
         .map(|spec| spec.name)
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
-            sigil_kernel::RUN_PENDING_PLAN_TOOL_NAME.to_owned(),
-            sigil_kernel::KEEP_PENDING_PLAN_TOOL_NAME.to_owned(),
-        ]
+    assert!(
+        names
+            .iter()
+            .any(|name| name == sigil_kernel::RUN_PENDING_PLAN_TOOL_NAME)
     );
-    assert!(!names.iter().any(|name| {
-        name == sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-            || name == sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME
-            || name == sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME
-    }));
+    assert!(
+        names
+            .iter()
+            .any(|name| name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME)
+    );
+    assert!(
+        names.iter().any(|name| name == "inspect_workspace"),
+        "a pending Plan must not replace ordinary business tools with a routing-only turn"
+    );
     Ok(())
 }
 
@@ -370,39 +328,6 @@ fn explicit_task_admission_uses_the_same_idempotent_handoff_protocol() -> Result
 }
 
 #[test]
-fn explicit_requested_anchor_recovers_a_missing_source_user_turn() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Manual);
-    let mut session = Session::new("provider", "model");
-    let source = ConversationTurnRef::new(
-        session.session_scope_id(),
-        "explicit-source-after-crash",
-        "task-command-crashed",
-    )?;
-    let handoff_id = handoff_id_for_source(&source)?;
-    session.append_control(ControlEntry::TaskHandoffRequested(
-        TaskHandoffRequestedEntry {
-            handoff_id,
-            source_turn: source.clone(),
-            trigger: TaskAdmissionTrigger::ExplicitTaskCommand,
-            reason_codes: Vec::new(),
-            recovery_objective: Some("recover explicit objective".to_owned()),
-            policy_snapshot_hash: super::explicit_task_policy_snapshot_hash(),
-            requested_at_ms: 17,
-        },
-    ))?;
-
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 18)?;
-    assert_eq!(actions.len(), 1);
-    assert!(session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::User(message)
-            if message.id == source.message_id
-                && message.content.as_deref() == Some("recover explicit objective")
-    )));
-    Ok(())
-}
-
-#[test]
 fn disabled_or_manual_routing_never_binds_the_internal_handoff() -> Result<()> {
     for coordinator in [
         ConversationCoordinator::new(false, TaskRoutingPolicy::Auto),
@@ -507,171 +432,6 @@ fn accepted_crash_gap_reconciles_only_the_missing_task_run() -> Result<()> {
 }
 
 #[test]
-fn durable_running_task_recovery_interrupts_stale_steps_and_requires_explicit_continue()
--> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let temp = tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::load_from_store("mock", "model", store.clone())?;
-    let source = append_source_turn(&mut session, "durable objective")?;
-    append_requested(&mut session, &source)?;
-    let first = coordinator.reconcile(&mut session, &parent_ref()?, 50)?;
-    let action = first.first().expect("admission gap should resume");
-    let step_id = TaskStepId::new("stale-step")?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: action.task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: step_id.clone(),
-            title: "stale execution".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: action.task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "durable objective".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: action.task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        role: AgentRole::Executor,
-        status: TaskStepStatus::Running,
-        title: Some("stale execution".to_owned()),
-        summary: None,
-        reason: None,
-    }))?;
-    let attempt_id = task_participant_attempt_id(
-        &action.task_id,
-        TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        1,
-    )?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            child_session_ref: task_participant_session_ref(&action.task_id, &attempt_id)?,
-            attempt_id: attempt_id.clone(),
-            task_id: action.task_id.clone(),
-            purpose: TaskParticipantPurpose::Step,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: Some(step_id.clone()),
-            role: AgentRole::Executor,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-
-    drop(session);
-    let mut session = Session::load_from_store("mock", "model", store)?;
-    let resumed = coordinator.reconcile(&mut session, &parent_ref()?, 60)?;
-    assert!(resumed.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&action.task_id)
-        .expect("task should remain projected");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert_eq!(
-        task.steps
-            .get(&(1, step_id))
-            .expect("stale step should remain projected")
-            .status,
-        TaskStepStatus::Interrupted
-    );
-    assert_eq!(
-        task.participant_attempts
-            .get(&attempt_id)
-            .expect("stale participant should remain projected")
-            .status,
-        TaskParticipantAttemptStatus::Interrupted
-    );
-    Ok(())
-}
-
-#[test]
-fn recovery_completes_a_started_planner_after_its_parent_plan_is_committed() -> Result<()> {
-    let mut session = Session::new("mock", "model");
-    let task_id = TaskId::new("planner-commit-recovery")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "recover a committed planner result".to_owned(),
-        title: None,
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    let step_id = TaskStepId::new("committed-step")?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id,
-            title: "committed step".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-    let attempt_id =
-        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Planner,
-            ordinal: 1,
-            plan_version: None,
-            step_id: None,
-            role: AgentRole::Planner,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-
-    assert_eq!(
-        reconcile_committed_planner_attempts(&mut session, &task_id)?,
-        1
-    );
-    assert_eq!(
-        reconcile_committed_planner_attempts(&mut session, &task_id)?,
-        0
-    );
-    assert_eq!(
-        session
-            .task_state_projection()
-            .tasks
-            .get(&task_id)
-            .and_then(|task| task.participant_attempts.get(&attempt_id))
-            .expect("planner attempt should remain projected")
-            .status,
-        TaskParticipantAttemptStatus::Completed
-    );
-    Ok(())
-}
-
-#[test]
 fn resolution_without_request_fails_closed() -> Result<()> {
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
     let mut session = Session::new("mock", "model");
@@ -688,733 +448,6 @@ fn resolution_without_request_fails_closed() -> Result<()> {
         .reconcile(&mut session, &parent_ref()?, 50)
         .expect_err("orphan resolution must fail closed");
     assert!(error.to_string().contains("without a request"));
-    Ok(())
-}
-
-#[test]
-fn durable_task_cancellation_suppresses_crash_prefix_final_repair() -> Result<()> {
-    let temp = tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("mock", "model").with_store(store);
-    let task_id = sigil_kernel::TaskId::new("task-cancelled-prefix")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "cancel before final commit".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
-        TaskRunCancellationScopeBoundEntry {
-            task_id: task_id.clone(),
-            run_scope_id: "task-root-prefix".to_owned(),
-        },
-    ))?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Synthesis,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: None,
-            role: AgentRole::Planner,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Completed,
-            reason: None,
-        },
-    ))?;
-    let summary = "synthesis completed before cancellation won".to_owned();
-    session.append_control(ControlEntry::TaskParticipantResult(
-        TaskParticipantResultEntry {
-            attempt_id,
-            task_id: task_id.clone(),
-            summary_hash: sha256_prefixed(&summary),
-            output_hash: sha256_prefixed("exact synthesis output"),
-            summary,
-            summary_truncated: false,
-            terminal_status: Some(TaskParticipantAttemptStatus::Completed),
-            final_answer_ref: None,
-            artifact_refs: Vec::new(),
-            changed_paths: Vec::new(),
-            verification_refs: Vec::new(),
-            completion_claim: None,
-        },
-    ))?;
-    session
-        .run_cancellation_recorder()?
-        .append_requested(&RunCancellationRequestedEntry {
-            request_id: "cancel-task-prefix".to_owned(),
-            run_scope_id: "task-root-prefix".to_owned(),
-            target: RunCancellationTarget::Run,
-            reason: "user cancelled".to_owned(),
-            requested_at_ms: 10,
-            quiescence_deadline_ms: 20,
-        })?;
-
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 30)?;
-
-    assert!(actions.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("task remains projected");
-    assert_eq!(task.status, TaskRunStatus::Interrupted);
-    assert!(task.final_answer.is_none());
-    assert!(session.entries().iter().all(|entry| {
-        !matches!(
-            entry,
-            SessionLogEntry::Assistant(message)
-                if message.assistant_kind == Some(sigil_kernel::AssistantMessageKind::FinalAnswer)
-        )
-    }));
-    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
-        TaskRunCancellationScopeBoundEntry {
-            task_id: task_id.clone(),
-            run_scope_id: "task-root-continued".to_owned(),
-        },
-    ))?;
-    assert!(!durable_task_cancellation_requested(
-        &session,
-        task_id.as_str()
-    )?);
-    Ok(())
-}
-
-#[test]
-fn synthesis_result_only_crash_prefix_completes_without_provider_replay() -> Result<()> {
-    let temp = tempdir()?;
-    let parent_store_path = temp.path().join("session.jsonl");
-    let store = JsonlSessionStore::new(&parent_store_path)?;
-    let mut session = Session::load_from_store("mock", "model", store)?;
-    let task_id = sigil_kernel::TaskId::new("task-result-only-prefix")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "recover result-only synthesis".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    let completed_step_id = TaskStepId::new("completed-step")?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: completed_step_id.clone(),
-            title: "completed prerequisite".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: completed_step_id,
-        role: AgentRole::Executor,
-        status: TaskStepStatus::Completed,
-        title: Some("completed prerequisite".to_owned()),
-        summary: Some("done".to_owned()),
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
-        scope: EvidenceScope::Step(format!("{}:completed-step", task_id.as_str())),
-        evaluation: ReadinessEvaluation {
-            run_status: RunStatus::Completed,
-            verification_verdict: VerificationVerdict::NotApplicable,
-            visible_state: VisibleCompletionState::Completed,
-            reasons: vec![ReadinessReason::NoVerificationRequired],
-            required_actions: Vec::new(),
-        },
-        policy_hash: None,
-        workspace_snapshot_id: None,
-    }))?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
-    let final_text = "result-only synthesis final";
-    let child_message_id = "synthesis-result-only".to_owned();
-    let child_store = JsonlSessionStore::new(
-        child_session_ref.resolve(parent_store_path.parent().expect("parent store directory")),
-    )?;
-    let mut child_session = Session::load_from_store("mock", "model", child_store)?;
-    let mut child_message = ModelMessage::assistant_with_kind(
-        Some(final_text.to_owned()),
-        Vec::new(),
-        AssistantMessageKind::FinalAnswer,
-    );
-    child_message.id.clone_from(&child_message_id);
-    child_session.append_assistant_message(child_message)?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Synthesis,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: None,
-            role: AgentRole::Planner,
-            child_session_ref: child_session_ref.clone(),
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    let summary = final_text.to_owned();
-    session.append_control(ControlEntry::TaskParticipantResult(
-        TaskParticipantResultEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            summary_hash: sha256_prefixed(&summary),
-            output_hash: sha256_prefixed(final_text),
-            summary,
-            summary_truncated: false,
-            terminal_status: Some(TaskParticipantAttemptStatus::Completed),
-            final_answer_ref: Some(AgentFinalAnswerRef {
-                session_ref: child_session_ref,
-                message_id: child_message_id,
-                content_hash: sha256_hex(final_text),
-                char_count: final_text.chars().count(),
-            }),
-            artifact_refs: Vec::new(),
-            changed_paths: Vec::new(),
-            verification_refs: Vec::new(),
-            completion_claim: Some(sigil_kernel::TaskCompletionClaimV1 {
-                schema_version: sigil_kernel::TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-                subject: TaskCompletionClaimSubjectV1::Task {
-                    task_id: task_id.clone(),
-                    plan_version: 1,
-                },
-                attempt_id: attempt_id.as_str().to_owned(),
-                evidence_frontier: format!("sha256:{}", "0".repeat(64)),
-                status: TaskCompletionClaimStatusV1::Completed,
-                requirements: vec![TaskCompletionRequirementClaimV1 {
-                    source: TaskCompletionRequirementSourceV1::TaskPlanOutcome {
-                        task_id: task_id.clone(),
-                        plan_version: 1,
-                    },
-                    required: true,
-                    outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
-                    artifact_refs: Vec::new(),
-                    event_refs: Vec::new(),
-                    explanation: String::new(),
-                }],
-                artifact_refs: Vec::new(),
-                explanation: String::new(),
-            }),
-        },
-    ))?;
-
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 30)?;
-
-    assert!(actions.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("task remains projected");
-    assert_eq!(task.status, TaskRunStatus::Completed);
-    assert_eq!(
-        task.participant_attempts
-            .get(&attempt_id)
-            .expect("synthesis attempt remains projected")
-            .status,
-        TaskParticipantAttemptStatus::Completed
-    );
-    assert_eq!(
-        session
-            .entries()
-            .iter()
-            .filter(|entry| matches!(
-                entry,
-                SessionLogEntry::Assistant(message)
-                    if message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
-            ))
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[test]
-fn step_result_only_crash_prefix_blocks_without_replaying_side_effects() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let mut session = Session::new("mock", "model");
-    let source = append_source_turn(&mut session, "change the workspace once")?;
-    append_requested(&mut session, &source)?;
-    let first = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
-    let action = first.first().expect("task should be admitted");
-    let task_id = action.task_id.clone();
-    let step_id = TaskStepId::new("write-once")?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: step_id.clone(),
-            title: "write once".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "change the workspace once".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        role: AgentRole::Executor,
-        status: TaskStepStatus::Running,
-        title: Some("write once".to_owned()),
-        summary: None,
-        reason: None,
-    }))?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        1,
-    )?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Step,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: Some(step_id.clone()),
-            role: AgentRole::Executor,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    let lease_id = WriteLeaseId::new("lease-result-only")?;
-    session.append_control(ControlEntry::WriteLeaseAcquired(WriteLeaseAcquired {
-        lease_id: lease_id.clone(),
-        workspace_id: "workspace-result-only".to_owned(),
-        owner_agent_id: format!("task:{}:step:{}", task_id.as_str(), step_id.as_str()),
-        isolation_mode: WriteIsolationMode::SharedWorkspaceExclusive,
-        scope: WriteLeaseScope::Workspace,
-    }))?;
-    let summary = "workspace mutation already happened".to_owned();
-    session.append_control(ControlEntry::TaskParticipantResult(
-        TaskParticipantResultEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            summary_hash: sha256_prefixed(&summary),
-            output_hash: sha256_prefixed("exact step output"),
-            summary,
-            summary_truncated: false,
-            terminal_status: Some(TaskParticipantAttemptStatus::Completed),
-            final_answer_ref: None,
-            artifact_refs: Vec::new(),
-            changed_paths: vec!["src/lib.rs".to_owned()],
-            verification_refs: Vec::new(),
-            completion_claim: None,
-        },
-    ))?;
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
-
-    assert!(actions.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("task remains projected");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert_eq!(
-        task.participant_attempts
-            .get(&attempt_id)
-            .expect("attempt remains projected")
-            .status,
-        TaskParticipantAttemptStatus::Completed
-    );
-    assert_eq!(
-        task.steps
-            .get(&(1, step_id))
-            .expect("step remains projected")
-            .status,
-        TaskStepStatus::Blocked
-    );
-    assert!(
-        task.steps
-            .get(&(1, TaskStepId::new("write-once")?))
-            .and_then(|step| step.reason.as_deref())
-            .is_some_and(|reason| reason.contains("participant result was committed"))
-    );
-    assert!(
-        !session
-            .write_isolation_projection()
-            .leases
-            .get(&lease_id)
-            .expect("lease remains auditable")
-            .is_active()
-    );
-    let entry_count = session.entries().len();
-    assert!(
-        coordinator
-            .reconcile(&mut session, &parent_ref()?, 30)?
-            .is_empty()
-    );
-    assert_eq!(session.entries().len(), entry_count);
-    Ok(())
-}
-
-#[test]
-fn legacy_step_result_only_prefix_fails_closed() -> Result<()> {
-    let mut session = Session::new("mock", "model");
-    let task_id = TaskId::new("task-legacy-step-result")?;
-    let step_id = TaskStepId::new("legacy-write")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "recover legacy write result".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        role: AgentRole::Executor,
-        status: TaskStepStatus::Running,
-        title: Some("legacy write".to_owned()),
-        summary: None,
-        reason: None,
-    }))?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        1,
-    )?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Step,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: Some(step_id.clone()),
-            role: AgentRole::Executor,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    let summary = "legacy result may already include side effects".to_owned();
-    session.append_control(ControlEntry::TaskParticipantResult(
-        TaskParticipantResultEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            summary_hash: sha256_prefixed(&summary),
-            output_hash: sha256_prefixed("legacy exact output"),
-            summary,
-            summary_truncated: false,
-            terminal_status: None,
-            final_answer_ref: None,
-            artifact_refs: Vec::new(),
-            changed_paths: vec!["src/legacy.rs".to_owned()],
-            verification_refs: Vec::new(),
-            completion_claim: None,
-        },
-    ))?;
-
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    assert!(
-        coordinator
-            .reconcile(&mut session, &parent_ref()?, 20)?
-            .is_empty()
-    );
-
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("task remains projected");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert_eq!(
-        task.participant_attempts
-            .get(&attempt_id)
-            .expect("attempt remains projected")
-            .status,
-        TaskParticipantAttemptStatus::Interrupted
-    );
-    assert_eq!(
-        task.steps
-            .get(&(1, step_id))
-            .expect("step remains projected")
-            .status,
-        TaskStepStatus::Blocked
-    );
-    Ok(())
-}
-
-#[test]
-fn reconcile_restarts_a_single_started_synthesis_participant_for_durable_recovery() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let temp = tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("mock", "model").with_store(store);
-    let source = append_source_turn(&mut session, "resume final synthesis safely")?;
-    append_requested(&mut session, &source)?;
-    let admitted = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
-    let task_id = admitted.first().expect("task is admitted").task_id.clone();
-    let step_id = TaskStepId::new("completed-step")?;
-    let step = TaskStepSpec {
-        step_id: step_id.clone(),
-        title: "Completed work".to_owned(),
-        display_name: None,
-        detail: None,
-        role: AgentRole::Executor,
-        depends_on: Vec::new(),
-        intent_refs: Vec::new(),
-        mode: None,
-        isolation: Some(TaskIsolationMode::SharedReadOnly),
-    };
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "resume final synthesis safely".to_owned(),
-        title: None,
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![step.clone()],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id,
-        role: step.role,
-        status: TaskStepStatus::Completed,
-        title: Some(step.title),
-        summary: Some("completed before process loss".to_owned()),
-        reason: None,
-    }))?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Synthesis,
-            ordinal: 1,
-            plan_version: Some(1),
-            step_id: None,
-            role: AgentRole::Planner,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    let synthesis_attempt = session
-        .task_state_projection()
-        .tasks
-        .get(&task_id)
-        .and_then(|task| task.participant_attempts.get(&attempt_id))
-        .cloned()
-        .expect("started synthesis is projected");
-    append_durable_provider_recovery_schedule(&session, &synthesis_attempt)?;
-
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0].task_id, task_id);
-    assert_eq!(
-        session
-            .task_state_projection()
-            .tasks
-            .get(&actions[0].task_id)
-            .expect("task is retained")
-            .status,
-        TaskRunStatus::Running
-    );
-    Ok(())
-}
-
-#[test]
-fn reconcile_restarts_a_single_started_planner_for_durable_recovery() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let temp = tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("mock", "model").with_store(store);
-    let source = append_source_turn(&mut session, "resume planner safely")?;
-    append_requested(&mut session, &source)?;
-    let admitted = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
-    let task_id = admitted.first().expect("task is admitted").task_id.clone();
-    let attempt_id =
-        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Planner,
-            ordinal: 1,
-            plan_version: None,
-            step_id: None,
-            role: AgentRole::Planner,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    let planner_attempt = session
-        .task_state_projection()
-        .tasks
-        .get(&task_id)
-        .and_then(|task| task.participant_attempts.get(&attempt_id))
-        .cloned()
-        .expect("started planner is projected");
-    append_durable_provider_recovery_schedule(&session, &planner_attempt)?;
-
-    let projected = session.task_state_projection();
-    let task = projected
-        .tasks
-        .get(&task_id)
-        .expect("started planner is projected");
-    assert!(
-        super::single_started_participant_provider_recovery(&session, task),
-        "planner recovery projection: {task:#?}"
-    );
-
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0].task_id, task_id);
-    assert_eq!(
-        session
-            .task_state_projection()
-            .tasks
-            .get(&actions[0].task_id)
-            .expect("task is retained")
-            .status,
-        TaskRunStatus::Started
-    );
-    Ok(())
-}
-
-#[test]
-fn handoff_cancellation_interrupts_started_participant_before_resume() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let temp = tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("mock", "model").with_store(store);
-    let source = append_source_turn(&mut session, "cancel this recovered task")?;
-    append_requested(&mut session, &source)?;
-    let first = coordinator.reconcile(&mut session, &parent_ref()?, 10)?;
-    let action = first.first().expect("task should be admitted");
-    let task_id = action.task_id.clone();
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "cancel this recovered task".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
-        TaskRunCancellationScopeBoundEntry {
-            task_id: task_id.clone(),
-            run_scope_id: "cancel-handoff-scope".to_owned(),
-        },
-    ))?;
-    let attempt_id =
-        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
-    session.append_control(ControlEntry::TaskParticipantAttempt(
-        TaskParticipantAttemptEntry {
-            attempt_id: attempt_id.clone(),
-            task_id: task_id.clone(),
-            purpose: TaskParticipantPurpose::Planner,
-            ordinal: 1,
-            plan_version: None,
-            step_id: None,
-            role: AgentRole::Planner,
-            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-            status: TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
-    session
-        .run_cancellation_recorder()?
-        .append_requested(&RunCancellationRequestedEntry {
-            request_id: "cancel-handoff".to_owned(),
-            run_scope_id: "cancel-handoff-scope".to_owned(),
-            target: RunCancellationTarget::Task {
-                task_id: task_id.as_str().to_owned(),
-            },
-            reason: "user cancelled".to_owned(),
-            requested_at_ms: 11,
-            quiescence_deadline_ms: 21,
-        })?;
-
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 30)?;
-
-    assert!(actions.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("task remains projected");
-    assert_eq!(task.status, TaskRunStatus::Interrupted);
-    assert_eq!(
-        task.participant_attempts
-            .get(&attempt_id)
-            .expect("attempt remains projected")
-            .status,
-        TaskParticipantAttemptStatus::Interrupted
-    );
     Ok(())
 }
 
@@ -1613,9 +646,9 @@ fn writable_memory_is_part_of_the_frozen_route_surface_and_fingerprint() -> Resu
     let with_memory = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_writable_memory_routing(true);
     let capability = sigil_kernel::AutomaticRouteCapability::ReviewFirst;
-    assert_eq!(without_memory.route_tool_specs(capability).len(), 2);
+    assert_eq!(without_memory.route_tool_specs(capability).len(), 1);
     let with_memory_specs = with_memory.route_tool_specs(capability);
-    assert_eq!(with_memory_specs.len(), 4);
+    assert_eq!(with_memory_specs.len(), 3);
     assert_eq!(
         with_memory_specs
             .iter()
@@ -1623,12 +656,11 @@ fn writable_memory_is_part_of_the_frozen_route_surface_and_fingerprint() -> Resu
             .collect::<Vec<_>>(),
         vec![
             sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
-            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
             sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
             sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
         ]
     );
-    for spec in &with_memory_specs[2..] {
+    for spec in &with_memory_specs[1..] {
         assert_eq!(spec.access, sigil_kernel::ToolAccess::Write);
         assert_eq!(spec.preview, sigil_kernel::ToolPreviewCapability::Required);
         assert_eq!(spec.network_effect, None);
@@ -1673,39 +705,41 @@ fn writable_memory_is_part_of_the_frozen_route_surface_and_fingerprint() -> Resu
     Ok(())
 }
 
-fn seed_current_resumable_task(session: &mut Session) -> Result<TaskId> {
-    let task_id = TaskId::new("task-current")?;
-    let run = |status| {
-        ControlEntry::TaskRun(TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: SessionRef::new_relative("session.jsonl")
-                .expect("valid parent session ref"),
-            objective: "implement the original plan".to_owned(),
-            title: None,
-            status,
-            reason: None,
-        })
-    };
-    session.append_control(run(TaskRunStatus::Started))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step-current")?,
-            title: "implement original scope".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: Some("accepted v1".to_owned()),
-    }))?;
-    session.append_control(run(TaskRunStatus::Paused))?;
-    Ok(task_id)
+#[test]
+fn ordinary_auto_surface_preserves_business_tools_and_optional_handoffs() {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let session = Session::new("route-surface", "model");
+    let capability = AutomaticRouteCapability::ReviewFirst;
+    let ordinary = sigil_kernel::writable_memory_route_tool_specs();
+    let tools =
+        coordinator.conversation_tool_specs_for_session(&session, capability, ordinary.clone());
+    assert_eq!(
+        coordinator.conversation_contract_for_session(&session, capability),
+        Some(sigil_kernel::conversation_auto_execution_contract_material())
+    );
+    for expected in &ordinary {
+        assert!(tools.iter().any(|tool| tool.name == expected.name));
+    }
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME)
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME)
+    );
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool.name == sigil_kernel::START_TASK_TOOL_NAME)
+    );
+    assert!(
+        coordinator
+            .conversation_contract_for_session(&session, AutomaticRouteCapability::Unsupported)
+            .is_none()
+    );
 }
 
 fn seed_current_resumable_direct_task(session: &mut Session) -> Result<TaskId> {
@@ -1722,107 +756,11 @@ fn seed_current_resumable_direct_task(session: &mut Session) -> Result<TaskId> {
             reason: None,
         })
     };
+    let admission = crate::direct_plan_fixture::append(session, &task_id, objective)?;
     session.append_control(run(TaskRunStatus::Started))?;
-    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
-        TaskDirectExecutionAdmittedV1::approved_plan(
-            task_id.clone(),
-            objective,
-            PlanId::new("plan-current-direct")?,
-            format!("sha256:{}", "a".repeat(64)),
-            41,
-        ),
-    ))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
     session.append_control(run(TaskRunStatus::Paused))?;
     Ok(task_id)
-}
-
-#[test]
-fn coordinator_interrupts_started_direct_attempts_during_restart_reconciliation() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
-    let mut session = Session::new("direct-recovery", "model");
-    let task_id = seed_current_resumable_direct_task(&mut session)?;
-    let admission = session
-        .task_state_projection()
-        .tasks
-        .get(&task_id)
-        .and_then(|task| task.direct_execution_admission.clone())
-        .expect("direct task admission");
-    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(
-        sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1),
-    ))?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "execute the approved objective directly".to_owned(),
-        title: None,
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-
-    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 42)?;
-    assert!(actions.is_empty());
-    let projection = session.task_state_projection();
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .expect("reconciled direct task");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert_eq!(
-        task.direct_execution_attempts
-            .values()
-            .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Interrupted)
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[test]
-fn coordinator_keeps_latest_resumable_task_as_a_typed_continuation_candidate() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
-        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
-            provider_supports_routing_tools: true,
-            task_executor_available: true,
-        });
-    let mut session = Session::new("continuation-route", "model");
-    let task_id = seed_current_resumable_task(&mut session)?;
-    let capability = coordinator.resolve_route_capability(&session);
-    assert!(
-        coordinator
-            .route_tool_specs_for_session(&session, capability)
-            .iter()
-            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME)
-    );
-
-    let bound = coordinator.bind_conversation_input(
-        &session,
-        AgentRunInput::user("also add the requested compatibility check"),
-        parent_ref()?,
-        "continue-current-run",
-        None,
-        42,
-    )?;
-    let AgentRunPurpose::Conversation(context) = bound.purpose.expect("conversation purpose")
-    else {
-        panic!("expected conversation purpose")
-    };
-    let continuation = context
-        .task_continuation
-        .expect("current resumable Task should be host-bound");
-    assert_eq!(continuation.task_id, task_id);
-    assert_eq!(continuation.plan_version, Some(1));
-    assert_eq!(continuation.task_status, TaskRunStatus::Paused);
-    assert_eq!(continuation.plan_status, Some(TaskPlanStatus::Accepted));
-
-    session.append_user_message(ModelMessage::user("unrelated explanation request"))?;
-    assert!(
-        coordinator
-            .route_tool_specs_for_session(&session, capability)
-            .iter()
-            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME),
-        "clearing execution focus must not make the host-owned resumable Task undiscoverable"
-    );
-    Ok(())
 }
 
 #[test]
@@ -1863,233 +801,6 @@ fn coordinator_recovers_direct_continuation_after_chat_clears_focus() -> Result<
         .task_continuation
         .expect("current direct Task should be host-bound");
     assert_eq!(continuation.task_id, task_id);
-    assert_eq!(continuation.plan_version, None);
     assert_eq!(continuation.task_status, TaskRunStatus::Paused);
-    assert_eq!(continuation.plan_status, None);
-    Ok(())
-}
-
-fn continuation_action_fixture() -> Result<(Session, ContinueDurableTaskAction)> {
-    continuation_action_fixture_with_guidance("also add the requested compatibility check")
-}
-
-fn continuation_action_fixture_with_guidance(
-    guidance: &str,
-) -> Result<(Session, ContinueDurableTaskAction)> {
-    continuation_action_fixture_with_control(
-        guidance,
-        TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-    )
-}
-
-fn continuation_action_fixture_with_control(
-    guidance: &str,
-    control: TaskContinuationControlKind,
-) -> Result<(Session, ContinueDurableTaskAction)> {
-    continuation_action_fixture_with_controls(guidance, control, control)
-}
-
-fn continuation_action_fixture_with_controls(
-    guidance: &str,
-    durable_control: TaskContinuationControlKind,
-    action_control: TaskContinuationControlKind,
-) -> Result<(Session, ContinueDurableTaskAction)> {
-    let mut session = Session::new("continuation-validation", "model");
-    let task_id = seed_current_resumable_task(&mut session)?;
-    let prompt = project_conversation_prompt_for_persistence(guidance);
-    let mut source = ModelMessage::user(guidance);
-    source.id = "continuation-source-message".to_owned();
-    let source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        source.id.clone(),
-        "continuation-source-run",
-    )?;
-    session.append_user_message(source)?;
-    let route_contract_fingerprint = "sha256:continuation-contract".to_owned();
-    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
-        ConversationRouteDecisionRecordedEntry {
-            decision_id: conversation_route_decision_id_for_source(&source_turn),
-            source_turn: source_turn.clone(),
-            route: ConversationRoute::Task,
-            reason_codes: Vec::new(),
-            configured_policy: TaskRoutingPolicy::Auto,
-            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
-            policy_snapshot_hash: "sha256:continuation-policy".to_owned(),
-            route_contract_fingerprint: route_contract_fingerprint.clone(),
-            decided_at_ms: 42,
-        },
-    ))?;
-    let receipt = TaskContinuationSelectedEntry {
-        task_id: task_id.clone(),
-        source_turn: source_turn.clone(),
-        plan_version: Some(1),
-        task_status: TaskRunStatus::Paused,
-        plan_status: Some(TaskPlanStatus::Accepted),
-        route_contract_fingerprint: route_contract_fingerprint.clone(),
-        control: durable_control,
-        prompt_hash: prompt.prompt_hash,
-        exact_prompt_required: prompt.exact_prompt_required,
-        guidance: prompt.safe_prompt,
-        selected_at_ms: 42,
-    };
-    session.append_control(ControlEntry::TaskContinuationSelected(receipt.clone()))?;
-    let mut action_receipt = receipt.clone();
-    action_receipt.control = action_control;
-    Ok((
-        session,
-        ContinueDurableTaskAction {
-            task_id,
-            source_turn,
-            plan_version: Some(1),
-            task_status: TaskRunStatus::Paused,
-            plan_status: Some(TaskPlanStatus::Accepted),
-            route_contract_fingerprint,
-            control: match action_control {
-                TaskContinuationControlKind::ResumeTask => TaskContinuationControl::ResumeTask,
-                TaskContinuationControlKind::ApplyCurrentRequestAsGuidance => {
-                    TaskContinuationControl::ApplyTaskGuidance(guidance.to_owned())
-                }
-                TaskContinuationControlKind::LegacyUnspecified => {
-                    TaskContinuationControl::ApplyTaskGuidance(guidance.to_owned())
-                }
-            },
-            guidance: SecretString::new(guidance),
-            guidance_receipt: action_receipt,
-        },
-    ))
-}
-
-#[test]
-fn continuation_prompt_words_do_not_override_the_typed_model_decision() -> Result<()> {
-    for prompt in ["continue", "resume", "继续", "继续执行", "ship the patch"] {
-        let (session, action) = continuation_action_fixture_with_control(
-            prompt,
-            TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-        )?;
-        assert_eq!(
-            action.control(),
-            TaskContinuationControl::ApplyTaskGuidance(prompt.to_owned())
-        );
-        validate_task_continuation_action(&session, &action)?;
-    }
-
-    let (session, action) = continuation_action_fixture_with_control(
-        "arbitrary text that contains no resume keyword",
-        TaskContinuationControlKind::ResumeTask,
-    )?;
-    assert_eq!(action.control(), TaskContinuationControl::ResumeTask);
-    validate_task_continuation_action(&session, &action)?;
-    Ok(())
-}
-
-#[test]
-fn typed_resume_receipt_recovers_without_prompt_matching() -> Result<()> {
-    let (session, action) = continuation_action_fixture_with_control(
-        "the current user text is not interpreted by host code",
-        TaskContinuationControlKind::ResumeTask,
-    )?;
-
-    validate_task_continuation_action(&session, &action)?;
-    assert_eq!(action.control(), TaskContinuationControl::ResumeTask);
-    Ok(())
-}
-
-#[test]
-fn typed_resume_upgrades_a_legacy_receipt_without_prompt_matching() -> Result<()> {
-    let (session, action) = continuation_action_fixture_with_controls(
-        "arbitrary current text",
-        TaskContinuationControlKind::LegacyUnspecified,
-        TaskContinuationControlKind::ResumeTask,
-    )?;
-
-    validate_task_continuation_action(&session, &action)?;
-    assert_eq!(action.control(), TaskContinuationControl::ResumeTask);
-    assert_eq!(
-        action.guidance_receipt.control,
-        TaskContinuationControlKind::ResumeTask
-    );
-    Ok(())
-}
-
-#[test]
-fn continuation_dispatch_rejects_stale_plan_and_status_bindings() -> Result<()> {
-    let (mut stale_plan_session, stale_plan_action) = continuation_action_fixture()?;
-    validate_task_continuation_action(&stale_plan_session, &stale_plan_action)?;
-    stale_plan_session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: stale_plan_action.task_id.clone(),
-        plan_version: 2,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step-v2")?,
-            title: "revised scope".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: Some("accepted v2 before dispatch".to_owned()),
-    }))?;
-    assert!(validate_task_continuation_action(&stale_plan_session, &stale_plan_action).is_err());
-
-    let (mut stale_status_session, stale_status_action) = continuation_action_fixture()?;
-    stale_status_session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: stale_status_action.task_id.clone(),
-        parent_session_ref: parent_ref()?,
-        objective: "implement the original plan".to_owned(),
-        title: None,
-        status: TaskRunStatus::Failed,
-        reason: Some("status changed before dispatch".to_owned()),
-    }))?;
-    assert!(
-        validate_task_continuation_action(&stale_status_session, &stale_status_action).is_err()
-    );
-    Ok(())
-}
-
-#[test]
-fn continuation_dispatch_accepts_reused_pending_selection_after_new_user_clears_focus() -> Result<()>
-{
-    let (mut session, action) = continuation_action_fixture()?;
-    session.append_user_message(ModelMessage::user(
-        "also add the requested compatibility check",
-    ))?;
-    assert!(session.task_state_projection().current_task().is_none());
-
-    let resolved = validate_task_continuation_action(&session, &action)?;
-
-    assert_eq!(resolved.task_id, action.task_id);
-    assert!(!resolved.needs_planning());
-    let run_scope_id = "scope-reused-pending-selection";
-    session.append_controls(vec![
-        ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
-            task_id: action.task_id.clone(),
-            run_scope_id: run_scope_id.to_owned(),
-        }),
-        ControlEntry::TaskRunTargetSelected(TaskRunTargetSelectedEntry::new(
-            action.task_id.clone(),
-            run_scope_id,
-            action.task_status,
-            action.plan_version,
-            action.plan_status,
-        )),
-    ])?;
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
-        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
-            provider_supports_routing_tools: true,
-            task_executor_available: true,
-        });
-    assert!(
-        coordinator
-            .route_tool_specs_for_session(
-                &session,
-                sigil_kernel::AutomaticRouteCapability::DirectTask,
-            )
-            .iter()
-            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME),
-        "handler-boundary recovery focus must keep exact continuation available after restart"
-    );
     Ok(())
 }

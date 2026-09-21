@@ -579,7 +579,7 @@ argument-hint: scope
 allowed-tools:
   - read_file
   - grep
-disallowed-tools: [bash]
+disallowed-tools: [exec_command]
 paths: [crates/**, dev/**]
 ---
 
@@ -608,7 +608,7 @@ paths: [crates/**, dev/**]
     assert_eq!(descriptor.argument_hint.as_deref(), Some("scope"));
     assert!(descriptor.allowed_tools.names.contains("read_file"));
     assert!(descriptor.allowed_tools.names.contains("grep"));
-    assert!(descriptor.disallowed_tools.names.contains("bash"));
+    assert!(descriptor.disallowed_tools.names.contains("exec_command"));
     assert_eq!(descriptor.path_patterns, vec!["crates/**", "dev/**"]);
 }
 

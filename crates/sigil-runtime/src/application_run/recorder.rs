@@ -161,6 +161,23 @@ impl ApplicationRunEventRecorder {
         task_id: &TaskId,
         status: TaskRunStatus,
     ) -> Result<()> {
+        if status != TaskRunStatus::Paused {
+            let (terminal, answer, event) =
+                task_control::application_task_continuation_terminal(session, task_id, status)?;
+            let summary = match &event {
+                PublicRunEventKind::RunFailed { error } => Some(error.clone()),
+                PublicRunEventKind::RunBlocked { reason }
+                | PublicRunEventKind::RunPaused { reason }
+                | PublicRunEventKind::RunInterrupted { reason } => Some(reason.clone()),
+                _ => None,
+            };
+            return self.finish(
+                terminal,
+                answer.map(|answer| answer.message_id),
+                summary.as_deref(),
+                event,
+            );
+        }
         let output = application_task_terminal_output(
             session,
             task_id,
@@ -171,7 +188,6 @@ impl ApplicationRunEventRecorder {
                     final_text: String::new(),
                     tool_calls: 0,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 outcome: AgentRunOutcome::default(),
             },

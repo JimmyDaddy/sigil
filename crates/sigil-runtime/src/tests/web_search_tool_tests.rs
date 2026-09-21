@@ -143,6 +143,12 @@ fn websearch_permission_plan_declares_only_network_read_and_keeps_query_out_of_s
         std::collections::BTreeSet::from([ToolPermissionEffect::NetworkRead])
     );
     assert_eq!(first.semantic_scope, second.semantic_scope);
+    assert!(first.session_grant_containment_binding().is_none());
+    assert!(first.session_grant_network_binding().is_some());
+    assert_eq!(
+        first.session_grant_network_binding(),
+        second.session_grant_network_binding()
+    );
     assert_ne!(first.plan_hash, second.plan_hash);
     assert_eq!(
         first.analysis_bindings.get("planner").map(String::as_str),

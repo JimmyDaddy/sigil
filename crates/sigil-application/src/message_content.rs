@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_MESSAGE_CONTENT_PAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MessageContentQuery {
     pub display_id: String,
     #[serde(default)]
@@ -39,7 +38,6 @@ impl MessageContentQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MessageContentPage {
     pub display_id: String,
     pub message_id: String,
