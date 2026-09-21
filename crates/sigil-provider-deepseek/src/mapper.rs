@@ -1,8 +1,12 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
+use tracing::debug;
 
 use sigil_kernel::{
     CacheTokenCountV1, CacheUsageV1, ProviderChunk, ProviderProtocolViolation,
-    ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+    ProviderStreamEndedUnexpectedly, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator,
+    UsageStats,
 };
 
 use crate::{
@@ -12,7 +16,11 @@ use crate::{
 
 pub struct StreamMapper {
     tool_parts: ToolCallStreamAccumulator,
-    saw_tool_call: bool,
+    tool_indices: BTreeSet<usize>,
+    argument_fragments: usize,
+    argument_bytes: usize,
+    completed_calls: usize,
+    finish_reason: Option<&'static str>,
     reasoning_buffer: String,
     text_protocol_tail: String,
 }
@@ -26,7 +34,11 @@ impl StreamMapper {
     pub fn new(_model: impl Into<String>) -> Self {
         Self {
             tool_parts: ToolCallStreamAccumulator::new(),
-            saw_tool_call: false,
+            tool_indices: BTreeSet::new(),
+            argument_fragments: 0,
+            argument_bytes: 0,
+            completed_calls: 0,
+            finish_reason: None,
             reasoning_buffer: String::new(),
             text_protocol_tail: String::new(),
         }
@@ -65,6 +77,20 @@ impl StreamMapper {
             }));
         }
         for choice in envelope.choices {
+            if self.finish_reason.is_some() {
+                return Err(
+                    self.stream_error("provider emitted a choice after the terminal finish reason")
+                );
+            }
+            if let Some(reason) = choice.finish_reason.as_deref() {
+                self.finish_reason = Some(match reason {
+                    "tool_calls" => "tool_calls",
+                    "stop" => "stop",
+                    "length" => "length",
+                    "content_filter" => "content_filter",
+                    _ => "other",
+                });
+            }
             if let Some(content) = choice.delta.content {
                 self.reject_unstructured_native_tool_protocol(&content)?;
                 chunks.push(ProviderChunk::TextDelta(content));
@@ -74,16 +100,45 @@ impl StreamMapper {
                 chunks.push(ProviderChunk::ReasoningDelta(reasoning_content));
             }
             if let Some(tool_calls) = choice.delta.tool_calls {
-                self.saw_tool_call = true;
                 for tool_call in tool_calls {
-                    self.map_tool_delta(&mut chunks, tool_call);
+                    self.map_tool_delta(&mut chunks, tool_call)?;
                 }
+            }
+            if self
+                .finish_reason
+                .is_some_and(|reason| !matches!(reason, "tool_calls" | "stop"))
+            {
+                if self.finish_reason == Some("length") && !self.has_tool_calls() {
+                    return Err(ProviderStreamEndedUnexpectedly.into());
+                }
+                return Err(
+                    self.stream_error("provider response ended without a successful finish reason")
+                );
             }
             if matches!(choice.finish_reason.as_deref(), Some("tool_calls")) {
                 self.tool_parts.complete_open_calls(
                     &mut chunks,
                     ToolCallCompletionIdPolicy::RequireProviderId,
                 );
+                self.completed_calls = chunks
+                    .iter()
+                    .filter(|chunk| matches!(chunk, ProviderChunk::ToolCallComplete(_)))
+                    .count();
+                let completed_argument_bytes = chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        ProviderChunk::ToolCallComplete(call) => Some(call.args_json.len()),
+                        _ => None,
+                    })
+                    .fold(0usize, usize::saturating_add);
+                if self.completed_calls != self.tool_indices.len()
+                    || self.completed_calls == 0
+                    || completed_argument_bytes != self.argument_bytes
+                {
+                    return Err(self.stream_error(
+                        "provider tool finish is missing complete tool-call identity",
+                    ));
+                }
                 if !self.reasoning_buffer.is_empty() {
                     chunks.push(ProviderChunk::ContinuationState(
                         DeepSeekReasoningReplayPayload {
@@ -97,6 +152,11 @@ impl StreamMapper {
                 self.text_protocol_tail.clear();
             }
             if matches!(choice.finish_reason.as_deref(), Some("stop")) {
+                if self.has_tool_calls() {
+                    return Err(
+                        self.stream_error("provider stopped before completing streamed tool calls")
+                    );
+                }
                 self.tool_parts.clear();
                 self.reasoning_buffer.clear();
                 self.text_protocol_tail.clear();
@@ -105,13 +165,80 @@ impl StreamMapper {
         Ok(chunks)
     }
 
-    fn map_tool_delta(&mut self, chunks: &mut Vec<ProviderChunk>, delta: DeepSeekToolCallDelta) {
+    pub(crate) fn diagnostic(&self) -> sigil_kernel::ProviderDiagnosticV1 {
+        use sigil_kernel::ProviderStreamFinishV1;
+        sigil_kernel::ProviderDiagnosticV1::ToolStreamFinished {
+            finish: match self.finish_reason {
+                Some("tool_calls") => ProviderStreamFinishV1::ToolCalls,
+                Some("stop") => ProviderStreamFinishV1::Stop,
+                Some("length") => ProviderStreamFinishV1::Length,
+                Some("content_filter") => ProviderStreamFinishV1::ContentFilter,
+                Some(_) => ProviderStreamFinishV1::Other,
+                None => ProviderStreamFinishV1::Missing,
+            },
+            tool_call_count: self.tool_indices.len() as u64,
+            argument_fragments: self.argument_fragments as u64,
+            argument_bytes: self.argument_bytes as u64,
+            completed_calls: self.completed_calls as u64,
+        }
+    }
+
+    pub(crate) fn has_tool_calls(&self) -> bool {
+        !self.tool_indices.is_empty()
+    }
+
+    pub(crate) fn finish(&self) -> Result<()> {
+        self.trace_stream("stream_end");
+        if self.has_tool_calls() && self.finish_reason != Some("tool_calls") {
+            return Err(
+                self.stream_error("provider stream ended before completing streamed tool calls")
+            );
+        }
+        Ok(())
+    }
+
+    fn trace_stream(&self, stage: &'static str) {
+        debug!(target: "sigil_provider_deepseek", stage, finish_reason = self.finish_reason.unwrap_or("missing"),
+            tool_call_count = self.tool_indices.len(), argument_fragments = self.argument_fragments,
+            argument_bytes = self.argument_bytes, completed_calls = self.completed_calls,
+            "chat tool stream diagnostic");
+    }
+
+    fn stream_error(&self, reason: &'static str) -> anyhow::Error {
+        self.trace_stream("protocol_error");
+        sigil_kernel::SafePersistenceError::ToolCallStreamInvalid {
+            reason: format!("{reason}; finish_reason={}; tool_calls={}; argument_fragments={}; argument_bytes={}; completed_calls={}",
+                self.finish_reason.unwrap_or("missing"), self.tool_indices.len(), self.argument_fragments,
+                self.argument_bytes, self.completed_calls),
+        }.into()
+    }
+
+    fn map_tool_delta(
+        &mut self,
+        chunks: &mut Vec<ProviderChunk>,
+        delta: DeepSeekToolCallDelta,
+    ) -> Result<()> {
+        if !self.tool_indices.contains(&delta.index)
+            && self.tool_indices.len() >= sigil_kernel::MAX_PROVIDER_TURN_TOOL_CALLS
+        {
+            return Err(self.stream_error("provider exceeded the streamed tool-call limit"));
+        }
+        self.tool_indices.insert(delta.index);
         let (name, arguments) = delta
             .function
             .map(|function| (function.name, function.arguments))
             .unwrap_or_default();
+        if let Some(arguments) = arguments.as_ref() {
+            self.argument_fragments = self.argument_fragments.saturating_add(1);
+            self.argument_bytes = self.argument_bytes.saturating_add(arguments.len());
+        }
         self.tool_parts
             .append_delta(chunks, delta.index, delta.id, name, arguments);
+        if let Some(ProviderChunk::ToolCallStreamError(error)) = chunks.last() {
+            self.trace_stream("protocol_error");
+            return Err(error.clone().into());
+        }
+        Ok(())
     }
 
     fn reject_unstructured_native_tool_protocol(&mut self, text: &str) -> Result<()> {

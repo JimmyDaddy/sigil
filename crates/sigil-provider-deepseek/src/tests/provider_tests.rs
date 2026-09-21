@@ -14,15 +14,16 @@ use sigil_kernel::{
     CompactionFoldPlan, CompactionInitiation, ContextBodyRef, ContextInclusionReason, ContextItem,
     ContextSensitivity, ContextSource, ContextTrustLevel, ContinuationItemPriority,
     ContinuationModelOutputItemV1, ContinuationModelOutputV1, ControlEntry, EffectiveTokenBudget,
-    FrozenProviderRequestMaterial, ImageInputCapability, InputTokenEvidence, InteractionMode,
-    JsonlSessionStore, MemoryConfig, ModelMessage, ModelRequestTimeouts, NoopEventHandler,
-    PROVIDER_ERROR_BODY_LIMIT_BYTES, PermissionConfig, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, Provider, ProviderChunk, ProviderPhysicalAttemptProjection,
-    ProviderRequestRejection, ReasoningEffort, ReasoningStreamSupport, RequestFitProof,
-    RuntimeContextCandidates, Session, SessionLogEntry, TokenMeasurementBinding,
-    TokenMeasurementScope, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolMutationTracking, ToolOutputProjectionPolicy, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, VersionedProfileIdentity, provider_rate_limit_from_error,
+    FrozenProviderRequestMaterial, HostedToolKind, HostedToolLimits, HostedToolRequest,
+    ImageInputCapability, InputTokenEvidence, InteractionMode, JsonlSessionStore, MemoryConfig,
+    ModelMessage, ModelRequestTimeouts, NoopEventHandler, PROVIDER_ERROR_BODY_LIMIT_BYTES,
+    PermissionConfig, PortableSemanticCompactionRequest, PortableTargetRequestMaterial, Provider,
+    ProviderChunk, ProviderPhysicalAttemptProjection, ProviderRequestRejection, ReasoningEffort,
+    ReasoningStreamSupport, RequestFitProof, RuntimeContextCandidates, Session, SessionLogEntry,
+    TokenMeasurementBinding, TokenMeasurementScope, Tool, ToolAccess, ToolCall, ToolCategory,
+    ToolContext, ToolMutationTracking, ToolOutputProjectionPolicy, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, VersionedProfileIdentity,
+    provider_rate_limit_from_error,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -40,7 +41,6 @@ use super::DeepSeekProvider;
 struct RealCacheProbeTool;
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecordedCacheUsageReplay {
     schema_version: u16,
     source: String,
@@ -48,7 +48,6 @@ struct RecordedCacheUsageReplay {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RecordedCacheUsageResponse {
     name: String,
     sse: String,
@@ -65,7 +64,7 @@ impl Tool for RealCacheProbeTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
-                "additionalProperties": false
+                "additionalProperties": true
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
@@ -230,6 +229,79 @@ async fn real_provider_three_exact_prefix_turns_report_cache_hit_and_miss_usage(
     assert!(
         usage[1..].iter().any(|usage| usage.cache_hit_tokens > 0),
         "at least one repeated exact-prefix request must report a cache hit"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit real-provider opt-in, secret, and local cost admission"]
+async fn real_hosted_messages_request_accepts_custom_schema_with_true_additional_properties()
+-> Result<()> {
+    const REQUIRED_FLAG: &str = "SIGIL_REAL_PROVIDER_HOSTED_SCHEMA";
+    const BUDGET_ENV: &str = "SIGIL_REAL_PROVIDER_MAX_COST_USD";
+
+    if env::var(REQUIRED_FLAG).as_deref() != Ok("1") {
+        anyhow::bail!("{REQUIRED_FLAG}=1 is required before this test may contact DeepSeek");
+    }
+    let api_key = env::var(crate::SIGIL_API_KEY_ENV)
+        .context("SIGIL_API_KEY is required for the hosted-schema provider smoke")?;
+    let max_cost_usd = env::var(BUDGET_ENV)
+        .context("SIGIL_REAL_PROVIDER_MAX_COST_USD is required")?
+        .parse::<f64>()
+        .context("hosted-schema smoke budget must be a decimal USD value")?;
+    if !(max_cost_usd.is_finite() && 0.0 < max_cost_usd && max_cost_usd <= 0.10) {
+        anyhow::bail!("hosted-schema smoke budget must be greater than zero and at most $0.10");
+    }
+
+    let provider = DeepSeekProvider::new_exact(
+        crate::DeepSeekProviderConfig {
+            api_key: Some(api_key),
+            ..crate::DeepSeekProviderConfig::default_for_model("deepseek-v4-flash")
+        },
+        ModelRequestTimeouts {
+            request_timeout: Duration::from_secs(60),
+            stream_idle_timeout: Duration::from_secs(60),
+            stream_total_timeout: Some(Duration::from_secs(120)),
+        },
+    )?;
+    const CONSERVATIVE_INPUT_TOKENS: u64 = 16_384;
+    const MAX_OUTPUT_TOKENS: u64 = 64;
+    let pricing = provider
+        .usage_pricing_snapshot("deepseek-v4-flash")
+        .context("hosted-schema smoke requires a trusted DeepSeek pricing snapshot")?;
+    let unit_tokens = pricing.unit_tokens as f64;
+    let reservation_usd = (CONSERVATIVE_INPUT_TOKENS as f64 * pricing.uncached_input_per_unit
+        + MAX_OUTPUT_TOKENS as f64 * pricing.output_per_unit)
+        / unit_tokens;
+    if reservation_usd > max_cost_usd {
+        anyhow::bail!(
+            "hosted-schema smoke reserves ${reservation_usd:.6}, above the admitted ${max_cost_usd:.6}"
+        );
+    }
+    let mut request = simple_chat_request("deepseek-v4-flash");
+    request.messages = vec![ModelMessage::user(
+        "Reply with exactly SCHEMA-ACCEPTED and no additional text. Do not call any tools.",
+    )];
+    request.tools = vec![RealCacheProbeTool.spec()];
+    request.hosted_tools = vec![HostedToolRequest::new(
+        "hosted-schema-live-smoke",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            max_uses: Some(1),
+            ..HostedToolLimits::default()
+        },
+    )?];
+    request.max_tokens = Some(MAX_OUTPUT_TOKENS as u32);
+
+    let mut stream = provider.stream(request).await?;
+    let mut chunks = 0;
+    while let Some(chunk) = stream.next().await {
+        chunk?;
+        chunks += 1;
+    }
+    assert!(
+        chunks > 0,
+        "DeepSeek returned no hosted Messages response chunks"
     );
     Ok(())
 }
@@ -974,6 +1046,7 @@ fn reasoning_retry_and_mapper_helpers_cover_provider_side_branches() -> Result<(
             "finish_reason": "stop"
         }]
     }))?;
+    let mut mapper = crate::mapper::StreamMapper::new("deepseek-v4-flash");
     let chunks = mapper.map_envelope(stop_envelope)?;
     assert!(
         matches!(chunks.as_slice(), [ProviderChunk::ReasoningDelta(reasoning)] if reasoning == "done")
@@ -1376,11 +1449,12 @@ async fn provider_surfaces_invalid_chat_and_completion_events() -> Result<()> {
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .next()
+        .find(Result::is_err)
         .expect("stream should yield one error")
         .expect_err("invalid chat event should fail");
-    assert!(error.to_string().contains("invalid DeepSeek event"));
-    assert!(error.to_string().contains("..."));
+    assert!(error.to_string().contains("invalid deepseek chat event"));
+    assert!(error.to_string().contains("raw_bytes=302"));
+    assert!(!error.to_string().contains(&"x".repeat(20)));
 
     let completion_server =
         spawn_mock_server(Arc::new(Mutex::new(VecDeque::from(vec![http_response(
@@ -1774,8 +1848,7 @@ async fn provider_surfaces_invalid_utf8_chat_chunks() -> Result<()> {
         .stream(simple_chat_request("deepseek-v4-flash"))
         .await?;
 
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("stream should yield one error")
         .expect_err("invalid utf-8 should fail");
@@ -1841,8 +1914,7 @@ async fn fim_completion_surfaces_invalid_utf8_chunks() -> Result<()> {
         })
         .await?;
 
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("stream should yield one error")
         .expect_err("invalid utf-8 should fail");
@@ -1914,13 +1986,12 @@ async fn provider_surfaces_invalid_chat_event_payloads() -> Result<()> {
         .stream(simple_chat_request("deepseek-v4-flash"))
         .await?;
 
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("stream should yield one error")
         .expect_err("invalid JSON should fail");
 
-    assert!(error.to_string().contains("invalid DeepSeek event"));
+    assert!(error.to_string().contains("invalid deepseek chat event"));
     Ok(())
 }
 
@@ -1975,8 +2046,7 @@ async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> 
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
         .await?;
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("chat stream should yield one error")
         .expect_err("malformed chunked body should fail");
@@ -2006,8 +2076,7 @@ async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> 
             stop: Vec::new(),
         })
         .await?;
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("completion stream should yield one error")
         .expect_err("malformed chunked body should fail");
@@ -2086,8 +2155,7 @@ async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
         .await?;
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("chat stream should yield one error")
         .expect_err("invalid unterminated chat frame should fail");
@@ -2113,8 +2181,7 @@ async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
             stop: Vec::new(),
         })
         .await?;
-    let error = stream
-        .next()
+    let error = next_non_diagnostic(&mut stream)
         .await
         .expect("completion stream should yield one error")
         .expect_err("invalid unterminated completion frame should fail");
@@ -2540,4 +2607,238 @@ fn default_max_output_tokens_is_the_canonical_v4_cap() -> Result<()> {
         Some(crate::DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS)
     );
     Ok(())
+}
+
+#[test]
+fn chat_frame_rejects_truncated_tool_done_and_redacts_invalid_envelope() -> Result<()> {
+    let mut mapper = crate::mapper::StreamMapper::new("deepseek-v4-flash");
+    let mut pending = std::collections::VecDeque::new();
+    let data = serde_json::json!({"choices": [{"delta": {"tool_calls": [{"index": 0,
+        "id": "call-1", "function": {"name": "echo", "arguments": "{\"value\":"}}]}}]})
+    .to_string();
+    super::enqueue_chat_frame(
+        &mut mapper,
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Data(data),
+    )?;
+    assert!(
+        super::enqueue_chat_frame(
+            &mut mapper,
+            &mut pending,
+            crate::response::DeepSeekSseFrame::Done
+        )
+        .is_err()
+    );
+    assert!(!pending.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::Done | ProviderChunk::ToolCallComplete(_)
+    )));
+    let error = super::enqueue_chat_frame(
+        &mut mapper,
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Data(
+            "{\"choices\":\"private-argument-marker\"}".to_owned(),
+        ),
+    )
+    .expect_err("invalid event must fail");
+    let chain = format!("{error:#}");
+    assert!(!chain.contains("private-argument-marker"));
+    assert!(chain.contains("raw_bytes="));
+    assert!(chain.contains("column="));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_emits_safe_tool_stream_facts_before_truncated_response_error() -> Result<()> {
+    use sigil_kernel::ProviderStreamFinishV1::{Missing, ToolCalls};
+    for (finish, suffix, expected_finish, expected_completed) in [
+        (None, "", Missing, 0),
+        (None, "data: [DONE]\n\n", Missing, 0),
+        (
+            Some("tool_calls"),
+            "data: {\"choices\":\"private-argument-marker\"}\n\n",
+            ToolCalls,
+            1,
+        ),
+    ] {
+        let event = serde_json::json!({"choices": [{"delta": {"tool_calls": [{"index": 0,
+            "id": "call-1", "function": {"name": "echo", "arguments": "private-argument-marker"}}]},
+            "finish_reason": finish}]});
+        let body = format!("data: {event}\n\n{suffix}");
+        let server = spawn_chunked_streaming_server(vec![body.into_bytes()]).await?;
+        let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+            base_url: server.clone(),
+            beta_base_url: server.clone(),
+            anthropic_base_url: server,
+            model: "deepseek-v4-flash".to_owned(),
+            fim_model: "deepseek-v4-pro".to_owned(),
+            api_key: Some("test".to_owned()),
+            user_id_strategy: None,
+            strict_tools_mode: crate::StrictToolsMode::Auto,
+        })?;
+        let chunks = provider
+            .stream(simple_chat_request("deepseek-v4-flash"))
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| matches!(
+                    chunk,
+                    Ok(ProviderChunk::Diagnostic(
+                        sigil_kernel::ProviderDiagnosticV1::ToolStreamFinished { .. }
+                    ))
+                ))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            chunks.get(chunks.len().saturating_sub(2)),
+            Some(Ok(ProviderChunk::Diagnostic(
+                sigil_kernel::ProviderDiagnosticV1::ToolStreamFinished {
+                    finish,
+                    argument_fragments: 1,
+                    argument_bytes: 23,
+                    completed_calls,
+                    ..
+                }
+            ))) if *finish == expected_finish && *completed_calls == expected_completed
+        ));
+        assert!(chunks.last().is_some_and(Result::is_err));
+        assert!(!chunks.iter().any(|chunk| matches!(
+            chunk,
+            Ok(ProviderChunk::Done | ProviderChunk::ToolCallComplete(_))
+        )));
+        assert!(!format!("{:?}", chunks.last()).contains("private-argument-marker"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_completes_tool_stream_once_at_done_or_eof() -> Result<()> {
+    let arguments = "{\"done\":";
+    for suffix in ["", "data: [DONE]\n\n"] {
+        let event = serde_json::json!({"choices": [{"delta": {"tool_calls": [{"index": 0,
+            "id": "call-1", "function": {"name": "echo", "arguments": arguments}}]},
+            "finish_reason": "tool_calls"}]});
+        let body = format!("data: {event}\n\n{suffix}");
+        let server = spawn_chunked_streaming_server(vec![body.into_bytes()]).await?;
+        let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+            base_url: server.clone(),
+            beta_base_url: server.clone(),
+            anthropic_base_url: server,
+            model: "deepseek-v4-flash".to_owned(),
+            fim_model: "deepseek-v4-pro".to_owned(),
+            api_key: Some("test".to_owned()),
+            user_id_strategy: None,
+            strict_tools_mode: crate::StrictToolsMode::Auto,
+        })?;
+        let chunks = provider
+            .stream(simple_chat_request("deepseek-v4-flash"))
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(
+            chunks
+                .iter()
+                .filter_map(|chunk| match chunk {
+                    ProviderChunk::ToolCallComplete(call) => Some(call.args_json.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![arguments]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| matches!(chunk, ProviderChunk::Diagnostic(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            chunks.get(chunks.len().saturating_sub(2)),
+            Some(ProviderChunk::Diagnostic(
+                sigil_kernel::ProviderDiagnosticV1::ToolStreamFinished {
+                    finish: sigil_kernel::ProviderStreamFinishV1::ToolCalls,
+                    tool_call_count: 1,
+                    argument_fragments: 1,
+                    argument_bytes,
+                    completed_calls: 1,
+                }
+            )) if *argument_bytes == arguments.len() as u64
+        ));
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| matches!(chunk, ProviderChunk::Done))
+                .count(),
+            1
+        );
+        assert!(matches!(chunks.last(), Some(ProviderChunk::Done)));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_records_actual_strict_mode_without_exposing_tool_schema() -> Result<()> {
+    for (mode, schema, expected) in [
+        (
+            crate::StrictToolsMode::Off,
+            serde_json::json!({"type":"object", "properties":{}}),
+            sigil_kernel::ProviderToolSchemaModeV1::Disabled,
+        ),
+        (
+            crate::StrictToolsMode::Auto,
+            serde_json::json!({"type":"object", "properties":{}}),
+            sigil_kernel::ProviderToolSchemaModeV1::Enabled,
+        ),
+        (
+            crate::StrictToolsMode::Auto,
+            serde_json::json!({"type":"object"}),
+            sigil_kernel::ProviderToolSchemaModeV1::FallbackUnsupportedSchema,
+        ),
+    ] {
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_vec();
+        let server = spawn_chunked_streaming_server(vec![body]).await?;
+        let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+            base_url: server.clone(),
+            beta_base_url: server.clone(),
+            anthropic_base_url: server,
+            model: "deepseek-v4-flash".to_owned(),
+            fim_model: "deepseek-v4-pro".to_owned(),
+            api_key: Some("test".to_owned()),
+            user_id_strategy: None,
+            strict_tools_mode: mode,
+        })?;
+        let mut request = simple_chat_request("deepseek-v4-flash");
+        request.tools.push(ToolSpec {
+            name: "echo".to_owned(),
+            description: "test".to_owned(),
+            input_schema: schema,
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        });
+        let chunks = provider.stream(request).await?.collect::<Vec<_>>().await;
+        assert!(
+            matches!(chunks.first(), Some(Ok(ProviderChunk::Diagnostic(sigil_kernel::ProviderDiagnosticV1::ToolsPrepared { schema_mode, tool_count: 1 }))) if *schema_mode == expected)
+        );
+        assert!(matches!(chunks.last(), Some(Ok(ProviderChunk::Done))));
+    }
+    Ok(())
+}
+
+async fn next_non_diagnostic(
+    stream: &mut std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderChunk>> + Send>>,
+) -> Option<Result<ProviderChunk>> {
+    while let Some(chunk) = stream.next().await {
+        if !matches!(chunk, Ok(ProviderChunk::Diagnostic(_))) {
+            return Some(chunk);
+        }
+    }
+    None
 }

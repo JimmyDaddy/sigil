@@ -2,7 +2,7 @@ use std::{collections::VecDeque, pin::Pin, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use tracing::debug;
@@ -35,6 +35,7 @@ use crate::{
     },
     retry::classify_status,
     stream::DeepSeekSseDecoder,
+    tools::sanitize_request_tool_schemas,
 };
 
 /// DeepSeek provider adapter that maps kernel requests onto DeepSeek transport flows.
@@ -294,6 +295,14 @@ impl DeepSeekProvider {
             self.config.strict_tools_mode,
             &self.profile.quirks,
         )?;
+        let strict_mode_enabled = prepared.body.tools.as_ref().is_some_and(|tools| {
+            !tools.is_empty() && tools.iter().all(|tool| tool["function"]["strict"] == true)
+        });
+        debug!(target: "sigil_provider_deepseek",
+            configured_strict_mode = ?self.config.strict_tools_mode,
+            strict_mode_enabled, tool_count = request.tools.len(),
+            strict_fallback = !prepared.tool_diagnostics.is_empty(),
+            "chat tool request diagnostic");
         for diagnostic in &prepared.tool_diagnostics {
             debug!(
                 target: "sigil_provider_deepseek",
@@ -302,13 +311,30 @@ impl DeepSeekProvider {
                 "tool schema diagnostic"
             );
         }
-        self.stream_chat_chunks(
-            prepared.endpoint,
-            "/chat/completions",
-            &request.model_name,
-            &prepared.body,
-        )
-        .await
+        let response = self
+            .stream_chat_chunks(
+                prepared.endpoint,
+                "/chat/completions",
+                &request.model_name,
+                &prepared.body,
+            )
+            .await?;
+        if request.tools.is_empty() {
+            return Ok(response);
+        }
+        let diagnostic = sigil_kernel::ProviderDiagnosticV1::ToolsPrepared {
+            schema_mode: if strict_mode_enabled {
+                sigil_kernel::ProviderToolSchemaModeV1::Enabled
+            } else if !prepared.tool_diagnostics.is_empty() {
+                sigil_kernel::ProviderToolSchemaModeV1::FallbackUnsupportedSchema
+            } else {
+                sigil_kernel::ProviderToolSchemaModeV1::Disabled
+            },
+            tool_count: request.tools.len() as u64,
+        };
+        Ok(Box::pin(
+            stream::once(async move { Ok(ProviderChunk::Diagnostic(diagnostic)) }).chain(response),
+        ))
     }
 
     fn official_anthropic_endpoint(&self) -> bool {
@@ -487,10 +513,14 @@ impl DeepSeekProvider {
             HeaderValue::from_str(&auth).context("invalid auth header")?,
         );
 
+        let mut wire_body =
+            serde_json::to_value(body).context("failed to serialize DeepSeek request body")?;
+        sanitize_request_tool_schemas(&mut wire_body);
+
         self.client
             .post(url)
             .headers(headers)
-            .json(body)
+            .json(&wire_body)
             .send()
             .await
             .context("failed to send DeepSeek request")
@@ -623,7 +653,6 @@ fn chat_response_stream(
     let mapper = StreamMapper::new(model_name.clone());
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
-    let saw_done = false;
     let timeout_state = ProviderStreamTimeoutState::new(timeouts);
     let state = (
         byte_stream,
@@ -631,10 +660,10 @@ fn chat_response_stream(
         mapper,
         pending,
         finished,
-        saw_done,
         timeout_state,
         timeouts,
         model_name,
+        None::<anyhow::Error>,
     );
 
     Box::pin(stream::unfold(state, |mut state| async move {
@@ -642,51 +671,42 @@ fn chat_response_stream(
             if let Some(chunk) = state.3.pop_front() {
                 return Some((Ok(chunk), state));
             }
+            if let Some(error) = state.8.take() {
+                return Some((Err(error), state));
+            }
             if state.4 {
                 return None;
             }
 
-            match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
+            let result = match timeout_provider_stream_next(&mut state.0, state.6, &mut state.5)
+                .await
+            {
                 Ok(Some(Ok(bytes))) => {
-                    match enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &bytes) {
-                        Ok(done_seen) => {
-                            state.5 |= done_seen;
-                            if done_seen {
-                                state.4 = true;
-                            }
-                        }
-                        Err(error) => {
-                            state.4 = true;
-                            return Some((Err(error), state));
-                        }
-                    }
+                    enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &bytes)
                 }
                 Ok(Some(Err(error))) => {
-                    state.4 = true;
-                    return Some((Err(error).context("failed to read response chunk"), state));
+                    Err(anyhow::Error::new(error).context("failed to read response chunk"))
                 }
-                Err(phase) => {
+                Err(phase) => Err(provider_timeout_error(phase, state.6, "deepseek", &state.7)),
+                Ok(None) => enqueue_finished_chat_frames(&mut state.1, &mut state.2, &mut state.3)
+                    .and_then(|done_seen| {
+                        if !done_seen {
+                            enqueue_chat_frame(
+                                &mut state.2,
+                                &mut state.3,
+                                crate::response::DeepSeekSseFrame::Done,
+                            )?;
+                        }
+                        Ok(true)
+                    }),
+            };
+            match result {
+                Ok(done_seen) => state.4 = done_seen,
+                Err(error) => {
+                    state.3.clear();
                     state.4 = true;
-                    return Some((
-                        Err(provider_timeout_error(phase, state.7, "deepseek", &state.8)),
-                        state,
-                    ));
-                }
-                Ok(None) => {
-                    match enqueue_finished_chat_frames(&mut state.1, &mut state.2, &mut state.3) {
-                        Ok(done_seen) => {
-                            state.5 |= done_seen;
-                            if !state.5 {
-                                state.3.push_back(ProviderChunk::Done);
-                                state.5 = true;
-                            }
-                            state.4 = true;
-                        }
-                        Err(error) => {
-                            state.4 = true;
-                            return Some((Err(error), state));
-                        }
-                    }
+                    state.8 = Some(error);
+                    return Some((Ok(ProviderChunk::Diagnostic(state.2.diagnostic())), state));
                 }
             }
         }
@@ -804,14 +824,19 @@ fn enqueue_chat_frame(
             Ok(false)
         }
         crate::response::DeepSeekSseFrame::Done => {
+            mapper.finish()?;
+            if mapper.has_tool_calls() {
+                pending.push_back(ProviderChunk::Diagnostic(mapper.diagnostic()));
+            }
             pending.push_back(ProviderChunk::Done);
             Ok(true)
         }
         crate::response::DeepSeekSseFrame::Data(data) => {
-            let envelope: DeepSeekStreamEnvelope =
-                serde_json::from_str(&data).with_context(|| {
-                    format!("invalid DeepSeek event {}", truncate_event_payload(&data))
-                })?;
+            let envelope: DeepSeekStreamEnvelope = serde_json::from_str(&data).map_err(|error| {
+                // The decoder error may contain an input value; only retain structural facts.
+                anyhow::anyhow!("invalid deepseek chat event; raw_bytes={}; category={:?}; line={}; column={}",
+                    data.len(), error.classify(), error.line(), error.column())
+            })?;
             pending.extend(mapper.map_envelope(envelope)?);
             Ok(false)
         }

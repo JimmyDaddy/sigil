@@ -10,7 +10,6 @@ pub const OPENAI_RESPONSES_API_KEY_ENV_NAMES: &[&str] =
 pub const OPENAI_RESPONSES_BASE_URL_ENV: &str = "SIGIL_OPENAI_RESPONSES_BASE_URL";
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OpenAiResponsesProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,

@@ -102,21 +102,17 @@ fn resolved_config_prefers_sigil_env_then_gemini_and_google_aliases() -> anyhow:
 }
 
 #[test]
-fn config_rejects_provider_model_field() {
-    let error = serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
+fn config_ignores_provider_model_field() {
+    serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
         "model": "gemini-2.5-pro"
     }))
-    .expect_err("provider model field should be rejected");
-
-    assert!(error.to_string().contains("model"));
+    .expect("provider model field is ignored at this boundary");
 }
 
 #[test]
-fn config_rejects_legacy_provider_timeout_field() {
-    let error = serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
+fn config_ignores_legacy_provider_timeout_field() {
+    serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
         "request_timeout_secs": 43
     }))
-    .expect_err("provider timeout field should be rejected");
-
-    assert!(error.to_string().contains("request_timeout_secs"));
+    .expect("retired provider timeout field is ignored");
 }

@@ -245,12 +245,11 @@ fn decode_output_items_state(value: &Value) -> Result<Vec<Value>> {
     let object = value
         .as_object()
         .context("OpenAI Responses output-item state must be an object")?;
-    if object.len() != 3
-        || !object.contains_key("schema_version")
+    if !object.contains_key("schema_version")
         || !object.contains_key("response_id")
         || !object.contains_key("output_items")
     {
-        bail!("OpenAI Responses output-item state has unsupported fields")
+        bail!("OpenAI Responses output-item state is missing required fields")
     }
     if object.get("schema_version").and_then(Value::as_u64)
         != Some(OUTPUT_ITEMS_STATE_SCHEMA_VERSION)

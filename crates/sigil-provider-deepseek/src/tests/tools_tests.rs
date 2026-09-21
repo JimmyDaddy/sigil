@@ -2,7 +2,9 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec};
 
-use super::{StrictToolsMode, ToolSchemaDiagnosticLevel, prepare_tools};
+use super::{
+    StrictToolsMode, ToolSchemaDiagnosticLevel, prepare_tools, sanitize_request_tool_schemas,
+};
 
 fn tool_spec(name: &str, input_schema: Value) -> ToolSpec {
     ToolSpec {
@@ -14,6 +16,69 @@ fn tool_spec(name: &str, input_schema: Value) -> ToolSpec {
         network_effect: None,
         preview: ToolPreviewCapability::None,
     }
+}
+
+fn assert_no_true_additional_properties(value: &Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "additionalProperties" {
+                    assert_ne!(child, &Value::Bool(true));
+                }
+                assert_no_true_additional_properties(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_no_true_additional_properties(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn final_wire_boundary_removes_true_additional_properties_from_every_tool_schema() {
+    let mut body = json!({
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                            "members": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": true
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "name": "custom_tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "nested": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        ]
+    });
+
+    sanitize_request_tool_schemas(&mut body);
+
+    assert_no_true_additional_properties(&body["tools"]);
+    assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+    assert_eq!(body["tools"][1]["name"], "custom_tool");
 }
 
 #[test]
@@ -84,6 +149,44 @@ fn strict_auto_falls_back_to_standard_tools_for_unsupported_schema() -> Result<(
             .contains("using standard tools")
     );
     assert!(prepared.diagnostics[0].message.contains("$"));
+    Ok(())
+}
+
+#[test]
+fn standard_fallback_omits_true_additional_properties_at_every_schema_depth() -> Result<()> {
+    let prepared = prepare_tools(
+        &[tool_spec(
+            "unsupported_with_permissive_objects",
+            json!({
+                "type": "object",
+                "properties": {
+                    "nested": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "additionalProperties": true
+                    },
+                    "unsupported": true
+                },
+                "additionalProperties": true
+            }),
+        )],
+        StrictToolsMode::Auto,
+    )?;
+
+    assert!(!prepared.strict_mode_enabled);
+    let payload = prepared.payload.expect("standard fallback payload");
+    let function = &payload[0]["function"];
+    assert_no_true_additional_properties(function);
+    assert!(function["parameters"].get("additionalProperties").is_none());
+    assert!(
+        function["parameters"]["properties"]["nested"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert_eq!(
+        function["parameters"]["properties"]["nested"]["properties"]["value"]["type"],
+        "string"
+    );
     Ok(())
 }
 
@@ -389,4 +492,35 @@ fn strict_always_errors_include_schema_path() {
     let message = format!("{error:#}");
     assert!(message.contains("tool `bad_nested` strict schema normalization failed"));
     assert!(message.contains("$.properties.nested.properties.bad"));
+}
+
+#[test]
+fn task_checklist_schema_normalizes_without_fallback_or_nullable_defaults() -> Result<()> {
+    let checklist = sigil_kernel::update_task_checklist_tool_spec();
+    for mode in [StrictToolsMode::Always, StrictToolsMode::Auto] {
+        let prepared = prepare_tools(std::slice::from_ref(&checklist), mode)?;
+        assert!(prepared.strict_mode_enabled);
+        assert!(prepared.diagnostics.is_empty());
+        let function = &prepared.payload.as_ref().expect("checklist payload")[0]["function"];
+        assert_eq!(function["strict"], true);
+        assert_no_true_additional_properties(function);
+        let parameters = &function["parameters"];
+        assert_eq!(parameters["additionalProperties"], false);
+        let item = &parameters["properties"]["items"]["items"];
+        assert_eq!(item["additionalProperties"], false);
+        assert_eq!(item["properties"]["text"]["type"], "string");
+        assert_eq!(item["properties"]["status"]["type"], "string");
+        assert_eq!(
+            item["properties"].as_object().expect("item fields").len(),
+            2
+        );
+        for field in item["properties"]
+            .as_object()
+            .expect("item fields")
+            .values()
+        {
+            assert!(field.get("anyOf").is_none());
+        }
+    }
+    Ok(())
 }

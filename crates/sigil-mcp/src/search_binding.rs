@@ -100,9 +100,6 @@ fn classify_generic_query_schema(schema: &Value) -> McpStableSearchEligibility {
         return incompatible_missing();
     };
     if root.get("type").and_then(Value::as_str) != Some("object")
-        || root
-            .get("additionalProperties")
-            .is_some_and(|value| value != &Value::Bool(false))
         || root.keys().any(|key| {
             !matches!(
                 key.as_str(),

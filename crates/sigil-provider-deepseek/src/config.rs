@@ -16,7 +16,6 @@ pub const SIGIL_FIM_MODEL_ENV: &str = "SIGIL_FIM_MODEL";
 pub const SIGIL_STRICT_TOOLS_MODE_ENV: &str = "SIGIL_STRICT_TOOLS_MODE";
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeepSeekProviderConfig {
     #[serde(default = "default_primary_base_url")]
     pub base_url: String,

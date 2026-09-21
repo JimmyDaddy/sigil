@@ -83,14 +83,49 @@ pub fn prepare_tools(specs: &[ToolSpec], mode: StrictToolsMode) -> Result<Prepar
 }
 
 fn prepare_standard_tool(spec: &ToolSpec) -> Result<Value> {
+    let parameters = without_true_additional_properties(&spec.input_schema);
     Ok(json!({
         "type": "function",
         "function": {
             "name": spec.name,
             "description": spec.description,
-            "parameters": canonicalize_cache_stable_json(&spec.input_schema)?,
+            "parameters": canonicalize_cache_stable_json(&parameters)?,
         }
     }))
+}
+
+/// DeepSeek rejects an explicit `additionalProperties: true` even on the standard
+/// (non-strict) tool route. Omitting that keyword preserves JSON Schema's default
+/// permissive behavior while producing a request accepted by the provider.
+pub(crate) fn without_true_additional_properties(schema: &Value) -> Value {
+    match schema {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, value)| {
+                    key.as_str() != "additionalProperties" || value.as_bool() != Some(true)
+                })
+                .map(|(key, value)| (key.clone(), without_true_additional_properties(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(without_true_additional_properties)
+                .collect(),
+        ),
+        scalar => scalar.clone(),
+    }
+}
+
+/// Enforces DeepSeek's tool-schema restriction on the fully serialized HTTP request body.
+///
+/// Request builders already normalize their schemas, but this final transport boundary keeps
+/// future request paths from sending an explicit `additionalProperties: true` accidentally.
+pub(crate) fn sanitize_request_tool_schemas(body: &mut Value) {
+    if let Some(tools) = body.get_mut("tools") {
+        *tools = without_true_additional_properties(tools);
+    }
 }
 
 fn prepare_strict_tool(spec: &ToolSpec) -> Result<Value> {
@@ -202,6 +237,9 @@ fn normalize_object_schema(map: &Map<String, Value>, path: &str) -> Result<Value
         Value::Object(normalized_properties),
     );
     normalized.insert("required".to_owned(), Value::Array(normalized_required));
+    // DeepSeek strict function schemas require additionalProperties=false on every object.
+    // This constrains model-generated arguments at the provider boundary; tool handlers still
+    // project the fields they consume and remain tolerant of unknown input from other sources.
     normalized.insert("additionalProperties".to_owned(), Value::Bool(false));
     copy_common_fields(map, &mut normalized);
     Ok(Value::Object(normalized))

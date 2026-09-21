@@ -62,6 +62,52 @@ fn renders_hosted_declaration_first_with_custom_tools_after() {
 }
 
 #[test]
+fn strips_true_additional_properties_from_hosted_and_custom_message_tool_schemas() {
+    let mut request = request_with(vec![ModelMessage::user("hi")], hosted_request("auth-1"));
+    request.tools[0].input_schema = json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "nested": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                    "value": {"type": "string"}
+                }
+            },
+            "closed": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+            }
+        }
+    });
+    let prepared = build_messages_request(
+        &request,
+        &request.hosted_tools[0],
+        &DeepSeekHostedContinuationStore::default(),
+    )
+    .expect("messages request builds");
+
+    let tools = prepared.body.tools.as_ref().expect("tools present");
+    let schema = &tools[1]["input_schema"];
+    assert!(schema.get("additionalProperties").is_none());
+    assert!(
+        schema["properties"]["nested"]
+            .get("additionalProperties")
+            .is_none()
+    );
+    assert_eq!(
+        schema["properties"]["nested"]["properties"]["value"]["type"],
+        "string"
+    );
+    assert_eq!(
+        schema["properties"]["closed"]["additionalProperties"],
+        false
+    );
+}
+
+#[test]
 fn renders_domain_filters_and_max_uses_into_hosted_declaration() {
     let hosted = HostedToolRequest::new(
         "auth-1",

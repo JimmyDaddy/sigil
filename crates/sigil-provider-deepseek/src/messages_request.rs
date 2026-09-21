@@ -12,6 +12,7 @@ use crate::compaction_token_profile::DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_O
 use crate::hosted_search::DEEPSEEK_WEB_SEARCH_TOOL_TYPE;
 use crate::messages_continuation::{ContinuationResolution, DeepSeekHostedContinuationStore};
 use crate::messages_models::DeepSeekMessagesRequest;
+use crate::tools::without_true_additional_properties;
 
 pub struct PreparedMessagesRequest {
     pub body: DeepSeekMessagesRequest,
@@ -113,7 +114,7 @@ pub fn build_messages_request(
         tools.push(json!({
             "name": tool.name,
             "description": tool.description,
-            "input_schema": tool.input_schema,
+            "input_schema": without_true_additional_properties(&tool.input_schema),
         }));
     }
 

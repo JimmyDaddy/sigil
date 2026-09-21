@@ -84,7 +84,7 @@ fn map_envelope_emits_usage_reasoning_tool_chunks_and_continuation_state() -> Re
 }
 
 #[test]
-fn map_envelope_uses_synthetic_tool_id_and_clears_state_on_stop() -> Result<()> {
+fn map_envelope_rejects_stop_with_incomplete_tool_calls() -> Result<()> {
     let start: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
         "choices": [{
             "delta": {
@@ -114,7 +114,9 @@ fn map_envelope_uses_synthetic_tool_id_and_clears_state_on_stop() -> Result<()> 
 
     let mut mapper = StreamMapper::new("deepseek-v4-flash");
     let first = mapper.map_envelope(start)?;
-    let second = mapper.map_envelope(stop)?;
+    let error = mapper
+        .map_envelope(stop)
+        .expect_err("stop cannot discard a pending tool call");
 
     assert!(matches!(
         first.as_slice(),
@@ -123,10 +125,7 @@ fn map_envelope_uses_synthetic_tool_id_and_clears_state_on_stop() -> Result<()> 
             ProviderChunk::ToolCallArgsDelta { id, delta }
         ] if reasoning == "partial" && id == "call-2" && delta == "{\"value\":1}"
     ));
-    assert!(matches!(
-        second.as_slice(),
-        [ProviderChunk::ToolCallStart { id, name }] if id == "call-2" && name == "echo"
-    ));
+    assert!(error.to_string().contains("stopped before completing"));
     Ok(())
 }
 
@@ -209,5 +208,117 @@ fn map_envelope_rejects_native_dsml_tool_protocol_split_across_text_deltas() -> 
         error.downcast_ref::<sigil_kernel::ProviderProtocolViolation>(),
         Some(&sigil_kernel::ProviderProtocolViolation::UnstructuredToolInvocation)
     );
+    Ok(())
+}
+
+#[test]
+fn map_envelope_preserves_malformed_arguments_for_tool_validation() -> Result<()> {
+    let mut mapper = StreamMapper::new("deepseek-v4-flash");
+    let envelope = serde_json::from_value(serde_json::json!({
+        "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1",
+            "function": {"name": "task_completion_claim", "arguments": "{\"requirements\":[\"source\""}}]},
+            "finish_reason": "tool_calls"}]
+    }))?;
+    let chunks = mapper.map_envelope(envelope)?;
+    assert!(chunks.iter().any(
+        |chunk| matches!(chunk, ProviderChunk::ToolCallComplete(call)
+        if call.args_json == "{\"requirements\":[\"source\"")
+    ));
+    mapper.finish()?;
+    assert_eq!(mapper.argument_fragments, 1);
+    assert_eq!(mapper.completed_calls, 1);
+    Ok(())
+}
+
+#[test]
+fn map_envelope_rejects_truncation_and_missing_identity_without_exposing_arguments() -> Result<()> {
+    for (finish_reason, include_id) in [("length", true), ("tool_calls", false)] {
+        let mut mapper = StreamMapper::new("deepseek-v4-flash");
+        let mut call = serde_json::json!({"index": 0,
+            "function": {"name": "task_completion_claim", "arguments": "private-argument-marker"}});
+        if include_id {
+            call["id"] = serde_json::json!("call-1");
+        }
+        let envelope = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [call]}, "finish_reason": finish_reason}]
+        }))?;
+        let error = mapper
+            .map_envelope(envelope)
+            .expect_err("incomplete stream must fail");
+        assert!(
+            error
+                .downcast_ref::<sigil_kernel::SafePersistenceError>()
+                .is_some()
+        );
+        assert!(!error.to_string().contains("private-argument-marker"));
+        assert!(error.to_string().contains("finish_reason="));
+    }
+    Ok(())
+}
+
+#[test]
+fn map_envelope_classifies_text_only_length_finish_as_recoverable_truncation() -> Result<()> {
+    let mut mapper = StreamMapper::new("deepseek-v4-flash");
+    let envelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": {"reasoning_content": "partial reasoning"},
+            "finish_reason": "length"
+        }]
+    }))?;
+
+    let error = mapper
+        .map_envelope(envelope)
+        .expect_err("length finish without tool calls is an incomplete generation");
+    assert!(
+        error
+            .downcast_ref::<sigil_kernel::ProviderStreamEndedUnexpectedly>()
+            .is_some()
+    );
+    assert!(matches!(
+        mapper.diagnostic(),
+        sigil_kernel::ProviderDiagnosticV1::ToolStreamFinished {
+            finish: sigil_kernel::ProviderStreamFinishV1::Length,
+            tool_call_count: 0,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn map_envelope_rejects_identity_drift_and_post_finish_calls() -> Result<()> {
+    for second_id in ["different-call", "call-1"] {
+        let mut mapper = StreamMapper::new("deepseek-v4-flash");
+        let first = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1",
+                "function": {"name": "echo", "arguments": "{}"}}]},
+                "finish_reason": if second_id == "call-1" { Some("tool_calls") } else { None }}]
+        }))?;
+        mapper.map_envelope(first)?;
+        let second = serde_json::from_value(serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{"index": 0, "id": second_id,
+                "function": {"arguments": "private-argument-marker"}}]}}]
+        }))?;
+        let error = mapper
+            .map_envelope(second)
+            .expect_err("stream identity is immutable");
+        assert!(!error.to_string().contains("private-argument-marker"));
+    }
+    Ok(())
+}
+
+#[test]
+fn map_envelope_rejects_stream_end_before_tool_finish() -> Result<()> {
+    let mut mapper = StreamMapper::new("deepseek-v4-flash");
+    let envelope = serde_json::from_value(serde_json::json!({
+        "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1",
+            "function": {"name": "echo", "arguments": "{\"value\":"}}]}}]
+    }))?;
+    mapper.map_envelope(envelope)?;
+    let error = mapper
+        .finish()
+        .expect_err("EOF and DONE cannot complete partial arguments");
+    assert!(error.to_string().contains("finish_reason=missing"));
+    assert!(error.to_string().contains("argument_fragments=1"));
     Ok(())
 }

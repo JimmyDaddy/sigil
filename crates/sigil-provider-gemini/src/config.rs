@@ -14,7 +14,6 @@ pub const SIGIL_GEMINI_API_KEY_ENV_NAMES: &[&str] = &[
 pub const SIGIL_GEMINI_BASE_URL_ENV: &str = "SIGIL_GEMINI_BASE_URL";
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GeminiProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,

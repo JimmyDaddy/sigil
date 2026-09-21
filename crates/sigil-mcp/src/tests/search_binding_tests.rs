@@ -34,7 +34,6 @@ fn search_binding_generic_accepts_only_exact_required_query_string() {
         json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query","limit"]}),
         json!({"type":"object","properties":{"query":{"type":"string","pattern":".*"}},"required":["query"]}),
         json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"oneOf":[]}),
-        json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":true}),
         json!({"$ref":"#/$defs/request","$defs":{"request":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}),
     ] {
         assert!(matches!(
@@ -42,6 +41,16 @@ fn search_binding_generic_accepts_only_exact_required_query_string() {
             McpStableSearchEligibility::Incompatible(_)
         ));
     }
+    let open_schema = tool(json!({
+        "type":"object",
+        "properties":{"query":{"type":"string"}},
+        "required":["query"],
+        "additionalProperties":true
+    }));
+    assert_eq!(
+        classify_mcp_search_binding("identity", &open_schema, &[]),
+        McpStableSearchEligibility::Eligible(McpSearchAdapterKind::GenericQueryText)
+    );
 }
 
 #[test]

@@ -17,14 +17,12 @@ pub struct DeepSeekCatalogModel {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelList {
     object: String,
     data: Vec<ModelObject>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelObject {
     id: String,
     object: String,

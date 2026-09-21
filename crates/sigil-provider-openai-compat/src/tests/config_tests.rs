@@ -63,23 +63,20 @@ fn resolved_config_uses_openai_api_key_alias_when_sigil_env_is_blank() -> Result
 }
 
 #[test]
-fn config_rejects_provider_model_field() {
-    let error = serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
+fn config_ignores_provider_owned_model_field() {
+    let config = serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
         "model": "gpt-4.1"
     }))
-    .expect_err("provider model field should be rejected");
-
-    assert!(error.to_string().contains("model"));
+    .expect("unknown provider model field is ignored");
+    assert_eq!(config.model, "gpt-4.1");
 }
 
 #[test]
-fn config_rejects_legacy_provider_timeout_field() {
-    let error = serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
+fn config_ignores_legacy_provider_timeout_field() {
+    serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
         "request_timeout_secs": 30
     }))
-    .expect_err("provider timeout field should be rejected");
-
-    assert!(error.to_string().contains("request_timeout_secs"));
+    .expect("retired provider timeout field is ignored");
 }
 
 struct EnvScope {

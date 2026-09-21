@@ -12,7 +12,6 @@ pub const SIGIL_ANTHROPIC_VERSION_ENV: &str = "SIGIL_ANTHROPIC_VERSION";
 pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AnthropicProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,

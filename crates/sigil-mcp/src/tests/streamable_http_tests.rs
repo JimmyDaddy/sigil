@@ -257,6 +257,69 @@ async fn streamable_http_post_sse_dispatches_inbound_request_before_eof() {
 }
 
 #[tokio::test]
+async fn streamable_http_final_response_settles_while_response_body_remains_open() {
+    let result = json!({"jsonrpc":"2.0","id":2,"result":{"content":[]}});
+    let (client, _server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false)),
+            FixtureResponse::empty(202),
+            FixtureResponse::sse(200, "").with_chunks(vec![
+                (format!("data: {result}\n\n"), Duration::ZERO),
+                (": still open\n\n".to_owned(), Duration::from_secs(2)),
+            ]),
+            FixtureResponse::json(
+                200,
+                json!({"jsonrpc":"2.0","id":3,"result":{"tools":[]}}).to_string(),
+            ),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        client.call_tool(&empty_tool("final"), json!({}), None, &|| true),
+    )
+    .await
+    .expect("complete RPC must not wait for HTTP body EOF")
+    .expect("valid final response");
+    assert!(
+        client
+            .list_tools()
+            .await
+            .expect("next RPC remains usable")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn streamable_http_wrong_session_cannot_dispatch_inbound_before_final_response() {
+    let ping = json!({"jsonrpc":"2.0","id":"wrong-session-ping","method":"ping","params":{}});
+    let result = json!({"jsonrpc":"2.0","id":2,"result":{"content":[]}});
+    let (client, server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false))
+                .with_header("Mcp-Session-Id", "expected-session"),
+            FixtureResponse::empty(202),
+            FixtureResponse::sse(200, format!("data: {ping}\n\ndata: {result}\n\n"))
+                .with_header("Mcp-Session-Id", "another-session"),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    assert!(matches!(
+        client
+            .call_tool(&empty_tool("scope"), json!({}), None, &|| true)
+            .await,
+        Err(McpStreamableHttpError::InvalidSessionId)
+    ));
+    assert_eq!(
+        server.requests().len(),
+        3,
+        "untrusted inbound request must not trigger a reply POST"
+    );
+}
+
+#[tokio::test]
 async fn streamable_http_get_sse_dispatches_inbound_request_before_eof() {
     let ping = json!({"jsonrpc":"2.0","id":"get-ping-before-eof","method":"ping","params":{}});
     let ping_event = format!("data: {ping}\n\n");

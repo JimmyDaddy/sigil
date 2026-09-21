@@ -44,11 +44,52 @@ fn remote_elicitation_validates_flat_form_before_modal_and_response() {
         .validate_response(&json!({"kind":"docs","count":2}))
         .expect("valid response");
     assert!(request.validate_response(&json!({"kind":"other"})).is_err());
-    assert!(
-        request
-            .validate_response(&json!({"kind":"docs","extra":true}))
-            .is_err()
-    );
+    request
+        .validate_response(&json!({"kind":"docs","extra":true}))
+        .expect("unknown response fields are ignored");
+}
+
+#[test]
+fn remote_elicitation_uses_schema_field_semantics_for_optional_and_extra_fields() {
+    let empty_request = ValidatedMcpFormRequest::parse(&json!({
+        "requestedSchema": {"type":"object"}
+    }))
+    .expect("object schemas may omit an empty properties map");
+    assert!(empty_request.fields.is_empty());
+    empty_request
+        .validate_response(&json!({}))
+        .expect("empty object response");
+
+    let open_request = ValidatedMcpFormRequest::parse(&json!({
+        "requestedSchema":{
+            "type":"object",
+            "properties":{
+                "kind":{"type":"string"},
+                "details":{"type":"string"}
+            },
+            "required":["kind"]
+        }
+    }))
+    .expect("schema without additionalProperties is valid");
+    open_request
+        .validate_response(&json!({"kind":"docs"}))
+        .expect("required field is accepted");
+    open_request
+        .validate_response(&json!({"kind":"docs","extra":true}))
+        .expect("JSON Schema defaults to allowing additional properties");
+
+    let closed_request = ValidatedMcpFormRequest::parse(&json!({
+        "requestedSchema":{
+            "type":"object",
+            "properties":{"kind":{"type":"string"}},
+            "required":["kind"],
+            "additionalProperties":false
+        }
+    }))
+    .expect("closed schema");
+    closed_request
+        .validate_response(&json!({"kind":"docs","extra":true}))
+        .expect("explicit additionalProperties=false does not reject unknown fields");
 }
 
 #[test]

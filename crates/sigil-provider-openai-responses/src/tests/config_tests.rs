@@ -47,13 +47,11 @@ fn resolved_config_uses_openai_api_key_alias_when_responses_name_is_missing() ->
 }
 
 #[test]
-fn config_rejects_provider_model_field() {
-    let error = serde_json::from_value::<OpenAiResponsesProviderConfig>(serde_json::json!({
+fn config_ignores_provider_model_field() {
+    serde_json::from_value::<OpenAiResponsesProviderConfig>(serde_json::json!({
         "model": "gpt-test"
     }))
-    .expect_err("model belongs to [agent]");
-
-    assert!(error.to_string().contains("model"));
+    .expect("provider model field is ignored at this boundary");
 }
 
 struct EnvScope {

@@ -28,29 +28,27 @@ impl McpPromptToolKind {
     pub(super) fn input_schema(self) -> Value {
         match self {
             Self::List => json!({
-                "type": "object",
-                "properties": {
-                    "cursor": {
-                        "type": "string",
-                        "description": "Optional pagination cursor from a previous prompts/list response"
-                    }
-                },
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string",
+                    "description": "Optional pagination cursor from a previous prompts/list response"
+                }
+            },
             }),
             Self::Get => json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "MCP prompt name returned by prompts/list"
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Optional prompt arguments matching the prompt argument schema"
-                    }
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "MCP prompt name returned by prompts/list"
                 },
-                "required": ["name"],
-                "additionalProperties": false
+                "arguments": {
+                    "type": "object",
+                    "description": "Optional prompt arguments matching the prompt argument schema"
+                }
+            },
+            "required": ["name"],
             }),
         }
     }

@@ -87,10 +87,13 @@ impl ValidatedMcpFormRequest {
         if schema_object.get("type").and_then(Value::as_str) != Some("object") {
             return Err(McpStreamableHttpError::InvalidForm);
         }
-        let properties = schema_object
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or(McpStreamableHttpError::InvalidForm)?;
+        let empty_properties = serde_json::Map::new();
+        let properties = match schema_object.get("properties") {
+            Some(properties) => properties
+                .as_object()
+                .ok_or(McpStreamableHttpError::InvalidForm)?,
+            None => &empty_properties,
+        };
         if properties.len() > MAX_FORM_PROPERTIES {
             return Err(McpStreamableHttpError::InvalidForm);
         }
@@ -150,17 +153,12 @@ impl ValidatedMcpFormRequest {
         }) {
             return Err(McpStreamableHttpError::InvalidForm);
         }
-        let declared = self
-            .fields
-            .iter()
-            .map(|field| field.name.as_str())
-            .collect::<BTreeSet<_>>();
-        if object.keys().any(|name| !declared.contains(name.as_str())) {
-            return Err(McpStreamableHttpError::InvalidForm);
-        }
         if object.values().any(value_looks_like_credential) {
             return Err(McpStreamableHttpError::InvalidForm);
         }
+        // `fields` is only the renderer projection. Required and additional-property semantics
+        // belong to the original JSON Schema, so an omitted optional property or an allowed
+        // extra property must not be rejected by comparing response keys with `fields`.
         CompiledMcpSchema::compile(&self.schema)
             .and_then(|compiled| compiled.validate(content))
             .map_err(|_| McpStreamableHttpError::InvalidForm)

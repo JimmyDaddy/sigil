@@ -405,11 +405,6 @@ pub(super) fn validate_schema_value(
             {
                 return Err(McpStreamableHttpError::SchemaDrift);
             }
-            if object.get("additionalProperties") == Some(&Value::Bool(false))
-                && instance.keys().any(|name| !properties.contains_key(name))
-            {
-                return Err(McpStreamableHttpError::SchemaDrift);
-            }
             for (name, child) in &properties {
                 if let Some(value) = instance.get(name) {
                     validate_schema_value(root, child, value, depth + 1, ref_stack)?;

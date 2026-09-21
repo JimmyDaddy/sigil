@@ -28,25 +28,23 @@ impl McpResourceToolKind {
     pub(super) fn input_schema(self) -> Value {
         match self {
             Self::List => json!({
-                "type": "object",
-                "properties": {
-                    "cursor": {
-                        "type": "string",
-                        "description": "Optional pagination cursor from a previous resources/list response"
-                    }
-                },
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string",
+                    "description": "Optional pagination cursor from a previous resources/list response"
+                }
+            },
             }),
             Self::Read => json!({
-                "type": "object",
-                "properties": {
-                    "uri": {
-                        "type": "string",
-                        "description": "MCP resource URI returned by resources/list"
-                    }
-                },
-                "required": ["uri"],
-                "additionalProperties": false
+            "type": "object",
+            "properties": {
+                "uri": {
+                    "type": "string",
+                    "description": "MCP resource URI returned by resources/list"
+                }
+            },
+            "required": ["uri"],
             }),
         }
     }

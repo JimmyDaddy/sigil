@@ -134,23 +134,19 @@ fn resolved_api_key_env_overrides_file_value() -> Result<()> {
 }
 
 #[test]
-fn config_rejects_legacy_provider_timeout_field() {
-    let error = serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
+fn config_ignores_legacy_provider_timeout_field() {
+    serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
         "request_timeout_secs": 9
     }))
-    .expect_err("provider timeout field should be rejected");
-
-    assert!(error.to_string().contains("request_timeout_secs"));
+    .expect("retired provider timeout field is ignored");
 }
 
 #[test]
-fn config_rejects_provider_model_field() {
-    let error = serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
+fn config_ignores_provider_model_field() {
+    serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
         "model": "deepseek-v4-pro"
     }))
-    .expect_err("provider model field should be rejected");
-
-    assert!(error.to_string().contains("model"));
+    .expect("provider model field is ignored at this boundary");
 }
 
 #[test]

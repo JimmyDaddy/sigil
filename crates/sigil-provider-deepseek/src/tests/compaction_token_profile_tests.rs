@@ -59,7 +59,7 @@ fn strict_only_tool_schema_request() -> CompletionRequest {
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
-            "additionalProperties": false,
+            "additionalProperties": true,
         }),
         category: ToolCategory::File,
         access: ToolAccess::Read,
@@ -199,18 +199,24 @@ fn canonical_renderer_keeps_tool_argument_order_and_merges_tool_results() -> Res
 }
 
 #[test]
-fn strict_only_parity_fixture_changes_only_the_transport_annotation() -> Result<()> {
+fn strict_only_parity_fixture_uses_provider_valid_object_schema() -> Result<()> {
     let request = strict_only_tool_schema_request();
     let mut strict_function = prepared_tool_function(&request, StrictToolsMode::Auto)?;
     let strict_object = strict_function
         .as_object_mut()
         .context("strict-only parity fixture function must be an object")?;
     assert_eq!(strict_object.remove("strict"), Some(Value::Bool(true)));
-
     assert_eq!(
-        strict_function,
-        prepared_tool_function(&request, StrictToolsMode::Off)?,
-        "strict-only parity fixture must not vary schema or function content"
+        strict_function["parameters"]["additionalProperties"],
+        Value::Bool(false),
+        "DeepSeek strict schemas must reject additional properties"
+    );
+    let standard_function = prepared_tool_function(&request, StrictToolsMode::Off)?;
+    assert!(
+        standard_function["parameters"]
+            .get("additionalProperties")
+            .is_none(),
+        "standard mode omits explicit true because DeepSeek rejects it"
     );
     Ok(())
 }
