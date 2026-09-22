@@ -126,14 +126,13 @@ pub(super) fn load_routed_session_with_runtime_attachments(
     )
     .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
     sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
-    let mut session = sigil_runtime::provider_connections::load_session_for_route(
-        root_config,
-        &fallback_route,
-        store,
+    let mut session = sigil_runtime::provider_connections::load_inspected_session_for_route(
+        inspected,
         None,
         None,
         Some(attachment),
-    )?;
+    )?
+    .session;
     sigil_runtime::bind_session_composition(&mut session, root_config)?;
     attach_captured_runtime_attachments(&mut session, &runtime_attachments)?;
     Ok(session)

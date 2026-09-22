@@ -1555,6 +1555,7 @@ fn resume_selector_empty_message_distinguishes_no_match_from_no_sessions() {
     app.session_browser.history = vec![crate::sessions::SessionHistoryEntry {
         path: Path::new(".sigil/sessions/alpha.jsonl").to_path_buf(),
         label: "alpha".to_owned(),
+        session_id: None,
         title: Some("Alpha task".to_owned()),
         modified_epoch_secs: 1,
         bytes: 128,

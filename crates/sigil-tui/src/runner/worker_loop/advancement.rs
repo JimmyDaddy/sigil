@@ -294,7 +294,14 @@ fn advance_terminal_lifecycle_updates(
         } else {
             state.session.detached_durable_controls.push(control);
             if entry.status.is_terminal() {
-                let durable_entries = JsonlSessionStore::read_entries(&state.session.log_path);
+                let durable_entries = state.session.durable_read_handle.as_ref().map_or_else(
+                    || {
+                        Err(anyhow::anyhow!(
+                            "detached terminal task has no owner-derived session reader"
+                        ))
+                    },
+                    sigil_kernel::session::SessionRecordReadHandle::read_entries,
+                );
                 match durable_entries {
                     Ok(entries) => {
                         if let Some(profile) = terminal_start_execution_profile_for_task(

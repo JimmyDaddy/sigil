@@ -135,6 +135,9 @@ impl WorkerLoopState {
                 application_operation_owner: session
                     .as_ref()
                     .and_then(|session| session.application_operation_owner().ok()),
+                durable_read_handle: session
+                    .as_ref()
+                    .and_then(Session::durable_event_read_handle),
                 current: session,
                 attachment_lease,
                 detached_durable_controls: Vec::new(),
@@ -408,6 +411,11 @@ pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) application_operation_owner:
         Option<sigil_kernel::session::SessionApplicationOperationOwner>,
     pub(in crate::runner) log_path: PathBuf,
+    /// Owner-derived reader retained while the durable session is temporarily moved into a
+    /// foreground task. Detached lifecycle observations must use this coordinator instead of
+    /// opening the JSONL path a second time while the task is appending.
+    pub(in crate::runner) durable_read_handle:
+        Option<sigil_kernel::session::SessionRecordReadHandle>,
     pub(in crate::runner) current: Option<Session>,
     pub(in crate::runner) attachment_lease: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,

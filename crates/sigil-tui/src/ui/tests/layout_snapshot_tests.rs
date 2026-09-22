@@ -1032,6 +1032,7 @@ fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyho
     app.session_browser.history = vec![crate::sessions::SessionHistoryEntry {
         path: Path::new(".sigil/sessions/layout-snapshot.jsonl").to_path_buf(),
         label: "layout-snapshot".to_owned(),
+        session_id: None,
         title: Some("Layout snapshot".to_owned()),
         modified_epoch_secs: 1,
         bytes: 128,

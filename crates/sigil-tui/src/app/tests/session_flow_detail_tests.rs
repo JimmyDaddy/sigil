@@ -91,6 +91,7 @@ fn session_labels_and_identifiers_truncate_as_expected() {
     let titled = SessionHistoryEntry {
         path: PathBuf::from("session-alpha.jsonl"),
         label: "session-alpha.jsonl".to_owned(),
+        session_id: None,
         title: Some("A very long title that should still be visible".to_owned()),
         modified_epoch_secs: 0,
         bytes: 0,
@@ -2113,6 +2114,7 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
     app.session_browser.history = vec![SessionHistoryEntry {
         path: PathBuf::from("session-current.jsonl"),
         label: "session-current.jsonl".to_owned(),
+        session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
         bytes: 0,
@@ -2127,6 +2129,7 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
     app.session_browser.history.push(SessionHistoryEntry {
         path: PathBuf::from("session-other.jsonl"),
         label: "session-other.jsonl".to_owned(),
+        session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
         bytes: 0,
@@ -2134,6 +2137,7 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
     app.session_browser.history.push(SessionHistoryEntry {
         path: PathBuf::from("session-third.jsonl"),
         label: "session-third.jsonl".to_owned(),
+        session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
         bytes: 0,

@@ -1579,6 +1579,17 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
             .iter()
             .any(|entry| entry.path == alpha_path && entry.title.as_deref() == Some("alpha title"))
     );
+    let alpha_session_id = app
+        .session_browser
+        .history
+        .iter()
+        .find(|entry| entry.path == alpha_path)
+        .and_then(|entry| entry.session_id.clone())
+        .expect("catalog should expose the durable session id");
+    assert_eq!(
+        app.resolve_resume_target(&alpha_session_id),
+        Some(alpha_path.clone())
+    );
     assert!(
         !app.session_browser
             .history
@@ -2137,6 +2148,27 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
 }
 
 #[test]
+fn resolve_resume_target_accepts_durable_session_id_when_source_ref_is_opaque() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let managed_path = Path::new(
+        "/state/managed/session-log/674eeeedbae7efc7193bded7b41927a10c76367e8c206270383be54e0224e838/records.jsonl",
+    );
+    app.session_browser.history = vec![crate::sessions::SessionHistoryEntry {
+        path: managed_path.to_path_buf(),
+        label: "674eeeedbae7efc7193bded7b41927a10c76367e8c206270383be54e0224e838.jsonl".to_owned(),
+        session_id: Some("93d49c3f-5ea9-5067-bb41-2eb563a433b4".to_owned()),
+        title: Some("分批收尾工作区所有变更".to_owned()),
+        modified_epoch_secs: 1,
+        bytes: 128,
+    }];
+
+    assert_eq!(
+        app.resolve_resume_target("93d49c3f-5ea9-5067-bb41-2eb563a433b4"),
+        Some(managed_path.to_path_buf())
+    );
+}
+
+#[test]
 fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_log_path = Path::new("session-current.jsonl").to_path_buf();
@@ -2144,6 +2176,7 @@ fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
         crate::sessions::SessionHistoryEntry {
             path: Path::new("session-alpha.jsonl").to_path_buf(),
             label: "session-alpha.jsonl".to_owned(),
+            session_id: None,
             title: Some("restored alpha prompt".to_owned()),
             modified_epoch_secs: 2,
             bytes: 10,
@@ -2151,6 +2184,7 @@ fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
         crate::sessions::SessionHistoryEntry {
             path: Path::new("session-beta.jsonl").to_path_buf(),
             label: "session-beta.jsonl".to_owned(),
+            session_id: None,
             title: Some("restored beta prompt".to_owned()),
             modified_epoch_secs: 1,
             bytes: 10,

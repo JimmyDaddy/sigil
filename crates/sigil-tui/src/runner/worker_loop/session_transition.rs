@@ -533,6 +533,7 @@ where
     state.session.projection_reconciliation_attempts = 0;
     state.session.projection_reconciliation_latched = false;
     state.session.application_operation_owner = Some(session.application_operation_owner()?);
+    state.session.durable_read_handle = session.durable_event_read_handle();
     state.session.current = Some(session);
     state.session.log_path = session_log_path.clone();
     if let Some(artifact_store) = target_managed_artifact_store {

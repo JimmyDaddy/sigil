@@ -594,6 +594,10 @@ carrier、cache proof 等私有状态能否复用。同一 durable egress trust 
 `SessionRouteRebound + SessionRouteTrustBound` 原子边界；origin/tenant变化、connection缺失或 legacy
 trust无法证明时，Desktop/TUI/HTTP都投影 bounded typed recovery，未经 exact-bound确认不得发送历史。
 直接运行 TUI 默认创建 fresh session，历史只通过显式 `sigil resume [selector]` 或 `/resume` attach；
+退出提示中的 durable `session_id` 是 resume 的一等精确 selector；session catalog 同时保留该身份与受管
+source ref；退出提示和精确 selector 匹配不依赖受管 source 的物理 opaque key。resume 后首个输入
+可能早于异步 application projection 首次提交；application bridge 会先建立当前 durable frontier
+再准备 command，接纳失败则清理本地 optimistic run 状态，不能留下无 provider 请求的假性 Thinking。
 每个 session 另有 OS-backed、crash-released的跨进程 write-capable attachment lease，目标 busy 时不释放
 source、不启动第二个 worker。该 attachment lease 与 durable writer/lifecycle lease职责独立。
 fresh session 启动时为 route、workspace trust 和 writer authority 建立的 bootstrap-only stream 只属于

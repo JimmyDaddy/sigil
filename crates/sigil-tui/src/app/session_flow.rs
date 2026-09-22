@@ -612,6 +612,21 @@ impl AppState {
             return Some(path);
         }
 
+        if let Some(path) = self
+            .session_browser
+            .history
+            .iter()
+            .find(|entry| {
+                entry
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|session_id| session_id.eq_ignore_ascii_case(normalized))
+            })
+            .map(|entry| entry.path.clone())
+        {
+            return Some(path);
+        }
+
         let query = normalized.to_ascii_lowercase();
         let mut matches = candidate_indices
             .into_iter()
