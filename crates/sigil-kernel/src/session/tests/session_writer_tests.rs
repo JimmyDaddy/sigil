@@ -707,6 +707,34 @@ fn session_writer_conditional_preallocated_append_reuses_loaded_link_index() -> 
 }
 
 #[test]
+fn session_writer_conditional_appends_reuse_loaded_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+
+    for index in 0..32 {
+        let event_id = format!("event-conditional-cache-{index}");
+        store
+            .append_audit_batch_if(
+                DurableAuditBatch::new(
+                    format!("batch-conditional-cache-{index}"),
+                    vec![linked_audit_record(
+                        &format!("record-conditional-cache-{index}"),
+                        &event_id,
+                        &event_id,
+                        None,
+                    )?],
+                )?,
+                |_| Ok(true),
+            )?
+            .expect("conditional append should produce a receipt");
+    }
+
+    assert_eq!(store.writer_full_scan_count()?, 1);
+    assert_eq!(store.read_event_records_writer()?.len(), 32);
+    Ok(())
+}
+
+#[test]
 fn session_writer_reconciles_exact_absent_and_conflicting_events() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

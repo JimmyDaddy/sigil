@@ -553,11 +553,14 @@ impl SharedSessionCoordinator {
     {
         let (receipt, notice) = {
             let mut writer = self.lock_writer()?;
-            let records = writer.read_records_writer()?;
-            if !should_append(&records)? {
+            let should_append = {
+                let records = writer.records_writer()?;
+                should_append(records)?
+            };
+            if !should_append {
                 return Ok(None);
             }
-            writer.cache_event_links_for_audit_batch(&batch, &records);
+            writer.cache_event_links_for_audit_batch(&batch);
             let (receipt, events) = writer.append_audit_batch_with_events(batch)?;
             let notice = self.commit_delta_locked(&mut writer, &events);
             (receipt, notice)
@@ -672,7 +675,11 @@ impl SharedSessionCoordinator {
     pub(super) fn read_reconciled_records(&self) -> Result<Vec<SessionStreamRecord>> {
         let (records, notice) = {
             let mut writer = self.lock_writer()?;
-            let records = writer.read_records_writer()?;
+            // Session loading is an explicit reconciliation boundary. Even when this process
+            // already owns a warm writer cache, replay the durable stream once so startup and
+            // existing-only recovery rebuild every derived index from disk and detect changes
+            // made outside the current in-memory projection.
+            let records = writer.reload_records_writer()?;
             let frontier = writer.frontier_from_tail()?;
             let mut state = self
                 .projection
@@ -1828,6 +1835,10 @@ pub(super) struct LinearSessionWriter {
     lease_file: Option<File>,
     parent_dir_synced: bool,
     tail: Option<SessionWriterTail>,
+    /// The validated stream owned by this writer. Once loaded, appends extend it in memory and
+    /// conditional appends can validate their guards without reparsing and hashing the complete
+    /// JSONL file on every record.
+    records: Option<Vec<SessionStreamRecord>>,
     event_links: Option<DurableEventLinkIndex>,
     public_event_outbox_index: Option<PublicEventOutboxAdmissionIndexV1>,
     requires_reload: bool,
@@ -1981,6 +1992,7 @@ impl LinearSessionWriter {
             lease_file: None,
             parent_dir_synced: false,
             tail: None,
+            records: None,
             event_links: None,
             public_event_outbox_index: None,
             requires_reload: false,
@@ -2256,6 +2268,7 @@ impl LinearSessionWriter {
             PublicEventOutboxAdmissionIndexV1::from_records(&recovered.records)
                 .context("failed to rebuild public event outbox admission index")?,
         );
+        self.records = Some(recovered.records.clone());
         self.requires_reload = false;
         Ok(recovered.records)
     }
@@ -2529,6 +2542,17 @@ impl LinearSessionWriter {
             tail_suffix_hash: stable_event_hash(last_line),
             file_fingerprint: file_fingerprint(&file, &self.path)?,
         });
+        if let Some(records) = self.records.as_mut() {
+            records.extend(events.iter().cloned().map(SessionStreamRecord::Stored));
+        } else {
+            self.records = Some(
+                events
+                    .iter()
+                    .cloned()
+                    .map(SessionStreamRecord::Stored)
+                    .collect(),
+            );
+        }
         if let Some(event_links) = self.event_links.as_mut() {
             event_links.extend(&events);
         }
@@ -2693,18 +2717,34 @@ impl LinearSessionWriter {
     pub(super) fn read_records_writer(&mut self) -> Result<Vec<SessionStreamRecord>> {
         self.ensure_writer_lease()?;
         let mut file = self.open_locked_data_file()?;
+        self.ensure_current_tail(&mut file)?;
+        self.records
+            .as_ref()
+            .cloned()
+            .context("session writer records are unavailable after loading the current tail")
+    }
+
+    pub(super) fn reload_records_writer(&mut self) -> Result<Vec<SessionStreamRecord>> {
+        self.ensure_writer_lease()?;
+        let mut file = self.open_locked_data_file()?;
         self.reload_from_file(&mut file)
     }
 
-    pub(super) fn cache_event_links_for_audit_batch(
-        &mut self,
-        batch: &DurableAuditBatch,
-        records: &[SessionStreamRecord],
-    ) {
+    fn records_writer(&mut self) -> Result<&[SessionStreamRecord]> {
+        self.ensure_writer_lease()?;
+        let mut file = self.open_locked_data_file()?;
+        self.ensure_current_tail(&mut file)?;
+        self.records
+            .as_deref()
+            .context("session writer records are unavailable after loading the current tail")
+    }
+
+    pub(super) fn cache_event_links_for_audit_batch(&mut self, batch: &DurableAuditBatch) {
         if batch
             .records
             .iter()
             .any(|record| record.event_id.is_some() || record.causation_id.is_some())
+            && let Some(records) = self.records.as_deref()
         {
             self.event_links = Some(DurableEventLinkIndex::from_records(records));
         }

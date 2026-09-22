@@ -95,6 +95,22 @@ fn session_record_read_handle_serializes_writer_and_releases_returned_snapshot()
 }
 
 #[test]
+fn session_record_read_handle_reads_entries_through_the_owner_coordinator() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    crate::session::append_current_test_session_identity(&store)?;
+    store.append(&SessionLogEntry::User(crate::ModelMessage::user(
+        "durable entry",
+    )))?;
+
+    let entries = store.read_handle().read_entries()?;
+
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(entries[1], SessionLogEntry::User(_)));
+    Ok(())
+}
+
+#[test]
 fn session_record_read_handle_derivation_does_not_create_or_recover_a_stream() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

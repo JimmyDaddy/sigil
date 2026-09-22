@@ -197,6 +197,17 @@ impl SessionRecordReadHandle {
         self.coordinator.read_records_coordinated()
     }
 
+    /// Reads the current durable session entries through the existing owner's coordinator.
+    ///
+    /// This is intentionally different from [`JsonlSessionStore::read_entries`]: detached
+    /// observers must retain the coordinator that belongs to the live session writer so a
+    /// concurrent append waits in-process instead of racing a second path-based reader.
+    pub fn read_entries(&self) -> Result<Vec<SessionLogEntry>> {
+        let records = self.read_event_records()?;
+        ConversationQueueDurableProjection::from_records(&records)?;
+        session_entries_from_records(&records)
+    }
+
     /// Reads the complete strictly validated stream once and retains the byte offsets needed by
     /// later bounded tail reads. The coordinator and shared file lock are released before the
     /// range is returned; offsets are metadata only and never grant write or recovery authority.
@@ -1041,7 +1052,11 @@ impl JsonlSessionStore {
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let mut records = writer.read_records_writer()?;
+        // Loading/recovery is a reconciliation boundary: rebuild the writer cache from the
+        // durable stream so startup sees records appended outside this process and derived
+        // indexes cannot reuse a stale admission snapshot. Hot append paths keep using the
+        // in-memory cache; this path intentionally performs the explicit disk replay.
+        let mut records = writer.reload_records_writer()?;
         ConversationQueueDurableProjection::from_records(&records)?;
         let mut entries = session_entries_from_records(&records)?;
 
