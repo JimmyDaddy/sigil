@@ -5747,7 +5747,7 @@ where
         )?;
         append_tool_control_entries_from_result(context.session, context.handler, &mut result)?;
         if let Some(entry) =
-            append_terminal_task_control_from_result(context.session, context.handler, &result)?
+            append_terminal_task_control_from_result(context.session, context.handler, &mut result)?
         {
             reconcile_terminal_task_mutation_from_start(
                 context.session,

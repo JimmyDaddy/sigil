@@ -784,14 +784,58 @@ pub(super) fn append_tool_execution_started_audit(
 pub(super) fn append_terminal_task_control_from_result(
     session: &mut Session,
     handler: &mut impl EventHandler,
-    result: &ToolResult,
+    result: &mut ToolResult,
 ) -> Result<Option<TerminalTaskEntry>> {
     let Some(entry) = TerminalTaskEntry::from_tool_result_details(&result.metadata.details)? else {
         return Ok(None);
     };
+    if let Some(current) = session
+        .terminal_task_projection()
+        .tasks
+        .get(&entry.handle.task_id)
+        && current.generation >= entry.generation
+    {
+        if let Some(details) = result.metadata.details.as_object_mut() {
+            details.insert("observation_stale".to_owned(), Value::Bool(true));
+            details.insert(
+                "latest_generation".to_owned(),
+                Value::from(current.generation),
+            );
+            details.insert(
+                "latest_status".to_owned(),
+                Value::String(current.status.as_str().to_owned()),
+            );
+            details.insert(
+                "latest_observation".to_owned(),
+                terminal_task_latest_observation(current),
+            );
+        }
+        return Ok(None);
+    }
     let control = ControlEntry::TerminalTask(entry.clone());
     handler.commit_controls(session, vec![control])?;
     Ok(Some(entry))
+}
+
+fn terminal_task_latest_observation(summary: &crate::TerminalTaskSummary) -> Value {
+    serde_json::json!({
+        "execution_id": summary.handle.task_id.as_str(),
+        "generation": summary.generation,
+        "status": &summary.status,
+        "readiness": &summary.readiness,
+        "cleanup": &summary.cleanup,
+        "output_hash": &summary.output_hash,
+        "output_truncated": summary.output_truncated,
+        "output_total_bytes": summary.output_total_bytes,
+        "output_limit_bytes": summary.output_limit_bytes,
+        "output_termination_reason": &summary.output_termination_reason,
+        "log_ref": &summary.handle.log_ref,
+        "next_action": if summary.status.is_active() {
+            "exec_wait"
+        } else {
+            "inspect_terminal_result"
+        },
+    })
 }
 
 pub(super) fn reconcile_terminal_task_mutation_from_start(
@@ -997,3 +1041,7 @@ pub(super) fn duration_ms(started_at: Instant) -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+#[path = "tests/tool_audit_tests.rs"]
+mod tests;
