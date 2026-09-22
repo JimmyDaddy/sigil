@@ -182,12 +182,7 @@ async fn real_pipeline_wrapper_zero_does_not_become_passed_verification() -> Res
                 &task,
                 CheckCommand {
                     command: "bash".to_owned(),
-                    args: vec![
-                        "-o".to_owned(),
-                        "pipefail".to_owned(),
-                        "-c".to_owned(),
-                        "false | cat".to_owned(),
-                    ],
+                    args: vec!["-c".to_owned(), "false | cat".to_owned()],
                     cwd: None,
                 },
                 VerificationAutoRunPolicy::TrustedOnly,
@@ -263,7 +258,7 @@ async fn real_pipeline_wrapper_zero_does_not_become_passed_verification() -> Res
             assert!(
                 receipts
                     .iter()
-                    .all(|record| record.receipt.check_status == ReceiptStatus::Failed)
+                    .all(|record| record.receipt.check_status == ReceiptStatus::Inconclusive)
             );
         } else {
             assert_eq!(output.task_status, TaskRunStatus::Completed);

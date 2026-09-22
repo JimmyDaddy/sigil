@@ -16,6 +16,10 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::managed_execution::{
+    ExecutionCheckReceiptV1, PipelineOutcomeV1, VerificationEvidenceReasonV1,
+    VerificationEvidenceV1,
+};
 use crate::{
     DurableEventType, EventClass, EventId, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest,

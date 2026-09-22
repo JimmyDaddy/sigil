@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use super::*;
 
 /// Execution consumer port for trusted verification checks.
@@ -128,7 +130,7 @@ where
     let command_output = execute_check_command(
         execution_port,
         &workspace_root,
-        &check.command,
+        check,
         request.policy.timeout_ms,
     )
     .await?;
@@ -455,6 +457,8 @@ pub(super) struct CheckCommandOutput {
     pub(super) stderr: String,
     pub(super) timed_out: bool,
     pub(super) termination: ExecutionTerminationCause,
+    /// Evidence about whether a shell wrapper exposed all stages of the check.
+    pub(super) execution_check: Option<ExecutionCheckReceiptV1>,
 }
 
 impl CheckCommandOutput {
@@ -466,9 +470,10 @@ impl CheckCommandOutput {
 async fn execute_check_command<E: VerificationExecutionPortV1 + ?Sized>(
     execution_port: &E,
     workspace_root: &Path,
-    command: &CheckCommand,
+    check: &CheckSpec,
     timeout_ms: Option<u64>,
 ) -> Result<CheckCommandOutput> {
+    let command = &check.command;
     let cwd = command
         .cwd
         .as_ref()
@@ -500,6 +505,7 @@ async fn execute_check_command<E: VerificationExecutionPortV1 + ?Sized>(
             )
         })?;
     let output = receipt.effective_output();
+    let execution_check = execution_check_receipt(check, &receipt);
     Ok(CheckCommandOutput {
         backend: receipt.backend,
         backend_capabilities: receipt.capabilities,
@@ -510,7 +516,242 @@ async fn execute_check_command<E: VerificationExecutionPortV1 + ?Sized>(
         stderr: truncated_captured_lossy(&receipt.stderr, &output.stderr),
         timed_out: matches!(output.termination, ExecutionTerminationCause::TimedOut),
         termination: output.termination,
+        execution_check: Some(execution_check),
     })
+}
+
+fn execution_check_receipt(
+    check: &CheckSpec,
+    receipt: &ExecutionReceipt,
+) -> ExecutionCheckReceiptV1 {
+    let final_exit_code = receipt.exit_code.unwrap_or(-1);
+    let assessment = assess_shell_check(&check.command, final_exit_code);
+    let (pipeline_outcome, verification_evidence) = match assessment {
+        ShellCheckAssessment::Safe => (
+            PipelineOutcomeV1::NotPipeline,
+            VerificationEvidenceV1::Sufficient,
+        ),
+        ShellCheckAssessment::AllStagesObserved => (
+            PipelineOutcomeV1::AllStagesObserved {
+                stage_statuses_digest: canonical_hash_for_check_material(
+                    check,
+                    "all_stages_observed",
+                    final_exit_code,
+                ),
+            },
+            VerificationEvidenceV1::Sufficient,
+        ),
+        ShellCheckAssessment::FinalStageOnly {
+            shell_supports_pipefail,
+        } => (
+            PipelineOutcomeV1::FinalStageOnly { final_exit_code },
+            VerificationEvidenceV1::Insufficient {
+                reason: if shell_supports_pipefail {
+                    VerificationEvidenceReasonV1::UpstreamStatusUnobserved
+                } else {
+                    VerificationEvidenceReasonV1::ShellProfileDoesNotSupportPipefail
+                },
+            },
+        ),
+    };
+    ExecutionCheckReceiptV1 {
+        check_spec_hash: canonical_hash_for_text(&check.check_spec_hash),
+        pipeline_outcome,
+        verification_evidence,
+        evidence_binding_hash: canonical_hash_for_check_material(
+            check,
+            receipt.output.termination.as_str(),
+            final_exit_code,
+        ),
+        shell_profile_hash: canonical_hash_for_text(&format_check_command(&check.command)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellCheckAssessment {
+    Safe,
+    AllStagesObserved,
+    FinalStageOnly { shell_supports_pipefail: bool },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ShellOperators {
+    pipeline: bool,
+    sequence: bool,
+    or_list: bool,
+}
+
+fn assess_shell_check(command: &CheckCommand, _final_exit_code: i32) -> ShellCheckAssessment {
+    let Some((shell, script)) = shell_script(command) else {
+        return ShellCheckAssessment::Safe;
+    };
+    let operators = shell_operators(script);
+    if !operators.pipeline && !operators.sequence && !operators.or_list {
+        return ShellCheckAssessment::Safe;
+    }
+    let pipefail_enabled = shell_pipefail_enabled(command, script);
+    let shell_supports_pipefail = shell_profile_supports_pipefail(shell);
+    let errexit = shell_enables_errexit(command, script);
+    if (operators.pipeline && !pipefail_enabled)
+        || (operators.sequence && !errexit)
+        || operators.or_list
+    {
+        ShellCheckAssessment::FinalStageOnly {
+            shell_supports_pipefail,
+        }
+    } else {
+        ShellCheckAssessment::AllStagesObserved
+    }
+}
+
+fn shell_script(command: &CheckCommand) -> Option<(&str, &str)> {
+    let shell = Path::new(&command.command)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    if !matches!(
+        shell.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish"
+    ) {
+        return None;
+    }
+    let index = command.args.iter().position(|arg| {
+        arg == "-c"
+            || arg == "--command"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
+    })?;
+    Some((shell, command.args.get(index + 1)?.as_str()))
+}
+
+fn shell_pipefail_enabled(command: &CheckCommand, script: &str) -> bool {
+    if command.args.iter().any(|arg| arg == "--pipefail")
+        || command
+            .args
+            .windows(2)
+            .any(|window| window[0] == "-o" && window[1] == "pipefail")
+        || shell_script_declares_option(script, "pipefail")
+    {
+        return true;
+    }
+    false
+}
+
+fn shell_profile_supports_pipefail(shell: &str) -> bool {
+    !matches!(shell.to_ascii_lowercase().as_str(), "sh" | "dash" | "fish")
+}
+
+fn shell_enables_errexit(command: &CheckCommand, script: &str) -> bool {
+    command
+        .args
+        .iter()
+        .any(|arg| arg == "-e" || arg == "--errexit")
+        || command
+            .args
+            .windows(2)
+            .any(|window| window[0] == "-o" && window[1] == "errexit")
+        || shell_script_declares_option(script, "errexit")
+        || shell_script_declares_short_errexit(script)
+}
+
+fn shell_script_declares_option(script: &str, option: &str) -> bool {
+    script.split([';', '\n']).any(|segment| {
+        let tokens = segment
+            .split_whitespace()
+            .map(|token| token.trim_matches(['\'', '"']))
+            .collect::<Vec<_>>();
+        tokens.first() == Some(&"set")
+            && tokens.iter().skip(1).any(|token| *token == option)
+            && tokens
+                .iter()
+                .skip(1)
+                .any(|token| *token == "-o" || (token.starts_with('-') && token.contains('o')))
+    })
+}
+
+fn shell_script_declares_short_errexit(script: &str) -> bool {
+    script.split([';', '\n']).any(|segment| {
+        let tokens = segment
+            .split_whitespace()
+            .map(|token| token.trim_matches(['\'', '"']))
+            .collect::<Vec<_>>();
+        tokens.first() == Some(&"set")
+            && tokens
+                .iter()
+                .skip(1)
+                .any(|token| *token == "-e" || (token.starts_with('-') && token.contains('e')))
+    })
+}
+
+fn shell_operators(script: &str) -> ShellOperators {
+    let bytes = script.as_bytes();
+    let mut operators = ShellOperators::default();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if let Some(current) = quote {
+            if byte == current {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'|' if bytes.get(index + 1) == Some(&b'|') => {
+                operators.or_list = true;
+                index += 2;
+            }
+            b'|' => {
+                operators.pipeline = true;
+                index += 1;
+            }
+            b';' | b'\n' => {
+                operators.sequence = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    operators
+}
+
+fn canonical_hash_for_text(text: &str) -> crate::resource::CanonicalHash {
+    crate::resource::CanonicalHash::from_bytes(Sha256::digest(text.as_bytes()).into())
+}
+
+fn canonical_hash_for_check_material(
+    check: &CheckSpec,
+    label: &str,
+    final_exit_code: i32,
+) -> crate::resource::CanonicalHash {
+    let mut digest = Sha256::new();
+    digest.update(label.as_bytes());
+    digest.update([0]);
+    digest.update(check.check_spec_hash.as_bytes());
+    digest.update([0]);
+    digest.update(check.command.command.as_bytes());
+    digest.update([0]);
+    for arg in &check.command.args {
+        digest.update(arg.as_bytes());
+        digest.update([0]);
+    }
+    digest.update(final_exit_code.to_be_bytes());
+    crate::resource::CanonicalHash::from_bytes(digest.finalize().into())
 }
 
 fn check_receipt_status(
@@ -518,7 +759,12 @@ fn check_receipt_status(
     mutates_verification_scope: bool,
 ) -> ReceiptStatus {
     if command_output.succeeded() {
-        if mutates_verification_scope {
+        if mutates_verification_scope
+            || !command_output
+                .execution_check
+                .as_ref()
+                .is_some_and(|receipt| receipt.verification_passed())
+        {
             ReceiptStatus::Inconclusive
         } else {
             ReceiptStatus::Succeeded
@@ -533,6 +779,15 @@ pub(super) fn check_failure_reason(
     timeout_ms: Option<u64>,
 ) -> Option<String> {
     if command_output.succeeded() {
+        if !command_output
+            .execution_check
+            .as_ref()
+            .is_some_and(|receipt| receipt.verification_passed())
+        {
+            return Some(
+                "check completed, but verification evidence was insufficient to prove every shell stage".to_owned(),
+            );
+        }
         return None;
     }
     match &command_output.termination {
@@ -594,6 +849,7 @@ fn append_command_finished_event(
             "execution_backend_capabilities": command_output.backend_capabilities,
             "execution_network": command_output.network,
             "execution_resources": command_output.resources,
+            "execution_check": command_output.execution_check,
             "stdout_preview": command_output.stdout,
             "stderr_preview": command_output.stderr,
         }),
@@ -851,3 +1107,7 @@ pub(super) fn truncated_captured_lossy(bytes: &[u8], capture: &ExecutionStreamCa
     ));
     value
 }
+
+#[cfg(test)]
+#[path = "tests/runner_shell_evidence_tests.rs"]
+mod tests;

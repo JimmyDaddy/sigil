@@ -668,7 +668,7 @@ pub(super) fn direct_execution_prompt(objective: &str, guidance: Option<&str>) -
         })
         .unwrap_or_default();
     format!(
-        "Execute the following complete, user-approved Task objective now. Use the existing conversation and tool results to preserve completed work and execute only what remains; do not replay completed tool calls. Use the available tools, keep the optional display checklist current when it helps the user, verify the result, and finish with a concise outcome. Checklist updates are progress reporting only and never execution authority.\n\n{objective}{follow_up}"
+        "Execute the following complete, user-approved Task objective now. Use the existing conversation and tool results to preserve completed work and execute only what remains; do not replay completed tool calls. Use the available tools, keep the optional display checklist current when it helps the user, and perform every verification required by the user, repository rules, and the changed code's risk. Keep required checks until they have actually run against the final relevant content; do not substitute a narrower check. A successful wrapper or terminal process is not by itself proof that an inner check passed when a pipeline, tail, echo, or similar command can hide the upstream status. Prefer explicit verification evidence and state process-only or pending verification plainly. Finish with a concise outcome that lists the checks run, their results, and any remaining blockers. Checklist updates are progress reporting only and never execution authority.\n\n{objective}{follow_up}"
     )
 }
 

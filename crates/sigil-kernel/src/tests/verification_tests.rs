@@ -1736,6 +1736,7 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
         stderr: String::new(),
         timed_out: true,
         termination: crate::ExecutionTerminationCause::TimedOut,
+        execution_check: None,
     };
     assert_eq!(
         super::check_failure_reason(&timeout_without_configured_ms, None).as_deref(),
@@ -1752,6 +1753,7 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
         stderr: String::new(),
         timed_out: false,
         termination: crate::ExecutionTerminationCause::Exited,
+        execution_check: None,
     };
     assert_eq!(
         super::check_failure_reason(&terminated_without_exit_code, None).as_deref(),
