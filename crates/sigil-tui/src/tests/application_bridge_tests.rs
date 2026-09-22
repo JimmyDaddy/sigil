@@ -350,6 +350,32 @@ fn stale_projection_does_not_hide_an_optimistic_live_run() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn prepare_action_refreshes_the_initial_projection_before_admission() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("tui-cold-start")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("session")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let application = session(port, scope)?;
+    assert!(application.current_projection()?.is_none());
+
+    let request = application
+        .prepare_action(
+            &AppAction::SubmitPrompt("resume immediately".to_owned()),
+            None,
+            None,
+        )?
+        .expect("prompt must map through the application contract");
+    assert_eq!(request.envelope.expected_frontier.through_sequence, 0);
+    assert!(application.current_projection()?.is_some());
+    Ok(())
+}
+
 pub(crate) fn session(
     port: Arc<dyn ApplicationPort>,
     scope: ApplicationScope,

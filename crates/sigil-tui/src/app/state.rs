@@ -7,8 +7,9 @@ use std::{
 
 use sigil_kernel::{
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest,
-    ConversationInputQueueId, ConversationInputQueuedEntry, EvidenceScope, ImageAttachment,
-    ReasoningEffort, SessionLogEntry, SessionStats, TaskIntegrationReviewRequest, ToolCall,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputTarget,
+    ConversationQueueProjection, EvidenceScope, ImageAttachment, ReasoningEffort, SessionLogEntry,
+    SessionStats, TaskIntegrationReviewRequest, ToolCall,
 };
 use sigil_runtime::BalanceSnapshot;
 
@@ -338,6 +339,16 @@ pub(crate) struct SessionBrowserState {
     pub(crate) current_entries: Vec<SessionLogEntry>,
     pub(crate) current_entries_revision: u64,
     pub(in crate::app) view_cache: RefCell<SessionViewCache>,
+    pub(in crate::app) queue_projection_cache: RefCell<ConversationQueueProjectionCache>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ConversationQueueProjectionCache {
+    pub(in crate::app) entries_revision: u64,
+    pub(in crate::app) entries_len: usize,
+    pub(in crate::app) optimistic_signature: Vec<(ConversationInputQueueId, String)>,
+    pub(in crate::app) target: Option<ConversationInputTarget>,
+    pub(in crate::app) projection: Option<ConversationQueueProjection>,
 }
 
 impl Default for SessionBrowserState {
@@ -351,6 +362,7 @@ impl Default for SessionBrowserState {
             current_entries: Vec::new(),
             current_entries_revision: 0,
             view_cache: RefCell::new(SessionViewCache::default()),
+            queue_projection_cache: RefCell::new(ConversationQueueProjectionCache::default()),
         }
     }
 }

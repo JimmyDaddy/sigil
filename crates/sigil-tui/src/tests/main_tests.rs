@@ -249,13 +249,14 @@ fn invalid_new_prompt_admission_releases_only_optimistic_run_state() -> Result<(
         Some(AppAction::SubmitPrompt(_))
     ));
 
-    // Unavailability does not prove that a dispatched command had no effect.
+    // Application admission errors produce no receipt and therefore no worker terminal event;
+    // the optimistic local state must be released so the user can retry.
     report_application_admission_error(
         &mut app,
         &AppAction::SubmitPrompt("valid next prompt".to_owned()),
         &anyhow::Error::new(sigil_application::ApplicationError::Unavailable),
     )?;
-    assert!(app.runtime.is_busy);
+    assert!(!app.runtime.is_busy);
     assert!(app.worker_ready());
     Ok(())
 }

@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use sigil_kernel::{
     EgressAuditRecorder, EgressDisclosurePresenter, ExtensionProcessNetworkAdmission,
     InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder, Provider,
-    ProviderCapabilities, ResolvedModelRoute, RootConfig, Session, SessionLogEntry, WorkspaceTrust,
-    workspace_trust_from_entries,
+    ProviderCapabilities, ResolvedModelRoute, RootConfig, Session, workspace_trust_from_entries,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
 use tokio::runtime::Runtime;
@@ -194,6 +193,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         )
     };
     if let Some(composition) = authority_composition.as_ref() {
+        let _phase = crate::phase_timing::PhaseTimer::new("startup.plan_review_recovery");
         sigil_runtime::PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
             JsonlSessionStore::new(&effective_session_log_path)?,
             composition
@@ -202,12 +202,15 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             sigil_runtime::current_unix_time_ms(),
         )?;
     }
-    let (provider_name, route, route_rebound, projection_owner) = initialize_worker_session_route(
-        &root_config,
-        &effective_session_log_path,
-        &route_directive,
-        attachment_lease.as_ref(),
-    )?;
+    let (provider_name, route, route_rebound, projection_owner, initial_session) = {
+        let _phase = crate::phase_timing::PhaseTimer::new("startup.route_initialization");
+        initialize_worker_session_route(
+            &root_config,
+            &effective_session_log_path,
+            &route_directive,
+            attachment_lease.as_ref(),
+        )?
+    };
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
@@ -222,16 +225,23 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 "rfc-0071: authority composition state"
             );
             send_startup_notice(&message_tx, "initializing agent runtime");
-            let Some(runtime) = report_runtime_build_result(build_worker_runtime(), &message_tx)
-            else {
+            let runtime = {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.runtime_build");
+                report_runtime_build_result(build_worker_runtime(), &message_tx)
+            };
+            let Some(runtime) = runtime else {
                 return;
             };
 
             send_startup_notice(&message_tx, "loading provider credentials");
-            let provider = match runtime.block_on(sigil_runtime::build_provider_for_model_ref_async(
-                &root_config,
-                &route.model_ref,
-            )) {
+            let provider_result = {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.provider_build");
+                runtime.block_on(sigil_runtime::build_provider_for_model_ref_async(
+                    &root_config,
+                    &route.model_ref,
+                ))
+            };
+            let provider = match provider_result {
                 Ok(provider) => provider,
                 Err(error) => {
                     tracing::debug!(%error, "provider startup is unavailable");
@@ -361,13 +371,15 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 WorkerMcpRuntimeEventSender::new(event_tx.clone()),
             ));
             send_startup_notice(&message_tx, "loading session state");
-            let (session_entries, workspace_trust) = match load_session_entries_with_workspace_trust(
-                &effective_session_log_path,
-                &workspace_root,
-            ) {
-                Ok(projection) => projection,
+            let session_entries = initial_session.entries();
+            let workspace_trust_result = {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.session_projection");
+                workspace_trust_from_entries(session_entries, &workspace_root)
+            };
+            let workspace_trust = match workspace_trust_result {
+                Ok(trust) => trust,
                 Err(error) => {
-                    tracing::debug!(%error, "session stream startup is unavailable");
+                    tracing::debug!(%error, "session workspace trust startup is unavailable");
                     send_worker_startup_recovery(
                         &message_tx,
                         sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
@@ -463,17 +475,21 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                         super::egress_disclosure_bridge::AutoAcceptDisclosurePresenter,
                     )
                 };
-            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
-                &root_config,
-                &provider_capabilities,
-                workspace_root.clone(),
-                elicitation_handler.clone(),
-                mcp_event_handler.clone(),
-                workspace_trust,
-                terminal_lifecycle_factory,
-                managed_extension_execution.clone(),
-                managed_command_execution.clone(),
-            ) {
+            let surface_result = {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.tool_surface");
+                sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+                    &root_config,
+                    &provider_capabilities,
+                    workspace_root.clone(),
+                    elicitation_handler.clone(),
+                    mcp_event_handler.clone(),
+                    workspace_trust,
+                    terminal_lifecycle_factory,
+                    managed_extension_execution.clone(),
+                    managed_command_execution.clone(),
+                )
+            };
+            let surface = match surface_result {
                 Ok(surface) => surface,
                 Err(error) => {
                     tracing::debug!(%error, "tool surface startup is unavailable");
@@ -516,14 +532,21 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 );
                 return;
             }
-            if root_config.task.enabled
-                && root_config.composition.allows(sigil_kernel::OptionalCapability::TaskOrchestration)
-                && let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
-                &mut registry,
-                &root_config,
-                &workspace_root,
-                &session_entries,
-            ) {
+            let agent_tools_registration = if root_config.task.enabled
+                && root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+            {
+                Some(sigil_runtime::register_agent_tools_with_workspace_and_entries(
+                    &mut registry,
+                    &root_config,
+                    &workspace_root,
+                    session_entries,
+                ))
+            } else {
+                None
+            };
+            if let Some(Err(error)) = agent_tools_registration {
                 tracing::debug!(%error, "agent tool startup is unavailable");
                 send_worker_startup_recovery(
                     &message_tx,
@@ -538,21 +561,24 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 return;
             }
             send_startup_notice(&message_tx, "starting configured MCP servers");
-            spawn_eager_mcp_startup_tasks(
-                &runtime,
-                registry.clone(),
-                &root_config,
-                &provider_capabilities,
-                workspace_root.clone(),
-                &message_tx,
-                elicitation_handler.clone(),
-                mcp_event_handler.clone(),
-                mutation_recorder,
-                egress_recorder,
-                disclosure_presenter,
-                extension_network_admission,
-                managed_extension_execution.clone(),
-            );
+            {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.eager_mcp");
+                spawn_eager_mcp_startup_tasks(
+                    &runtime,
+                    registry.clone(),
+                    &root_config,
+                    &provider_capabilities,
+                    workspace_root.clone(),
+                    &message_tx,
+                    elicitation_handler.clone(),
+                    mcp_event_handler.clone(),
+                    mutation_recorder,
+                    egress_recorder,
+                    disclosure_presenter,
+                    extension_network_admission,
+                    managed_extension_execution.clone(),
+                );
+            }
             send_startup_notice(&message_tx, "finalizing agent worker");
             let managed_artifact_store = match authority_composition.as_ref() {
                 Some(composition)
@@ -615,7 +641,9 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 WorkerLoopSessionAttachment::from_shared(
                     effective_session_log_path,
                     attachment_lease,
-                ).with_runtime_ready(route_directive.runtime_ready.clone()),
+                )
+                .with_runtime_ready(route_directive.runtime_ready.clone())
+                .with_preloaded_session(initial_session),
                 options,
                 permission_mode_override,
                 (event_tx, event_rx, urgent_rx),
@@ -656,51 +684,36 @@ fn initialize_worker_session_route(
     ResolvedModelRoute,
     bool,
     sigil_runtime::RuntimeSessionProjectionOwner,
+    Session,
 )> {
+    let _phase = crate::phase_timing::PhaseTimer::new("startup.route_load");
     let (_, fallback_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(root_config)
             .map_err(anyhow::Error::new)
             .context("model_route_not_configured: complete provider setup before starting")?;
-    let previous_route = JsonlSessionStore::read_entries(session_log_path)?
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(sigil_kernel::ControlEntry::SessionIdentity {
-                resolved_model_route,
-                ..
-            }) => resolved_model_route.clone(),
-            SessionLogEntry::Control(
-                sigil_kernel::ControlEntry::SessionModelSelected {
-                    resolved_model_route,
-                    ..
-                }
-                | sigil_kernel::ControlEntry::SessionRouteRebound {
-                    resolved_model_route,
-                    ..
-                },
-            ) => Some(resolved_model_route.clone()),
-            _ => None,
-        });
     let store = JsonlSessionStore::new(session_log_path)?;
+    let background_owner = attachment.agent_tool_background_runs()?;
+    let store = store.with_live_background_agent_threads(background_owner.thread_ids()?);
     let inspected = sigil_runtime::provider_connections::inspect_session_for_route_resume(
         root_config,
         &fallback_route,
         store.clone(),
     )
     .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
+    let previous_route = inspected.session.resolved_model_route().cloned();
     sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
-    let mut session = sigil_runtime::provider_connections::load_session_for_route(
-        root_config,
-        &fallback_route,
-        store.clone(),
+    let mut session = sigil_runtime::provider_connections::load_inspected_session_for_route(
+        inspected,
         directive.recovery_confirmation.as_deref(),
         directive
             .explicit_selection
             .as_ref()
             .map(|(provider_name, route)| (provider_name.as_str(), route)),
         Some(attachment),
-    )?;
+    )?
+    .session;
     sigil_runtime::bind_session_composition(&mut session, root_config)?;
+    sigil_runtime::attach_session_url_capability_store(&mut session)?;
     let route = session.resolved_model_route().cloned().ok_or_else(|| {
         anyhow::anyhow!(
             "session_route_missing: durable session has no frozen connection route; \
@@ -716,13 +729,23 @@ fn initialize_worker_session_route(
         .as_ref()
         .is_some_and(|previous| previous != &route);
     let projection_owner = sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store);
-    Ok((provider_name, route, route_rebound, projection_owner))
+    Ok((
+        provider_name,
+        route,
+        route_rebound,
+        projection_owner,
+        session,
+    ))
 }
 
+#[cfg(test)]
 pub(super) fn load_session_entries_with_workspace_trust(
     session_log_path: &Path,
     workspace_root: &Path,
-) -> Result<(Vec<SessionLogEntry>, WorkspaceTrust)> {
+) -> Result<(
+    Vec<sigil_kernel::SessionLogEntry>,
+    sigil_kernel::WorkspaceTrust,
+)> {
     let entries = JsonlSessionStore::read_entries(session_log_path)?;
     let workspace_trust = workspace_trust_from_entries(&entries, workspace_root)?;
     Ok((entries, workspace_trust))

@@ -91,6 +91,7 @@ impl WorkerLoopTerminalRuntime {
 pub(in crate::runner) struct WorkerLoopSessionAttachment {
     pub(in crate::runner) log_path: PathBuf,
     runtime_ready: Option<sigil_kernel::SessionRuntimeReadyV1>,
+    preloaded_session: Option<Session>,
     pub(in crate::runner) lease: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
@@ -105,6 +106,7 @@ impl WorkerLoopSessionAttachment {
         Self {
             log_path,
             runtime_ready: None,
+            preloaded_session: None,
             lease: Some(Arc::new(lease)),
         }
     }
@@ -117,6 +119,11 @@ impl WorkerLoopSessionAttachment {
         self
     }
 
+    pub(in crate::runner) fn with_preloaded_session(mut self, session: Session) -> Self {
+        self.preloaded_session = Some(session);
+        self
+    }
+
     pub(in crate::runner) fn from_shared(
         log_path: PathBuf,
         lease: Arc<
@@ -126,6 +133,7 @@ impl WorkerLoopSessionAttachment {
         Self {
             log_path,
             runtime_ready: None,
+            preloaded_session: None,
             lease: Some(lease),
         }
     }
@@ -155,6 +163,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let WorkerLoopSessionAttachment {
         log_path: session_log_path,
         runtime_ready,
+        preloaded_session,
         lease: attachment_lease,
     } = session_attachment;
     let provider_capabilities = agent.provider_capabilities();
@@ -198,13 +207,20 @@ pub(in crate::runner) fn run_worker_loop<P>(
         None => sigil_runtime::AgentToolBackgroundRuns::default(),
     };
     super::super::spawn::send_startup_notice(&message_tx, "opening durable session");
-    let mut initial_session = match load_session_with_runtime_attachments_and_background_owner(
-        &root_config.agent.runtime_provider,
-        &root_config.agent.model,
-        &session_log_path,
-        None,
-        Some(&background_agent_runs),
-    ) {
+    let initial_session_result = {
+        let _phase = crate::phase_timing::PhaseTimer::new("startup.durable_session_load");
+        match preloaded_session {
+            Some(session) => Ok(session),
+            None => load_session_with_runtime_attachments_and_background_owner(
+                &root_config.agent.runtime_provider,
+                &root_config.agent.model,
+                &session_log_path,
+                None,
+                Some(&background_agent_runs),
+            ),
+        }
+    };
+    let mut initial_session = match initial_session_result {
         Ok(mut session) => {
             if let Err(error) = sigil_runtime::bind_session_composition(&mut session, &root_config)
             {
@@ -237,13 +253,17 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         return;
                     }
                 };
-                match runtime.block_on(
-                    sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup_excluding(
-                        &mut session,
-                        &workspace_root,
-                        &live_worktree_ids,
-                    ),
-                ) {
+                let workspace_recovery_result = {
+                    let _phase = crate::phase_timing::PhaseTimer::new("startup.workspace_recovery");
+                    runtime.block_on(
+                        sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup_excluding(
+                            &mut session,
+                            &workspace_root,
+                            &live_worktree_ids,
+                        ),
+                    )
+                };
+                match workspace_recovery_result {
                     Ok(report) if report.inspected > 0 => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} retained for recovery, {} require review",
@@ -258,12 +278,17 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         return;
                     }
                 }
-                match runtime.block_on(
-                    sigil_runtime::integration_lanes::reconcile_integration_promotions(
-                        &mut session,
-                        &workspace_root,
-                    ),
-                ) {
+                let integration_recovery_result = {
+                    let _phase =
+                        crate::phase_timing::PhaseTimer::new("startup.integration_recovery");
+                    runtime.block_on(
+                        sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                            &mut session,
+                            &workspace_root,
+                        ),
+                    )
+                };
+                match integration_recovery_result {
                     Ok(report) if report.inspected > 0 => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
@@ -301,6 +326,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             session_ref_for_log_path(&session_log_path)
         }
         .and_then(|parent_session_ref| {
+            let _phase = crate::phase_timing::PhaseTimer::new("startup.task_handoff_recovery");
             ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
                 .reconcile(
                     &mut initial_session,
@@ -375,12 +401,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
     }
     let agent_supervisor = if task_orchestration_enabled {
         super::super::spawn::send_startup_notice(&message_tx, "loading agent profiles");
-        Some(
-            match sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-                &root_config,
-                &workspace_root,
-                session_entries,
-            ) {
+        Some({
+            let agent_profile_result = {
+                let _phase = crate::phase_timing::PhaseTimer::new("startup.agent_profiles");
+                sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+                    &root_config,
+                    &workspace_root,
+                    session_entries,
+                )
+            };
+            match agent_profile_result {
                 Ok(registry) => sigil_runtime::AgentSupervisor::new(
                     registry,
                     sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
@@ -394,8 +424,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                     return;
                 }
-            },
-        )
+            }
+        })
     } else {
         None
     };
@@ -458,7 +488,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
         });
     }
     super::super::spawn::send_startup_notice(&message_tx, "attaching session observers");
-    if let Err(error) = register_worker_active_projection_observer(&mut state) {
+    let observer_registration = {
+        let _phase = crate::phase_timing::PhaseTimer::new("startup.session_observer");
+        register_worker_active_projection_observer(&mut state)
+    };
+    if let Err(error) = observer_registration {
         let _ = message_tx.send(WorkerMessage::RunFailed(error));
         return;
     }

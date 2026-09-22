@@ -93,13 +93,7 @@ impl AppState {
     }
 
     fn main_timeline_render_len(&self) -> usize {
-        let snapshot = self.timeline_state.render_store.snapshot();
-        snapshot
-            .lines_range(0..snapshot.total_lines())
-            .iter()
-            .rposition(line_has_visible_content)
-            .map(|index| index + 1)
-            .unwrap_or(0)
+        self.timeline_state.render_store.visible_line_count()
     }
 
     pub(crate) fn main_timeline_active(&self) -> bool {

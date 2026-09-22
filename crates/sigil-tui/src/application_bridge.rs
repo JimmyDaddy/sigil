@@ -647,17 +647,21 @@ impl TuiApplicationSession {
         ) {
             return Ok(None);
         }
-        // A native approval card can arrive before the periodic application refresh. Resolve
-        // action bindings from the current durable frontier before admitting a control command.
+        // A native action can arrive before the owner loop's first asynchronous application
+        // refresh (most visible immediately after `resume`). Establish that initial frontier
+        // here instead of rejecting a valid prompt merely because the cached projection is not
+        // installed yet. The application service remains the sole authority for the refresh and
+        // command envelope; this is only a startup race repair, not a worker bypass.
         let latest = if matches!(
             action,
             AppAction::ApprovalDecision { .. } | AppAction::CancelRun
         ) {
             futures::executor::block_on(self.application.refresh())?
         } else {
-            self.application
-                .current_projection()?
-                .ok_or(ApplicationError::Unavailable)?
+            match self.application.current_projection()? {
+                Some(projection) => projection,
+                None => futures::executor::block_on(self.application.refresh())?,
+            }
         };
         let command = match action {
             AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(

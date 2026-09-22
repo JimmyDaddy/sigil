@@ -23,6 +23,29 @@ impl AppState {
             return ConversationQueueProjection::default();
         };
 
+        // Queue projection is requested by several widgets during every render. Rebuilding it
+        // from the complete session stream (and cloning that stream first to append optimistic
+        // entries) made a long resumed session spend most of its CPU in the TUI render path. The
+        // durable stream revision plus the optimistic queue signature are sufficient to reuse the
+        // exact projection until either source changes.
+        let optimistic_signature = self
+            .composer
+            .optimistic_queue_items
+            .iter()
+            .map(|queued| (queued.queue_id.clone(), queued.prompt_hash.clone()))
+            .collect::<Vec<_>>();
+        {
+            let cache = self.session_browser.queue_projection_cache.borrow();
+            if cache.entries_revision == self.session_browser.current_entries_revision
+                && cache.entries_len == self.session_browser.current_entries.len()
+                && cache.optimistic_signature == optimistic_signature
+                && cache.target.as_ref() == Some(&visible_target)
+                && let Some(projection) = cache.projection.as_ref()
+            {
+                return projection.clone();
+            }
+        }
+
         let mut entries = self.session_browser.current_entries.clone();
         for (index, queued) in self.composer.optimistic_queue_items.iter().enumerate() {
             if optimistic_queue_item_confirmed_by_durable_projection(
@@ -48,6 +71,14 @@ impl AppState {
                 .is_some_and(|queue_id| item.queued.queue_id == *queue_id)
         }) {
             projection.next_dispatchable = None;
+        }
+        {
+            let mut cache = self.session_browser.queue_projection_cache.borrow_mut();
+            cache.entries_revision = self.session_browser.current_entries_revision;
+            cache.entries_len = self.session_browser.current_entries.len();
+            cache.optimistic_signature = optimistic_signature;
+            cache.target = Some(visible_target);
+            cache.projection = Some(projection.clone());
         }
         projection
     }

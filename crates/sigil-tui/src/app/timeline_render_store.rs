@@ -229,6 +229,27 @@ impl TimelineRenderStore {
         }
     }
 
+    /// Returns the visible prefix length without scanning every rendered line.
+    ///
+    /// The render store already maintains prefix counts and the last visible block while it
+    /// rebuilds or incrementally updates the timeline. Reusing that index keeps scroll bounds and
+    /// viewport calculations constant-time during every frame of a long resumed session.
+    pub(crate) fn visible_line_count(&self) -> usize {
+        let Some(last_visible_index) = self.last_visible_block_index else {
+            return 0;
+        };
+        self.prefix_line_counts
+            .get(last_visible_index)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(
+                self.blocks
+                    .get(last_visible_index)
+                    .map(tail_trimmed_line_count)
+                    .unwrap_or(0),
+            )
+    }
+
     #[cfg(test)]
     pub(crate) fn last_reused_prefix_lines(&self) -> usize {
         self.last_reused_prefix_lines

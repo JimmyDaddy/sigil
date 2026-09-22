@@ -3585,9 +3585,10 @@ fn report_application_admission_error(
         &format!("application command was not admitted: {error}"),
     );
     // Admission can reject an action while the worker is still waiting for its exact approval.
-    // Keep that pending request and its owner intact so the user can retry the action.
-    // A malformed new prompt, however, only owns an optimistic local Thinking state: it never
-    // reached the worker and therefore will not receive a terminal event to release that state.
+    // Keep that pending request and its owner intact so the user can retry the action. Prompt-like
+    // actions have no durable worker event until admission returns a receipt, so every admission
+    // error must release their optimistic local Thinking state; otherwise a startup race or a
+    // failed application port leaves a permanent spinner with no provider request in flight.
     if matches!(
         action,
         AppAction::SubmitPrompt(_)
@@ -3598,9 +3599,6 @@ fn report_application_admission_error(
             | AppAction::InvokeInlineSkill { .. }
             | AppAction::InvokeChildSessionSkill { .. }
             | AppAction::InvokeAgentProfile { .. }
-    ) && matches!(
-        error.downcast_ref::<sigil_application::ApplicationError>(),
-        Some(sigil_application::ApplicationError::InvalidRequest(_))
     ) && app.approval.pending.is_none()
     {
         app.clear_worker_run_state();
