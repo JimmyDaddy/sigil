@@ -54,11 +54,18 @@ def touched_packages(metadata: dict, changed_files: list[str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed-files", type=Path, required=True)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT,
+        help="workspace root whose Cargo metadata should be inspected",
+    )
     args = parser.parse_args()
     try:
+        workspace_root = args.root.resolve()
         result = subprocess.run(
             ["cargo", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"],
-            cwd=ROOT,
+            cwd=workspace_root,
             capture_output=True,
             text=True,
             check=True,

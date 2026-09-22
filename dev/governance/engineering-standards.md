@@ -123,6 +123,8 @@
 
 Touched package必须从`cargo metadata`的workspace member/manifest path解析，不把目录名当package名：`crates/sigil-tui`对应`sigil-tui-host`，`crates/sigil-tui-framework`对应`sigil-tui`。根Cargo manifest/lock/toolchain变化选择全部workspace成员，即使同一diff也包含某个crate源码；解析失败必须停止，不能无声跳过测试。`python3 scripts/test-check-touched-packages.py`验证该映射与扩面规则。
 
+需要验证暂存内容时使用 `./scripts/check-touched.sh --scope staged`。该模式先从 Git index 生成带父提交标识的临时候选 worktree，再在候选树中运行 Cargo 与隔离测试；工作区里未暂存的修复不会替暂存内容通过。门禁输出的 candidate tree 只对该次 index 快照有效，暂存内容改变后必须重新执行。
+
 上述测试命令必须由 `scripts/run-isolated-tests.py` 包裹执行，包括 coverage、doctest 和离线 conformance 的产品子进程。隔离入口提供全新用户身份，fixture 提供独立资源根；不能继承真实 Sigil 配置/凭证/启动目录，也不能让全局 `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME` 覆盖 fixture storage。裸 `cargo test` 不会自动获得隔离。具体协议、回归要求与 live/keyring 资格化边界见[测试隔离设计](../docs/test-isolation.md)。
 
 仍可手动运行完整门禁：

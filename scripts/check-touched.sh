@@ -110,7 +110,6 @@ changed_files() {
 }
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
 files_file="${tmp_dir}/changed-files"
 packages_file="${tmp_dir}/packages"
 : >"${packages_file}"
@@ -120,6 +119,45 @@ if [[ ! -s "${files_file}" ]]; then
   echo "no changed files for scope=${scope}"
   exit 0
 fi
+
+# A staged gate must validate the exact index tree. Running Cargo in the dirty
+# checkout would allow unstaged follow-up edits to make a broken staged tree
+# appear healthy. Materialize the index into an isolated candidate directory;
+# the candidate has no .git directory, so the checks cannot accidentally read
+# the caller's worktree or index.
+execution_root="${ROOT}"
+candidate_tree=""
+candidate_root=""
+candidate_worktree=0
+cleanup() {
+  if [[ "${candidate_worktree}" == "1" ]]; then
+    git -C "${ROOT}" worktree remove --force "${candidate_root}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${tmp_dir}"
+}
+trap cleanup EXIT
+if [[ "${scope}" == "staged" && "${dry_run}" == "0" ]]; then
+  candidate_tree="$(git -C "${ROOT}" write-tree)"
+  candidate_root="${tmp_dir}/candidate"
+  git -C "${ROOT}" worktree add --detach --no-checkout "${candidate_root}" HEAD >/dev/null
+  candidate_worktree=1
+  git -C "${candidate_root}" read-tree "${candidate_tree}"
+  git -C "${candidate_root}" checkout-index --all --force
+  execution_root="${candidate_root}"
+  echo "candidate tree: ${candidate_tree}"
+  echo "candidate parent: $(git -C "${ROOT}" rev-parse HEAD)"
+fi
+
+# This is the only check that intentionally inspects the caller's Git index.
+run_cmd git -C "${ROOT}" diff --check --
+if [[ "${candidate_worktree}" == "1" ]]; then
+  # The caller may have supplied an alternate GIT_INDEX_FILE to describe the staged
+  # candidate. Once the candidate worktree is materialized, inherited index state would
+  # make Cargo tests and nested Git probes read the caller's temporary index instead of
+  # the candidate worktree's own index.
+  unset GIT_INDEX_FILE
+fi
+cd "${execution_root}"
 
 rust_changed=0
 docs_changed=0
@@ -149,7 +187,9 @@ while IFS= read -r path; do
 done <"${files_file}"
 
 if [[ "${rust_changed}" == "1" ]]; then
-  python3 "${ROOT}/scripts/check-touched-packages.py" --changed-files "${files_file}" >"${packages_file}"
+  python3 "${ROOT}/scripts/check-touched-packages.py" \
+    --changed-files "${files_file}" \
+    --root "${execution_root}" >"${packages_file}"
 fi
 packages=()
 while IFS= read -r package; do
@@ -170,7 +210,6 @@ if [[ "${high_risk_changed}" == "1" && "${tier}" == "quick" ]]; then
   echo "note: high-risk paths changed; prefer --tier standard before commit and --tier full before release"
 fi
 
-run_cmd git diff --check --
 run_cmd scripts/test-check-touched-classifier.sh
 run_cmd python3 scripts/test-check-touched-packages.py
 run_cmd python3 scripts/test-check-no-prompt-phrase-routing.py
