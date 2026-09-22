@@ -5017,6 +5017,11 @@ fn exec_command_schema_separates_io_wait_and_runtime() {
     register_builtin_tools(&mut registry);
     let spec = registry.spec_for("exec_command").expect("exec command");
     assert_eq!(spec.input_schema["required"], json!(["command"]));
+    assert!(
+        spec.description
+            .contains("required input key is exactly `command`")
+    );
+    assert!(spec.description.contains("do not use `cmd`"));
     assert!(spec.input_schema["properties"].get("mode").is_none());
     assert!(
         spec.input_schema["properties"]
@@ -5034,6 +5039,23 @@ fn exec_command_schema_separates_io_wait_and_runtime() {
     );
     assert!(registry.spec_for("bash").is_none());
     assert!(registry.spec_for("terminal_start").is_none());
+}
+
+#[test]
+fn exec_command_does_not_treat_cmd_as_a_command_alias() {
+    let error = super::parse_terminal_start_args(&json!({"cmd": "printf ignored"}))
+        .expect_err("cmd must not satisfy the required command field");
+    assert_eq!(
+        error.to_string(),
+        "missing string field command; field cmd is unknown and ignored; retry with command"
+    );
+
+    super::parse_terminal_start_args(&json!({
+        "command": "true",
+        "cmd": "ignored",
+        "retired_field": true,
+    }))
+    .expect("unknown fields remain ignored when command is present");
 }
 
 #[test]

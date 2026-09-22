@@ -553,7 +553,7 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "exec_command".to_owned(),
             description: format!(
-                "Execute a shell command from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. Finite commands, builds, tests, services, and interactive work use this one entry. pty selects terminal I/O independently of lifetime. Wait up to yield_time_ms (default 1000, maximum 60000); if still running, retain the returned execution_id and use exec_wait, exec_read, exec_input, exec_resize, or exec_cancel. max_runtime_secs optionally stops the process at a separate runtime deadline. A running response is not command success. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files that must survive across tool calls in this session (shown as {}). The scratch directory is scoped to the current session and private to this user; usage is measured during maintenance and expired contents are reclaimed. Do not rely on it for long-term storage. OS temp directories are outside the workspace and require permission.external_directory.",
+                "Execute a shell command from the workspace. The required input key is exactly `command` and must be a string; do not use `cmd`. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or Windows `cmd.exe` executables. Finite commands, builds, tests, services, and interactive work use this one entry. pty selects terminal I/O independently of lifetime. Wait up to yield_time_ms (default 1000, maximum 60000); if still running, retain the returned execution_id and use exec_wait, exec_read, exec_input, exec_resize, or exec_cancel. max_runtime_secs optionally stops the process at a separate runtime deadline. A running response is not command success. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files that must survive across tool calls in this session (shown as {}). The scratch directory is scoped to the current session and private to this user; usage is measured during maintenance and expired contents are reclaimed. Do not rely on it for long-term storage. OS temp directories are outside the workspace and require permission.external_directory.",
                 self.managers.default_shell_summary(),
                 self.scratch_label
             ),
@@ -1411,7 +1411,13 @@ pub(crate) struct TerminalStartArgs {
 }
 
 pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
-    let command = required_string(args, "command")?.to_owned();
+    let command = match required_string(args, "command") {
+        Ok(command) => command.to_owned(),
+        Err(error) if args.get("cmd").is_some() => {
+            bail!("{error}; field cmd is unknown and ignored; retry with command")
+        }
+        Err(error) => return Err(error),
+    };
     let cwd = optional_string(args, "cwd").map(PathBuf::from);
     let shell = optional_string(args, "shell").map(str::to_owned);
     let pty = match args.get("pty") {
