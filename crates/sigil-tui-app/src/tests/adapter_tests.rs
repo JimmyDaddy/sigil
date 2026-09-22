@@ -105,6 +105,8 @@ struct Port {
     snapshot: Mutex<ProjectionSnapshot>,
     commands: Mutex<Vec<ApplicationCommandRequest>>,
     deliveries: Mutex<Vec<DurableDeliveryRequest>>,
+    recovery_calls: Mutex<Vec<(ApplicationScope, ControlLogRecoveryAction)>>,
+    resume_calls: Mutex<Vec<ApplicationCommandRequest>>,
 }
 impl Port {
     fn new() -> Self {
@@ -116,6 +118,8 @@ impl Port {
             }),
             commands: Mutex::new(Vec::new()),
             deliveries: Mutex::new(Vec::new()),
+            recovery_calls: Mutex::new(Vec::new()),
+            resume_calls: Mutex::new(Vec::new()),
         }
     }
     fn advance(&self, public_id: &str) {
@@ -143,6 +147,31 @@ impl Port {
     }
 }
 impl ApplicationPort for Port {
+    fn recover_control_log(
+        &self,
+        scope: ApplicationScope,
+        action: ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<ControlLogRecoveryOutcome, ApplicationError>> {
+        self.recovery_calls
+            .lock()
+            .expect("recovery calls")
+            .push((scope, action));
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+    fn resume_session_runtime_transition(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
+        self.resume_calls
+            .lock()
+            .expect("resume calls")
+            .push(request.clone());
+        self.commands
+            .lock()
+            .expect("commands")
+            .push(request.clone());
+        self.application.execute(request)
+    }
     fn open_projection(
         &self,
         _request: OpenProjectionRequest,
@@ -341,6 +370,10 @@ fn adapter_surfaces_unavailable_control_log_recovery_instead_of_activating() {
         !matches!(outcome, Ok(ControlLogRecoveryOutcome::Activated(_))),
         "a port without control-log recovery must not yield an activated binding"
     );
+    let calls = port.recovery_calls.lock().expect("recovery calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, scope());
+    assert!(matches!(calls[0].1, ControlLogRecoveryAction::Preview));
 }
 
 #[test]
@@ -357,13 +390,18 @@ fn adapter_resumes_runtime_transition_only_through_the_application_port() {
             }),
         )
         .expect("prepare");
-    let resumed = block_on(adapter.resume_session_runtime_transition(request));
-    assert!(
-        resumed.is_err() || matches!(resumed, Ok(ApplicationCommandReceipt::Replayed(_))),
-        "runtime resume must be answered by the port instead of synthesized by the adapter"
+    let resumed = block_on(adapter.resume_session_runtime_transition(request.clone()))
+        .expect("runtime resume");
+    assert!(matches!(
+        resumed,
+        ApplicationCommandReceipt::Settled(_) | ApplicationCommandReceipt::Replayed(_)
+    ));
+    assert_eq!(
+        port.resume_calls.lock().expect("resume calls").as_slice(),
+        std::slice::from_ref(&request)
     );
-    assert!(
-        port.commands.lock().expect("commands").is_empty(),
-        "the adapter must not dispatch a command of its own"
+    assert_eq!(
+        port.commands.lock().expect("commands").as_slice(),
+        &[request]
     );
 }
