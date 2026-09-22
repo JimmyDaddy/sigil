@@ -1021,9 +1021,9 @@ fn context_source_symbol_candidates_find_exact_rust_symbol() -> Result<()> {
         .expect("session.rs source candidate");
     assert_eq!(
         source.inclusion_reason,
-        ContextInclusionReason::ExactSymbolMatch
+        ContextInclusionReason::RetrievalHit
     );
-    assert!(has_score_component(
+    assert!(!has_score_component(
         source,
         ContextScoreComponentKind::ExactSymbol
     ));
@@ -1101,9 +1101,11 @@ fn context_source_symbol_candidates_match_cjk_query_and_identifier() -> Result<(
     );
 
     let natural = context_candidates_from_repo_query(temp.path(), "配置解析器函数在哪里定义？")?;
-    assert_eq!(
-        natural.items.first().map(|item| item.id.as_str()),
-        Some("repo-file:services/config.py")
+    assert!(
+        natural
+            .items
+            .iter()
+            .all(|item| { item.inclusion_reason != ContextInclusionReason::ExactSymbolMatch })
     );
     Ok(())
 }

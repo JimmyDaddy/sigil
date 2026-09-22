@@ -1512,6 +1512,8 @@ fn source_symbol_file_score(
     let mut score_breakdown = Vec::new();
     let mut matched_symbol = false;
     let mut matched_lexical_path = false;
+    let mut matched_lexical_content = false;
+    let mut matched_symbol_content = false;
     let mut lexical_content_matches = 0_u32;
     let mut snippet_terms = BTreeSet::new();
     let mut symbol_range = None;
@@ -1525,18 +1527,16 @@ fn source_symbol_file_score(
         if file_stem == *term {
             push_score_component(
                 &mut score_breakdown,
-                ContextScoreComponentKind::ExactSymbol,
+                ContextScoreComponentKind::SourcePath,
                 130.0,
             );
-            matched_symbol = true;
             snippet_terms.insert(term.clone());
         } else if file_stem.contains(term) {
             push_score_component(
                 &mut score_breakdown,
-                ContextScoreComponentKind::ExactSymbol,
+                ContextScoreComponentKind::SourcePath,
                 85.0,
             );
-            matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
         if relative_text.contains(term) {
@@ -1545,23 +1545,18 @@ fn source_symbol_file_score(
                 ContextScoreComponentKind::SourcePath,
                 70.0,
             );
-            matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
         if index_text.contains(term) {
-            push_score_component(
-                &mut score_breakdown,
-                ContextScoreComponentKind::ExactSymbol,
-                95.0,
-            );
-            matched_symbol = true;
+            lexical_content_matches = lexical_content_matches.saturating_add(1);
+            matched_lexical_content = true;
+            matched_symbol_content = true;
             snippet_terms.insert(term.clone());
         }
         if let Some(symbol) = symbols.iter().find(|symbol| {
             source_term_variants(&symbol.name)
                 .iter()
                 .any(|variant| variant == term)
-                || symbol.name.to_lowercase().contains(term)
         }) {
             push_score_component(
                 &mut score_breakdown,
@@ -1571,6 +1566,16 @@ fn source_symbol_file_score(
             matched_symbol = true;
             snippet_terms.insert(term.clone());
             symbol_range = symbol_range.or_else(|| symbol.range.clone());
+        } else if symbols
+            .iter()
+            .any(|symbol| symbol.name.to_lowercase().contains(term))
+        {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                32.0,
+            );
+            snippet_terms.insert(term.clone());
         }
     }
 
@@ -1590,7 +1595,14 @@ fn source_symbol_file_score(
         }
     }
 
-    if matched_symbol || matched_lexical_path {
+    if matched_symbol || matched_lexical_path || matched_lexical_content {
+        if matched_symbol_content && !matched_symbol {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                40.0,
+            );
+        }
         push_score_component(
             &mut score_breakdown,
             ContextScoreComponentKind::RetrievalScore,
@@ -1616,8 +1628,10 @@ fn source_symbol_file_score(
 
     let inclusion_reason = if matched_symbol {
         ContextInclusionReason::ExactSymbolMatch
-    } else {
+    } else if matched_lexical_path {
         ContextInclusionReason::SourcePathMatch
+    } else {
+        ContextInclusionReason::RetrievalHit
     };
     Some(SourceSymbolScore {
         score,
@@ -1741,7 +1755,6 @@ fn collect_explicit_query_term(segment: &str, terms: &mut BTreeSet<String>) {
 fn is_code_like_query_token(token: &str) -> bool {
     token.contains('_')
         || token.contains('-')
-        || !token.is_ascii()
         || token.chars().skip(1).any(char::is_uppercase) && token.chars().any(char::is_lowercase)
 }
 
