@@ -883,6 +883,25 @@ pub fn load_session_for_route_transition(
     };
     let inspected = inspect_session_for_route_resume(root_config, fallback_route, store)
         .map_err(SessionRouteLoadError::Unavailable)?;
+    load_inspected_session_for_route(
+        inspected,
+        recovery_confirmation,
+        explicit_selection,
+        attachment,
+    )
+}
+
+/// Applies a route decision to a session that was already inspected from the same durable store.
+///
+/// Callers that need both the inspection result and the loaded session should use this entry point
+/// so the JSONL stream is parsed once. The inspected session must have been loaded with any live
+/// background-agent ownership that the caller wants route recovery to respect.
+pub fn load_inspected_session_for_route(
+    inspected: InspectedSessionRouteResume,
+    recovery_confirmation: Option<&str>,
+    explicit_selection: Option<(&str, &ResolvedModelRoute)>,
+    attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+) -> std::result::Result<SessionRouteLoadOutcome, SessionRouteLoadError> {
     let InspectedSessionRouteResume {
         mut session,
         config_snapshot,

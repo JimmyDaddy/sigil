@@ -1248,6 +1248,70 @@ fn route_loader_requires_attachment_for_mutation_authority() -> anyhow::Result<(
     Ok(())
 }
 
+#[test]
+fn inspected_route_loader_keeps_attachment_gated_mutation_authority() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_root =
+        local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let (provider_name, source_route) = resolve_default_model_route(&source_root)?;
+    let mut target_connection = load_provider_connections(&source_root)
+        .connections
+        .get(&source_route.model_ref.connection_id)
+        .expect("connection")
+        .config
+        .clone();
+    let source_binding = connection_egress_trust_binding(&target_connection);
+    let session_path = temp.path().join("session.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
+    let session = sigil_kernel::Session::load_from_store_with_route_and_trust(
+        provider_name,
+        source_route.model_ref.model_id.clone(),
+        Some(source_route.clone()),
+        Some(source_binding),
+        store,
+    )?;
+    drop(session);
+    let before = std::fs::read(&session_path)?;
+
+    target_connection.base_url = "https://models.example.test/v2/responses".to_owned();
+    let target_root = materialize_root_config(
+        &source_root,
+        &BTreeMap::from([(target_connection.id.clone(), target_connection)]),
+        &source_route.model_ref,
+    )?;
+    let (_, target_route) = resolve_default_model_route(&target_root)?;
+
+    let inspected = inspect_session_for_route_resume(
+        &target_root,
+        &target_route,
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+    )?;
+    let automatic_error = match load_inspected_session_for_route(inspected, None, None, None) {
+        Ok(_) => anyhow::bail!("inspected loader must reject automatic route mutation"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        automatic_error,
+        SessionRouteLoadError::Unavailable(ref error)
+            if error.to_string() == "session_route_mutation_requires_attachment"
+    ));
+    assert_eq!(std::fs::read(&session_path)?, before);
+
+    let attachment =
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )?;
+    let inspected = inspect_session_for_route_resume(
+        &target_root,
+        &target_route,
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+    )?;
+    let rebound = load_inspected_session_for_route(inspected, None, None, Some(&attachment))?;
+    assert_eq!(rebound.session.resolved_model_route(), Some(&target_route));
+    assert_ne!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
 #[tokio::test]
 async fn connection_inventory_is_secret_free_and_reports_each_connection() {
     let env_connection = deepseek_connection();
