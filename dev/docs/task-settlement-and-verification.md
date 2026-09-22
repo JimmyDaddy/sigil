@@ -10,6 +10,10 @@ Desktop/TUI/HTTP 复用 kernel 的执行结果归约。普通 coding task 使用
 
 Checklist 仅展示模型报告的进度，不授予权限、不驱动依赖调度，也不证明验证通过。缺失或无效更新不会封锁其他业务工具和最终回答；无效参数仍返回结构化工具错误。host 不在任务结束时自动勾选模型遗留的未完成项。并行 participant 不共享写入根任务的同一列表，既有 plan step 状态继续展示执行进度。
 
+终端工具的 `success` 只表示该进程以退出码 0 结束。普通 shell 包装、管道或输出摘要不会自动生成验证通过回执；没有绑定具体 CheckSpec、候选快照和完整管道观察时，结果会标记为 `process_exit_only`，模型仍需决定是否执行并读取真正的验证检查。
+
+后台终端返回较旧 generation 时，host 保留这次观察用于审计，但不会把它重新投影为当前状态。工具结果会同时附带最新 generation、状态、readiness、cleanup、输出计数、`log_ref` 和下一步建议；任务仍在运行时建议模型调用 `exec_wait`，已结束时再读取最终结果。host 不替模型自动重跑或取消。
+
 ## 恢复与历史记录
 
 `bind_direct_task_requirements` 和 `task_completion_claim` 不再作为运行工具提供；删除其来源绑定、完成证明、修正回合、专用暂停以及 worktree capture/restore 执行路径。新 participant result 不携带 completion claim。
@@ -31,6 +35,8 @@ accepted step 的 `check_spec_refs` 在 participant dispatch 前解析到实际 
 `WorkspaceKnowledge::SnapshotUnavailable` 仅表示有界观察不完整。snapshot builder 不再凭缺少完整 manifest 合成 `workspace_snapshot_incomplete` mutation。普通 symlink/大文件等观察限制不能把已知写入变成未知 effect；原 mutation/recovery owner 产生的真实 `UnknownDirty` 和无法认证的历史未知事实仍保留阻塞语义。
 
 ## 验证边界
+
+provider 请求的 cache layout 只保存有界的消息指纹、字段类别哈希和 provider-visible 字节计数。发生 `conversation_history_rewritten` 时，诊断会给出第一个变化位置、角色/内容/tool call/附件等变化类别、前后大小以及是否触及指纹上限，不保存消息原文。比较优先使用逐消息指纹，因此旧前缀中的后段变化不会再把可复用前缀错误归零。
 
 回归覆盖 direct、串行/并行 step 和 synthesis 无 claim 完成；首轮实际工具可用；单项 checklist 更新和重开读取；无效进度参数不封锁后续工具；host 不自动勾完未完成项；实际阻塞、取消、required verification 继续生效。真实 Git worktree 测试覆盖重开后的未结算副本保留，历史日志测试覆盖读取、损坏数据校验及 compaction 后引用保护。
 
