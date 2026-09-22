@@ -813,12 +813,42 @@ async fn execute_managed_edit(
     let path = required_string(&args, "path")?.to_owned();
     let old_text = required_string(&args, "old_text")?.to_owned();
     let new_text = required_string(&args, "new_text")?.to_owned();
-    let outcome = execute_managed_file_operation(
+    let outcome = match execute_managed_file_operation(
         ctx,
         sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
         sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Edit { old_text, new_text },
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            use sigil_kernel::{ToolErrorKind, ToolExecutionGuardError};
+            if let Some(ToolExecutionGuardError::ManagedFile {
+                kind: ToolErrorKind::InvalidInput,
+                message,
+            }) = error.downcast_ref::<ToolExecutionGuardError>()
+                && message.contains("old_text not found")
+            {
+                return Ok(ToolResult::error(
+                    call_id,
+                    tool.spec().name,
+                    ToolErrorKind::InvalidInput,
+                    format!(
+                        "edit_file could not find old_text in {path:?}; the file may have changed since it was read. Re-read the current file and diff before retrying; do not replay the stale edit."
+                    ),
+                )
+                .with_error_details(
+                    true,
+                    json!({
+                        "path": path,
+                        "recovery": "reread_current_file_and_rebase_edit",
+                        "stale_edit": true,
+                    }),
+                ));
+            }
+            return Err(error);
+        }
+    };
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,

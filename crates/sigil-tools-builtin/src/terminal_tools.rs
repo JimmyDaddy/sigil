@@ -1411,18 +1411,6 @@ pub(crate) struct TerminalStartArgs {
 }
 
 pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
-    for removed in [
-        "mode",
-        "task_id",
-        "execution_id",
-        "timeout_secs",
-        "readiness",
-    ] {
-        anyhow::ensure!(
-            args.get(removed).is_none(),
-            "exec_command does not accept {removed}; use pty, yield_time_ms, and max_runtime_secs"
-        );
-    }
     let command = required_string(args, "command")?.to_owned();
     let cwd = optional_string(args, "cwd").map(PathBuf::from);
     let shell = optional_string(args, "shell").map(str::to_owned);
@@ -1437,12 +1425,11 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
         max_runtime_secs.is_none_or(|seconds| seconds <= 86_400),
         "max_runtime_secs must be between 1 and 86400"
     );
-    let pty_size = if args.get("rows").is_some() || args.get("cols").is_some() {
+    let pty_size = if pty && (args.get("rows").is_some() || args.get("cols").is_some()) {
         Some(required_terminal_pty_size(args)?)
     } else {
         None
     };
-    anyhow::ensure!(pty || pty_size.is_none(), "rows and cols require pty=true");
     Ok(TerminalStartArgs {
         command,
         cwd,
@@ -1718,16 +1705,11 @@ fn terminal_entry_result_with_shell_context(
             TerminalTaskStatus::Exited { exit_code } => json!(exit_code),
             _ => Value::Null,
         };
-        let workspace_check = match shell_context {
-            Some(TerminalShellReceiptContext::Analysis(analysis)) => {
-                analysis.command_family.is_workspace_check()
-            }
-            Some(TerminalShellReceiptContext::Prepared(plan)) => {
-                plan.safe_summary.workspace_code_steps > 0
-            }
-            None => false,
-        };
-        analysis["rerun_not_needed"] = json!(workspace_check && verdict == "success");
+        // A terminal process exit is evidence about that process only.  It is not a
+        // verification receipt for the repository: shell wrappers may mask an upstream
+        // failure, and no check specification/hash is bound at this layer.
+        analysis["verification_evidence"] = json!("process_exit_only");
+        analysis["rerun_not_needed"] = json!(false);
     }
     let content = format!(
         "{action} execution {}\nstatus: {}\nverdict: {verdict}{}",

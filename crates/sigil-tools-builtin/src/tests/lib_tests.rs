@@ -206,18 +206,20 @@ fn exec_permission_plan_accepts_lifetime_choices_without_command_family_routing(
 }
 
 #[tokio::test]
-async fn exec_rejects_retired_timeout_argument_before_spawning() -> Result<()> {
+async fn exec_ignores_retired_timeout_argument_and_still_spawns() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let error = posix_exec_tool(workspace.path())?
+    let result = posix_exec_tool(workspace.path())?
         .execute(
             ToolContext::new(workspace.path(), 5),
             "invalid-contract".into(),
             json!({"command":"touch never-started", "timeout_secs":1}),
         )
-        .await
-        .expect_err("retired ambiguous timeout field");
-    assert!(error.to_string().contains("timeout_secs"));
-    assert!(!workspace.path().join("never-started").exists());
+        .await?;
+    assert!(
+        matches!(result.status, ToolResultStatus::Ok),
+        "retired fields are ignored: {result:?}"
+    );
+    assert!(workspace.path().join("never-started").exists());
     Ok(())
 }
 
@@ -5037,9 +5039,7 @@ fn exec_command_schema_separates_io_wait_and_runtime() {
 #[test]
 fn exec_command_validates_independent_io_wait_and_deadline_fields() -> Result<()> {
     for args in [
-        json!({"command": "true", "mode": "background"}),
         json!({"command": "true", "pty": "true"}),
-        json!({"command": "true", "rows": 24, "cols": 80}),
         json!({"command": "true", "yield_time_ms": -1}),
         json!({"command": "true", "yield_time_ms": 60_001}),
         json!({"command": "true", "max_runtime_secs": 0}),
@@ -5052,6 +5052,20 @@ fn exec_command_validates_independent_io_wait_and_deadline_fields() -> Result<()
             &json!({"command": "true", "pty": pty, "yield_time_ms": 0, "max_runtime_secs": 5}),
         )?;
     }
+    super::parse_terminal_start_args(&json!({
+        "command": "true",
+        "mode": "retired",
+        "task_id": "old",
+        "rows": "not-a-number",
+        "cols": null,
+        "pty": false,
+    }))?;
+    super::parse_terminal_start_args(&json!({
+        "command": "true",
+        "rows": 24,
+        "cols": 80,
+        "pty": true,
+    }))?;
     Ok(())
 }
 
@@ -6550,7 +6564,8 @@ async fn exec_result_exposes_workspace_check_facts() -> Result<()> {
     assert_eq!(shell["grant_scope_detail"]["args_family"], "quick");
     assert_eq!(shell["exit_code"], 0);
     assert_eq!(shell["verdict"], "success");
-    assert_eq!(shell["rerun_not_needed"], true);
+    assert_eq!(shell["verification_evidence"], "process_exit_only");
+    assert_eq!(shell["rerun_not_needed"], false);
     Ok(())
 }
 
@@ -6655,9 +6670,16 @@ async fn edit_file_errors_for_missing_and_ambiguous_old_text() -> Result<()> {
             "edit-missing".to_owned(),
             json!({ "path": "note.txt", "old_text": "absent", "new_text": "new" }),
         )
-        .await
-        .expect_err("missing old_text should fail");
-    assert!(missing.to_string().contains("old_text not found"));
+        .await?;
+    assert!(matches!(
+        missing.status,
+        sigil_kernel::ToolResultStatus::Error(_)
+    ));
+    assert!(missing.content.contains("Re-read the current file"));
+    let sigil_kernel::ToolResultStatus::Error(error) = &missing.status else {
+        unreachable!("missing edit must return a structured error");
+    };
+    assert_eq!(error.details["stale_edit"], true);
 
     let ambiguous = EditFileTool
         .execute_with_file_authority(
