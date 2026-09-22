@@ -227,6 +227,26 @@ fn cache_layout_v2_ignores_per_turn_hosted_authorization_identity() -> Result<()
 }
 
 #[test]
+fn cache_layout_v2_ignores_host_only_message_identity_and_presentation_fields() -> Result<()> {
+    let first_request = request();
+    let first = CacheLayoutProofV2::from_request(&first_request, None)?;
+
+    let mut next_request = first_request;
+    next_request.messages[1].id = "new-local-message-id".to_owned();
+    next_request.messages[1].assistant_kind = Some(crate::AssistantMessageKind::Progress);
+    next_request.messages[1].logical_run_id = Some(crate::LogicalRunId::new("run-2")?);
+    let next = CacheLayoutProofV2::from_request(&next_request, Some(&first))?;
+
+    assert_eq!(first.conversation_hash, next.conversation_hash);
+    assert_eq!(
+        next.mutation_from_previous.kind,
+        CacheLayoutMutationKind::Identical
+    );
+    assert!(next.mutation_from_previous.local_stable_prefix_preserved);
+    Ok(())
+}
+
+#[test]
 fn cache_layout_v2_detects_provider_visible_hosted_schema_changes() -> Result<()> {
     let mut baseline_request = request();
     baseline_request.hosted_tools.push(HostedToolRequest::new(
@@ -256,5 +276,118 @@ fn cache_layout_v2_detects_provider_visible_hosted_schema_changes() -> Result<()
         CacheLayoutMutationKind::ToolSchemaChanged
     );
     assert!(!changed.mutation_from_previous.local_stable_prefix_preserved);
+    Ok(())
+}
+
+#[test]
+fn cache_layout_diagnostic_identifies_changed_message_fields_without_content() -> Result<()> {
+    let baseline_request = request();
+    let baseline = CacheLayoutProofV2::from_request(&baseline_request, None)?;
+    let mut changed_request = baseline_request;
+    changed_request.messages[1].role = MessageRole::Assistant;
+    changed_request.messages[1].content = Some("rewritten answer".to_owned());
+    let changed = CacheLayoutProofV2::from_request(&changed_request, Some(&baseline))?;
+
+    let diagnostic = changed
+        .mutation_from_previous
+        .diagnostic
+        .as_ref()
+        .expect("rewrite should carry a bounded diagnostic");
+    assert_eq!(diagnostic.first_changed_message_index, Some(0));
+    assert!(
+        diagnostic
+            .changed_fields
+            .contains(&crate::CacheLayoutMessageFieldV1::Role)
+    );
+    assert!(
+        diagnostic
+            .changed_fields
+            .contains(&crate::CacheLayoutMessageFieldV1::Content)
+    );
+    assert!(
+        diagnostic
+            .changed_fields
+            .contains(&crate::CacheLayoutMessageFieldV1::Size)
+    );
+    let rendered = serde_json::to_string(diagnostic)?;
+    assert!(!rendered.contains("rewritten answer"));
+    assert_eq!(
+        diagnostic.previous_message_count,
+        diagnostic.current_message_count
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_layout_rewrite_keeps_the_unchanged_prefix_count() -> Result<()> {
+    let mut baseline_request = request();
+    baseline_request.messages.extend([ModelMessage::assistant(
+        Some("answer".to_owned()),
+        Vec::new(),
+    )]);
+    let baseline = CacheLayoutProofV2::from_request(&baseline_request, None)?;
+    let mut changed_request = baseline_request;
+    changed_request.messages[2].content = Some("rewritten answer".to_owned());
+    let changed = CacheLayoutProofV2::from_request(&changed_request, Some(&baseline))?;
+
+    assert_eq!(
+        changed
+            .mutation_from_previous
+            .reusable_conversation_message_count,
+        1
+    );
+    assert_eq!(
+        changed
+            .mutation_from_previous
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.first_changed_message_index),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_layout_diagnostic_bounds_fingerprint_growth() -> Result<()> {
+    let mut request = request();
+    request
+        .messages
+        .extend((0..256).map(|index| ModelMessage::user(format!("message-{index}"))));
+    let proof = CacheLayoutProofV2::from_request(&request, None)?;
+    proof.validate()?;
+    assert!(proof.mutation_from_previous.message_fingerprints.len() <= 128);
+    assert!(
+        proof
+            .mutation_from_previous
+            .diagnostic
+            .as_ref()
+            .is_some_and(|diagnostic| diagnostic.comparison_truncated)
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_layout_full_prefix_hash_survives_the_fingerprint_bound() -> Result<()> {
+    let mut baseline_request = request();
+    baseline_request
+        .messages
+        .extend((0..160).map(|index| ModelMessage::user(format!("message-{index}"))));
+    let baseline = CacheLayoutProofV2::from_request(&baseline_request, None)?;
+    let mut appended_request = baseline_request;
+    appended_request
+        .messages
+        .push(ModelMessage::assistant(Some("tail".to_owned()), Vec::new()));
+    let appended = CacheLayoutProofV2::from_request(&appended_request, Some(&baseline))?;
+
+    assert_eq!(
+        appended.mutation_from_previous.kind,
+        CacheLayoutMutationKind::ConversationTailAppended
+    );
+    assert_eq!(
+        appended
+            .mutation_from_previous
+            .reusable_conversation_message_count,
+        baseline.conversation_message_count
+    );
     Ok(())
 }

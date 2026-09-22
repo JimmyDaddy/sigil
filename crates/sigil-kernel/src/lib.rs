@@ -143,6 +143,7 @@ pub use approval::{
 };
 pub use cache_layout::{
     CACHE_LAYOUT_PROOF_SCHEMA_VERSION, CACHE_LAYOUT_PROOF_V2_SCHEMA_VERSION,
+    CacheLayoutMessageFieldV1, CacheLayoutMessageFingerprintV1, CacheLayoutMutationDiagnosticV1,
     CacheLayoutMutationKind, CacheLayoutMutationProofV1, CacheLayoutProofV1, CacheLayoutProofV2,
     canonicalize_cache_stable_json,
 };
