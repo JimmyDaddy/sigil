@@ -14941,3 +14941,107 @@ fn failed_batch_settlement_ignores_historical_started_calls_with_reused_ids() ->
     assert_single_settled_result(&session, "reused-id", "before execution started");
     Ok(())
 }
+
+#[tokio::test]
+async fn provider_first_content_reaches_handler_before_remaining_stream_is_released() -> Result<()>
+{
+    struct GatedStreamProvider(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl Provider for GatedStreamProvider {
+        fn name(&self) -> &str {
+            "gated-stream"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            MockProvider.capabilities()
+        }
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+            let release = Arc::clone(&self.0);
+            Ok(Box::pin(stream::unfold(
+                (0, release),
+                |(step, release)| async move {
+                    match step {
+                        0 => Some((
+                            Ok(ProviderChunk::ReasoningDelta("reasoning now".to_owned())),
+                            (1, release),
+                        )),
+                        1 => {
+                            release.notified().await;
+                            Some((
+                                Ok(ProviderChunk::TextDelta("answer now".to_owned())),
+                                (2, release),
+                            ))
+                        }
+                        2 => {
+                            release.notified().await;
+                            Some((Ok(ProviderChunk::Done), (3, release)))
+                        }
+                        _ => None,
+                    }
+                },
+            )))
+        }
+    }
+    struct ReleaseOnVisibleEvent {
+        release: Arc<tokio::sync::Notify>,
+        received: Vec<&'static str>,
+    }
+    impl EventHandler for ReleaseOnVisibleEvent {
+        fn handle(&mut self, event: RunEvent) -> Result<()> {
+            match event {
+                RunEvent::ReasoningDelta(text) => {
+                    assert_eq!(text, "reasoning now");
+                    self.received.push("reasoning");
+                    self.release.notify_one();
+                }
+                RunEvent::TextDelta(text) => {
+                    assert_eq!(text, "answer now");
+                    self.received.push("text");
+                    self.release.notify_one();
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+    let release = Arc::new(tokio::sync::Notify::new());
+    let agent = Agent::new(
+        GatedStreamProvider(Arc::clone(&release)),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("gated-stream", "model");
+    let mut handler = ReleaseOnVisibleEvent {
+        release,
+        received: Vec::new(),
+    };
+    let temp = tempfile::tempdir()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        agent.run_with_input(
+            &mut session,
+            AgentRunInput::user("respond"),
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+                tool_authority: None,
+            },
+            &mut handler,
+        ),
+    )
+    .await
+    .expect("first content must be published while subsequent chunks are pending")?;
+    assert_eq!(handler.received, ["reasoning", "text"]);
+    assert_eq!(output.result.final_text, "answer now");
+    Ok(())
+}
