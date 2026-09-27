@@ -60,9 +60,10 @@ use sigil_runtime::application_run::{
     PreparedApplicationTaskContinuation, PreparedApplicationUserInputDecision,
     accept_application_task_integration_review_with_attachment, application_agent_activity_view,
     application_recoverable_user_input_decision, application_run_context_view,
-    application_session_frontier_view, application_session_has_unresolved_user_input,
-    application_task_integration_review_view, application_user_input_request_view_by_key,
-    application_verification_view, bind_application_session_with_model_ref_and_projection_owner,
+    application_run_start_view, application_session_frontier_view,
+    application_session_has_unresolved_user_input, application_task_integration_review_view,
+    application_user_input_request_view_by_key, application_verification_view,
+    bind_application_session_with_model_ref_and_projection_owner,
     bind_existing_application_session,
     bind_existing_application_session_with_attachment_and_projection_owner,
     prepare_application_run, prepare_application_task_continuation,
@@ -73,6 +74,18 @@ use sigil_runtime::application_run::{
 use sigil_runtime::conversation_display::ConversationDisplayProjectionError;
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
+
+#[path = "production_run_start.rs"]
+mod run_start;
+use run_start::{bind_run_start_route, http_route_recovery};
+
+#[path = "production_active_runs.rs"]
+mod active_runs;
+use active_runs::HttpActiveRunsReady;
+
+#[path = "production_terminal_io.rs"]
+mod terminal_io;
+use terminal_io::HttpRunTerminalIo;
 
 use crate::{
     HttpAgentActivityItem, HttpAgentActivityStatus, HttpAgentActivityView, HttpAgentHandoffStatus,
@@ -345,7 +358,7 @@ pub struct HttpProductionRunDriver {
     application_delivery_acks:
         Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
-    active_runs_ready: Arc<Condvar>,
+    active_runs_ready: Arc<HttpActiveRunsReady>,
     active_artifact_stores: Arc<Mutex<BTreeMap<String, sigil_kernel::ToolArtifactStore>>>,
     artifact_access: Arc<ArtifactAccessCoordinator>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
@@ -533,7 +546,7 @@ async fn run_http_background_agent_monitor(
     >,
     registry: Weak<HttpSessionRunRegistry>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
-    active_runs_ready: Arc<Condvar>,
+    active_runs_ready: Arc<HttpActiveRunsReady>,
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<HttpBackgroundAgentSignal>,
 ) {
     while let Some(signal) = receiver.recv().await {
@@ -544,26 +557,9 @@ async fn run_http_background_agent_monitor(
         let Some(attachment) = attachment.upgrade() else {
             return;
         };
-        let session_id = session.id.clone();
-        let active_runs_to_wait = Arc::clone(&active_runs);
-        let active_runs_ready_to_wait = Arc::clone(&active_runs_ready);
-        let idle = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let mut runs = active_runs_to_wait
-                .lock()
-                .map_err(|_| anyhow::anyhow!("HTTP active-run state poisoned"))?;
-            while runs.values().any(|run| run.session_id == session_id) {
-                let (next, _) = active_runs_ready_to_wait
-                    .wait_timeout(runs, Duration::from_secs(30))
-                    .map_err(|_| anyhow::anyhow!("HTTP active-run wait state poisoned"))?;
-                runs = next;
-            }
-            Ok(())
-        })
-        .await;
-        let idle = match idle {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::Error::new(error)),
-        };
+        let idle = active_runs_ready
+            .wait_for_session_idle(&active_runs, &session.id)
+            .await;
         if let Err(error) = idle {
             tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not wait for session idle");
             continue;
@@ -1357,7 +1353,7 @@ fn reconcile_plan_review_revision_terminal_registry_event(
 /// unbinds the registry foreground slot, because the slot was not claimed yet.
 fn rollback_revision_run_registration(
     active_runs: &Arc<std::sync::Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
-    active_runs_ready: &Arc<Condvar>,
+    active_runs_ready: &Arc<HttpActiveRunsReady>,
     run_id: &str,
 ) {
     if let Ok(mut runs) = active_runs.lock() {
@@ -1370,7 +1366,7 @@ fn rollback_revision_run_registration(
 /// foreground slot, and wakes idle/shutdown waiters.
 fn release_owned_revision_run(
     active_runs: &Arc<std::sync::Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
-    active_runs_ready: &Arc<Condvar>,
+    active_runs_ready: &Arc<HttpActiveRunsReady>,
     registry: &Weak<HttpSessionRunRegistry>,
     session_id: &str,
     run_id: &str,
@@ -1558,7 +1554,7 @@ impl HttpProductionRunDriver {
             application_reservations: OnceLock::new(),
             application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
-            active_runs_ready: Arc::new(Condvar::new()),
+            active_runs_ready: Arc::new(HttpActiveRunsReady::default()),
             active_artifact_stores: Arc::new(Mutex::new(BTreeMap::new())),
             artifact_access: Arc::new(ArtifactAccessCoordinator {
                 states: Mutex::new(BTreeMap::new()),
@@ -2172,11 +2168,11 @@ impl HttpProductionRunDriver {
             .validate_for_session(&start.session.durable_session_scope_id)
             .map_err(|_| HttpRunDriverError::new("queued promotion candidate is invalid"))?;
 
-        let run_context = application_run_context_view(
+        let run_context = application_run_start_view(
             &self.options.config_path,
-            &self.options.launch_cwd,
             Path::new(&start.session.session_log_path),
             &start.session.durable_session_scope_id,
+            None,
         )
         .map_err(|_| HttpRunDriverError::new("queued run context is unavailable"))?;
         let reasoning_effort_binding = if start.run.reasoning_effort.is_some() {
@@ -2193,7 +2189,10 @@ impl HttpProductionRunDriver {
             session: start.session,
             run: start.run,
             prompt: queued.queued.prompt.clone(),
-            model_ref: None,
+            model_ref: Some(crate::HttpProviderModelRef {
+                connection_id: run_context.model_ref.connection_id.as_str().to_owned(),
+                model_id: run_context.model_ref.model_id,
+            }),
             model_selection_binding: None,
             route_recovery_binding: None,
             reasoning_effort_binding,
@@ -3190,10 +3189,25 @@ impl HttpRunDriver for HttpProductionRunDriver {
     ) -> Result<(), HttpRunAdmissionError> {
         self.require_current_schema_admission()?;
         self.acquire_session_attachment(session)?;
-        let context = self
-            .run_context_view(session)
+        let requested_model = request
+            .model_ref
+            .as_ref()
+            .map(|model| {
+                sigil_kernel::ModelRef::new(
+                    sigil_kernel::ConnectionId::new(model.connection_id.clone())?,
+                    model.model_id.clone(),
+                )
+            })
+            .transpose()
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        let Some(recovery) = context.route_recovery else {
+        let context = application_run_start_view(
+            &self.options.config_path,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            requested_model.as_ref(),
+        )
+        .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        let Some(recovery) = context.route_recovery.map(http_route_recovery) else {
             return Ok(());
         };
         let admitted = match recovery.code {
@@ -3206,12 +3220,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     == Some(recovery.recovery_binding.as_str())
                     && request.model_selection_binding.as_deref()
                         == Some(context.model_selection_binding.as_str())
-                    && request.model_ref.as_ref().is_some_and(|requested| {
-                        context.model_options.iter().any(|option| {
-                            option.model_ref == *requested
-                                && option.availability != "configured_unavailable"
-                        })
-                    })
+                    && context.requested_model_available
             }
             HttpSessionRouteRecoveryCode::ModelRouteNotConfigured
             | HttpSessionRouteRecoveryCode::ConnectionConfigInvalid
@@ -3792,8 +3801,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 last_layout_mutation: usage
                     .last_layout_mutation
                     .map(|mutation| mutation.as_str().to_owned()),
-                provider_miss_without_local_mutation: usage
-                    .provider_miss_without_local_mutation,
+                provider_miss_without_local_mutation: usage.provider_miss_without_local_mutation,
             }),
             context_window_source: match view.context_window_source {
                 sigil_runtime::ContextWindowSource::Connection => {
@@ -3894,32 +3902,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     })
                     .collect(),
             },
-            route_recovery: attachment_recovery.or_else(|| view.route_recovery.map(|recovery| {
-                crate::HttpSessionRouteRecoveryView {
-                    code: match recovery.code {
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired => crate::HttpSessionRouteRecoveryCode::SessionRouteConfirmationRequired,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionRouteSelectionRequired => crate::HttpSessionRouteRecoveryCode::SessionRouteSelectionRequired,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ModelRouteNotConfigured => crate::HttpSessionRouteRecoveryCode::ModelRouteNotConfigured,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ConnectionConfigInvalid => crate::HttpSessionRouteRecoveryCode::ConnectionConfigInvalid,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ProviderUnavailable => crate::HttpSessionRouteRecoveryCode::ProviderUnavailable,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::AuthorityUnavailable => crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionAlreadyActive => crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionWriterBusy => crate::HttpSessionRouteRecoveryCode::SessionWriterBusy,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionStreamInvalid => crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid,
-                    },
-                    allowed_actions: recovery.allowed_actions.into_iter().map(|action| match action {
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::ConfirmCurrentRoute => crate::HttpSessionRouteRecoveryAction::ConfirmCurrentRoute,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RepairConnection => crate::HttpSessionRouteRecoveryAction::RepairConnection,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::SelectReplacement => crate::HttpSessionRouteRecoveryAction::SelectReplacement,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::StartNewSession => crate::HttpSessionRouteRecoveryAction::StartNewSession,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RetryProvider => crate::HttpSessionRouteRecoveryAction::RetryProvider,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RetrySessionAttach => crate::HttpSessionRouteRecoveryAction::RetrySessionAttach,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::BackToSessionLibrary => crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
-                    }).collect(),
-                    recovery_binding: recovery.recovery_binding,
-                    retryable: recovery.retryable,
-                }
-            })),
+            route_recovery: attachment_recovery
+                .or_else(|| view.route_recovery.map(http_route_recovery)),
         })
     }
 
@@ -4536,11 +4520,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
         {
             return Ok(None);
         }
-        let context = application_run_context_view(
+        let context = application_run_start_view(
             &self.options.config_path,
-            &self.options.launch_cwd,
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
+            None,
         )
         .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
         let dispatch_run_id = stable_http_queued_dispatch_run_id(
@@ -5807,25 +5791,21 @@ impl HttpRunSupervisor {
         let registry = self.registry.upgrade().ok_or_else(|| {
             HttpRunDriverError::new("production registry closed before run preparation")
         })?;
-        let run_context = application_run_context_view(
-            &self.options.config_path,
-            &self.options.launch_cwd,
-            Path::new(&self.start.session.session_log_path),
-            &self.start.session.durable_session_scope_id,
-        )
-        .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
+        let terminal_io = HttpRunTerminalIo::new(
+            &registry,
+            &self.event_bus,
+            &self.start.session,
+            &self.start.run.id,
+        );
         let selected_model = self.start.model_ref.as_ref();
         let model_connection_id = selected_model
             .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
             .transpose()
             .map_err(|error| {
                 HttpRunDriverError::new(format!("invalid selected connection: {error}"))
-            })?
-            .or_else(|| Some(run_context.model_ref.connection_id.clone()));
-        let model_name = selected_model
-            .map(|model_ref| model_ref.model_id.clone())
-            .or_else(|| Some(run_context.model_ref.model_id.clone()));
-        let request = ApplicationRunRequest {
+            })?;
+        let model_name = selected_model.map(|model_ref| model_ref.model_id.clone());
+        let mut request = ApplicationRunRequest {
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
             prompt: self.start.prompt.clone(),
@@ -5890,6 +5870,13 @@ impl HttpRunSupervisor {
                     ));
                 }
                 return Ok(prepared);
+            }
+            if queued.is_none()
+                && task_continuation.is_none()
+                && request.model_connection_id.is_none()
+                && request.model_name.is_none()
+            {
+                bind_run_start_route(&mut request, &expected_session_scope_id).await?;
             }
             match (queued, task_continuation) {
                 (Some(_), Some(_)) => Err(anyhow!("queued runs cannot continue an existing Task")),
@@ -6018,13 +6005,7 @@ impl HttpRunSupervisor {
                         )
                     })?
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-                record_run_terminal_and_reconcile_stream(
-                    &registry,
-                    &self.event_bus,
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    HttpRunTerminalOutcome::Failed,
-                )?;
+                terminal_io.record(HttpRunTerminalOutcome::Failed).await?;
                 return Ok(());
             }
         };
@@ -6086,23 +6067,11 @@ impl HttpRunSupervisor {
                 biased;
                 result = &mut execution => {
                 let terminal = require_durable_application_terminal(
-                    durable_application_execution_terminal(&control, &result)?,
+                    terminal_io.observe_execution(&control, result).await?,
                     "application execution ended",
                 )?;
-                replay_pending_http_public_outbox(
-                    Path::new(&self.start.session.session_log_path),
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    &self.event_bus,
-                    &registry,
-                )?;
-                record_run_terminal_and_reconcile_stream(
-                    &registry,
-                    &self.event_bus,
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    terminal,
-                )?;
+                terminal_io.replay().await?;
+                terminal_io.record(terminal).await?;
                     break 'run;
                 }
                 command = self.cancel_receiver.recv() => {
@@ -6159,15 +6128,7 @@ impl HttpRunSupervisor {
                             ),
                         );
                         let natural_result = (&mut execution).await;
-                        if record_natural_terminal_if_committed(
-                            &control,
-                            &registry,
-                            &self.event_bus,
-                            &self.start.session.durable_session_scope_id,
-                            &self.start.run.id,
-                            Path::new(&self.start.session.session_log_path),
-                            &natural_result,
-                        )? {
+                        if terminal_io.record_natural_if_committed(&control, natural_result).await? {
                             return Ok(());
                         }
                         return Err(error);
@@ -6186,15 +6147,7 @@ impl HttpRunSupervisor {
                             Ok(request) => request,
                             Err(_) => {
                                 let natural_result = (&mut execution).await;
-                                if record_natural_terminal_if_committed(
-                                    &control,
-                                    &registry,
-                                    &self.event_bus,
-                                    &self.start.session.durable_session_scope_id,
-                                    &self.start.run.id,
-                                    Path::new(&self.start.session.session_log_path),
-                                    &natural_result,
-                                )? {
+                                if terminal_io.record_natural_if_committed(&control, natural_result).await? {
                                     return Ok(());
                                 }
                                 return Err(error);
@@ -6229,24 +6182,13 @@ impl HttpRunSupervisor {
                                         )
                                     };
                                     let natural_result = (&mut execution).await;
-                                    if record_natural_terminal_if_committed(
-                                        &control,
-                                        &registry,
-                                        &self.event_bus,
-                                        &self.start.session.durable_session_scope_id,
-                                        &self.start.run.id,
-                                        Path::new(&self.start.session.session_log_path),
-                                        &natural_result,
-                                    )? {
+                                    if terminal_io.record_natural_if_committed(&control, natural_result).await? {
                                         return Ok(());
                                     }
                                     return Err(error);
                                 }
                             };
-                            let terminal = match durable_application_execution_terminal(
-                                &control,
-                                &natural_result,
-                            ) {
+                            let terminal = match terminal_io.observe_execution(&control, natural_result).await {
                                 Ok(Some(terminal)) => terminal,
                                 Ok(None) => {
                                     let error = HttpRunDriverError::new(
@@ -6278,13 +6220,7 @@ impl HttpRunSupervisor {
                                     return Err(error);
                                 }
                             };
-                            if let Err(error) = replay_pending_http_public_outbox(
-                                Path::new(&self.start.session.session_log_path),
-                                &self.start.session.durable_session_scope_id,
-                                &self.start.run.id,
-                                &self.event_bus,
-                                &registry,
-                            ) {
+                            if let Err(error) = terminal_io.replay().await {
                                 let error = if acknowledgement_sent {
                                     error
                                 } else {
@@ -6297,13 +6233,7 @@ impl HttpRunSupervisor {
                                 };
                                 return Err(error);
                             }
-                            if let Err(error) = record_run_terminal_and_reconcile_stream(
-                                &registry,
-                                &self.event_bus,
-                                &self.start.session.durable_session_scope_id,
-                                &self.start.run.id,
-                                terminal,
-                            ) {
+                            if let Err(error) = terminal_io.record(terminal).await {
                                 let error = if acknowledgement_sent {
                                     error
                                 } else {
@@ -6410,7 +6340,7 @@ impl HttpRunSupervisor {
                 if !execution_joined {
                     let _ = (&mut execution).await;
                 }
-                let terminal = match durable_application_terminal(&control) {
+                let terminal = match terminal_io.observe(&control).await {
                     Ok(Some(observed)) if observed == terminal => observed,
                     Ok(Some(_)) => {
                         let error = HttpRunDriverError::new(
@@ -6458,13 +6388,7 @@ impl HttpRunSupervisor {
                         return Err(error);
                     }
                 };
-                if let Err(error) = replay_pending_http_public_outbox(
-                    Path::new(&self.start.session.session_log_path),
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    &self.event_bus,
-                    &registry,
-                ) {
+                if let Err(error) = terminal_io.replay().await {
                     let error = if acknowledgement_sent {
                         error
                     } else {
@@ -6477,13 +6401,7 @@ impl HttpRunSupervisor {
                     };
                     return Err(error);
                 }
-                if let Err(error) = record_run_terminal_and_reconcile_stream(
-                    &registry,
-                    &self.event_bus,
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    terminal,
-                ) {
+                if let Err(error) = terminal_io.record(terminal).await {
                     let error = if acknowledgement_sent {
                         error
                     } else {
@@ -6521,6 +6439,12 @@ impl HttpRunSupervisor {
     where
         F: Future<Output = Result<ApplicationRunTerminalStatus>>,
     {
+        let terminal_io = HttpRunTerminalIo::new(
+            registry,
+            &self.event_bus,
+            &self.start.session,
+            &self.start.run.id,
+        );
         let acknowledgement = pause.acknowledgement;
         let deadline = cancellation_deadline(self.options.cancellation_timeout);
         let request_control = Arc::clone(&control);
@@ -6542,15 +6466,10 @@ impl HttpRunSupervisor {
                         HttpRunDriverError::new("production Task pause activation worker failed"),
                     );
                     let natural_result = (&mut *execution).await;
-                    if record_natural_terminal_if_committed(
-                        &control,
-                        registry,
-                        &self.event_bus,
-                        &self.start.session.durable_session_scope_id,
-                        &self.start.run.id,
-                        Path::new(&self.start.session.session_log_path),
-                        &natural_result,
-                    )? {
+                    if terminal_io
+                        .record_natural_if_committed(&control, natural_result)
+                        .await?
+                    {
                         return Ok(true);
                     }
                     return Err(error);
@@ -6571,15 +6490,10 @@ impl HttpRunSupervisor {
                             Some(ticket) => Ok(ticket),
                             None => {
                                 let natural_result = (&mut *execution).await;
-                                if record_natural_terminal_if_committed(
-                                    &control,
-                                    registry,
-                                    &self.event_bus,
-                                    &self.start.session.durable_session_scope_id,
-                                    &self.start.run.id,
-                                    Path::new(&self.start.session.session_log_path),
-                                    &natural_result,
-                                )? {
+                                if terminal_io
+                                    .record_natural_if_committed(&control, natural_result)
+                                    .await?
+                                {
                                     return Ok(true);
                                 }
                                 return Err(error);
@@ -6682,7 +6596,7 @@ impl HttpRunSupervisor {
         if !execution_joined {
             let _ = (&mut *execution).await;
         }
-        let terminal = match durable_application_terminal(&control) {
+        let terminal = match terminal_io.observe(&control).await {
             Ok(Some(observed)) if observed == terminal => observed,
             Ok(Some(_)) => {
                 let error = HttpRunDriverError::new(
@@ -6727,13 +6641,7 @@ impl HttpRunSupervisor {
                 });
             }
         };
-        if let Err(error) = replay_pending_http_public_outbox(
-            Path::new(&self.start.session.session_log_path),
-            &self.start.session.durable_session_scope_id,
-            &self.start.run.id,
-            &self.event_bus,
-            registry,
-        ) {
+        if let Err(error) = terminal_io.replay().await {
             return Err(if acknowledgement_sent {
                 error
             } else {
@@ -6745,13 +6653,7 @@ impl HttpRunSupervisor {
                 )
             });
         }
-        if let Err(error) = record_run_terminal_and_reconcile_stream(
-            registry,
-            &self.event_bus,
-            &self.start.session.durable_session_scope_id,
-            &self.start.run.id,
-            terminal,
-        ) {
+        if let Err(error) = terminal_io.record(terminal).await {
             return Err(if acknowledgement_sent {
                 error
             } else {
@@ -6776,6 +6678,12 @@ impl HttpRunSupervisor {
         prepared: HttpPreparedApplicationRun,
         deadline: Instant,
     ) -> Result<(), HttpRunDriverError> {
+        let terminal_io = HttpRunTerminalIo::new(
+            registry,
+            &self.event_bus,
+            &self.start.session,
+            &self.start.run.id,
+        );
         let acknowledgement = cancellation.acknowledgement;
         if prepared.session_id() != self.start.session.durable_session_scope_id
             || prepared.session_log_path()
@@ -6902,47 +6810,33 @@ impl HttpRunSupervisor {
                 })?
             }
         };
-        let result = finalized
-            .map_err(|error| {
+        let result = async {
+            let expected_terminal = finalized.map_err(|error| {
                 HttpRunDriverError::new(format!(
                     "pre-execution cancellation terminal could not be durably proven: {error}"
                 ))
-            })
-            .and_then(|expected_terminal| {
-                let expected_terminal = match expected_terminal {
-                    sigil_kernel::RunCancellationTerminalOutcome::Cancelled => {
-                        HttpRunTerminalOutcome::Cancelled
-                    }
-                    sigil_kernel::RunCancellationTerminalOutcome::Interrupted => {
-                        HttpRunTerminalOutcome::Interrupted
-                    }
-                };
-                let terminal = durable_application_terminal(&control)?.ok_or_else(|| {
-                    HttpRunDriverError::new(
-                        "pre-execution cancellation ended without an atomically committed domain terminal and public outbox",
-                    )
-                })?;
-                if terminal != expected_terminal {
-                    return Err(HttpRunDriverError::new(
-                        "pre-execution cancellation outcome conflicts with its durable application terminal",
-                    ));
+            })?;
+            let expected_terminal = match expected_terminal {
+                sigil_kernel::RunCancellationTerminalOutcome::Cancelled => {
+                    HttpRunTerminalOutcome::Cancelled
                 }
-                replay_pending_http_public_outbox(
-                    Path::new(&self.start.session.session_log_path),
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    &self.event_bus,
-                    registry,
-                )?;
-                record_run_terminal_and_reconcile_stream(
-                    registry,
-                    &self.event_bus,
-                    &self.start.session.durable_session_scope_id,
-                    &self.start.run.id,
-                    terminal,
+                sigil_kernel::RunCancellationTerminalOutcome::Interrupted => {
+                    HttpRunTerminalOutcome::Interrupted
+                }
+            };
+            let terminal = terminal_io.observe(&control).await?.ok_or_else(|| {
+                HttpRunDriverError::new(
+                    "pre-execution cancellation ended without an atomically committed domain terminal and public outbox",
                 )
-                .map(|_| ())
-            });
+            })?;
+            if terminal != expected_terminal {
+                return Err(HttpRunDriverError::new(
+                    "pre-execution cancellation outcome conflicts with its durable application terminal",
+                ));
+            }
+            terminal_io.replay().await?;
+            terminal_io.record(terminal).await.map(|_| ())
+        }.await;
         match result {
             Ok(()) => {
                 if !acknowledgement_sent {
@@ -6966,6 +6860,12 @@ impl HttpRunSupervisor {
         cancellation: HttpProductionCancellationCommand,
         deadline: Instant,
     ) -> Result<(), HttpRunDriverError> {
+        let terminal_io = HttpRunTerminalIo::new(
+            registry,
+            &self.event_bus,
+            &self.start.session,
+            &self.start.run.id,
+        );
         let acknowledgement = cancellation.acknowledgement;
         let config_path = self.options.config_path.clone();
         let session_path = PathBuf::from(&self.start.session.session_log_path);
@@ -7075,14 +6975,10 @@ impl HttpRunSupervisor {
                         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
                 }
             };
-            record_run_terminal_and_reconcile_stream(
-                registry,
-                &self.event_bus,
-                &self.start.session.durable_session_scope_id,
-                &self.start.run.id,
-                HttpRunTerminalOutcome::Cancelled,
-            )
-            .map(|_| ())
+            terminal_io
+                .record(HttpRunTerminalOutcome::Cancelled)
+                .await
+                .map(|_| ())
         }
         .await;
         if acknowledgement_sent {
@@ -8348,11 +8244,16 @@ fn reconcile_registered_http_terminal_outboxes(
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
     let projection = PublicEventOutboxProjectionV1::from_records(&records)
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let mut records_by_event_id = BTreeMap::new();
+    for record in &records {
+        records_by_event_id
+            .entry(record.stored_event().event_id.as_str())
+            .or_insert(record);
+    }
     let mut reconciled = 0usize;
     for entry in projection.events_in_order() {
-        let revision_attempt = records
-            .iter()
-            .find(|record| record.stored_event().event_id == entry.domain_event_id)
+        let revision_attempt = records_by_event_id
+            .get(entry.domain_event_id.as_str())
             .map(|record| {
                 record
                     .session_log_entry()

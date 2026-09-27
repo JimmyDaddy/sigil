@@ -570,46 +570,73 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
 ) -> Result<RuntimeToolSurface> {
     let effective_config = root_config.with_effective_composition()?;
     let root_config = &effective_config;
-    let mut registry = ToolRegistry::new();
-    let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
-        &mut registry,
-        root_config,
-        workspace_root.clone(),
-        workspace_trust,
-        terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
-        external_scratch_control,
-        managed_memory_writer.clone(),
-        managed_command_execution,
-    )?;
-    let mut context_resolver =
-        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence)
+    // Skills/configuration and local tool discovery perform filesystem work. Keep them off the
+    // executor that also serves cancellation and UI requests, while retaining the assembly owner.
+    let local_config = root_config.clone();
+    let local_workspace = workspace_root.clone();
+    let (mut registry, context_resolver, terminal_control, scratch_control, declarations) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let mut registry = ToolRegistry::new();
+            let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
+                &mut registry,
+                &local_config,
+                local_workspace.clone(),
+                workspace_trust,
+                terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
+                external_scratch_control,
+                managed_memory_writer.clone(),
+                managed_command_execution,
+            )?;
+            let mut context_resolver = crate::context::RequestContextResolver::new(
+                local_workspace.clone(),
+                code_intelligence,
+            )
             .with_repository_context(
-                root_config
+                local_config
                     .composition
                     .allows(sigil_kernel::OptionalCapability::RepositoryContext),
             );
-    if root_config
-        .composition
-        .allows(sigil_kernel::OptionalCapability::Memory)
-        && root_config.memory.writable
-    {
-        let paths =
-            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-        let memory_store = match managed_memory_writer {
-            Some(writer) => crate::WritableMemoryStore::with_managed_writer(
-                paths.workspace_id.as_str(),
-                writer,
-            )?,
-            None => crate::WritableMemoryStore::from_paths(&paths),
-        };
-        context_resolver = context_resolver.with_writable_memory(memory_store);
-    }
-    if root_config
-        .composition
-        .allows(sigil_kernel::OptionalCapability::Mcp)
-    {
-        let declarations =
-            resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+            if local_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Memory)
+                && local_config.memory.writable
+            {
+                let paths = resolve_sigil_paths(
+                    &local_config.storage,
+                    &local_config.session,
+                    &local_workspace,
+                );
+                let memory_store = match managed_memory_writer {
+                    Some(writer) => crate::WritableMemoryStore::with_managed_writer(
+                        paths.workspace_id.as_str(),
+                        writer,
+                    )?,
+                    None => crate::WritableMemoryStore::from_paths(&paths),
+                };
+                context_resolver = context_resolver.with_writable_memory(memory_store);
+            }
+            let declarations = if local_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Mcp)
+            {
+                Some(resolve_user_root_mcp_declarations(
+                    &local_config.mcp_servers,
+                    &local_workspace,
+                )?)
+            } else {
+                None
+            };
+            Ok((
+                registry,
+                context_resolver,
+                terminal_control,
+                scratch_control,
+                declarations,
+            ))
+        })
+        .await
+        .context("local tool surface preparation worker failed")??;
+    if let Some(declarations) = declarations {
         let mut registration_options =
             McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
                 .with_handlers(

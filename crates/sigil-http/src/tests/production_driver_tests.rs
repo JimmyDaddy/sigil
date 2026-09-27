@@ -45,6 +45,15 @@ use crate::{
 #[path = "production_projection_owner_tests.rs"]
 mod projection_owner;
 
+#[path = "production_run_start_tests.rs"]
+mod run_start;
+
+#[path = "production_terminal_io_tests.rs"]
+mod terminal_io;
+
+#[path = "production_active_run_tests.rs"]
+mod active_runs;
+
 #[path = "production_artifact_access_tests.rs"]
 mod artifact_access;
 
@@ -6114,6 +6123,14 @@ fn attachment_reconcile_keeps_a_durable_revision_waiting_checkpoint_resumable() 
             },
         ),
     )?;
+
+    // Keep the referenced waiting domain event away from the end of a nonempty history.
+    // Indexed terminal reconciliation must still match its exact event id, not a nearby record.
+    for index in 0..128 {
+        session.append_user_message(sigil_kernel::ModelMessage::user(format!(
+            "unrelated history after waiting checkpoint {index}"
+        )))?;
+    }
 
     let registry = HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
         binding: HttpSessionBinding {

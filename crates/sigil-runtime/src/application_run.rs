@@ -44,11 +44,13 @@ use crate::{
 mod integration_control;
 mod live_preview;
 mod recorder;
+mod run_start;
 mod task_control;
 mod user_input;
 
 pub use live_preview::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub use recorder::ApplicationRunEventRecorder;
+pub use run_start::{ApplicationRunStartView, application_run_start_view};
 
 pub use integration_control::{
     APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
@@ -70,6 +72,32 @@ pub use user_input::{
     prepare_application_user_input_decision,
     recoverable_agent_user_input_decision_from_child_sessions,
 };
+
+// Timing is process-local diagnostics, never execution authority or public conversation content.
+struct PreparationPhaseTimer {
+    run_id: String,
+    phase: &'static str,
+    started: Instant,
+}
+
+impl PreparationPhaseTimer {
+    fn new(run_id: &str, phase: &'static str) -> Self {
+        tracing::debug!(target: "sigil_run_latency", run_id, phase, "preparation phase started");
+        Self {
+            run_id: run_id.to_owned(),
+            phase,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for PreparationPhaseTimer {
+    fn drop(&mut self) {
+        tracing::debug!(target: "sigil_run_latency", run_id = %self.run_id, phase = self.phase,
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "preparation phase ended");
+    }
+}
 
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default number of user-visible messages returned by one transcript page.
@@ -3835,6 +3863,9 @@ async fn prepare_application_run_internal(
             message: "run id must not be empty".to_owned(),
         });
     }
+    let _preparation_timer = PreparationPhaseTimer::new(&request.run_id, "total");
+    let local_preparation_timer =
+        PreparationPhaseTimer::new(&request.run_id, "session_preparation");
     let conversation_start =
         ConversationRunStartedEntryV1::new(request.run_id.clone(), current_unix_time_ms())
             .map_err(|error| ApplicationRunPrepareError::InvalidInvocation {
@@ -3865,6 +3896,7 @@ async fn prepare_application_run_internal(
     .map_err(|error| ApplicationRunPrepareError::Internal {
         source: anyhow!(error).context("application run blocking preparation task failed"),
     })??;
+    drop(local_preparation_timer);
     let BlockingApplicationRunPreparation {
         mut root_config,
         workspace_root,
@@ -3905,9 +3937,11 @@ async fn prepare_application_run_internal(
         &selected_composition,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
+    let provider_timer = PreparationPhaseTimer::new(&run_id, "provider_construction");
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
+    drop(provider_timer);
     if target_max_tokens.is_none() {
         let effective_context_window = crate::resolve_model_context_window_tokens(
             &root_config,
@@ -3963,6 +3997,7 @@ async fn prepare_application_run_internal(
         && root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None
         && task_agent_registry.is_some()
         && services.task_role_provider_builder.is_some();
+    let surface_timer = PreparationPhaseTimer::new(&run_id, "tool_surface");
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -3980,6 +4015,8 @@ async fn prepare_application_run_internal(
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
+    drop(surface_timer);
+    let context_timer = PreparationPhaseTimer::new(&run_id, "request_context");
     let context_prompt = queued_first_request
         .as_ref()
         .map_or(prompt.as_str(), |(exact_prompt, _)| {
@@ -3990,6 +4027,7 @@ async fn prepare_application_run_internal(
         .resolve(context_prompt)
         .await
         .unwrap_or_default();
+    drop(context_timer);
     let pending_input_provider: Arc<dyn sigil_kernel::PendingConversationInputProvider> =
         Arc::new(crate::pending_input::DurableQueuePendingInputProvider::new(
             surface.context_resolver.clone(),
@@ -4949,129 +4987,21 @@ pub(crate) fn application_run_context_view_from_records(
     let root_config = RootConfig::load(config_path)?.with_effective_composition()?;
     let entries =
         application_bound_session_entries_from_records(records, expected_session_scope_id)?;
-    let route = application_session_route(&entries).ok_or_else(|| {
-        anyhow!(
-            "session_route_missing: restore the referenced connection or fork with current route"
-        )
-    })?;
-    let config_snapshot =
-        crate::provider_connections::ResolvedRouteConfigSnapshot::from_root_config(&root_config);
-    let plan = crate::provider_connections::plan_session_route_resume(
-        &config_snapshot,
-        &crate::provider_connections::SessionRouteResumeInput {
-            route: route.clone(),
-            egress_trust_binding: application_session_route_trust_binding(&entries),
-        },
-    );
-    let route_frontier_binding =
-        crate::provider_connections::session_route_frontier_binding(&entries);
-    let route_authority_generation_binding =
-        crate::provider_connections::session_route_authority_generation_binding(&entries);
-    let recovery_binding = config_snapshot.recovery_binding(
-        expected_session_scope_id,
-        &route,
-        &route_frontier_binding,
-        &route_authority_generation_binding,
-    );
-    let (provider_name, effective_route, route_recovery) = match plan {
-        crate::provider_connections::SessionRouteResumePlan::Exact {
-            provider_name,
-            route,
-        }
-        | crate::provider_connections::SessionRouteResumePlan::RebindCurrentModel {
-            provider_name,
-            target_route: route,
-            ..
-        } => (provider_name, route, None),
-        crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation {
-            provider_name,
-            target_route,
-            ..
-        } => (
-            provider_name,
-            target_route,
-            Some(ApplicationSessionRouteRecoveryView {
-                code: ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired,
-                allowed_actions: vec![
-                    ApplicationSessionRouteRecoveryAction::ConfirmCurrentRoute,
-                    ApplicationSessionRouteRecoveryAction::RepairConnection,
-                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
-                    ApplicationSessionRouteRecoveryAction::StartNewSession,
-                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
-                ],
-                recovery_binding,
-                retryable: true,
-            }),
-        ),
-        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
-            reason: crate::provider_connections::SessionRouteUnavailableReason::ConnectionNotFound,
-            ..
-        } => (
-            application_session_identity(&entries)
-                .map(|(provider, _)| provider)
-                .unwrap_or_else(|| "unavailable".to_owned()),
-            route.clone(),
-            Some(ApplicationSessionRouteRecoveryView {
-                code: ApplicationSessionRouteRecoveryCode::SessionRouteSelectionRequired,
-                allowed_actions: vec![
-                    ApplicationSessionRouteRecoveryAction::RepairConnection,
-                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
-                    ApplicationSessionRouteRecoveryAction::StartNewSession,
-                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
-                ],
-                recovery_binding,
-                retryable: true,
-            }),
-        ),
-        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
-            reason:
-                crate::provider_connections::SessionRouteUnavailableReason::ConnectionConfigInvalid,
-            ..
-        }
-        | crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
-            reason: crate::provider_connections::ModelRouteSetupReason::ConfigurationInvalid,
-        } => (
-            application_session_identity(&entries)
-                .map(|(provider, _)| provider)
-                .unwrap_or_else(|| "unavailable".to_owned()),
-            route.clone(),
-            Some(ApplicationSessionRouteRecoveryView {
-                code: ApplicationSessionRouteRecoveryCode::ConnectionConfigInvalid,
-                allowed_actions: vec![
-                    ApplicationSessionRouteRecoveryAction::RepairConnection,
-                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
-                    ApplicationSessionRouteRecoveryAction::StartNewSession,
-                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
-                ],
-                recovery_binding,
-                retryable: false,
-            }),
-        ),
-        crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
-            reason: crate::provider_connections::ModelRouteSetupReason::RouteNotConfigured,
-        } => (
-            application_session_identity(&entries)
-                .map(|(provider, _)| provider)
-                .unwrap_or_else(|| "unavailable".to_owned()),
-            route.clone(),
-            Some(ApplicationSessionRouteRecoveryView {
-                code: ApplicationSessionRouteRecoveryCode::ModelRouteNotConfigured,
-                allowed_actions: vec![
-                    ApplicationSessionRouteRecoveryAction::RepairConnection,
-                    ApplicationSessionRouteRecoveryAction::StartNewSession,
-                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
-                ],
-                recovery_binding,
-                retryable: false,
-            }),
-        ),
-    };
-    let model_name = effective_route.model_ref.model_id.clone();
-    let resolved = crate::resolve_model_context_window_tokens(
-        &root_config,
-        &effective_route.model_ref,
-        &provider_name,
-    );
+    let ApplicationRunStartView {
+        model_ref,
+        provider_name,
+        model_selection_binding,
+        default_permission_mode,
+        available_reasoning_efforts,
+        default_reasoning_effort,
+        reasoning_effort_binding,
+        route_recovery,
+        source_model_ref,
+        requested_model_available: _,
+    } = run_start::resolve_run_start_view(&root_config, &entries, expected_session_scope_id, None)?;
+    let model_name = model_ref.model_id.clone();
+    let resolved =
+        crate::resolve_model_context_window_tokens(&root_config, &model_ref, &provider_name);
     let mut usage_stats = sigil_kernel::SessionStats::default();
     let mut observed_ordinary_usage = false;
     for entry in &entries {
@@ -5096,23 +5026,6 @@ pub(crate) fn application_run_context_view_from_records(
         last_layout_mutation: usage_stats.last_cache_layout_mutation,
         provider_miss_without_local_mutation: usage_stats.last_provider_miss_without_local_mutation,
     });
-    let available_reasoning_efforts = if route_recovery.as_ref().is_some_and(|recovery| {
-        recovery.code != ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired
-    }) {
-        Vec::new()
-    } else {
-        crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name)
-    };
-    let mut identity_config = root_config.clone();
-    identity_config.agent.runtime_provider = provider_name.clone();
-    identity_config.agent.model = model_name.clone();
-    let default_reasoning_effort =
-        crate::reasoning_effort::configured_default_reasoning_effort(&identity_config);
-    let reasoning_effort_binding = crate::reasoning_effort::reasoning_effort_binding(
-        &provider_name,
-        &model_name,
-        &available_reasoning_efforts,
-    );
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let sigil_paths =
@@ -5120,16 +5033,15 @@ pub(crate) fn application_run_context_view_from_records(
     let extension_catalog =
         crate::application_extension_catalog_view(&root_config, &workspace_root, &entries)?;
     let catalog_entries =
-        application_model_catalog_entries(&root_config, &route.model_ref, &sigil_paths.cache_root);
+        application_model_catalog_entries(&root_config, &source_model_ref, &sigil_paths.cache_root);
     let model_options = application_model_option_views(&root_config, catalog_entries);
-    let model_selection_binding = application_model_selection_binding(&route.model_ref);
     Ok(ApplicationRunContextView {
-        model_ref: effective_route.model_ref,
+        model_ref,
         provider_name,
         model_name,
         model_options,
         model_selection_binding,
-        default_permission_mode: root_config.permission.mode,
+        default_permission_mode,
         available_reasoning_efforts,
         default_reasoning_effort,
         reasoning_effort_binding,
