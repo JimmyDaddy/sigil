@@ -3344,6 +3344,125 @@ async fn write_fixture_http_response(
     Ok(())
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn small_context_output_budget_reaches_provider_and_preserves_request_rejection() -> Result<()>
+{
+    let _environment_guard = crate::test_env::lock();
+    for context_window in [4_096_u32, 8_192] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}/v1", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                let responses = [
+                    (
+                        "200 OK",
+                        "text/event-stream",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n",
+                    ),
+                    (
+                        "400 Bad Request",
+                        "application/json",
+                        r#"{"error":{"code":"context_length_exceeded","message":"the input and requested output exceed the model context window"}}"#,
+                    ),
+                ];
+                let mut requests = Vec::new();
+                for (status, content_type, body) in responses {
+                    let (mut socket, _) = listener.accept().await?;
+                    requests.push(read_fixture_http_request(&mut socket).await?);
+                    write_fixture_http_response(&mut socket, status, Some(content_type), body)
+                        .await?;
+                }
+                Result::<Vec<String>>::Ok(requests)
+            })
+            .await?
+        });
+
+        let temp = tempfile::tempdir()?;
+        let mut config = test_root_config("openai_compat");
+        config.storage.state_root =
+            sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+        config.storage.cache_root =
+            sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
+        config.model_request.max_output_tokens = Some(512);
+        let connection = config
+            .connections
+            .get_mut("openai-compatible-default")
+            .expect("configured connection");
+        connection["base_url"] = json!(base_url);
+        connection["credential"] = json!({"source":"none"});
+        connection["model_context_windows"] = json!({"gpt-test": context_window});
+        let provider = crate::build_provider_async(&config).await?;
+        let (_, route) = crate::provider_connections::resolve_default_model_route(&config)?;
+        let effective_context =
+            crate::resolve_model_context_window_tokens(&config, &route.model_ref, provider.name())
+                .tokens;
+        assert_eq!(effective_context, Some(context_window));
+        crate::validate_output_token_budget(
+            effective_context,
+            configured_max_output_tokens(&config),
+        )?;
+        crate::validate_provider_output_token_budget(
+            provider.as_ref(),
+            &route.model_ref.model_id,
+            configured_max_output_tokens(&config),
+        )?;
+        let options = build_run_options(
+            &config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        );
+        assert_eq!(
+            options.compaction_config.context_window_tokens,
+            effective_context
+        );
+        let agent = sigil_kernel::Agent::new(provider, ToolRegistry::new())
+            .with_default_max_output_tokens(configured_max_output_tokens(&config));
+        let mut handler = sigil_kernel::NoopEventHandler;
+        let mut short_session = Session::new("openai_compat", "gpt-test");
+        let result = agent
+            .run(&mut short_session, "hello", options.clone(), &mut handler)
+            .await?;
+        assert_eq!(result.final_text, "hello");
+
+        let long_prompt = "over budget ".repeat(context_window as usize);
+        let mut oversized_session = Session::new("openai_compat", "gpt-test");
+        let error = agent
+            .run(
+                &mut oversized_session,
+                long_prompt.clone(),
+                options,
+                &mut handler,
+            )
+            .await
+            .expect_err("a provider context rejection must remain a failed run");
+        let cause = error.root_cause().to_string();
+        assert!(cause.contains("status 400"), "{error:#}");
+        assert!(cause.contains("context_length_exceeded"), "{error:#}");
+
+        let requests = server.await??;
+        assert_eq!(requests.len(), 2);
+        for (request, expected_prompt) in requests.iter().zip(["hello", long_prompt.as_str()]) {
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+            let (_, body) = request.split_once("\r\n\r\n").expect("HTTP request body");
+            let body: serde_json::Value = serde_json::from_str(body)?;
+            assert_eq!(body["model"], "gpt-test");
+            assert_eq!(body["max_tokens"], 512);
+            assert_eq!(body["stream"], true);
+            assert!(
+                body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .any(|message| message["role"] == "user"
+                        && message["content"] == expected_prompt)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn eager_remote_config(
     host: &str,
     port: u16,

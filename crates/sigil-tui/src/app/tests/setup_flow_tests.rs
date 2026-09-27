@@ -847,7 +847,7 @@ fn setup_builder_rejects_output_budget_that_consumes_the_context_window() {
     state.max_output_tokens = "256K".to_owned();
 
     let error = validate_setup_state(state).expect("budget must be rejected");
-    assert!(error.contains("leave insufficient input budget"));
+    assert!(error.contains("leave input capacity"));
 }
 
 #[test]

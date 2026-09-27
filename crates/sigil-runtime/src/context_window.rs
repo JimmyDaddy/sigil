@@ -19,36 +19,30 @@ pub struct ResolvedContextWindow {
     pub source: ContextWindowSource,
 }
 
-/// Tokens kept available for the request envelope and provider-side framing when an explicit
-/// output cap is configured. A request with `input + max_output == context` is not actually
-/// sendable: the provider still needs room for message framing, tool metadata, and tokenizer
-/// rounding. Keep this shared by every setup/runtime adapter so validation cannot drift.
+/// Conservative input reservation for automatic defaults and exact compaction fit proofs.
+/// Explicit output configuration is validated independently of this planning estimate.
 pub const REQUEST_INPUT_SAFETY_BUFFER_TOKENS: u32 = 8_192;
 
 /// Validates an explicit output cap against the resolved model context window.
 ///
-/// An unknown context remains valid here because custom providers may only expose it at request
-/// time. Once a context is known, the output cap must leave a non-empty input budget plus the
-/// shared safety buffer. This catches configurations that would otherwise save successfully and
-/// fail on the first prompt.
+/// An unknown context remains valid because custom providers may expose it only at request time.
+/// A known window must leave room for input. Actual request materialization and provider limits
+/// still determine whether an individual request fits; a fixed envelope estimate is not a
+/// configuration admission requirement.
 pub fn validate_output_token_budget(
     context_window_tokens: Option<u32>,
     max_output_tokens: Option<u32>,
 ) -> Result<()> {
-    let (Some(context_window_tokens), Some(max_output_tokens)) =
-        (context_window_tokens, max_output_tokens)
-    else {
+    let Some(max_output_tokens) = max_output_tokens else {
         return Ok(());
     };
-    let required_context = max_output_tokens
-        .checked_add(REQUEST_INPUT_SAFETY_BUFFER_TOKENS)
-        .context("output token reservation overflowed")?;
-    let minimum_context = required_context
-        .checked_add(1)
-        .context("context window minimum overflowed")?;
-    if required_context >= context_window_tokens {
+    anyhow::ensure!(max_output_tokens > 0, "max output tokens must be positive");
+    let Some(context_window_tokens) = context_window_tokens else {
+        return Ok(());
+    };
+    if max_output_tokens >= context_window_tokens {
         anyhow::bail!(
-            "max output tokens ({max_output_tokens}) leave insufficient input budget in the effective context window ({context_window_tokens}); configure at least {minimum_context} context tokens"
+            "max output tokens ({max_output_tokens}) must be positive and leave input capacity in the effective context window ({context_window_tokens})"
         );
     }
     Ok(())
@@ -74,9 +68,9 @@ pub fn validate_provider_output_token_budget(
     Ok(())
 }
 
-/// Chooses an automatic provider default that still leaves the shared request safety buffer.
-/// Explicit user values are validated separately; this helper is for the blank/automatic field so
-/// a provider default cannot make a small configured context fail on the first request.
+/// Chooses an automatic output cap while reserving input capacity. Small windows reserve half
+/// their capacity instead of inheriting a larger model's fixed planning estimate. This default
+/// is not a proof that an actual request fits, and explicit user budgets are validated separately.
 pub fn resolve_automatic_output_token_budget(
     context_window_tokens: Option<u32>,
     provider_default_tokens: Option<u32>,
@@ -87,12 +81,14 @@ pub fn resolve_automatic_output_token_budget(
     let Some(context_window_tokens) = context_window_tokens else {
         return Ok(Some(provider_default_tokens));
     };
+    let input_reservation =
+        (context_window_tokens / 2).clamp(1, REQUEST_INPUT_SAFETY_BUFFER_TOKENS);
     let safe_output_limit = context_window_tokens
-        .checked_sub(REQUEST_INPUT_SAFETY_BUFFER_TOKENS)
+        .checked_sub(input_reservation)
         .context("effective context window leaves no input budget")?;
     anyhow::ensure!(
         safe_output_limit > 0,
-        "effective context window ({context_window_tokens}) leaves no input budget after the request safety buffer"
+        "effective context window ({context_window_tokens}) cannot hold both input and output"
     );
     Ok(Some(provider_default_tokens.min(safe_output_limit)))
 }

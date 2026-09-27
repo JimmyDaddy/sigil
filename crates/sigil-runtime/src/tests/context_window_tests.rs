@@ -46,11 +46,19 @@ fn configured_window_is_used_when_provider_window_is_unknown() {
 }
 
 #[test]
-fn output_budget_leaves_room_for_a_real_request_envelope() {
+fn output_budget_preserves_input_capacity_without_estimated_envelope_admission() {
     assert!(validate_output_token_budget(Some(1_000_000), Some(256_000)).is_ok());
     assert!(validate_output_token_budget(Some(256_000), Some(256_000)).is_err());
-    assert!(validate_output_token_budget(Some(64_000), Some(60_000)).is_err());
+    assert!(validate_output_token_budget(Some(64_000), Some(60_000)).is_ok());
     assert!(validate_output_token_budget(None, Some(256_000)).is_ok());
+    assert!(validate_output_token_budget(None, Some(0)).is_err());
+    for context in [4_096, 8_192] {
+        assert!(validate_output_token_budget(Some(context), Some(512)).is_ok());
+        assert!(validate_output_token_budget(Some(context), Some(context)).is_err());
+        assert!(validate_output_token_budget(Some(context), Some(context + 1)).is_err());
+        assert!(validate_output_token_budget(Some(context), Some(0)).is_err());
+    }
+    assert!(validate_output_token_budget(Some(u32::MAX), Some(u32::MAX - 1)).is_ok());
 }
 
 #[test]
@@ -63,6 +71,21 @@ fn automatic_provider_default_is_capped_for_small_configured_windows() -> Result
         resolve_automatic_output_token_budget(Some(1_000_000), Some(256_000))?,
         Some(256_000)
     );
+    for context in [4_096, 8_192] {
+        assert_eq!(
+            resolve_automatic_output_token_budget(Some(context), Some(4_096))?,
+            Some(context / 2)
+        );
+        assert_eq!(
+            resolve_automatic_output_token_budget(Some(context), Some(512))?,
+            Some(512)
+        );
+        assert_eq!(
+            resolve_automatic_output_token_budget(Some(context), None)?,
+            None
+        );
+    }
+    assert!(resolve_automatic_output_token_budget(Some(1), Some(1)).is_err());
     Ok(())
 }
 
