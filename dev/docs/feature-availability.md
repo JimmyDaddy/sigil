@@ -27,3 +27,7 @@ Streamable HTTP 工具支持有界 JSON Schema annotation（包括 `format`）�
 ## Provider 连接与角色装配
 
 主对话和子代理都按实际选中的 connection/model 验证配置与凭证。未使用连接的配置错误保留为诊断，不阻断另一条正常连接上的执行。全局配置版本错误、所选连接不存在或非法，以及该连接缺少运行凭证仍拒绝执行。
+
+## TUI 环境凭证引用
+
+Environment 凭证方式允许先保存合法变量名，再由用户配置环境并重启。当前进程缺少该变量时保留未就绪提示；启动 provider 时仍要求真实凭证。SecureStore 的密钥发布流程不变。

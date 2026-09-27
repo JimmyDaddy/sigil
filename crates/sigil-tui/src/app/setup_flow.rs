@@ -602,6 +602,13 @@ impl AppState {
             root_config.task.routing_policy.as_str(),
             root_config.task.multi_agent_mode.as_str()
         );
+        let saved_notice = if state.credential_source == SetupCredentialSource::Environment
+            && !state.environment_detected()
+        {
+            format!("{saved_notice}; configured environment credential is not set")
+        } else {
+            saved_notice
+        };
         self.last_notice = Some(if old_credential_cleanup_warning {
             format!(
                 "{saved_notice}; an unreferenced stored credential could not be cleaned up and was retained"
@@ -716,10 +723,6 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
         return Some(format!("{error:#}"));
     }
     match state.credential_source {
-        SetupCredentialSource::Environment if !state.environment_detected() => Some(format!(
-            "selected environment variable {} is not set",
-            state.api_key_env_name().unwrap_or("for this provider")
-        )),
         SetupCredentialSource::SecureStore
             if state.api_key.expose_secret().trim().is_empty()
                 && !state.can_reuse_stored_credential() =>
@@ -778,12 +781,6 @@ fn build_setup_draft(
         bail!("model cannot be empty");
     }
     match state.credential_source {
-        SetupCredentialSource::Environment if !state.environment_detected() => bail!(
-            "provide api_key or export {}",
-            state
-                .api_key_env_name()
-                .unwrap_or("the provider credential environment variable")
-        ),
         SetupCredentialSource::SecureStore
             if state.api_key.expose_secret().trim().is_empty()
                 && !state.can_reuse_stored_credential() =>

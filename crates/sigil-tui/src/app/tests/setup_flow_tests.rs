@@ -748,6 +748,47 @@ fn setup_manual_model_is_validated_locally_without_catalog_admission() {
 }
 
 #[test]
+fn setup_saves_missing_environment_reference_but_provider_start_requires_the_credential()
+-> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let _provider_api_key = crate::test_env::EnvScope::unset("DEEPSEEK_API_KEY");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("sigil.toml");
+    let mut app = AppState::from_setup(config_path.clone(), temp.path().to_path_buf(), None);
+    let state = app.setup_state.as_mut().expect("setup state");
+    state.credential_source = SetupCredentialSource::Environment;
+    state.selected_field = SetupField::Save;
+    assert!(!state.environment_detected());
+    assert_eq!(validate_setup_state(state), None);
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("SIGIL_API_KEY not set")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    let saved = RootConfig::load(&config_path)?;
+    let loaded = sigil_runtime::provider_connections::load_provider_connections(&saved);
+    let model = loaded.default_model.as_ref().expect("saved default model");
+    let connection = loaded
+        .connections
+        .get(&model.connection_id)
+        .expect("saved connection");
+    assert!(matches!(
+        &connection.config.credential,
+        sigil_runtime::provider_connections::CredentialRefConfig::Environment { name }
+            if name == DEFAULT_SETUP_API_KEY_ENV
+    ));
+    let error = sigil_runtime::build_provider(&saved)
+        .err()
+        .expect("provider needs actual credential");
+    assert!(error.to_string().contains("credential_missing"));
+    Ok(())
+}
+
+#[test]
 fn setup_builder_persists_the_selected_provider() -> Result<()> {
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
     state.provider_name = "anthropic".to_owned();
