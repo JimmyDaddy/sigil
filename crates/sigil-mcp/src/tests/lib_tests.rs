@@ -5538,3 +5538,120 @@ fn python_stdout_reader(script: &str) -> Result<BufReader<ChildStdout>> {
     std::mem::forget(child);
     Ok(BufReader::new(stdout))
 }
+
+// Each process waits for its peers before completing initialize. Sequential startup cannot pass
+// this protocol barrier; the fifth process also verifies the bounded first batch has discovered.
+fn write_startup_barrier_server(path: &std::path::Path) -> Result<()> {
+    write_fake_server_script(
+        path,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+root, name, fail = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+(root / (name + '.pid')).write_text(str(os.getpid()))
+def send(message):
+    print(json.dumps(message), flush=True)
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get('method')
+    if method == 'initialize':
+        (root / (name + '.started')).touch()
+        deadline = time.monotonic() + 8
+        peers = ['a', 'b', 'c', 'd'] if name != 'e' else []
+        while any(not (root / (peer + '.started')).exists() for peer in peers) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        ready = all((root / (peer + '.started')).exists() for peer in peers)
+        if name == 'e':
+            ready = all((root / (peer + '.listed')).exists() for peer in ['a', 'b', 'c', 'd'])
+        if not ready:
+            send({'jsonrpc':'2.0','id':message['id'],'error':{'code':-32000,'message':'startup was serial or exceeded its concurrency bound'}})
+        else:
+            send({'jsonrpc':'2.0','id':message['id'],'result':{'capabilities':{'tools':{}}}})
+    elif method == 'tools/list':
+        (root / (name + '.listed')).touch()
+        if fail == name:
+            send({'jsonrpc':'2.0','id':message['id'],'error':{'code':-32000,'message':'discovery failure'}})
+        else:
+            send({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'echo','inputSchema':{'type':'object'}}]}})
+"#,
+    )
+}
+
+fn startup_barrier_servers(
+    root: &std::path::Path,
+    script: &std::path::Path,
+    fail: &str,
+    count: usize,
+) -> Vec<McpServerConfig> {
+    ["a", "b", "c", "d", "e"].into_iter().take(count).map(|name| mcp_server_config! {
+        name: name.to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().into_owned(), root.to_string_lossy().into_owned(), name.to_owned(), fail.to_owned()],
+        startup_timeout_secs: 10,
+        ..McpServerConfig::default()
+    }).collect()
+}
+
+#[tokio::test]
+async fn eager_mcp_startup_is_concurrent_bounded_and_publishes_in_config_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("barrier.py");
+    write_startup_barrier_server(&script)?;
+    let servers = startup_barrier_servers(temp.path(), &script, "none", 5);
+    let mut registry = ToolRegistry::new();
+    let report = super::register_mcp_tools_with_report(
+        &mut registry,
+        &servers,
+        McpToolRegistrationOptions::eager()?,
+    )
+    .await?;
+    assert_eq!(
+        report
+            .lifecycle_owners
+            .iter()
+            .map(|owner| owner.scope())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "c", "d", "e"]
+    );
+    for server in &servers {
+        assert!(
+            registry
+                .spec_for(&format!("mcp__{}__echo", server.name))
+                .is_some()
+        );
+    }
+    for owner in &report.lifecycle_owners {
+        registry
+            .retire_by_lifecycle_owner(owner)
+            .dispose_and_quiesce()
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn concurrent_mcp_startup_failure_joins_and_reaps_successful_siblings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("barrier.py");
+    write_startup_barrier_server(&script)?;
+    let servers = startup_barrier_servers(temp.path(), &script, "b", 4);
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools(&mut registry, &servers)
+        .await
+        .expect_err("required discovery failure must fail the batch");
+    assert!(format!("{error:#}").contains("discovery failure"));
+    assert!(
+        registry.specs().is_empty(),
+        "published siblings must be rolled back"
+    );
+    for server in &servers {
+        let pid = std::fs::read_to_string(temp.path().join(format!("{}.pid", server.name)))?
+            .parse::<u32>()?;
+        assert!(
+            !crate::process_group::process_has_live_effect(pid)?,
+            "{} must be reaped before returning failure",
+            server.name
+        );
+    }
+    Ok(())
+}

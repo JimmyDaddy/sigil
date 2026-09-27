@@ -14,6 +14,7 @@ fn default_process_launcher() -> Arc<dyn McpProcessLauncher> {
 
 pub const MCP_TOOL_LIFECYCLE_NAMESPACE: &str = "sigil.mcp.server";
 
+#[derive(Clone)]
 pub struct McpToolRegistrationOptions {
     pub provider_tool_name_max_chars: usize,
     pub roots: Vec<PathBuf>,
@@ -221,270 +222,404 @@ async fn register_mcp_tools_for_startup_inner(
         .into_iter()
         .map(|spec| spec.name)
         .collect::<BTreeSet<_>>();
+    let selected = servers
+        .iter()
+        .filter(|server| server.startup == options.startup)
+        .collect::<Vec<_>>();
     let mut report = McpToolRegistrationReport::default();
-    for server in servers {
-        if server.startup != options.startup {
-            if options.startup == McpServerStartup::Eager
-                && server.startup == McpServerStartup::Lazy
-            {
-                warn!(
-                    server = %server.name,
-                    trust_class = server.trust.trust_class.as_str(),
-                    "lazy MCP server startup is deferred until explicit activation"
-                );
+    // Keep startup bounded and publication deterministic. Each batch is fully joined before an
+    // error is returned, so concurrently spawned clients are never abandoned on a sibling failure.
+    for batch in selected.chunks(4) {
+        let mut prepared = std::collections::VecDeque::from(
+            futures::future::join_all(
+                batch
+                    .iter()
+                    .map(|server| prepare_mcp_server(server, &options)),
+            )
+            .await,
+        );
+        while let Some(result) = prepared.pop_front() {
+            let result = match result {
+                Ok(Some(server)) => {
+                    register_prepared_mcp_server(
+                        registry,
+                        server,
+                        &options,
+                        &mut used_provider_names,
+                        registered_owners,
+                        &mut report,
+                    )
+                    .await
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                let mut failures = vec![error.to_string()];
+                for pending in prepared {
+                    match pending {
+                        Ok(Some(pending)) => {
+                            let cleanup = pending
+                                .client
+                                .close_connection("MCP registration batch failed".to_owned())
+                                .await;
+                            if let Err(audit_error) = record_mcp_server_lifecycle_scan_result_async(
+                                &options,
+                                &pending.server.name,
+                                pending.lifecycle_scan.as_ref(),
+                                Some(pending.client.process_receipt()),
+                                "startup_failed",
+                            )
+                            .await
+                            {
+                                failures.push(format!(
+                                    "MCP startup rollback audit failed: {audit_error:#}"
+                                ));
+                            }
+                            if !cleanup.completed {
+                                failures.push(format!(
+                                    "MCP server {} startup rollback incomplete: {}",
+                                    pending.server.name,
+                                    cleanup.summary()
+                                ));
+                            }
+                        }
+                        Err(error) => failures.push(error.to_string()),
+                        Ok(None) => {}
+                    }
+                }
+                return Err(error.context(failures.join("; ")));
             }
-            continue;
         }
+    }
+    Ok(report)
+}
 
-        let lifecycle_scan = capture_mcp_server_lifecycle_scan(&options, &server.name)?;
-        let client = match McpClient::spawn(
-            server.clone(),
-            options.roots.clone(),
-            options.working_dir.clone(),
-            options.secret_redactor.clone(),
-            Arc::clone(&options.elicitation_handler),
-            Arc::clone(&options.runtime_event_handler),
-            Arc::clone(&options.process_launcher),
-            options.expected_process_subject.as_ref(),
-            options.network_admission,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(error) if !server.required && !options.strict_registration => {
-                let receipt = error
-                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
-                    .map(super::client::McpPostSpawnStartupError::receipt);
-                let cleanup_incomplete = error
-                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
-                    .is_some_and(|error| !error.cleanup_completed());
-                record_mcp_server_lifecycle_scan_result(
-                    &options,
-                    &server.name,
-                    lifecycle_scan.as_ref(),
-                    receipt,
-                    "startup_failed",
-                )?;
-                if cleanup_incomplete {
-                    return Err(error.context(format!(
-                        "optional MCP server {} startup cleanup was incomplete",
-                        server.name
-                    )));
-                }
-                warn!(
-                    server = %server.name,
-                    trust_class = server.trust.trust_class.as_str(),
-                    error = %error,
-                    "optional MCP server failed to start and will be skipped"
-                );
-                continue;
-            }
-            Err(error) => {
-                let receipt = error
-                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
-                    .map(super::client::McpPostSpawnStartupError::receipt);
-                record_mcp_server_lifecycle_scan_result(
-                    &options,
-                    &server.name,
-                    lifecycle_scan.as_ref(),
-                    receipt,
-                    "startup_failed",
-                )?;
-                return Err(error);
-            }
-        };
-        let process_receipt = client.process_receipt().clone();
-        let tools = match client.list_tools().await {
-            Ok(tools) => tools,
-            Err(error) if !server.required && !options.strict_registration => {
-                let cleanup = client
-                    .close_connection(format!("tools/list failed: {error:#}"))
-                    .await;
-                record_mcp_server_lifecycle_scan_result(
-                    &options,
-                    &server.name,
-                    lifecycle_scan.as_ref(),
-                    Some(&process_receipt),
-                    "tools_list_failed",
-                )?;
-                if !cleanup.completed {
-                    bail!(
-                        "optional MCP server {} tools/list failed and cleanup was incomplete: {error:#}; transport cleanup: {}",
-                        server.name,
-                        cleanup.summary()
-                    );
-                }
-                warn!(
-                    server = %server.name,
-                    trust_class = server.trust.trust_class.as_str(),
-                    error = %error,
-                    cleanup = %cleanup.summary(),
-                    "optional MCP server tools/list failed and will be skipped"
-                );
-                continue;
-            }
-            Err(error) => {
-                let cleanup = client
-                    .close_connection(format!("tools/list failed: {error:#}"))
-                    .await;
-                record_mcp_server_lifecycle_scan_result(
-                    &options,
-                    &server.name,
-                    lifecycle_scan.as_ref(),
-                    Some(&process_receipt),
-                    "tools_list_failed",
-                )?;
-                bail!(
-                    "MCP server {} tools/list failed: {error:#}; transport cleanup: {}",
-                    server.name,
-                    cleanup.summary()
-                );
-            }
-        };
-        let mut registered_surface_count = 0usize;
-        for tool in tools {
-            let permission = classify_mcp_permission(
-                &tool.annotations,
-                server.trust.trust_class,
-                McpPermissionTransport::Stdio,
-            );
-            let tool_name = McpToolName::new(
+struct PreparedMcpServer<'a> {
+    server: &'a McpServerConfig,
+    client: Arc<McpClient>,
+    lifecycle_scan: Option<WorkspaceMutationScan>,
+    tools: Vec<McpToolDescriptor>,
+}
+
+async fn prepare_mcp_server<'a>(
+    server: &'a McpServerConfig,
+    options: &McpToolRegistrationOptions,
+) -> Result<Option<PreparedMcpServer<'a>>> {
+    let lifecycle_scan = capture_mcp_server_lifecycle_scan_async(options, &server.name).await?;
+    let client = match McpClient::spawn(
+        server.clone(),
+        options.roots.clone(),
+        options.working_dir.clone(),
+        options.secret_redactor.clone(),
+        Arc::clone(&options.elicitation_handler),
+        Arc::clone(&options.runtime_event_handler),
+        Arc::clone(&options.process_launcher),
+        options.expected_process_subject.as_ref(),
+        options.network_admission,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) if !server.required && !options.strict_registration => {
+            let receipt = error
+                .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                .map(super::client::McpPostSpawnStartupError::receipt);
+            let cleanup_incomplete = error
+                .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                .is_some_and(|error| !error.cleanup_completed());
+            record_mcp_server_lifecycle_scan_result_async(
+                options,
                 &server.name,
-                &tool.name,
-                options.provider_tool_name_max_chars,
-                &mut used_provider_names,
+                lifecycle_scan.as_ref(),
+                receipt,
+                "startup_failed",
+            )
+            .await?;
+            if cleanup_incomplete {
+                return Err(error.context(format!(
+                    "optional MCP server {} startup cleanup was incomplete",
+                    server.name
+                )));
+            }
+            warn!(
+                server = %server.name,
+                trust_class = server.trust.trust_class.as_str(),
+                error = %error,
+                "optional MCP server failed to start and will be skipped"
             );
-            registry.register(Arc::new(McpTool {
-                client: Arc::clone(&client),
-                spec: ToolSpec {
-                    name: tool_name.provider_name.clone(),
-                    description: tool.description.unwrap_or_else(|| "MCP tool".to_owned()),
-                    input_schema: tool.input_schema,
-                    category: ToolCategory::Mcp,
-                    access: permission.access,
-                    network_effect: permission.network_effect,
-                    preview: ToolPreviewCapability::None,
-                },
-                tool_name,
-                trust: server.trust.clone(),
-                annotations: tool.annotations,
-            }));
-            registered_surface_count = registered_surface_count.saturating_add(1);
+            return Ok(None);
         }
-        if client.supports_resources() {
-            for resource_kind in McpResourceToolKind::all() {
-                let original_name = resource_kind.provider_suffix();
-                let tool_name = McpToolName::new(
-                    &server.name,
-                    original_name,
-                    options.provider_tool_name_max_chars,
-                    &mut used_provider_names,
-                );
-                registry.register(Arc::new(McpResourceTool {
-                    client: Arc::clone(&client),
-                    spec: ToolSpec {
-                        name: tool_name.provider_name.clone(),
-                        description: resource_kind.description().to_owned(),
-                        input_schema: resource_kind.input_schema(),
-                        category: ToolCategory::Mcp,
-                        access: ToolAccess::Read,
-                        network_effect: Some(NetworkEffect::Read),
-                        preview: ToolPreviewCapability::None,
-                    },
-                    tool_name,
-                    kind: resource_kind,
-                    trust: server.trust.clone(),
-                }));
-                registered_surface_count = registered_surface_count.saturating_add(1);
-            }
+        Err(error) => {
+            let receipt = error
+                .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                .map(super::client::McpPostSpawnStartupError::receipt);
+            record_mcp_server_lifecycle_scan_result_async(
+                options,
+                &server.name,
+                lifecycle_scan.as_ref(),
+                receipt,
+                "startup_failed",
+            )
+            .await?;
+            return Err(error);
         }
-        if client.supports_prompts() {
-            for prompt_kind in McpPromptToolKind::all() {
-                let original_name = prompt_kind.provider_suffix();
-                let tool_name = McpToolName::new(
-                    &server.name,
-                    original_name,
-                    options.provider_tool_name_max_chars,
-                    &mut used_provider_names,
-                );
-                registry.register(Arc::new(McpPromptTool {
-                    client: Arc::clone(&client),
-                    spec: ToolSpec {
-                        name: tool_name.provider_name.clone(),
-                        description: prompt_kind.description().to_owned(),
-                        input_schema: prompt_kind.input_schema(),
-                        category: ToolCategory::Mcp,
-                        access: ToolAccess::Read,
-                        network_effect: Some(NetworkEffect::Read),
-                        preview: ToolPreviewCapability::None,
-                    },
-                    tool_name,
-                    kind: prompt_kind,
-                    trust: server.trust.clone(),
-                }));
-                registered_surface_count = registered_surface_count.saturating_add(1);
-            }
-        }
-        if registered_surface_count == 0 {
+    };
+    let process_receipt = client.process_receipt().clone();
+    let tools = match client.list_tools().await {
+        Ok(tools) => tools,
+        Err(error) if !server.required && !options.strict_registration => {
             let cleanup = client
-                .close_connection("MCP server registered no callable surfaces".to_owned())
+                .close_connection(format!("tools/list failed: {error:#}"))
                 .await;
-            if let Err(error) = record_mcp_server_lifecycle_scan_result(
-                &options,
+            record_mcp_server_lifecycle_scan_result_async(
+                options,
                 &server.name,
                 lifecycle_scan.as_ref(),
                 Some(&process_receipt),
-                "zero_surface",
-            ) {
-                return Err(error.context(format!(
-                    "MCP server {} zero-surface lifecycle evidence failed; transport cleanup: {}",
-                    server.name,
-                    cleanup.summary()
-                )));
-            }
-            if !cleanup.completed || options.strict_registration || server.required {
+                "tools_list_failed",
+            )
+            .await?;
+            if !cleanup.completed {
                 bail!(
-                    "MCP server {} registered no callable surfaces{}: {}",
+                    "optional MCP server {} tools/list failed and cleanup was incomplete: {error:#}; transport cleanup: {}",
                     server.name,
-                    if !cleanup.completed {
-                        " and cleanup was incomplete"
-                    } else if options.strict_registration {
-                        " during strict replacement"
-                    } else {
-                        " although the server is required"
-                    },
                     cleanup.summary()
                 );
             }
             warn!(
                 server = %server.name,
+                trust_class = server.trust.trust_class.as_str(),
+                error = %error,
                 cleanup = %cleanup.summary(),
-                "optional MCP server registered no callable surfaces and will be skipped"
+                "optional MCP server tools/list failed and will be skipped"
             );
-        } else {
-            let owner = client.lifecycle_owner();
-            registered_owners.push(owner.clone());
-            if let Err(error) = record_mcp_server_lifecycle_scan_result(
-                &options,
+            return Ok(None);
+        }
+        Err(error) => {
+            let cleanup = client
+                .close_connection(format!("tools/list failed: {error:#}"))
+                .await;
+            record_mcp_server_lifecycle_scan_result_async(
+                options,
                 &server.name,
                 lifecycle_scan.as_ref(),
                 Some(&process_receipt),
-                "registered",
-            ) {
-                let cleanup = client
-                    .close_connection(format!("registered lifecycle evidence failed: {error:#}"))
-                    .await;
-                return Err(error.context(format!(
-                    "MCP server {} lifecycle evidence failed after spawn and callable owner registration; transport cleanup: {}",
-                    server.name,
-                    cleanup.summary()
-                )));
-            }
-            report.process_launch_receipts.push(process_receipt);
-            report.lifecycle_owners.push(owner);
+                "tools_list_failed",
+            )
+            .await?;
+            bail!(
+                "MCP server {} tools/list failed: {error:#}; transport cleanup: {}",
+                server.name,
+                cleanup.summary()
+            );
+        }
+    };
+    Ok(Some(PreparedMcpServer {
+        server,
+        client,
+        lifecycle_scan,
+        tools,
+    }))
+}
+
+async fn register_prepared_mcp_server(
+    registry: &mut ToolRegistry,
+    prepared: PreparedMcpServer<'_>,
+    options: &McpToolRegistrationOptions,
+    used_provider_names: &mut BTreeSet<String>,
+    registered_owners: &mut Vec<ToolLifecycleOwner>,
+    report: &mut McpToolRegistrationReport,
+) -> Result<()> {
+    let PreparedMcpServer {
+        server,
+        client,
+        lifecycle_scan,
+        tools,
+    } = prepared;
+    let process_receipt = client.process_receipt().clone();
+    let mut registered_surface_count = 0usize;
+    for tool in tools {
+        let permission = classify_mcp_permission(
+            &tool.annotations,
+            server.trust.trust_class,
+            McpPermissionTransport::Stdio,
+        );
+        let tool_name = McpToolName::new(
+            &server.name,
+            &tool.name,
+            options.provider_tool_name_max_chars,
+            used_provider_names,
+        );
+        registry.register(Arc::new(McpTool {
+            client: Arc::clone(&client),
+            spec: ToolSpec {
+                name: tool_name.provider_name.clone(),
+                description: tool.description.unwrap_or_else(|| "MCP tool".to_owned()),
+                input_schema: tool.input_schema,
+                category: ToolCategory::Mcp,
+                access: permission.access,
+                network_effect: permission.network_effect,
+                preview: ToolPreviewCapability::None,
+            },
+            tool_name,
+            trust: server.trust.clone(),
+            annotations: tool.annotations,
+        }));
+        registered_surface_count = registered_surface_count.saturating_add(1);
+    }
+    if client.supports_resources() {
+        for resource_kind in McpResourceToolKind::all() {
+            let original_name = resource_kind.provider_suffix();
+            let tool_name = McpToolName::new(
+                &server.name,
+                original_name,
+                options.provider_tool_name_max_chars,
+                used_provider_names,
+            );
+            registry.register(Arc::new(McpResourceTool {
+                client: Arc::clone(&client),
+                spec: ToolSpec {
+                    name: tool_name.provider_name.clone(),
+                    description: resource_kind.description().to_owned(),
+                    input_schema: resource_kind.input_schema(),
+                    category: ToolCategory::Mcp,
+                    access: ToolAccess::Read,
+                    network_effect: Some(NetworkEffect::Read),
+                    preview: ToolPreviewCapability::None,
+                },
+                tool_name,
+                kind: resource_kind,
+                trust: server.trust.clone(),
+            }));
+            registered_surface_count = registered_surface_count.saturating_add(1);
         }
     }
-    Ok(report)
+    if client.supports_prompts() {
+        for prompt_kind in McpPromptToolKind::all() {
+            let original_name = prompt_kind.provider_suffix();
+            let tool_name = McpToolName::new(
+                &server.name,
+                original_name,
+                options.provider_tool_name_max_chars,
+                used_provider_names,
+            );
+            registry.register(Arc::new(McpPromptTool {
+                client: Arc::clone(&client),
+                spec: ToolSpec {
+                    name: tool_name.provider_name.clone(),
+                    description: prompt_kind.description().to_owned(),
+                    input_schema: prompt_kind.input_schema(),
+                    category: ToolCategory::Mcp,
+                    access: ToolAccess::Read,
+                    network_effect: Some(NetworkEffect::Read),
+                    preview: ToolPreviewCapability::None,
+                },
+                tool_name,
+                kind: prompt_kind,
+                trust: server.trust.clone(),
+            }));
+            registered_surface_count = registered_surface_count.saturating_add(1);
+        }
+    }
+    if registered_surface_count == 0 {
+        let cleanup = client
+            .close_connection("MCP server registered no callable surfaces".to_owned())
+            .await;
+        if let Err(error) = record_mcp_server_lifecycle_scan_result_async(
+            options,
+            &server.name,
+            lifecycle_scan.as_ref(),
+            Some(&process_receipt),
+            "zero_surface",
+        )
+        .await
+        {
+            return Err(error.context(format!(
+                "MCP server {} zero-surface lifecycle evidence failed; transport cleanup: {}",
+                server.name,
+                cleanup.summary()
+            )));
+        }
+        if !cleanup.completed || options.strict_registration || server.required {
+            bail!(
+                "MCP server {} registered no callable surfaces{}: {}",
+                server.name,
+                if !cleanup.completed {
+                    " and cleanup was incomplete"
+                } else if options.strict_registration {
+                    " during strict replacement"
+                } else {
+                    " although the server is required"
+                },
+                cleanup.summary()
+            );
+        }
+        warn!(
+            server = %server.name,
+            cleanup = %cleanup.summary(),
+            "optional MCP server registered no callable surfaces and will be skipped"
+        );
+    } else {
+        let owner = client.lifecycle_owner();
+        registered_owners.push(owner.clone());
+        if let Err(error) = record_mcp_server_lifecycle_scan_result_async(
+            options,
+            &server.name,
+            lifecycle_scan.as_ref(),
+            Some(&process_receipt),
+            "registered",
+        )
+        .await
+        {
+            let cleanup = client
+                .close_connection(format!("registered lifecycle evidence failed: {error:#}"))
+                .await;
+            return Err(error.context(format!(
+                "MCP server {} lifecycle evidence failed after spawn and callable owner registration; transport cleanup: {}",
+                server.name,
+                cleanup.summary()
+            )));
+        }
+        report.process_launch_receipts.push(process_receipt);
+        report.lifecycle_owners.push(owner);
+    }
+    Ok(())
+}
+
+async fn capture_mcp_server_lifecycle_scan_async(
+    options: &McpToolRegistrationOptions,
+    server_name: &str,
+) -> Result<Option<WorkspaceMutationScan>> {
+    let options = options.clone();
+    let server_name = server_name.to_owned();
+    tokio::task::spawn_blocking(move || capture_mcp_server_lifecycle_scan(&options, &server_name))
+        .await
+        .context("MCP lifecycle observation worker failed")?
+}
+
+async fn record_mcp_server_lifecycle_scan_result_async(
+    options: &McpToolRegistrationOptions,
+    server_name: &str,
+    before: Option<&WorkspaceMutationScan>,
+    receipt: Option<&McpProcessLaunchReceipt>,
+    startup_result: &'static str,
+) -> Result<()> {
+    let options = options.clone();
+    let server_name = server_name.to_owned();
+    let before = before.cloned();
+    let receipt = receipt.cloned();
+    tokio::task::spawn_blocking(move || {
+        record_mcp_server_lifecycle_scan_result(
+            &options,
+            &server_name,
+            before.as_ref(),
+            receipt.as_ref(),
+            startup_result,
+        )
+    })
+    .await
+    .context("MCP lifecycle recording worker failed")?
 }
 
 async fn rollback_registered_mcp_generations(
