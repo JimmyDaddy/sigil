@@ -185,6 +185,28 @@ struct VisionProviderFixture {
     worker: Option<thread::JoinHandle<anyhow::Result<Vec<serde_json::Value>>>>,
 }
 
+struct ProviderRequestGate {
+    run_request_index: usize,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+struct ProviderGateRelease(Option<std::sync::mpsc::Sender<()>>);
+
+impl ProviderGateRelease {
+    fn release(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl Drop for ProviderGateRelease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 impl VisionProviderFixture {
     fn start() -> anyhow::Result<Self> {
         Self::start_with_first_response(None)
@@ -195,6 +217,13 @@ impl VisionProviderFixture {
     }
 
     fn start_with_responses(responses: Vec<Option<String>>) -> anyhow::Result<Self> {
+        Self::start_with_options(responses, None)
+    }
+
+    fn start_with_options(
+        responses: Vec<Option<String>>,
+        mut request_gate: Option<ProviderRequestGate>,
+    ) -> anyhow::Result<Self> {
         use anyhow::Context as _;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -240,6 +269,17 @@ impl VisionProviderFixture {
                     run_request_count += 1;
                 }
                 requests.push(request);
+                if !is_title
+                    && request_gate
+                        .as_ref()
+                        .is_some_and(|gate| gate.run_request_index == run_request_count)
+                {
+                    let gate = request_gate.take().context("provider gate")?;
+                    let _ = gate.entered.send(());
+                    gate.release
+                        .recv_timeout(Duration::from_secs(20))
+                        .context("provider request gate was not released")?;
+                }
                 let final_answer = concat!(
                     "event: response.output_text.delta\n",
                     "data: {\"delta\":\"Image received.\"}\n\n",
@@ -3138,6 +3178,166 @@ async fn desktop_message_fork_uses_managed_catalog_identity_without_starting_a_r
         requests.len() - run_requests.len() <= 1,
         "at most one parent title maintenance request"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_branch_knowledge_serve_contract_preserves_lineage_and_imports_once()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    async fn start_turn(
+        client: &sigil_desktop::DesktopHttpClient,
+        session_id: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let receipt = client
+            .start_run(
+                session_id,
+                sigil_desktop::DesktopRunStartRequest {
+                    review_annotations: Vec::new(),
+                    image_attachments: Vec::new(),
+                    prompt: prompt.to_owned(),
+                    permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
+                    model_ref: None,
+                    model_selection_binding: None,
+                    route_recovery_binding: None,
+                    reasoning_effort: None,
+                    reasoning_effort_binding: None,
+                    skill_binding: None,
+                    agent_binding: None,
+                    task_continuation: None,
+                },
+            )
+            .await?;
+        Ok(receipt.run.id)
+    }
+    async fn finish_turn(
+        client: &sigil_desktop::DesktopHttpClient,
+        run_id: &str,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(run_id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(
+                        run.status == sigil_desktop::DesktopRunStatus::Finished,
+                        "branch fixture run failed: {run:?}"
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+    async fn turn(
+        client: &sigil_desktop::DesktopHttpClient,
+        session_id: &str,
+        prompt: &str,
+    ) -> anyhow::Result<()> {
+        let run_id = start_turn(client, session_id, prompt).await?;
+        finish_turn(client, &run_id).await
+    }
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let (entered_sender, entered) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let provider = VisionProviderFixture::start_with_options(
+        Vec::new(),
+        Some(ProviderRequestGate {
+            run_request_index: 3,
+            entered: entered_sender,
+            release: release_receiver,
+        }),
+    )?;
+    write_config(&config_path, &provider.base_url);
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
+    )?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    // On assertion failure this releases the provider before manager/provider teardown.
+    let mut gate_release = ProviderGateRelease(Some(release_sender));
+    let result: anyhow::Result<()> = async {
+        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "branch knowledge contract",
+        )).await?;
+        let client = manager.client(&opened.id)?;
+        let parent = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("parent".to_owned()), model_ref: None }).await?;
+        turn(&client, &parent.id, "Explore the parent approach").await?;
+        let point = client.conversation_recovery(&parent.id).await?.fork_points.into_iter().next().context("source turn")?;
+        let model_ref = client.run_context(&parent.id).await?.model_ref;
+        let forked = client.command_conversation_recovery(&parent.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ForkConversation { source_turn_digest: point.source_turn_digest, model_ref }).await?.fork.context("branch receipt")?;
+        let branch = client.open_session(sigil_desktop::DesktopSessionOpenRequest { session_ref: forked.session_ref.clone(), session_id: forked.session_id.clone(), label: Some("alternative".to_owned()), recovery_binding: None }).await?;
+        turn(&client, &branch.id, "Conclude the branch investigation").await?;
+        let parent_lineage = client.branch_lineage(&parent.id).await?;
+        assert!(parent_lineage.children.iter().any(|link| link.session_ref == forked.session_ref && link.session_id == forked.session_id));
+        let branch_lineage = client.branch_lineage(&branch.id).await?;
+        let source_parent = branch_lineage.parent.context("parent link")?;
+        assert_eq!(source_parent.session_id, parent.durable_session_scope_id);
+        let preview = client.branch_knowledge_preview(&parent.id, sigil_desktop::DesktopBranchKnowledgeSource { source_session_ref: forked.session_ref.clone(), source_session_id: forked.session_id }).await?;
+        let conclusion = preview.points.last().context("completed branch conclusion")?;
+        assert_eq!(conclusion.summary, "Image received.");
+        let selection = sigil_desktop::DesktopBranchKnowledgeImport {
+            source_session_ref: preview.source_session_ref, source_session_id: preview.source_session_id,
+            source_turn_digest: conclusion.source_turn_digest.clone(), source_message_id: conclusion.source_message_id.clone(),
+            source_text_sha256: conclusion.source_text_sha256.clone(), summary_sha256: conclusion.summary_sha256.clone(),
+        };
+        // Hold a real provider request so import executes through an active session owner.
+        let active_run = start_turn(&client, &parent.id, "An unrelated update in the parent").await?;
+        tokio::time::timeout(Duration::from_secs(10), entered).await??;
+        assert_eq!(client.run(&active_run).await?.status, sigil_desktop::DesktopRunStatus::Running);
+        let run_ids = client.session(&parent.id).await?.run_ids;
+        let first = client.command_conversation_recovery(&parent.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection: selection.clone() }).await?.branch_knowledge.context("import receipt")?;
+        assert!(!first.already_imported);
+        let replay = client.command_conversation_recovery(&parent.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection: selection.clone() }).await?.branch_knowledge.context("duplicate receipt")?;
+        assert!(replay.already_imported);
+        assert_eq!(replay.import_id, first.import_id);
+        assert_eq!(client.session(&parent.id).await?.run_ids, run_ids, "import must not start a run");
+        let mut altered = selection.clone();
+        altered.summary_sha256 = format!("sha256:{}", "0".repeat(64));
+        assert!(client.command_conversation_recovery(&parent.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection: altered }).await.is_err(), "unrelated target activity is allowed; changed source binding is not");
+        assert_eq!(client.run(&active_run).await?.status, sigil_desktop::DesktopRunStatus::Running, "import must neither stop nor replace the held run");
+        gate_release.release();
+        finish_turn(&client, &active_run).await?;
+        manager.restart(&opened.id).await?;
+        let client = manager.client(&opened.id)?;
+        let restored = client.open_session(sigil_desktop::DesktopSessionOpenRequest { session_ref: source_parent.session_ref, session_id: source_parent.session_id, label: None, recovery_binding: None }).await?;
+        let recovered = client.command_conversation_recovery(&restored.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection }).await?.branch_knowledge.context("recovered import receipt")?;
+        assert!(recovered.already_imported);
+        assert_eq!(recovered.import_id, first.import_id);
+        turn(&client, &restored.id, "Use the selected branch conclusion as reference").await?;
+        Ok(())
+    }.await;
+    gate_release.release();
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    result?;
+    anyhow::ensure!(
+        cleanup
+            .iter()
+            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
+        "branch knowledge server cleanup failed"
+    );
+    let run_requests = explicit_provider_requests(&requests);
+    assert_eq!(
+        run_requests.len(),
+        4,
+        "only the four explicitly requested turns may call the provider"
+    );
+    assert!(
+        requests.len() - run_requests.len() <= 2,
+        "at most one title per parent and branch"
+    );
+    let last = serde_json::to_string(run_requests.last().context("final explicit request")?)?;
+    assert_eq!(
+        last.matches("User-selected branch conclusion from session")
+            .count(),
+        1,
+        "one durable import must produce one untrusted context snippet"
+    );
+    assert!(last.contains("Unverified external knowledge"));
     Ok(())
 }
 

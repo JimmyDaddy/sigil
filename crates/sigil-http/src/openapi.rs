@@ -4600,6 +4600,28 @@ pub fn http_openapi_document() -> Value {
             }
         }
     });
+    document["components"]["schemas"]["BranchLink"] = json!({"type": "object", "properties": {"session_ref": {"type": "string"}, "session_id": {"type": "string"}, "source_turn_digest": {"type": "string"}, "title": {"type": ["string", "null"]}, "source_turn_index": {"type": "integer", "minimum": 0}}, "required": ["session_ref", "session_id", "source_turn_digest", "title", "source_turn_index"]});
+    document["components"]["schemas"]["BranchLineage"] = json!({"type": "object", "properties": {"session_id": {"type": "string"}, "parent": {"oneOf": [{"$ref": "#/components/schemas/BranchLink"}, {"type": "null"}]}, "children": {"type": "array", "items": {"$ref": "#/components/schemas/BranchLink"}}, "unavailable_count": {"type": "integer", "minimum": 0}}, "required": ["session_id", "parent", "children", "unavailable_count"]});
+    document["components"]["schemas"]["BranchKnowledgeSource"] = json!({"type": "object", "properties": {"source_session_ref": {"type": "string"}, "source_session_id": {"type": "string"}}, "required": ["source_session_ref", "source_session_id"]});
+    document["components"]["schemas"]["BranchKnowledgePoint"] = json!({"type": "object", "properties": {"source_turn_digest": {"type": "string"}, "source_message_id": {"type": "string"}, "source_text_sha256": {"type": "string"}, "summary_sha256": {"type": "string"}, "summary": {"type": "string"}, "truncated": {"type": "boolean"}}, "required": ["source_turn_digest", "source_message_id", "source_text_sha256", "summary_sha256", "summary", "truncated"]});
+    document["components"]["schemas"]["BranchKnowledgePreview"] = json!({"type": "object", "properties": {"source_session_ref": {"type": "string"}, "source_session_id": {"type": "string"}, "points": {"type": "array", "items": {"$ref": "#/components/schemas/BranchKnowledgePoint"}}}, "required": ["source_session_ref", "source_session_id", "points"]});
+    document["components"]["schemas"]["BranchKnowledgeImport"] = json!({"type": "object", "properties": {"source_session_ref": {"type": "string"}, "source_session_id": {"type": "string"}, "source_turn_digest": {"type": "string"}, "source_message_id": {"type": "string"}, "source_text_sha256": {"type": "string"}, "summary_sha256": {"type": "string"}}, "required": ["source_session_ref", "source_session_id", "source_turn_digest", "source_message_id", "source_text_sha256", "summary_sha256"]});
+    document["components"]["schemas"]["BranchKnowledgeReceipt"] = json!({"type": "object", "properties": {"import_id": {"type": "string"}, "already_imported": {"type": "boolean"}}, "required": ["import_id", "already_imported"]});
+    document["components"]["schemas"]["ConversationRecoveryImportBranchKnowledgeAction"] = json!({"type": "object", "properties": {"kind": {"type": "string", "const": "import_branch_knowledge"}, "selection": {"$ref": "#/components/schemas/BranchKnowledgeImport"}}, "required": ["kind", "selection"]});
+    document["paths"]["/sessions/{session_id}/branches"] = json!({"get": {"summary": "Read parent and child branch identities", "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Bounded session projection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchLineage"}}}}, "404": {"description": "Session missing"}, "503": {"description": "Projection unavailable"}}}});
+    document["paths"]["/sessions/{session_id}/branches/knowledge-preview"] = json!({"post": {"summary": "Preview selected finalized source conclusions", "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Bounded session projection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchKnowledgePreview"}}}}, "404": {"description": "Session missing"}, "503": {"description": "Projection unavailable"}}, "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchKnowledgeSource"}}}}}});
+    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["branch_knowledge"] = json!({"oneOf": [{"$ref": "#/components/schemas/BranchKnowledgeReceipt"}, {"type": "null"}]});
+    document["components"]["schemas"]["ConversationRecoveryCommandAction"]["oneOf"]
+        .as_array_mut()
+        .expect("recovery variants")
+        .push(
+            json!({"$ref": "#/components/schemas/ConversationRecoveryImportBranchKnowledgeAction"}),
+        );
+    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["action"]
+        ["enum"]
+        .as_array_mut()
+        .expect("recovery action kinds")
+        .push(json!("import_branch_knowledge"));
     document["components"]["schemas"]
         .as_object_mut()
         .expect("OpenAPI schemas must be an object")

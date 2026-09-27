@@ -266,3 +266,87 @@ async fn production_application_projection_uses_its_actual_session_owner() -> Re
     assert_eq!(std::fs::read(store.path())?, before);
     Ok(())
 }
+
+#[tokio::test]
+async fn production_application_operation_reattaches_an_idle_switched_session_through_its_host()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let driver = production_queue_driver(&temp, "application-switched-write-owner");
+    let registry = driver.build_registry(Arc::new(HttpDurableCommandStore::open(
+        temp.path().join("commands.json"),
+        16,
+    )?))?;
+    let older = registry.create_session(HttpSessionCreateRequest::default())?;
+    let current = registry.create_session(HttpSessionCreateRequest::default())?;
+    let current_before = std::fs::read(&current.session_log_path)?;
+    let external =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &older.session_log_path,
+        )?;
+    assert!(driver.application_operation_owner(&older).is_err());
+    assert!(
+        driver
+            .session_attachments
+            .lock()
+            .expect("attachments")
+            .contains_key(&current.durable_session_scope_id),
+        "failed reattachment must not discard the selected controller"
+    );
+    drop(external);
+    let binding = sigil_kernel::ApplicationOperationBindingV1::new(
+        older.durable_session_scope_id.clone(),
+        "1".repeat(64),
+        "2".repeat(64),
+        sigil_kernel::ApplicationOperationTargetV1::QueuePause { paused: true },
+    )?;
+    let owner = driver.prepare_application_operation(&older, &binding)?;
+    let restored = owner.owner.attach_for_observation()?;
+    assert_eq!(restored.session_scope_id(), older.durable_session_scope_id);
+    assert!(driver.application_projection_owner(&older)?.is_some());
+    assert!(owner.owner.read_handle().read_event_records()?.iter().any(|record| {
+        matches!(record.session_log_entry().ok().flatten(),
+            Some(sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::ApplicationOperationPreparedV1(found))) if found == binding)
+    }));
+    assert!(
+        driver
+            .query_application_operation(&older, &binding)?
+            .proof
+            .is_none(),
+        "reattachment and preparation alone cannot settle a domain effect"
+    );
+    assert_eq!(std::fs::read(&current.session_log_path)?, current_before);
+    let released_current =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current.session_log_path,
+        )?;
+    drop(released_current);
+    drop(restored);
+    drop(owner);
+    driver
+        .session_attachments
+        .lock()
+        .expect("attachments")
+        .clear();
+    let before_wrong_scope = std::fs::read(&older.session_log_path)?;
+    let mut wrong_scope = older.clone();
+    wrong_scope.durable_session_scope_id = current.durable_session_scope_id;
+    assert!(driver.application_operation_owner(&wrong_scope).is_err());
+    assert_eq!(
+        std::fs::read(&older.session_log_path)?,
+        before_wrong_scope,
+        "a stale identity must fail before any resume or operation append"
+    );
+    assert!(
+        driver
+            .session_attachments
+            .lock()
+            .expect("attachments")
+            .is_empty(),
+        "failed host binding must not publish a replacement owner"
+    );
+    assert!(
+        registry.get_session(&older.id)?.run_ids.is_empty(),
+        "reattachment must not start a model run"
+    );
+    Ok(())
+}

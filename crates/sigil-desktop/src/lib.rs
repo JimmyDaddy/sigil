@@ -5,6 +5,8 @@
 //! implementation. A future native shell can depend on this crate without exposing process or
 //! credential primitives to its renderer.
 
+mod branches;
+pub use branches::*;
 mod images;
 pub use images::{
     DesktopImageAttachment, DesktopImageContent, MAX_DESKTOP_IMAGE_BYTES,

@@ -1353,6 +1353,17 @@ pub(crate) fn application_recovery_action(
 ) -> Result<ApplicationRecoveryAction, ApplicationError> {
     let safe = |value: &str| sigil_application::SafeText::new(value.to_owned());
     Ok(match action {
+        crate::HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
+            ApplicationRecoveryAction::ImportBranchKnowledge {
+                source_session_ref: safe(&selection.source_session_ref)?,
+                source_session_id: safe(&selection.source_session_id)?,
+                source_turn_digest: safe(&selection.source_turn_digest)?,
+                source_message_id: safe(&selection.source_message_id)?,
+                source_text_sha256: safe(&selection.source_text_sha256)?,
+                summary_sha256: safe(&selection.summary_sha256)?,
+                request_id: None,
+            }
+        }
         crate::HttpConversationRecoveryCommandAction::PrepareCompaction { preview_id } => {
             ApplicationRecoveryAction::PrepareCompaction {
                 preview_id: safe(preview_id)?,
@@ -1393,6 +1404,24 @@ fn http_recovery_action(
 ) -> Result<crate::HttpConversationRecoveryCommandAction, ApplicationError> {
     let text = |value: &sigil_application::SafeText| value.as_str().to_owned();
     Ok(match action {
+        ApplicationRecoveryAction::ImportBranchKnowledge {
+            source_session_ref,
+            source_session_id,
+            source_turn_digest,
+            source_message_id,
+            source_text_sha256,
+            summary_sha256,
+            ..
+        } => crate::HttpConversationRecoveryCommandAction::ImportBranchKnowledge {
+            selection: crate::HttpBranchKnowledgeImport {
+                source_session_ref: text(source_session_ref),
+                source_session_id: text(source_session_id),
+                source_turn_digest: text(source_turn_digest),
+                source_message_id: text(source_message_id),
+                source_text_sha256: text(source_text_sha256),
+                summary_sha256: text(summary_sha256),
+            },
+        },
         ApplicationRecoveryAction::StartCompaction
         | ApplicationRecoveryAction::PreviewCompaction
         | ApplicationRecoveryAction::CancelCompactionReview { .. }
@@ -1453,6 +1482,12 @@ pub(crate) fn application_recovery_outcome(
             ApplicationError::InvalidRequest("recovery count exceeds application bounds".to_owned())
         })
     };
+    if let Some(imported) = &receipt.branch_knowledge {
+        return Ok(ApplicationRecoveryOutcome::BranchKnowledge {
+            import_id: safe(imported.import_id.clone())?,
+            already_imported: imported.already_imported,
+        });
+    }
     if let Some(compaction) = &receipt.compaction {
         return Ok(ApplicationRecoveryOutcome::Compaction {
             compaction_id: safe(compaction.compaction_id.clone())?,
@@ -1520,11 +1555,27 @@ pub(crate) fn http_recovery_receipt(
         tool_output_shrink: None,
         restore: None,
         fork: None,
+        branch_knowledge: None,
         recovery,
         correlation_id,
         replayed,
     };
     match outcome {
+        ApplicationRecoveryOutcome::BranchKnowledge {
+            import_id,
+            already_imported,
+        } => {
+            if action != crate::HttpConversationRecoveryCommandActionKind::ImportBranchKnowledge {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.branch_knowledge = Some(crate::HttpBranchKnowledgeReceipt {
+                import_id: import_id.as_str().to_owned(),
+                already_imported,
+            });
+        }
+
         ApplicationRecoveryOutcome::Compaction {
             compaction_id,
             attempt_id,

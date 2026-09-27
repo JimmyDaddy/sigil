@@ -274,6 +274,26 @@ impl AppState {
                 request_id,
                 request,
             },
+            AppAction::LoadBranchKnowledge {
+                request_id,
+                target_session_id,
+                source_session_ref,
+                source_session_id,
+            } => WorkerCommand::LoadBranchKnowledge {
+                request_id,
+                target_session_id,
+                source_session_ref,
+                source_session_id,
+            },
+            AppAction::ImportBranchKnowledge {
+                request_id,
+                target_session_id,
+                request,
+            } => WorkerCommand::ImportBranchKnowledge {
+                request_id,
+                target_session_id,
+                request,
+            },
             AppAction::LoadConversationForkPoints {
                 request_id,
                 source_session_id,

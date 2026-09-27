@@ -1251,3 +1251,73 @@ async fn conversation_fork_causal_receipt_survives_closed_worker_and_source_rest
     }
     Ok(())
 }
+
+#[test]
+fn branch_knowledge_application_action_binds_current_target_and_exact_source() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("knowledge-bridge")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("target")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let app = session(port, scope)?;
+    let selected =
+        sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest {
+            source_session_ref: sigil_kernel::SessionRef::new_relative("branch.jsonl")?,
+            source_session_id: "source".to_owned(),
+            source_turn_digest: "a".repeat(64),
+            source_message_id: "final-answer".to_owned(),
+            source_text_sha256: "b".repeat(64),
+            summary_sha256: "c".repeat(64),
+        };
+    assert!(
+        app.prepare_action(
+            &AppAction::ImportBranchKnowledge {
+                request_id: 510,
+                target_session_id: "foreign-target".to_owned(),
+                request: selected.clone(),
+            },
+            None,
+            None
+        )
+        .is_err()
+    );
+    let request = app
+        .prepare_action(
+            &AppAction::ImportBranchKnowledge {
+                request_id: 511,
+                target_session_id: "target".to_owned(),
+                request: selected.clone(),
+            },
+            None,
+            None,
+        )?
+        .expect("knowledge must use shared application recovery");
+    assert!(matches!(&request.envelope.command,
+        ApplicationCommand::Conversation(ConversationCommand::Recovery {
+            action: ApplicationRecoveryAction::ImportBranchKnowledge { source_turn_digest, summary_sha256, .. }
+        }) if source_turn_digest.as_str() == selected.source_turn_digest && summary_sha256.as_str() == selected.summary_sha256));
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
+    let executor = TuiWorkerCommandExecutor {
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: "target".to_owned(),
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    assert!(!matches!(
+        executor.dispatch_sync(&request)?,
+        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
+    ));
+    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
+        WorkerCommand::ImportBranchKnowledge { request_id: 511, target_session_id, request }
+        if target_session_id == "target" && request == selected));
+    Ok(())
+}

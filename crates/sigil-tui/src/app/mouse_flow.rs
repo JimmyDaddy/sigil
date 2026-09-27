@@ -29,7 +29,10 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
-        if self.change_review_modal_open() || self.conversation_fork_modal_open() {
+        if self.change_review_modal_open()
+            || self.conversation_fork_modal_open()
+            || self.branch_knowledge_modal_open()
+        {
             return Ok(crate::mouse::AppMouseOutcome::Noop);
         }
         if self.intent_stack_modal_open() {

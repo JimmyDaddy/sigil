@@ -373,11 +373,16 @@ impl Session {
 pub struct ApplicationOperationCommitProofV1 {
     marker: StoredEvent,
     matched_control: ControlEntry,
+    reasserts_prior_target: bool,
 }
 impl ApplicationOperationCommitProofV1 {
     /// The exact control authenticated by the committed batch, never a current projection.
     pub fn matched_control(&self) -> &ControlEntry {
         &self.matched_control
+    }
+    /// Whether an earlier event already satisfied this target before this batch.
+    pub fn reasserts_prior_target(&self) -> bool {
+        self.reasserts_prior_target
     }
     pub fn validate_binding(&self, binding: &ApplicationOperationBindingV1) -> Result<()> {
         let value = self
@@ -466,6 +471,7 @@ struct ApplicationOperationReconciler<'a> {
     domain: VecDeque<(SessionStreamRecord, usize)>,
     retained_bytes: usize,
     prepared: bool,
+    first_matching_event: Option<String>,
 }
 impl<'a> ApplicationOperationReconciler<'a> {
     fn new(binding: &'a ApplicationOperationBindingV1) -> Self {
@@ -474,6 +480,7 @@ impl<'a> ApplicationOperationReconciler<'a> {
             domain: VecDeque::new(),
             retained_bytes: 0,
             prepared: false,
+            first_matching_event: None,
         }
     }
     fn apply(
@@ -481,6 +488,12 @@ impl<'a> ApplicationOperationReconciler<'a> {
         record: &SessionStreamRecord,
     ) -> Result<Option<ApplicationOperationCommitProofV1>> {
         let binding = self.binding;
+        if self.first_matching_event.is_none()
+            && let Some(SessionLogEntry::Control(control)) = record.session_log_entry()?
+            && binding.target.matches(&control)
+        {
+            self.first_matching_event = Some(record.event_id().to_owned());
+        }
         if record.session_id() != binding.domain_session_scope_id() {
             bail!("application operation proof has a different source scope");
         }
@@ -536,15 +549,19 @@ impl<'a> ApplicationOperationReconciler<'a> {
                 && binding.target.matches(&control)
                 && matched_control.is_none()
             {
-                matched_control = Some(control);
+                matched_control = Some((control, actual.event_id().to_owned()));
             }
             expected_sequence += 1;
         }
-        let matched_control = matched_control
+        let (matched_control, matched_event_id) = matched_control
             .context("application operation domain batch does not satisfy its original target")?;
         Ok(Some(ApplicationOperationCommitProofV1 {
             marker: record.stored_event().clone(),
             matched_control,
+            reasserts_prior_target: self
+                .first_matching_event
+                .as_ref()
+                .is_some_and(|first| first != &matched_event_id),
         }))
     }
 }

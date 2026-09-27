@@ -1245,6 +1245,15 @@ impl AppState {
                 );
                 self.schedule_balance_refresh();
             }
+            WorkerMessage::BranchKnowledgeLoaded { request_id, target_session_id, preview, lineage } => {
+                self.apply_branch_knowledge_preview(request_id, &target_session_id, preview, lineage);
+            }
+            WorkerMessage::BranchKnowledgeImported { request_id, target_session_id, receipt, entry } => {
+                if self.apply_branch_knowledge_receipt(request_id, &target_session_id, &receipt)
+                    && !self.session_browser.current_entries.iter().any(|existing| matches!(existing, sigil_kernel::SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(existing)) if existing.import_id == entry.import_id)) {
+                    self.session_browser.current_entries.push(sigil_kernel::SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(entry)));
+                }
+            }
             WorkerMessage::ConversationForkPointsLoaded {
                 request_id,
                 source_session_id,
@@ -1396,7 +1405,7 @@ impl AppState {
             }
             WorkerMessage::LocalSessionLifecycleFailed { request_id, error } => {
                 let summary = summarize_error(&error);
-                if self.apply_conversation_fork_failure(request_id, &summary)
+                if self.apply_branch_knowledge_error(request_id, &summary) || self.apply_conversation_fork_failure(request_id, &summary)
                     || self.apply_local_session_lifecycle_failed(request_id, summary.clone())
                 {
                     self.last_notice = Some(summary);

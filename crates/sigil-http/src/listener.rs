@@ -1447,6 +1447,38 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/branches"))
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return match registry.branch_lineage(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/branches/knowledge-preview"))
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        let Ok(source) = parse_json_body::<crate::HttpBranchKnowledgeSource>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_branch_source",
+                "invalid branch source binding",
+            );
+        };
+        return match registry.branch_knowledge_preview(session_id, &source) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/recovery"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {

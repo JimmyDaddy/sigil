@@ -749,20 +749,20 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     await openSession(entry);
   }, [loadHistory, openSession, selectedDurableSessionId]);
 
-  const openForkSession = async (sessionRef: string, sessionId: string) => {
+  const openForkSession = async (sessionRef: string, sessionId: string, title = t("forkCreated")) => {
     if (activeWorkspaceId === undefined) return;
     const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
     setConversationNavigation({
       kind: "opening",
       sessionRef,
-      title: t("forkCreated"),
+      title,
     });
     try {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef,
         sessionId,
-        label: t("forkCreated"),
+        label: title,
       });
       if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setConversationNavigation((current) => current?.kind === "opening"

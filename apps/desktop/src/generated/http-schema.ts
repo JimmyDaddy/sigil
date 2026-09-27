@@ -1451,6 +1451,114 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/branches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read parent and child branch identities */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bounded session projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BranchLineage"];
+                    };
+                };
+                /** @description Session missing */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Projection unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/branches/knowledge-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview selected finalized source conclusions */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["BranchKnowledgeSource"];
+                };
+            };
+            responses: {
+                /** @description Bounded session projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BranchKnowledgePreview"];
+                    };
+                };
+                /** @description Session missing */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Projection unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/continuity": {
         parameters: {
             query?: never;
@@ -2996,6 +3104,48 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        BranchKnowledgeImport: {
+            source_message_id: string;
+            source_session_id: string;
+            source_session_ref: string;
+            source_text_sha256: string;
+            source_turn_digest: string;
+            summary_sha256: string;
+        };
+        BranchKnowledgePoint: {
+            source_message_id: string;
+            source_text_sha256: string;
+            source_turn_digest: string;
+            summary: string;
+            summary_sha256: string;
+            truncated: boolean;
+        };
+        BranchKnowledgePreview: {
+            points: components["schemas"]["BranchKnowledgePoint"][];
+            source_session_id: string;
+            source_session_ref: string;
+        };
+        BranchKnowledgeReceipt: {
+            already_imported: boolean;
+            import_id: string;
+        };
+        BranchKnowledgeSource: {
+            source_session_id: string;
+            source_session_ref: string;
+        };
+        BranchLineage: {
+            children: components["schemas"]["BranchLink"][];
+            parent: components["schemas"]["BranchLink"] | null;
+            session_id: string;
+            unavailable_count: number;
+        };
+        BranchLink: {
+            session_id: string;
+            session_ref: string;
+            source_turn_digest: string;
+            source_turn_index: number;
+            title: string | null;
+        };
         /** @enum {string} */
         CheckpointFileAvailability: "restorable" | "sensitive" | "unsupported" | "unavailable";
         CheckpointFileView: {
@@ -3556,10 +3706,11 @@ export interface components {
         ConversationRecoveryCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["ConversationRecoveryCommandAction"];
         };
-        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryPrepareCompactionAction"] | components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryToolOutputShrinkAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"];
+        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryPrepareCompactionAction"] | components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryToolOutputShrinkAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"] | components["schemas"]["ConversationRecoveryImportBranchKnowledgeAction"];
         ConversationRecoveryCommandReceipt: {
             /** @enum {string} */
-            action: "prepare_compaction" | "apply_compaction" | "apply_standalone_tool_output_shrink" | "restore_checkpoint" | "fork_conversation";
+            action: "prepare_compaction" | "apply_compaction" | "apply_standalone_tool_output_shrink" | "restore_checkpoint" | "fork_conversation" | "import_branch_knowledge";
+            branch_knowledge?: components["schemas"]["BranchKnowledgeReceipt"] | null;
             client_id: string;
             command_id: string;
             compaction?: components["schemas"]["CompactionReceipt"] | null;
@@ -3582,6 +3733,11 @@ export interface components {
             kind: "fork_conversation";
             model_ref: components["schemas"]["ProviderModelRef"];
             source_turn_digest: string;
+        };
+        ConversationRecoveryImportBranchKnowledgeAction: {
+            /** @constant */
+            kind: "import_branch_knowledge";
+            selection: components["schemas"]["BranchKnowledgeImport"];
         };
         ConversationRecoveryPrepareCompactionAction: {
             /** @constant */

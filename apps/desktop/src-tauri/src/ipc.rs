@@ -1,3 +1,5 @@
+mod branches;
+pub(crate) use branches::*;
 mod change_review;
 pub(crate) use change_review::*;
 use serde::{Deserialize, Serialize};
@@ -1255,6 +1257,9 @@ pub(crate) struct DesktopConversationRecoveryCommandInput {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum DesktopConversationRecoveryActionInput {
+    ImportBranchKnowledge {
+        selection: DesktopBranchKnowledgeImport,
+    },
     ApplyCompaction {
         preview_id: String,
     },
@@ -1271,6 +1276,11 @@ pub(crate) enum DesktopConversationRecoveryActionInput {
 impl DesktopConversationRecoveryActionInput {
     pub(crate) fn into_native(self) -> NativeConversationRecoveryCommandAction {
         match self {
+            Self::ImportBranchKnowledge { selection } => {
+                NativeConversationRecoveryCommandAction::ImportBranchKnowledge {
+                    selection: selection.into(),
+                }
+            }
             Self::ApplyCompaction { preview_id } => {
                 NativeConversationRecoveryCommandAction::ApplyCompaction { preview_id }
             }
@@ -1298,6 +1308,8 @@ impl DesktopConversationRecoveryActionInput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopConversationRecoveryCommandReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) branch_knowledge: Option<DesktopBranchKnowledgeReceipt>,
     pub(crate) command_id: String,
     pub(crate) client_id: String,
     pub(crate) session_id: String,
@@ -2882,6 +2894,7 @@ impl From<NativeCheckpointRestoreReview> for DesktopCheckpointRestoreReview {
 impl From<NativeConversationRecoveryCommandReceipt> for DesktopConversationRecoveryCommandReceipt {
     fn from(value: NativeConversationRecoveryCommandReceipt) -> Self {
         Self {
+            branch_knowledge: value.branch_knowledge.map(Into::into),
             command_id: value.command_id,
             client_id: value.client_id,
             session_id: value.session_id,
@@ -2966,6 +2979,9 @@ fn conversation_recovery_action_kind_label(
     value: NativeConversationRecoveryCommandActionKind,
 ) -> &'static str {
     match value {
+        NativeConversationRecoveryCommandActionKind::ImportBranchKnowledge => {
+            "import_branch_knowledge"
+        }
         NativeConversationRecoveryCommandActionKind::PrepareCompaction => "prepare_compaction",
         NativeConversationRecoveryCommandActionKind::ApplyCompaction => "apply_compaction",
         NativeConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink => {

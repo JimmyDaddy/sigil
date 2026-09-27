@@ -4,6 +4,46 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn branch_knowledge_recovery_contract_requires_complete_source_binding() {
+    let text = |value| SafeText::new(value).expect("safe source binding");
+    let action = ApplicationRecoveryAction::ImportBranchKnowledge {
+        source_session_ref: text("catalog-source"),
+        source_session_id: text("source-session"),
+        source_turn_digest: text("turn-digest"),
+        source_message_id: text("message-id"),
+        source_text_sha256: text("source-sha256"),
+        summary_sha256: text("summary-sha256"),
+        request_id: None,
+    };
+    assert_eq!(
+        action.kind(),
+        ApplicationRecoveryActionKind::ImportBranchKnowledge
+    );
+    let encoded = serde_json::to_value(&action).expect("encode exact binding");
+    let decoded: ApplicationRecoveryAction =
+        serde_json::from_value(encoded.clone()).expect("decode exact binding");
+    assert_eq!(decoded, action);
+    let mut missing_digest = encoded;
+    missing_digest
+        .get_mut("ImportBranchKnowledge")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("source binding object")
+        .remove("summary_sha256");
+    assert!(serde_json::from_value::<ApplicationRecoveryAction>(missing_digest).is_err());
+
+    let outcome = ApplicationRecoveryOutcome::BranchKnowledge {
+        import_id: text("import-id"),
+        already_imported: true,
+    };
+    let encoded = serde_json::to_value(&outcome).expect("encode durable receipt");
+    assert_eq!(
+        serde_json::from_value::<ApplicationRecoveryOutcome>(encoded)
+            .expect("decode durable receipt"),
+        outcome
+    );
+}
+
 #[path = "client_overflow_tests.rs"]
 mod client_overflow_tests;
 

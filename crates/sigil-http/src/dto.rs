@@ -3140,6 +3140,9 @@ impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HttpConversationRecoveryCommandAction {
+    ImportBranchKnowledge {
+        selection: crate::HttpBranchKnowledgeImport,
+    },
     PrepareCompaction {
         preview_id: String,
     },
@@ -3163,6 +3166,7 @@ pub enum HttpConversationRecoveryCommandAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpConversationRecoveryCommandActionKind {
+    ImportBranchKnowledge,
     PrepareCompaction,
     ApplyCompaction,
     ApplyStandaloneToolOutputShrink,
@@ -3174,6 +3178,9 @@ impl HttpConversationRecoveryCommandAction {
     #[must_use]
     pub fn kind(&self) -> HttpConversationRecoveryCommandActionKind {
         match self {
+            Self::ImportBranchKnowledge { .. } => {
+                HttpConversationRecoveryCommandActionKind::ImportBranchKnowledge
+            }
             Self::PrepareCompaction { .. } => {
                 HttpConversationRecoveryCommandActionKind::PrepareCompaction
             }
@@ -3252,6 +3259,8 @@ pub struct HttpConversationRecoveryCommandReceipt {
     pub restore: Option<HttpCheckpointRestoreReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<HttpConversationForkReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_knowledge: Option<crate::HttpBranchKnowledgeReceipt>,
     pub recovery: HttpConversationRecoveryView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,

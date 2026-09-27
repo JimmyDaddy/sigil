@@ -3284,6 +3284,7 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
         tool_output_shrink: None,
         restore: None,
         fork: None,
+        branch_knowledge: None,
         recovery,
     });
     let command = HttpCommandEnvelope::new(

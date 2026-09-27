@@ -265,3 +265,28 @@ fn right_click_opens_actions_and_modal_rows_are_clickable() -> Result<()> {
     assert_eq!(app.composer.input, "/resume");
     Ok(())
 }
+
+#[test]
+fn branch_knowledge_session_actions_open_selected_source_without_switching_session() -> Result<()> {
+    let (_temp, mut app, source) = app_with_resume_target()?;
+    let target_id = app.session_id.clone();
+    let Some(AppAction::InspectLocalSession { request_id, .. }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?
+    else {
+        anyhow::bail!("expected session action inspection")
+    };
+    app.handle_worker_message(WorkerMessage::LocalSessionInspected {
+        request_id,
+        entry: ready_entry(&source, false, 1),
+    })?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))?;
+    assert!(
+        matches!(action, Some(AppAction::LoadBranchKnowledge { target_session_id, source_session_ref, source_session_id, .. })
+        if target_session_id == target_id && source_session_id == "session-target" && source_session_ref.as_path() == Path::new("session-target.jsonl"))
+    );
+    assert_eq!(app.session_id, target_id);
+    assert_eq!(app.composer.input, "/resume");
+    assert_eq!(app.modal_title(), Some("Bring Back a Conclusion"));
+    assert!(!app.runtime.is_busy);
+    Ok(())
+}

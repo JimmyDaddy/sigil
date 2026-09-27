@@ -100,3 +100,15 @@ it("keeps image selection and exact historical reads in narrow native commands",
   await desktopBridge.startRun("workspace", "session", "", "manual", undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["native-image"]);
   expect(invoke).toHaveBeenLastCalledWith("desktop_start_run", { workspaceId: "workspace", input: expect.objectContaining({ sessionId: "session", prompt: "", imageHandles: ["native-image"] }) });
 });
+
+it("keeps branch queries and exact knowledge imports within the native allowlist", async () => {
+  invoke.mockResolvedValue({});
+  await desktopBridge.branchLineage("workspace", "target");
+  expect(invoke).toHaveBeenLastCalledWith("desktop_branch_lineage", { workspaceId: "workspace", sessionId: "target" });
+  const source = { sourceSessionRef: "source.jsonl", sourceSessionId: "source" };
+  await desktopBridge.branchKnowledgePreview("workspace", "target", source);
+  expect(invoke).toHaveBeenLastCalledWith("desktop_branch_knowledge_preview", { workspaceId: "workspace", sessionId: "target", source });
+  const selection = { ...source, sourceTurnDigest: "turn", sourceMessageId: "message", sourceTextSha256: "full-hash", summarySha256: "summary-hash" };
+  await desktopBridge.commandConversationRecovery("workspace", { sessionId: "target", action: { kind: "import_branch_knowledge", selection } });
+  expect(invoke).toHaveBeenLastCalledWith("desktop_command_conversation_recovery", { workspaceId: "workspace", input: { sessionId: "target", action: { kind: "import_branch_knowledge", selection } } });
+});

@@ -706,6 +706,8 @@ fn command_conflicts_with_artifact_gc(command: &WorkerCommand) -> bool {
             | WorkerCommand::ForkLocalSession { .. }
             | WorkerCommand::ForkConversation { .. }
             | WorkerCommand::LoadConversationForkPoints { .. }
+            | WorkerCommand::LoadBranchKnowledge { .. }
+            | WorkerCommand::ImportBranchKnowledge { .. }
             | WorkerCommand::ForkConversationAtCheckpoint { .. }
             | WorkerCommand::ExportLocalSession { .. }
             | WorkerCommand::SetLocalSessionPin { .. }

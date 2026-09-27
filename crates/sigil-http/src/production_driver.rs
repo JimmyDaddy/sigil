@@ -840,6 +840,16 @@ impl std::fmt::Debug for HttpProductionRunDriver {
     }
 }
 
+fn application_publication_driver_error(
+    error: anyhow::Error,
+) -> HttpConversationRecoveryDriverError {
+    if error.is::<sigil_runtime::application_operation_owner::ApplicationPublicationError>() {
+        HttpConversationRecoveryDriverError::Unavailable
+    } else {
+        HttpConversationRecoveryDriverError::StaleBinding
+    }
+}
+
 fn canonical_http_session_path(session_log_path: &Path) -> Result<PathBuf> {
     Ok(JsonlSessionStore::new(session_log_path)?
         .path()
@@ -2843,9 +2853,63 @@ impl HttpRunDriver for HttpProductionRunDriver {
         &self,
         session: &HttpSessionSnapshot,
     ) -> Result<crate::driver::HttpApplicationOperationOwner, HttpRunDriverError> {
-        let attachment = self.acquire_session_attachment(session).map_err(|_| {
-            HttpRunDriverError::new("application session attachment is unavailable")
-        })?;
+        let attachment = self
+            .acquire_exact_session_attachment(
+                &session.durable_session_scope_id,
+                Path::new(&session.session_log_path),
+            )
+            .map_err(|_| {
+                HttpRunDriverError::new("application session attachment is unavailable")
+            })?;
+        let projection_owner = if attachment.application_operation_owner().is_none() {
+            let observed = bind_existing_application_session(
+                &self.options.config_path,
+                Path::new(&session.session_log_path),
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "application session identity inspection failed: {error}"
+                ))
+            })?;
+            if observed.session_scope_id != session.durable_session_scope_id
+                || observed.session_log_path != attachment.session_path()
+            {
+                return Err(HttpRunDriverError::new(
+                    "application session reattachment identity changed",
+                ));
+            }
+            // Switching away releases the idle controller. Reattach through the same host
+            // binding used by open-session before preparing any operation on its new lease.
+            let (binding, projection) =
+                bind_existing_application_session_with_attachment_and_projection_owner(
+                    &self.options.config_path,
+                    Path::new(&session.session_log_path),
+                    attachment.as_ref(),
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "application session reattachment failed: {error}"
+                    ))
+                })?;
+            if binding.session_scope_id != session.durable_session_scope_id
+                || binding.session_log_path != attachment.session_path()
+            {
+                return Err(HttpRunDriverError::new(
+                    "application session reattachment identity changed",
+                ));
+            }
+            Some(projection)
+        } else {
+            None
+        };
+        let attachment = self
+            .install_session_attachment(
+                &session.durable_session_scope_id,
+                Path::new(&session.session_log_path),
+                attachment,
+                projection_owner,
+            )
+            .map_err(|_| HttpRunDriverError::new("application session owner install failed"))?;
         let owner = attachment
             .application_operation_owner()
             .ok_or_else(|| HttpRunDriverError::new("session has not issued its operation owner"))?;
@@ -4196,6 +4260,46 @@ impl HttpRunDriver for HttpProductionRunDriver {
         ))
     }
 
+    fn branch_lineage(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<crate::HttpBranchLineage, HttpConversationRecoveryDriverError> {
+        let lifecycle = self
+            .options
+            .session_lifecycle
+            .as_ref()
+            .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+        let reference = self.catalog_reference_for_session(session)?;
+        sigil_runtime::application_branch_knowledge::application_branch_lineage_view(
+            lifecycle,
+            &reference,
+            &session.durable_session_scope_id,
+        )
+        .map(Into::into)
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    fn branch_knowledge_preview(
+        &self,
+        _session: &crate::HttpSessionSnapshot,
+        source: &crate::HttpBranchKnowledgeSource,
+    ) -> Result<crate::HttpBranchKnowledgePreview, HttpConversationRecoveryDriverError> {
+        let lifecycle = self
+            .options
+            .session_lifecycle
+            .as_ref()
+            .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+        let reference = SessionRef::new_relative(&source.source_session_ref)
+            .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)?;
+        sigil_runtime::application_branch_knowledge::application_branch_knowledge_preview(
+            lifecycle,
+            &reference,
+            &source.source_session_id,
+        )
+        .map(Into::into)
+        .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)
+    }
+
     fn conversation_recovery_view(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -4320,7 +4424,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
         let mut mutation_session = if matches!(
             command.action,
-            HttpConversationRecoveryCommandAction::ForkConversation { .. }
+            HttpConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
+                | HttpConversationRecoveryCommandAction::ForkConversation { .. }
         ) {
             let owner = session_attachment
                 .application_operation_owner()
@@ -4340,12 +4445,38 @@ impl HttpRunDriver for HttpProductionRunDriver {
         } else {
             None
         };
+        let mut branch_knowledge = None;
         let mut compaction_receipt = None;
         let mut compaction_review = None;
         let mut tool_output_shrink = None;
         let mut restore_receipt = None;
         let mut fork_receipt = None;
         match &command.action {
+            HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
+                let lifecycle = self
+                    .options
+                    .session_lifecycle
+                    .as_ref()
+                    .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+                let target = mutation_session
+                    .as_mut()
+                    .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+                let request = sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest {
+                    source_session_ref: SessionRef::new_relative(&selection.source_session_ref).map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)?,
+                    source_session_id: selection.source_session_id.clone(),
+                    source_turn_digest: selection.source_turn_digest.clone(),
+                    source_message_id: selection.source_message_id.clone(),
+                    source_text_sha256: selection.source_text_sha256.clone(),
+                    summary_sha256: selection.summary_sha256.clone(),
+                };
+                let receipt = sigil_runtime::application_branch_knowledge::import_application_branch_knowledge(lifecycle, target, &request)
+                    .map_err(application_publication_driver_error)?;
+                branch_knowledge = Some(crate::HttpBranchKnowledgeReceipt {
+                    import_id: receipt.import_id,
+                    already_imported: receipt.already_imported,
+                });
+            }
+
             HttpConversationRecoveryCommandAction::PrepareCompaction { preview_id } => {
                 let pending = self
                     .pending_compactions
@@ -4567,6 +4698,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         .map(Into::into)
         .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
         Ok(HttpConversationRecoveryDriverOutput {
+            branch_knowledge,
             compaction: compaction_receipt,
             compaction_review,
             tool_output_shrink,

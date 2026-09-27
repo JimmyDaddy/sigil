@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn branch_knowledge_import_rejects_incomplete_or_unbounded_binding_before_transport() {
+    let selection = crate::DesktopBranchKnowledgeImport {
+        source_session_ref: "catalog-source".to_owned(),
+        source_session_id: "source-session".to_owned(),
+        source_turn_digest: "turn-digest".to_owned(),
+        source_message_id: "message-id".to_owned(),
+        source_text_sha256: "source-sha256".to_owned(),
+        summary_sha256: "summary-sha256".to_owned(),
+    };
+    let action = DesktopConversationRecoveryCommandAction::ImportBranchKnowledge {
+        selection: selection.clone(),
+    };
+    validate_conversation_recovery_action(&action).expect("complete binding is admitted");
+    let value = serde_json::to_value(&action).expect("serialize exact import command");
+    let binding = value
+        .get("selection")
+        .and_then(serde_json::Value::as_object)
+        .expect("selection object");
+    assert_eq!(binding.len(), 6);
+    assert!(!binding.contains_key("summary"));
+    assert!(!binding.contains_key("source_path"));
+
+    let mut invalid = selection.clone();
+    invalid.source_session_ref = "\n".to_owned();
+    assert!(matches!(
+        validate_conversation_recovery_action(
+            &DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection: invalid }
+        ),
+        Err(DesktopClientError::InvalidRoute)
+    ));
+    let mut invalid = selection;
+    invalid.summary_sha256 = "x".repeat(513);
+    assert!(matches!(
+        validate_conversation_recovery_action(
+            &DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection: invalid }
+        ),
+        Err(DesktopClientError::InvalidRoute)
+    ));
+}
+
+#[test]
 fn error_code_projection_accepts_only_bounded_machine_labels() {
     assert_eq!(
         safe_error_code("stale_cursor".to_owned()).as_deref(),

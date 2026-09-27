@@ -173,6 +173,18 @@ pub(in crate::runner) enum RunPlanCommand {
 
 #[derive(Debug)]
 pub(in crate::runner) enum SessionCommand {
+    LoadBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        source_session_ref: sigil_kernel::SessionRef,
+        source_session_id: String,
+    },
+    ImportBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        request:
+            sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest,
+    },
     LoadConversationForkPoints {
         request_id: u64,
         source_session_id: String,
@@ -536,6 +548,26 @@ pub(in crate::runner) fn classify_worker_command(
             request_id,
             generation,
             expected_request_hash,
+        }),
+        WorkerCommand::LoadBranchKnowledge {
+            request_id,
+            target_session_id,
+            source_session_ref,
+            source_session_id,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::LoadBranchKnowledge {
+            request_id,
+            target_session_id,
+            source_session_ref,
+            source_session_id,
+        }),
+        WorkerCommand::ImportBranchKnowledge {
+            request_id,
+            target_session_id,
+            request,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::ImportBranchKnowledge {
+            request_id,
+            target_session_id,
+            request,
         }),
         WorkerCommand::LoadConversationForkPoints {
             request_id,

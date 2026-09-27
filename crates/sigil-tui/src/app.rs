@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 mod agent_flow;
 mod approval_flow;
+mod branch_knowledge_flow;
 mod change_review_flow;
 mod checkpoint_flow;
 mod command_dispatch;
@@ -888,6 +889,18 @@ pub enum AppAction {
         request_id: u64,
         request: sigil_kernel::IntentDropRequestV1,
     },
+    LoadBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        source_session_ref: sigil_kernel::SessionRef,
+        source_session_id: String,
+    },
+    ImportBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        request:
+            sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest,
+    },
     LoadConversationForkPoints {
         request_id: u64,
         source_session_id: String,
@@ -1746,6 +1759,7 @@ impl AppState {
             if self.checkpoint_mutation_pending()
                 || self.intent_drop_applying()
                 || self.conversation_fork_applying()
+                || self.branch_knowledge_applying()
             {
                 self.last_notice = Some(
                     "a reviewed workspace operation is applying; wait for completion before quitting"
@@ -1771,6 +1785,9 @@ impl AppState {
         if self.change_review_modal_open() {
             self.handle_change_review_key(key);
             return Ok(None);
+        }
+        if self.branch_knowledge_modal_open() {
+            return Ok(self.handle_branch_knowledge_key_event(key));
         }
         if self.conversation_fork_modal_open() {
             return Ok(self.handle_conversation_fork_modal_key_event(key));

@@ -1,3 +1,4 @@
+mod branches;
 use std::{fmt, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -770,6 +771,10 @@ impl DesktopHttpClient {
     ) -> Result<DesktopConversationRecoveryCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_conversation_recovery_action(&action)?;
+        let expects_branch_knowledge = matches!(
+            action,
+            DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
+        );
         let expected_action = action.kind();
         let command = self.command(session_id, None, action).await?;
         let expected_command_id = command.command_id.clone();
@@ -787,6 +792,13 @@ impl DesktopHttpClient {
             || receipt.action != expected_action
         {
             return Err(DesktopClientError::InvalidResponse);
+        }
+        if expects_branch_knowledge != receipt.branch_knowledge.is_some() {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if let Some(import) = &receipt.branch_knowledge {
+            validate_recovery_token(&import.import_id)
+                .map_err(|_| DesktopClientError::InvalidResponse)?;
         }
         validate_conversation_recovery_view(&receipt.recovery)?;
         Ok(receipt)
@@ -2662,6 +2674,19 @@ fn validate_conversation_recovery_action(
     action: &DesktopConversationRecoveryCommandAction,
 ) -> Result<(), DesktopClientError> {
     match action {
+        DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
+            for value in [
+                &selection.source_session_ref,
+                &selection.source_session_id,
+                &selection.source_turn_digest,
+                &selection.source_message_id,
+                &selection.source_text_sha256,
+                &selection.summary_sha256,
+            ] {
+                validate_recovery_token(value)?;
+            }
+            Ok(())
+        }
         DesktopConversationRecoveryCommandAction::PrepareCompaction { preview_id }
         | DesktopConversationRecoveryCommandAction::ApplyCompaction { preview_id }
         | DesktopConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {

@@ -802,6 +802,43 @@ pub(crate) async fn desktop_checkpoint_review(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_branch_lineage(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<crate::ipc::DesktopBranchLineage, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?
+        .branch_lineage(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_branch_knowledge_preview(
+    workspace_id: String,
+    session_id: String,
+    source: crate::ipc::DesktopBranchKnowledgeSource,
+    state: State<'_, DesktopAppState>,
+) -> Result<crate::ipc::DesktopBranchKnowledgePreview, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?
+        .branch_knowledge_preview(&session_id, source.into())
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_checkpoint_restore_preview(
     workspace_id: String,
     input: DesktopCheckpointRestorePreviewInput,
@@ -2534,6 +2571,19 @@ fn validate_recovery_action(
     action: &crate::ipc::DesktopConversationRecoveryActionInput,
 ) -> Result<(), DesktopCommandError> {
     match action {
+        crate::ipc::DesktopConversationRecoveryActionInput::ImportBranchKnowledge { selection } => {
+            for value in [
+                &selection.source_session_ref,
+                &selection.source_session_id,
+                &selection.source_turn_digest,
+                &selection.source_message_id,
+                &selection.source_text_sha256,
+                &selection.summary_sha256,
+            ] {
+                validate_recovery_token(value)?;
+            }
+            Ok(())
+        }
         crate::ipc::DesktopConversationRecoveryActionInput::ApplyCompaction { preview_id } => {
             validate_recovery_token(preview_id)
         }

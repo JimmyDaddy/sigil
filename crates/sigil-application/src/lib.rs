@@ -461,6 +461,7 @@ pub enum ApplicationRecoveryActionKind {
     ForkCheckpoint,
     RestoreCheckpoint,
     ForkConversation,
+    ImportBranchKnowledge,
     LoadIntentStack,
     PreviewIntentDrop,
     ExecuteIntentDrop,
@@ -510,6 +511,16 @@ pub enum ApplicationRecoveryAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<SafeText>,
     },
+    ImportBranchKnowledge {
+        source_session_ref: SafeText,
+        source_session_id: SafeText,
+        source_turn_digest: SafeText,
+        source_message_id: SafeText,
+        source_text_sha256: SafeText,
+        summary_sha256: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<SafeText>,
+    },
     LoadIntentStack {
         request_id: SafeText,
     },
@@ -546,6 +557,9 @@ impl ApplicationRecoveryAction {
             Self::ForkCheckpoint { .. } => ApplicationRecoveryActionKind::ForkCheckpoint,
             Self::RestoreCheckpoint { .. } => ApplicationRecoveryActionKind::RestoreCheckpoint,
             Self::ForkConversation { .. } => ApplicationRecoveryActionKind::ForkConversation,
+            Self::ImportBranchKnowledge { .. } => {
+                ApplicationRecoveryActionKind::ImportBranchKnowledge
+            }
             Self::LoadIntentStack { .. } => ApplicationRecoveryActionKind::LoadIntentStack,
             Self::PreviewIntentDrop { .. } => ApplicationRecoveryActionKind::PreviewIntentDrop,
             Self::ExecuteIntentDrop { .. } => ApplicationRecoveryActionKind::ExecuteIntentDrop,
@@ -555,6 +569,10 @@ impl ApplicationRecoveryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryOutcome {
+    BranchKnowledge {
+        import_id: SafeText,
+        already_imported: bool,
+    },
     Compaction {
         compaction_id: SafeText,
         attempt_id: SafeText,

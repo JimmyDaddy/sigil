@@ -2,6 +2,8 @@ use anyhow::Context;
 
 use super::*;
 
+mod branch_knowledge;
+
 pub(super) fn dispatch_session_command<P>(
     context: WorkerCommandContext<'_, P>,
     command: SessionCommand,
@@ -9,6 +11,12 @@ pub(super) fn dispatch_session_command<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    if matches!(
+        command,
+        SessionCommand::LoadBranchKnowledge { .. } | SessionCommand::ImportBranchKnowledge { .. }
+    ) {
+        return branch_knowledge::dispatch(context, command);
+    }
     let WorkerCommandContext {
         runtime,
         agent,
@@ -31,6 +39,10 @@ where
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
+            SessionCommand::LoadBranchKnowledge { .. }
+            | SessionCommand::ImportBranchKnowledge { .. } => {
+                unreachable!("branch commands were dispatched above")
+            }
             SessionCommand::LoadConversationForkPoints {
                 request_id,
                 source_session_id,

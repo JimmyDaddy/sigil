@@ -35,6 +35,23 @@ pub fn application_operation_binding(
             connection_id: connection_id.as_str().to_owned(),
             model_id: model_id.as_str().to_owned(),
         },
+        ApplicationCommand::Conversation(sigil_application::ConversationCommand::Recovery {
+            action:
+                sigil_application::ApplicationRecoveryAction::ImportBranchKnowledge {
+                    source_session_id,
+                    source_turn_digest,
+                    source_message_id,
+                    source_text_sha256,
+                    summary_sha256,
+                    ..
+                },
+        }) => Target::ImportBranchKnowledge {
+            source_session_id: source_session_id.as_str().to_owned(),
+            source_turn_digest: source_turn_digest.as_str().to_owned(),
+            source_message_id: source_message_id.as_str().to_owned(),
+            source_text_sha256: source_text_sha256.as_str().to_owned(),
+            summary_sha256: summary_sha256.as_str().to_owned(),
+        },
         ApplicationCommand::Conversation(sigil_application::ConversationCommand::Queue {
             action,
             ..
@@ -336,6 +353,12 @@ fn recovery_outcome_from_proof(
         })
     };
     Ok(match proof.matched_control() {
+        sigil_kernel::ControlEntry::BranchKnowledgeImportedV1(entry) => {
+            Some(Outcome::BranchKnowledge {
+                import_id: SafeText::new(entry.import_id.clone())?,
+                already_imported: proof.reasserts_prior_target(),
+            })
+        }
         sigil_kernel::ControlEntry::ConversationForkCommittedV1(entry) => Some(Outcome::Fork {
             session_ref: SafeText::new(
                 entry

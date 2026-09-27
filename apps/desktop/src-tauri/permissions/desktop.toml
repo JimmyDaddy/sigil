@@ -66,7 +66,7 @@ commands.allow = ["desktop_conversation_queue", "desktop_command_conversation_qu
 [[permission]]
 identifier = "allow-desktop-conversation-recovery"
 description = "Allows the main local window to preview and apply exact durable context compaction, inspect checkpoints, preview controlled-file reverse diffs, restore controlled files, or fork conversation history."
-commands.allow = ["desktop_conversation_recovery", "desktop_conversation_compaction_preview", "desktop_compact_conversation", "desktop_checkpoint_restore_preview", "desktop_checkpoint_review", "desktop_command_conversation_recovery"]
+commands.allow = ["desktop_conversation_recovery", "desktop_conversation_compaction_preview", "desktop_compact_conversation", "desktop_checkpoint_restore_preview", "desktop_checkpoint_review", "desktop_branch_lineage", "desktop_branch_knowledge_preview", "desktop_command_conversation_recovery"]
 
 [[permission]]
 identifier = "allow-desktop-approval"

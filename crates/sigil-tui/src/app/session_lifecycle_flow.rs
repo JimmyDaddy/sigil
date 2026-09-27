@@ -27,6 +27,7 @@ impl Default for SessionRetentionMaintenancePreview {
 pub(crate) enum SessionModalAction {
     Resume,
     Fork,
+    ImportKnowledge,
     Export,
     TogglePin,
     PreviewDelete,
@@ -78,6 +79,10 @@ impl SessionActionsModalState {
                         "[fork] Fork latest finalized turn and switch".to_owned(),
                     ));
                 }
+                rows.push((
+                    SessionModalAction::ImportKnowledge,
+                    "[knowledge] Bring a conclusion into the current conversation".to_owned(),
+                ));
                 rows.push((
                     SessionModalAction::Export,
                     "[export] Export safe transcript".to_owned(),
@@ -144,7 +149,8 @@ impl SessionActionsModalState {
         lines.push(String::new());
         lines.push(match self.phase {
             SessionActionsModalPhase::Ready => {
-                "Enter resume  F fork  E export  P pin  D delete  Esc close".to_owned()
+                "Enter resume  F fork  K conclusion  E export  P pin  D delete  Esc close"
+                    .to_owned()
             }
             SessionActionsModalPhase::DeleteReview => {
                 "Enter confirm delete  Backspace back  Esc close".to_owned()
@@ -358,6 +364,9 @@ impl AppState {
                 (SessionActionsModalPhase::Ready, KeyCode::Enter) => {
                     Some(SessionModalAction::Resume)
                 }
+                (SessionActionsModalPhase::Ready, KeyCode::Char('k' | 'K')) => {
+                    Some(SessionModalAction::ImportKnowledge)
+                }
                 (SessionActionsModalPhase::Ready, KeyCode::Char('f' | 'F')) => {
                     Some(SessionModalAction::Fork)
                 }
@@ -426,6 +435,12 @@ impl AppState {
                 let pinned = state.entry.as_ref().is_some_and(|entry| entry.pinned);
                 let delete_preview = state.delete_preview.clone();
                 match action {
+                    SessionModalAction::ImportKnowledge => {
+                        let entry = state.entry.as_ref()?;
+                        let source_ref = entry.session_ref.clone();
+                        let source_id = entry.session_id.clone()?;
+                        Some(self.open_branch_knowledge_modal(source_ref, source_id))
+                    }
                     SessionModalAction::Resume => {
                         self.modal_state = None;
                         Some(AppAction::SwitchSession {

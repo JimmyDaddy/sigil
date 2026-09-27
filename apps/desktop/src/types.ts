@@ -477,6 +477,7 @@ export interface CheckpointRestoreReview {
 }
 
 export type ConversationRecoveryAction =
+  | { kind: "import_branch_knowledge"; selection: import("./features/conversation/branchTypes").BranchKnowledgeImport }
   | { kind: "prepare_compaction"; previewId: string }
   | { kind: "apply_compaction"; previewId: string }
   | { kind: "apply_standalone_tool_output_shrink"; previewId: string }
@@ -524,6 +525,7 @@ export interface ConversationForkReceipt {
 }
 
 export interface ConversationRecoveryCommandReceipt {
+  branchKnowledge?: { importId: string; alreadyImported: boolean };
   commandId: string;
   clientId: string;
   sessionId: string;

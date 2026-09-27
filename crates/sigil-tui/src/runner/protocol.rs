@@ -552,6 +552,18 @@ pub enum WorkerCommand {
         request_id: u64,
         request: IntentDropRequestV1,
     },
+    LoadBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        source_session_ref: sigil_kernel::SessionRef,
+        source_session_id: String,
+    },
+    ImportBranchKnowledge {
+        request_id: u64,
+        target_session_id: String,
+        request:
+            sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest,
+    },
     LoadConversationForkPoints {
         request_id: u64,
         source_session_id: String,
@@ -1461,6 +1473,19 @@ pub enum WorkerMessage {
         model_name: String,
         copied_message_count: usize,
         entries: Vec<SessionLogEntry>,
+    },
+    BranchKnowledgeLoaded {
+        request_id: u64,
+        target_session_id: String,
+        preview: sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgePreview,
+        lineage: sigil_runtime::application_branch_knowledge::ApplicationBranchLineageView,
+    },
+    BranchKnowledgeImported {
+        request_id: u64,
+        target_session_id: String,
+        receipt:
+            sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportReceipt,
+        entry: sigil_kernel::BranchKnowledgeImportedV1,
     },
     ConversationForkPointsLoaded {
         request_id: u64,

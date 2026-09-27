@@ -30,6 +30,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
+| Import a completed conclusion into the current conversation | Saved-session actions, `K`; select and read a conclusion, then `Enter` imports without sending |
 | Branch from a completed conversation turn | `Alt-B`; `Up/Down` selects, `Enter` branches, `Esc` closes. While editing, `Alt-B` keeps word navigation. |
 | Comment on recorded changes | `Alt-R`; select a checkpoint, file and line range, `Enter` adds a comment, `Ctrl-S` sends or queues the batch |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |

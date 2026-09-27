@@ -7,6 +7,8 @@ pub use application_operation::{
 pub mod agent_thread;
 pub mod approval;
 pub mod borrowed_mutation;
+pub mod branch_knowledge;
+pub use branch_knowledge::{BranchKnowledgeImportedV1, branch_knowledge_context};
 pub mod cache_layout;
 pub mod cancellation;
 pub mod capability_issuer;

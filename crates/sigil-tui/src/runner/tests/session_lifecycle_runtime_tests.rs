@@ -684,3 +684,136 @@ fn dispatch_bound_fork(
         .map_err(anyhow::Error::msg)?;
     Ok(())
 }
+
+#[test]
+fn branch_knowledge_worker_imports_exact_conclusion_without_model_or_source_mutation() -> Result<()>
+{
+    use sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest;
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let path = sessions.join("target.jsonl");
+    let source_path = sessions.join("branch.jsonl");
+    let mut config = test_root_config(&workspace, "deepseek", "deepseek-v4-flash");
+    config.config_version = CONFIG_VERSION_V2;
+    config.agent.runtime_provider.clear();
+    config.agent.connection = Some(ConnectionId::new("selected-route")?);
+    config.connections.insert("selected-route".to_owned(), json!({
+        "label":"Selected", "provider":"deepseek", "protocol":"deepseek",
+        "base_url":"https://api.deepseek.com", "credential":{"source":"environment","name":"SIGIL_API_KEY"}
+    }));
+    config.session.log_dir = Some(sessions.display().to_string());
+    config.storage.state_root = StorageRoot::Path(temp.path().join("state").display().to_string());
+    config.storage.cache_root = StorageRoot::Path(temp.path().join("cache").display().to_string());
+    write_finalized_session(&path, "original target answer", &config)?;
+    write_finalized_session(&source_path, "branch conclusion", &config)?;
+    let target_id = Session::load_from_store_for_control(JsonlSessionStore::new(&path)?)?
+        .session_scope_id()
+        .to_owned();
+    let source_id = Session::load_from_store_for_control(JsonlSessionStore::new(&source_path)?)?
+        .session_scope_id()
+        .to_owned();
+    let source_bytes = fs::read(&source_path)?;
+    let (provider, calls) = PlannedProvider::new_with_stream_start_signal(Vec::new());
+    let worker = spawn_test_worker(
+        config,
+        path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace,
+    )?;
+    worker.send(WorkerCommand::LoadBranchKnowledge {
+        request_id: 501,
+        target_session_id: target_id.clone(),
+        source_session_ref: sigil_kernel::SessionRef::new_relative("branch.jsonl")?,
+        source_session_id: source_id,
+    })?;
+    let preview = match worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
+        matches!(
+            message,
+            WorkerMessage::BranchKnowledgeLoaded {
+                request_id: 501,
+                ..
+            } | WorkerMessage::LocalSessionLifecycleFailed {
+                request_id: 501,
+                ..
+            }
+        )
+    })? {
+        WorkerMessage::BranchKnowledgeLoaded { preview, .. } => preview,
+        other => anyhow::bail!("source preview failed: {other:?}"),
+    };
+    assert_eq!(preview.points.len(), 1);
+    let point = &preview.points[0];
+    let request = ApplicationBranchKnowledgeImportRequest {
+        source_session_ref: preview.source_session_ref.clone(),
+        source_session_id: preview.source_session_id.clone(),
+        source_turn_digest: point.source_turn_digest.clone(),
+        source_message_id: point.source_message_id.clone(),
+        source_text_sha256: point.source_text_sha256.clone(),
+        summary_sha256: point.summary_sha256.clone(),
+    };
+    // A concurrent same-session append is not a knowledge-import permission boundary.
+    Session::load_from_store_for_control(JsonlSessionStore::new(&path)?)?
+        .append_user_message(ModelMessage::user("unrelated later target message"))?;
+    for (request_id, expected_duplicate) in [(502, false), (503, true)] {
+        worker.send(WorkerCommand::ImportBranchKnowledge {
+            request_id,
+            target_session_id: target_id.clone(),
+            request: request.clone(),
+        })?;
+        match worker.recv_until_with_timeout(Duration::from_secs(30), |message| matches!(message,
+            WorkerMessage::BranchKnowledgeImported { request_id: id, .. }
+            | WorkerMessage::LocalSessionLifecycleFailed { request_id: id, .. } if *id == request_id))? {
+            WorkerMessage::BranchKnowledgeImported { receipt, entry, .. } => {
+                assert_eq!(receipt.already_imported, expected_duplicate);
+                assert_eq!(entry.summary, "completed branch conclusion");
+                assert_eq!(entry.target_session_id, target_id);
+            }
+            other => anyhow::bail!("import failed: {other:?}"),
+        }
+    }
+    let imported_bytes = fs::read(&path)?;
+    let mut altered = request.clone();
+    altered.source_text_sha256 = "f".repeat(64);
+    for (request_id, target, request) in [
+        (504, "other-target".to_owned(), request),
+        (505, target_id, altered),
+    ] {
+        worker.send(WorkerCommand::ImportBranchKnowledge {
+            request_id,
+            target_session_id: target,
+            request,
+        })?;
+        assert!(matches!(
+                worker.recv_until_with_timeout(
+                    Duration::from_secs(30),
+                    |message| matches!(message,
+            WorkerMessage::LocalSessionLifecycleFailed { request_id: id, .. } if *id == request_id)
+                )?,
+                WorkerMessage::LocalSessionLifecycleFailed { .. }
+            ));
+    }
+    assert_eq!(fs::read(&path)?, imported_bytes);
+    assert_eq!(fs::read(&source_path)?, source_bytes);
+    let restored = Session::load_from_store_for_control(JsonlSessionStore::new(&path)?)?;
+    assert_eq!(
+        restored
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                sigil_kernel::SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(_))
+            ))
+            .count(),
+        1
+    );
+    assert!(restored.entries().iter().any(|entry| matches!(entry,
+        sigil_kernel::SessionLogEntry::User(message) if message.content.as_deref() == Some("unrelated later target message"))));
+    assert!(
+        calls.try_recv().is_err(),
+        "knowledge import must not dispatch a model"
+    );
+    Ok(())
+}

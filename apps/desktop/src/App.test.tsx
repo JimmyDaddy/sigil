@@ -399,6 +399,8 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         nativeCarrierMaterialized: false,
       },
     }),
+    branchLineage: async (_workspaceId, sessionId) => ({ sessionId, children: [], unavailableCount: 0 }),
+    branchKnowledgePreview: async (_workspaceId, _sessionId, source) => ({ ...source, points: [] }),
     checkpointReview: async (_workspaceId, input) => ({ checkpointId: input.checkpointId, checkpointDigest: input.checkpointDigest, diffs: [], truncated: false }),
     checkpointRestorePreview: async (_workspaceId, input) => ({
       checkpointId: input.checkpointId,
@@ -7560,4 +7562,40 @@ it("does not navigate a late message fork over a newly selected conversation", a
   expect(openSession).toHaveBeenCalledTimes(2);
   expect(screen.getByRole("heading", { name: "Other" })).toBeTruthy();
   expect((await readyComposer()).value).toBe("Keep working here");
+});
+
+it("imports a branch conclusion during an active run without replacing the draft or starting another run", async () => {
+  const user = userEvent.setup();
+  let sourcesAvailable = false;
+  const defaults = bridgeWith();
+  const startRun = vi.fn<DesktopBridge["startRun"]>(defaults.startRun);
+  const pending = deferred<Awaited<ReturnType<DesktopBridge["commandConversationRecovery"]>>>();
+  const commandConversationRecovery = vi.fn<DesktopBridge["commandConversationRecovery"]>(() => pending.promise);
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    catalog: async () => ({ ...emptyCatalog, entries: sourcesAvailable ? [{ sessionRef: "investigation.jsonl", sessionId: "source-durable", sourceState: "ready", sourceBytes: 1024, sourceModifiedAtUnixMs: 0, title: "Other investigation", userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false }] : [] }),
+    branchKnowledgePreview: async (_workspace, _session, source) => ({ ...source, points: [{ sourceTurnDigest: "exact-turn", sourceMessageId: "exact-message", sourceTextSha256: "full-source-hash", summarySha256: "selected-summary-hash", summary: "Use bounded traversal with existing ignore rules.", truncated: false }] }),
+    commandConversationRecovery, startRun,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  const composer = await readyComposer();
+  await user.type(composer, "Keep working on the current approach");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByRole("button", { name: "Stop run" });
+  await waitFor(() => expect(composer.value).toBe(""));
+  await user.type(composer, "An unsent follow-up draft");
+  sourcesAvailable = true;
+  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await screen.findByRole("option", { name: "Other investigation" });
+  await user.selectOptions(screen.getByRole("combobox", { name: "Source conversation" }), JSON.stringify(["investigation.jsonl", "source-durable"]));
+  await user.click(await screen.findByRole("button", { name: "Import conclusion" }));
+  expect(screen.getByRole("button", { name: "Importing conclusion…" })).toBeTruthy();
+  expect(composer.value).toBe("An unsent follow-up draft");
+  const input = commandConversationRecovery.mock.calls[0][1];
+  expect(input.action).toEqual({ kind: "import_branch_knowledge", selection: { sourceSessionRef: "investigation.jsonl", sourceSessionId: "source-durable", sourceTurnDigest: "exact-turn", sourceMessageId: "exact-message", sourceTextSha256: "full-source-hash", summarySha256: "selected-summary-hash" } });
+  await act(async () => pending.resolve({ commandId: "import-command", clientId: "desktop", sessionId: input.sessionId, action: "import_branch_knowledge", recovery: { checkpoints: [], forkPoints: [], throughStreamSequence: 3 }, branchKnowledge: { importId: "import-id", alreadyImported: false }, replayed: false }));
+  expect(await screen.findByText("Conclusion imported for future requests. Your draft is unchanged.")).toBeTruthy();
+  expect(composer.value).toBe("An unsent follow-up draft");
+  expect(startRun).toHaveBeenCalledOnce();
 });

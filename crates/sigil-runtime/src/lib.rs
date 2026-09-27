@@ -118,6 +118,7 @@ mod agent_completion;
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
+pub mod application_branch_knowledge;
 pub mod application_catalog;
 pub mod application_compaction;
 pub mod application_delivery_ack_store;

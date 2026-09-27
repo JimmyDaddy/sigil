@@ -1205,6 +1205,185 @@
         ],
         "type": "object"
       },
+      "BranchKnowledgeImport": {
+        "properties": {
+          "source_message_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "source_session_ref": {
+            "type": "string"
+          },
+          "source_text_sha256": {
+            "type": "string"
+          },
+          "source_turn_digest": {
+            "type": "string"
+          },
+          "summary_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_ref",
+          "source_session_id",
+          "source_turn_digest",
+          "source_message_id",
+          "source_text_sha256",
+          "summary_sha256"
+        ],
+        "type": "object"
+      },
+      "BranchKnowledgePoint": {
+        "properties": {
+          "source_message_id": {
+            "type": "string"
+          },
+          "source_text_sha256": {
+            "type": "string"
+          },
+          "source_turn_digest": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "summary_sha256": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "source_turn_digest",
+          "source_message_id",
+          "source_text_sha256",
+          "summary_sha256",
+          "summary",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "BranchKnowledgePreview": {
+        "properties": {
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/BranchKnowledgePoint"
+            },
+            "type": "array"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "source_session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_ref",
+          "source_session_id",
+          "points"
+        ],
+        "type": "object"
+      },
+      "BranchKnowledgeReceipt": {
+        "properties": {
+          "already_imported": {
+            "type": "boolean"
+          },
+          "import_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "import_id",
+          "already_imported"
+        ],
+        "type": "object"
+      },
+      "BranchKnowledgeSource": {
+        "properties": {
+          "source_session_id": {
+            "type": "string"
+          },
+          "source_session_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_ref",
+          "source_session_id"
+        ],
+        "type": "object"
+      },
+      "BranchLineage": {
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/BranchLink"
+            },
+            "type": "array"
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BranchLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "unavailable_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "parent",
+          "children",
+          "unavailable_count"
+        ],
+        "type": "object"
+      },
+      "BranchLink": {
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "session_ref": {
+            "type": "string"
+          },
+          "source_turn_digest": {
+            "type": "string"
+          },
+          "source_turn_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_ref",
+          "session_id",
+          "source_turn_digest",
+          "title",
+          "source_turn_index"
+        ],
+        "type": "object"
+      },
       "CheckpointFileAvailability": {
         "enum": [
           "restorable",
@@ -3686,6 +3865,9 @@
           },
           {
             "$ref": "#/components/schemas/ConversationRecoveryForkAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationRecoveryImportBranchKnowledgeAction"
           }
         ]
       },
@@ -3697,9 +3879,20 @@
               "apply_compaction",
               "apply_standalone_tool_output_shrink",
               "restore_checkpoint",
-              "fork_conversation"
+              "fork_conversation",
+              "import_branch_knowledge"
             ],
             "type": "string"
+          },
+          "branch_knowledge": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BranchKnowledgeReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "client_id": {
             "type": "string"
@@ -3820,6 +4013,22 @@
           "kind",
           "source_turn_digest",
           "model_ref"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryImportBranchKnowledgeAction": {
+        "properties": {
+          "kind": {
+            "const": "import_branch_knowledge",
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/BranchKnowledgeImport"
+          }
+        },
+        "required": [
+          "kind",
+          "selection"
         ],
         "type": "object"
       },
@@ -12872,6 +13081,82 @@
           }
         },
         "summary": "Read one bounded application projection page"
+      }
+    },
+    "/sessions/{session_id}/branches": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchLineage"
+                }
+              }
+            },
+            "description": "Bounded session projection"
+          },
+          "404": {
+            "description": "Session missing"
+          },
+          "503": {
+            "description": "Projection unavailable"
+          }
+        },
+        "summary": "Read parent and child branch identities"
+      }
+    },
+    "/sessions/{session_id}/branches/knowledge-preview": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BranchKnowledgeSource"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchKnowledgePreview"
+                }
+              }
+            },
+            "description": "Bounded session projection"
+          },
+          "404": {
+            "description": "Session missing"
+          },
+          "503": {
+            "description": "Projection unavailable"
+          }
+        },
+        "summary": "Preview selected finalized source conclusions"
       }
     },
     "/sessions/{session_id}/continuity": {

@@ -192,6 +192,12 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(&skipped.reason, 96)
         ),
         ControlEntry::ExternalProvenance(entry) => render_external_provenance_line(entry),
+        ControlEntry::BranchKnowledgeImportedV1(entry) => format!(
+            "[ctl] branch knowledge source={} import={} unverified{}",
+            truncate_session_view_text(&entry.source_session_id, 32),
+            truncate_session_view_text(&entry.import_id, 16),
+            if entry.truncated { " truncated" } else { "" },
+        ),
         ControlEntry::WebUrlCapabilityDescriptor(entry) => format!(
             "[ctl] url capability source={} message={} restart={:?}",
             truncate_session_view_text(&entry.source_id, 48),

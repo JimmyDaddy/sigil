@@ -1409,6 +1409,37 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    /// Reads exact branch lineage without blocking an active run.
+    pub fn branch_lineage(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::HttpBranchLineage, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| self.driver.branch_lineage(&session)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "branch lineage",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(recovery_driver_registry_error)
+    }
+
+    /// Previews one selected source without reserving the destination writer.
+    pub fn branch_knowledge_preview(
+        &self,
+        session_id: &str,
+        source: &crate::HttpBranchKnowledgeSource,
+    ) -> Result<crate::HttpBranchKnowledgePreview, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.branch_knowledge_preview(&session, source)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "branch knowledge preview",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(recovery_driver_registry_error)
+    }
+
     /// Projects checkpoint restore and conversation-fork choices from durable session truth.
     ///
     /// # Errors
@@ -1587,7 +1618,14 @@ impl HttpSessionRunRegistry {
         application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
         let session = self.get_session(session_id)?;
-        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let guard = if matches!(
+            action,
+            HttpConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
+        ) {
+            None
+        } else {
+            Some(self.reserve_durable_session_mutation(&session.durable_session_scope_id)?)
+        };
         let driver_command = HttpConversationRecoveryDriverCommand {
             application_operation,
             command_id: command_id.to_owned(),
@@ -1603,7 +1641,9 @@ impl HttpSessionRunRegistry {
             run_id: session_id.to_owned(),
         })
         .and_then(|result| result.map_err(recovery_driver_registry_error));
-        guard.finish(false);
+        if let Some(guard) = guard {
+            guard.finish(false);
+        }
         let output = output?;
         Ok(HttpConversationRecoveryCommandReceipt {
             command_id: command_id.to_owned(),
@@ -1615,6 +1655,7 @@ impl HttpSessionRunRegistry {
             tool_output_shrink: output.tool_output_shrink,
             restore: output.restore,
             fork: output.fork,
+            branch_knowledge: output.branch_knowledge,
             recovery: output.recovery,
             correlation_id: correlation_id.map(str::to_owned),
             replayed: false,
@@ -6894,6 +6935,16 @@ fn validate_conversation_recovery_command(
     action: &HttpConversationRecoveryCommandAction,
 ) -> Result<(), HttpRegistryError> {
     let valid = match action {
+        HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => [
+            &selection.source_session_ref,
+            &selection.source_session_id,
+            &selection.source_turn_digest,
+            &selection.source_message_id,
+            &selection.source_text_sha256,
+            &selection.summary_sha256,
+        ]
+        .into_iter()
+        .all(|value| is_bounded_recovery_token(value)),
         HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
             is_bounded_recovery_token(preview_id)
         }

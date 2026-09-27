@@ -160,6 +160,10 @@ Press `Alt-R` to review recorded changes and add comments. Choose a turn, then a
 
 For recorded file changes, choose **Review changes** beside a checkpoint. Select an old/new line, Shift-click to extend the range, add comments, and send the batch. Comments on outdated or unavailable current files remain usable; Sigil includes the recorded source and requires fresh reads before editing. While a run is active the comments enter the normal follow-up queue. Failed admission preserves the batch and your regular draft.
 
+To bring a conclusion back, select its source in `/resume`, press `Ctrl-O`, then `K`. Review the branch relations and completed conclusion, use `Up/Down` to choose and `PgUp/PgDn` to read, then press `Enter` to import it into the current conversation. Imported text is unverified knowledge and may omit details; it transfers no permissions or passed checks. The current draft stays intact and nothing is sent automatically.
+
+In Desktop, open **Recovery controls → Branches and conclusions** to navigate parent/child conversations or search for a source conversation. Preview a completed conclusion, then choose **Import conclusion**. Importing keeps your draft, works during an active run, and supplies unverified reference material to future requests without running the model. It transfers no permissions or verification results.
+
 ### Intent Stack review
 
 When the current session has accepted Intent Stack history, press `Alt-S` or run `/intents` to review each intent, its dependencies, verification state, retained artifacts, and conflicts. Select an intent with `Up/Down`; `D` creates an exact Drop preview, and `Enter` confirms only that reviewed preview. Shared, drifted, unavailable, read-only, or out-of-scope contributions remain visible but cannot be dropped. Shell, network, remote, and other unsupported side effects are never undone. A current session without accepted durable intent history shows an explicit unavailable state rather than a guessed stack.

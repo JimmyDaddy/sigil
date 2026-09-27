@@ -1860,6 +1860,7 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::MemorySnapshotCaptured(_) => "memory_snapshot_captured",
         ControlEntry::ContextAssemblySkipped(_) => "context_assembly_skipped",
         ControlEntry::ExternalProvenance(_) => "external_provenance",
+        ControlEntry::BranchKnowledgeImportedV1(_) => "branch_knowledge_imported_v1",
         ControlEntry::ConversationForkCommittedV1(_) => "conversation_fork_committed_v1",
         ControlEntry::WebUrlCapabilityDescriptor(_) => "web_url_capability_descriptor",
         ControlEntry::ProviderDiagnostic(_) => "provider_diagnostic",

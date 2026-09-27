@@ -1,3 +1,4 @@
+import type { BranchLineage, BranchKnowledgeSource, BranchKnowledgePreview } from "./features/conversation/branchTypes";
 import type { CheckpointReview, ReviewAnnotation } from "./features/conversation/reviewTypes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -175,6 +176,8 @@ export interface DesktopBridge {
     workspaceId: string,
     input: ConversationQueueCommandInput,
   ): Promise<ConversationQueueCommandReceipt>;
+  branchLineage(workspaceId: string, sessionId: string): Promise<BranchLineage>;
+  branchKnowledgePreview(workspaceId: string, sessionId: string, source: BranchKnowledgeSource): Promise<BranchKnowledgePreview>;
   conversationRecovery(workspaceId: string, sessionId: string): Promise<ConversationRecoveryView>;
   conversationCompactionPreview(workspaceId: string, sessionId: string): Promise<CompactionReview>;
   compactConversation(
@@ -443,6 +446,10 @@ export const desktopBridge: DesktopBridge = {
       workspaceId,
       input,
     }),
+  branchLineage: (workspaceId, sessionId) =>
+    invoke<BranchLineage>("desktop_branch_lineage", { workspaceId, sessionId }),
+  branchKnowledgePreview: (workspaceId, sessionId, source) =>
+    invoke<BranchKnowledgePreview>("desktop_branch_knowledge_preview", { workspaceId, sessionId, source }),
   conversationRecovery: (workspaceId, sessionId) =>
     invoke<ConversationRecoveryView>("desktop_conversation_recovery", { workspaceId, sessionId }),
   conversationCompactionPreview: (workspaceId, sessionId) =>

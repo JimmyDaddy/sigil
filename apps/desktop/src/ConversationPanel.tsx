@@ -1,3 +1,4 @@
+import { BranchKnowledgePanel } from "./BranchKnowledgePanel";
 import { ChangeReview } from "./ChangeReview";
 import { emptyChangeReviewDraft, type CheckpointReview, type ReviewAnnotation } from "./features/conversation/reviewTypes";
 import {
@@ -122,7 +123,7 @@ interface ConversationPanelProps {
   onOpenSessionPicker: (query: string) => void;
   onOpenSettings: () => void;
   onOpenSupport: () => void;
-  onOpenFork: (sessionRef: string, sessionId: string) => Promise<void>;
+  onOpenFork: (sessionRef: string, sessionId: string, title?: string) => Promise<void>;
   onRetrySessionAttach?: (recoveryBinding: string) => Promise<boolean>;
   onResumeAcceptedUserInput?: () => Promise<boolean>;
 }
@@ -3046,6 +3047,12 @@ export function ConversationPanel({
         returnFocusRef={recoveryTriggerRef}
         onOpenChange={setConversationRecoveryOpen}
       >
+        {conversationRecoveryOpen && <BranchKnowledgePanel
+          key={`${workspaceId}:${session.id}`}
+          bridge={bridge} workspaceId={workspaceId} sessionId={session.id}
+          onOpen={onOpenFork}
+          onImported={(receipt) => { setConversationRecovery(receipt.recovery); setRunContextReload((value) => value + 1); }}
+        />}
         <ConversationRecoveryPanel
           recovery={conversationRecovery}
           preview={checkpointRestorePreview}

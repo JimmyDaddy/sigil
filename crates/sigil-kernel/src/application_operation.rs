@@ -15,6 +15,13 @@ pub enum ApplicationOperationTargetV1 {
         connection_id: String,
         model_id: String,
     },
+    ImportBranchKnowledge {
+        source_session_id: String,
+        source_turn_digest: String,
+        source_message_id: String,
+        source_text_sha256: String,
+        summary_sha256: String,
+    },
     QueueEnqueue {
         prompt_hash: String,
         target: crate::ConversationInputTarget,
@@ -78,6 +85,22 @@ impl ApplicationOperationTargetV1 {
                 &entry.source_turn_digest == source_turn_digest
                     && entry.target_model_ref.connection_id.as_str() == connection_id
                     && &entry.target_model_ref.model_id == model_id
+            }
+            (
+                Self::ImportBranchKnowledge {
+                    source_session_id,
+                    source_turn_digest,
+                    source_message_id,
+                    source_text_sha256,
+                    summary_sha256,
+                },
+                ControlEntry::BranchKnowledgeImportedV1(entry),
+            ) => {
+                entry.source_session_id == *source_session_id
+                    && entry.source_turn_digest == *source_turn_digest
+                    && entry.source_message_id == *source_message_id
+                    && entry.source_text_sha256 == *source_text_sha256
+                    && entry.summary_sha256 == *summary_sha256
             }
             (
                 Self::QueueEnqueue {

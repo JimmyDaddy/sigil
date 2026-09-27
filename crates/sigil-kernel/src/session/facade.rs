@@ -749,6 +749,73 @@ impl Session {
         Ok(fork_event)
     }
 
+    /// Appends one user-selected conclusion through this session's existing writer. Exact retry
+    /// is idempotent; unrelated same-session appends do not invalidate selected knowledge.
+    ///
+    /// # Errors
+    /// Rejects invalid or foreign bindings, non-durable sessions, conflicting imports and failed
+    /// durable writes. The source is verified by the host before this method is called.
+    pub fn append_branch_knowledge(
+        &mut self,
+        imported: crate::BranchKnowledgeImportedV1,
+    ) -> Result<bool> {
+        imported.validate()?;
+        if imported.target_session_id != self.session_scope_id {
+            bail!("branch knowledge destination scope changed");
+        }
+        let store = self
+            .store
+            .clone()
+            .context("branch knowledge requires a durable session")?;
+        let control = ControlEntry::BranchKnowledgeImportedV1(imported.clone());
+        if let Some(binding) = self.runtime_attachments.application_operation.as_ref() {
+            if !binding.target.matches(&control) {
+                bail!("branch knowledge selection differs from its application operation");
+            }
+            let already_imported = self.entries.iter().any(|entry| {
+                matches!(entry,
+                SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(existing))
+                    if existing.import_id == imported.import_id)
+            });
+            // A distinct explicit K/F needs its own causal receipt even when the same knowledge
+            // was selected before. Reaffirm this exact control and its marker atomically through
+            // the established operation writer; Context V2 deduplicates the semantic import ID.
+            self.append_control(control)?;
+            return Ok(!already_imported);
+        }
+        let entry = SessionLogEntry::Control(control.clone());
+        let event = store.append_event_if_with_identity(
+            DurableEventType::SessionEntryRecorded,
+            serde_json::json!({"session_log_entry": entry}),
+            stable_event_uuid("branch-knowledge-import", &imported.import_id),
+            None,
+            None,
+            |records| {
+                for record in records {
+                    if record.session_id() != imported.target_session_id {
+                        bail!("branch knowledge destination scope changed");
+                    }
+                    if let Some(SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(
+                        existing,
+                    ))) = record.session_log_entry()?
+                        && existing.import_id == imported.import_id
+                    {
+                        if existing != imported {
+                            bail!("branch knowledge import conflicts with its recorded content");
+                        }
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            },
+        )?;
+        if event.is_some() || !self.entries.iter().any(|entry| matches!(entry,
+            SessionLogEntry::Control(ControlEntry::BranchKnowledgeImportedV1(entry)) if entry.import_id == imported.import_id)) {
+            self.record_durably_appended_control(control);
+        }
+        Ok(event.is_some())
+    }
+
     pub(super) fn bind_tool_artifacts_after_append(
         &self,
         entries: &[SessionLogEntry],
@@ -3575,6 +3642,11 @@ impl Session {
             insert_task_memory_context_snippets(task_memory, &mut snippets);
             items.extend(task_items);
         }
+
+        let branch_knowledge =
+            crate::branch_knowledge_context(&self.session_scope_id, &self.entries)?;
+        snippets.extend(branch_knowledge.snippets);
+        items.extend(branch_knowledge.items);
 
         snippets.extend(runtime_context.snippets);
         items.extend(runtime_context.items);

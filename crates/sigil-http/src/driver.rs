@@ -202,6 +202,7 @@ pub struct HttpConversationRecoveryDriverCommand {
 /// Driver-owned durable outcome of one recovery mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConversationRecoveryDriverOutput {
+    pub branch_knowledge: Option<crate::HttpBranchKnowledgeReceipt>,
     pub compaction: Option<HttpCompactionReceipt>,
     pub compaction_review: Option<HttpCompactionReview>,
     pub tool_output_shrink: Option<crate::HttpToolOutputShrinkReceipt>,
@@ -579,6 +580,21 @@ pub trait HttpRunDriver: Send + Sync {
     }
 
     /// Projects exact checkpoint and finalized-turn recovery bindings.
+    fn branch_lineage(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<crate::HttpBranchLineage, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+    /// Previews finalized conclusions from an explicitly selected catalog source.
+    fn branch_knowledge_preview(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _source: &crate::HttpBranchKnowledgeSource,
+    ) -> Result<crate::HttpBranchKnowledgePreview, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
     fn conversation_recovery_view(
         &self,
         _session: &HttpSessionSnapshot,
