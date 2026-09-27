@@ -618,18 +618,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
     try {
-      const selectedDefaultModel = requestedModel ?? (
-        defaultModel !== undefined
-          && workspaceRunContext !== undefined
-          && workspaceRunContext.modelOptions.some(
-            (option) =>
-              option.modelRef.connectionId === defaultModel.connectionId
-              && option.modelRef.modelId === defaultModel.modelId
-              && modelOptionIsSelectable(option),
-          )
-          ? defaultModel
-          : undefined
-      );
+      const selectedDefaultModel = requestedModel ?? defaultModel ?? providerInventory?.defaultModel;
       const session = await bridge.createSession(
         activeWorkspaceId,
         t("newConversation"),

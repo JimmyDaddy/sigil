@@ -18,6 +18,7 @@ import type {
   DesktopBootstrap,
   PlanDecisionAction,
   PermissionMode,
+  ProviderConnectionInventory,
   RunContext,
   RunStreamStatus,
   ProviderSetupCatalog,
@@ -1719,6 +1720,59 @@ describe("desktop workspace and history shell", () => {
 
     expect(screen.queryByRole("radio", { name: /DeepSeek V4 Flash/ })).toBeNull();
     expect(providerSetupCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs the default route using an existing connection before any conversation exists", async () => {
+    const user = userEvent.setup();
+    const replacement = { connectionId: "ready-connection", modelId: "manual-model-without-catalog" };
+    const inventory: ProviderConnectionInventory = {
+      configMode: "v2",
+      defaultModel: { connectionId: "broken-default", modelId: "old-model" },
+      connections: [
+        { id: "broken-default", label: "Unavailable default", providerLabel: "Custom", protocolLabel: "Chat Completions", endpointDisplay: "broken.example", credentialSource: "environment", readiness: "needs_credential" },
+        { id: "ready-connection", label: "Existing connection", providerLabel: "Custom", protocolLabel: "Chat Completions", endpointDisplay: "ready.example", credentialSource: "stored", readiness: "ready" },
+      ],
+      issues: [],
+    };
+    const createSession = vi.fn(async () => ({ id: "new-repaired-session", label: "New conversation", runCount: 0 }));
+    const openSession = vi.fn();
+    const runContext = vi.fn(async () => defaultRunContext);
+    const saveProviderSetup = vi.fn();
+    const providerSetupCatalog = vi.fn();
+    const saveProviderDefaultModel = vi.fn(async (_workspaceId: string, modelRef: { connectionId: string; modelId: string }) => ({
+      defaultModel: modelRef,
+      inventory: { ...inventory, defaultModel: modelRef },
+      saveWarning: false,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      providerConnections: async () => inventory,
+      createSession,
+      openSession,
+      runContext,
+      saveProviderSetup,
+      providerSetupCatalog,
+      saveProviderDefaultModel,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Connect a model provider" });
+    expect(screen.getByRole("button", { name: "New conversation" }).hasAttribute("disabled")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Configured connection" }), replacement.connectionId);
+    const save = screen.getByRole("button", { name: "Save default model" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    await user.type(screen.getByLabelText("Model ID"), replacement.modelId);
+    await user.click(save);
+    await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenCalledWith(workspace.id, replacement));
+    await waitFor(() => expect(save.hasAttribute("disabled")).toBe(false));
+    expect(createSession).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+    expect(runContext).not.toHaveBeenCalled();
+    expect(saveProviderSetup).not.toHaveBeenCalled();
+    expect(providerSetupCatalog).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledWith(workspace.id, "New conversation", replacement));
   });
 
   it("persists a provider-validated default model for newly created desktop conversations", async () => {

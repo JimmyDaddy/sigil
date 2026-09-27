@@ -19,6 +19,7 @@ import { Button, Checkbox, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ProviderSetup } from "./ProviderSetup";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
+import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -102,26 +103,32 @@ export function SettingsPage({
     const selected = modelContext?.modelOptions.find(
       (option) => modelRefKey(option.modelRef) === selection,
     );
+    if (selected === undefined || !modelOptionIsSelectable(selected)) {
+      notify({ tone: "error", message: t("settingsSaveFailed") });
+      return;
+    }
+    await saveDefaultModel(selected.modelRef);
+  };
+  const saveDefaultModel = async (modelRef: ProviderModelRef) => {
     const connection = providerInventory?.connections.find(
-      (candidate) => candidate.id === selected?.modelRef.connectionId,
+      (candidate) => candidate.id === modelRef.connectionId,
     );
     if (
       workspaceId === undefined
-      || selected === undefined
-      || !modelOptionIsSelectable(selected)
       || connection === undefined
+      || modelRef.modelId.trim() === ""
     ) {
       notify({ tone: "error", message: t("settingsSaveFailed") });
       return;
     }
     setDefaultModelSaving(true);
     try {
-      const configuredContextWindow = connection.modelContextWindows?.[selected.modelRef.modelId];
+      const configuredContextWindow = connection.modelContextWindows?.[modelRef.modelId];
       const result = configuredContextWindow === undefined
-        ? await bridge.saveProviderDefaultModel(workspaceId, selected.modelRef)
+        ? await bridge.saveProviderDefaultModel(workspaceId, modelRef)
         : await bridge.saveProviderDefaultModel(
           workspaceId,
-          selected.modelRef,
+          modelRef,
           configuredContextWindow,
         );
       if (!onProviderInventoryChange(result.inventory)) return;
@@ -309,7 +316,16 @@ export function SettingsPage({
             </div>
           </div>
           <div className="settings-model-controls">
-            {modelContext === undefined ? (
+            {modelContext === undefined && providerInventory?.configMode === "v2"
+              && providerInventory.connections.length > 0 ? (
+              <DefaultModelRouteForm
+                key={workspaceId}
+                inventory={providerInventory}
+                defaultModel={effectiveDefaultModel}
+                saving={defaultModelSaving}
+                onSave={saveDefaultModel}
+              />
+            ) : modelContext === undefined ? (
               <p className="settings-control-unavailable">
                 {effectiveDefaultModel === undefined
                   ? t("defaultModelUnavailable")
