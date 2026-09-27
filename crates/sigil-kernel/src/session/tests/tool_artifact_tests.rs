@@ -2989,6 +2989,135 @@ fn oversized_execution_details_keep_bounded_lifecycle_facts() -> Result<()> {
 }
 
 #[test]
+fn long_nonzero_command_output_settles_error_facts_and_keeps_readable_artifact() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let output = "check failed: expected accepted input\n".repeat(1024);
+    let details = json!({
+        "execution_id":"failed-command", "generation":9, "status":"exited",
+        "verdict":"failed", "exit_code":3, "cleanup_complete":true,
+        "output_preview":output, "output_total_bytes":output.len(),
+        "call":{"summary":"command=run-check"}
+    });
+    // terminal_entry_result_with_shell_context places the same terminal snapshot in both
+    // error.details and metadata.details after a real nonzero process exit.
+    let body =
+        format!("started execution failed-command\nstatus: exited\nverdict: failed\n{output}");
+    let mut result = ToolResult::error(
+        "failed-command-call",
+        "exec_command",
+        ToolErrorKind::ExitStatus,
+        &body,
+    )
+    .with_error_details(false, details.clone());
+    result.metadata = ToolResultMeta {
+        exit_code: Some(3),
+        duration_ms: Some(123),
+        details,
+        ..ToolResultMeta::default()
+    };
+    let (recorded, _) =
+        ToolResultRecordedV3::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
+    recorded.validate()?;
+    assert!(serde_json::to_vec(&recorded.facts)?.len() <= TOOL_RESULT_FACTS_MAX_BYTES);
+    assert_eq!(recorded.facts.status, "error");
+    assert_eq!(recorded.facts.exit_code, Some(3));
+    assert_eq!(recorded.facts.duration_ms, Some(123));
+    let error = recorded.facts.error.as_ref().context("command error")?;
+    assert_eq!(error.kind, ToolErrorKind::ExitStatus);
+    assert!(!error.retryable);
+    for projection in [&recorded.facts.tool_specific, &error.details] {
+        assert_eq!(projection["execution_id"], "failed-command");
+        assert_eq!(projection["generation"], 9);
+        assert_eq!(projection["exit_code"], 3);
+        assert_eq!(projection["cleanup_complete"], true);
+        assert_eq!(projection["projection"], "truncated");
+    }
+    assert_eq!(
+        recorded.wire_semantics.outcome,
+        ToolResultOutcomeV1::ToolError
+    );
+    let descriptor = recorded.artifact.descriptor().context("published output")?;
+    assert_eq!(store.read_all(descriptor)?, body.as_bytes());
+    assert_eq!(descriptor.observed_bytes, body.len() as u64);
+    let restored: ToolResultRecordedV3 = serde_json::from_slice(&serde_json::to_vec(&recorded)?)?;
+    restored.validate()?;
+    assert_eq!(restored.facts, recorded.facts);
+    assert_eq!(restored.artifact, recorded.artifact);
+    Ok(())
+}
+
+#[test]
+fn facts_constructor_bounds_aggregate_paths_receipts_and_json_escaping() -> Result<()> {
+    for error_text in ["ordinary error".to_owned(), "\0".repeat(2000)] {
+        let mut result = ToolResult::error(
+            "aggregate-call",
+            "apply_patch",
+            ToolErrorKind::Io,
+            error_text,
+        )
+        .with_error_details(true, json!({"detail":"e".repeat(4000)}));
+        result.metadata = ToolResultMeta {
+            changed_files: (0..128)
+                .map(|index| format!("{index}/{}", "界\0".repeat(256)))
+                .collect(),
+            receipt: Some(crate::ToolReceiptMetadata {
+                idempotency_key: None,
+                idempotent: false,
+                mutation_operation_ids: (0..128)
+                    .map(|index| format!("receipt-{index}-{}", "\0".repeat(200)))
+                    .collect(),
+                status: crate::ToolReceiptStatus::Failed,
+            }),
+            details: json!({"detail":"m".repeat(4000)}),
+            ..ToolResultMeta::default()
+        };
+        let facts = ToolResultFactsV1::from_result(&result);
+        facts.validate()?;
+        assert!(serde_json::to_vec(&facts)?.len() <= TOOL_RESULT_FACTS_MAX_BYTES);
+        assert!(facts.changed_files.len() < result.metadata.changed_files.len());
+        assert!(facts.mutation_receipt_refs.len() < 128);
+        let error = facts.error.context("bounded error")?;
+        assert_eq!(error.kind, ToolErrorKind::Io);
+        assert!(error.retryable);
+        assert!(serde_json::to_vec(&error.message)?.len() <= TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES);
+    }
+    Ok(())
+}
+
+#[test]
+fn oversized_error_details_also_settle_bounded_terminal_fallback() -> Result<()> {
+    let details = json!({"execution_id":"fallback-command", "generation":3,
+        "status":"exited", "exit_code":2, "output_preview":"failure\n".repeat(4096)});
+    let mut result = ToolResult::error(
+        "fallback-command-call",
+        "exec_command",
+        ToolErrorKind::ExitStatus,
+        "failure\n".repeat(4096),
+    )
+    .with_error_details(false, details.clone());
+    result.metadata.details = details;
+    result.metadata.exit_code = Some(2);
+    let (recorded, _) = ToolResultRecordedV3::terminal_fallback(
+        &result,
+        ToolArtifactSensitivity::Ordinary,
+        &anyhow::anyhow!("injected projection failure"),
+    )?;
+    recorded.validate()?;
+    assert!(serde_json::to_vec(&recorded.facts)?.len() <= TOOL_RESULT_FACTS_MAX_BYTES);
+    assert_eq!(recorded.facts.status, "error");
+    assert_eq!(recorded.facts.exit_code, Some(2));
+    assert_eq!(
+        recorded.facts.error.context("fallback error")?.kind,
+        ToolErrorKind::ExitStatus
+    );
+    assert!(matches!(
+        recorded.artifact,
+        ToolArtifactBindingV1::Unavailable { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn literal_search_pages_preserve_every_occurrence_and_accept_large_requests() -> Result<()> {
     for (content, query, requested, context, expected) in [
         ("hit\n".repeat(103), "hit", 100, 0, 103),

@@ -66,7 +66,7 @@ pub enum BorrowedReleaseOutputErrorV1 {
     SymlinkAtBoundary,
     #[error("release output destination is already occupied")]
     DestinationOccupied,
-    #[error("release output payload is empty or exceeds its bounded limit")]
+    #[error("release output payload does not match its operation or exceeds its bounded limit")]
     PayloadOutOfBounds,
     #[error("release output tree entry is invalid or duplicated")]
     EntryInvalid,
@@ -171,8 +171,7 @@ impl AuthorityBorrowedReleaseOutputServiceV1 {
         self.validate_root()?;
         match request.operation {
             BorrowedReleaseOutputOperationV1::File => {
-                if request.content.is_empty()
-                    || request.content.len() > MAX_BORROWED_RELEASE_FILE_BYTES
+                if request.content.len() > MAX_BORROWED_RELEASE_FILE_BYTES
                     || !request.entries.is_empty()
                 {
                     return Err(BorrowedReleaseOutputErrorV1::PayloadOutOfBounds);
@@ -215,7 +214,7 @@ impl AuthorityBorrowedReleaseOutputServiceV1 {
                 let mut total = 0usize;
                 for entry in &request.entries {
                     let relative = validate_relative_entry(&entry.relative_path)?;
-                    if !seen.insert(relative.to_owned()) || entry.content.is_empty() {
+                    if !seen.insert(relative.to_owned()) {
                         return Err(BorrowedReleaseOutputErrorV1::EntryInvalid);
                     }
                     total = total

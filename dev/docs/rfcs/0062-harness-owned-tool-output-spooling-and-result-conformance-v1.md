@@ -899,6 +899,11 @@ full bounded facts
 
 facts 超限不得返回使 agent run 中止的普通 capture error。
 
+当前投影在构造时共享这 8 KiB 序列化预算：error summary 按 JSON 转义后的字节计界，
+`error.details` 与 `metadata.details` 均使用有界诊断投影，changed-files 与 receipt refs
+逐项计入剩余预算。长命令错误仍保留原失败类别、退出码和可用 lifecycle facts；原输出继续由
+artifact/body 路径保存，不因摘要缩减变成成功或触发重执行。terminal fallback 复用同一有界构造器。
+
 ### 11.2 Current assistant-batch initial projection
 
 initial preview 的 byte cap 只负责约束当前 assistant tool-call batch，不负责长期历史治理。默认：

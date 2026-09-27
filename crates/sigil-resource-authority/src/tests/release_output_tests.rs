@@ -5,6 +5,57 @@ fn capsule(value: &str) -> OpaqueRegistrationCapsuleId {
 }
 
 #[test]
+fn r71_release_output_preserves_empty_files_and_exact_receipts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = AuthorityBorrowedReleaseOutputServiceV1::new(temp.path());
+    for (name, operation, entries) in [
+        (
+            "unchanged.patch",
+            BorrowedReleaseOutputOperationV1::File,
+            Vec::new(),
+        ),
+        (
+            "empty-tree",
+            BorrowedReleaseOutputOperationV1::Tree,
+            vec![BorrowedReleaseOutputEntryV1 {
+                relative_path: PathBuf::from("unchanged.patch"),
+                content: Vec::new(),
+            }],
+        ),
+    ] {
+        let destination = temp.path().join(name);
+        let request = BorrowedReleaseOutputRequestV1 {
+            schema_version: BORROWED_RELEASE_OUTPUT_SCHEMA_VERSION,
+            capsule_id: capsule(name),
+            operation,
+            destination: destination.clone(),
+            content: Vec::new(),
+            entries,
+        };
+        let receipt = service
+            .publish(request.clone())
+            .expect("empty files are valid output");
+        assert_eq!(receipt.committed_entry_count, 1);
+        assert_eq!(receipt.committed_total_bytes, 0);
+        assert!(!receipt.partial);
+        let file = if operation == BorrowedReleaseOutputOperationV1::File {
+            destination
+        } else {
+            destination.join("unchanged.patch")
+        };
+        assert!(fs::read(&file).expect("committed empty file").is_empty());
+        let replay = BorrowedReleaseOutputRequestV1 {
+            destination: temp.path().join(format!("replay-{name}")),
+            ..request
+        };
+        assert_eq!(
+            service.publish(replay),
+            Err(BorrowedReleaseOutputErrorV1::CapsuleReplay)
+        );
+    }
+}
+
+#[test]
 fn r71_release_file_is_create_new_and_returns_closed_receipt() {
     let temp = tempfile::tempdir().expect("tempdir");
     let service = AuthorityBorrowedReleaseOutputServiceV1::new(temp.path());

@@ -70,6 +70,7 @@ const TOOL_RESULT_FACTS_MAX_BYTES: usize = 8 * 1024;
 pub const TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 const TOOL_RESULT_FACT_PATH_LIMIT: usize = 128;
 const TOOL_RESULT_FACT_PATH_MAX_BYTES: usize = 1024;
+const TOOL_RESULT_FACT_REF_LIMIT: usize = 16;
 const TOOL_ARTIFACT_REF_PREFIX: &str = "ta1_";
 #[cfg(any(test, feature = "test-support"))]
 const TOOL_ARTIFACT_MANIFEST_MAX_ENTRIES: usize = 100_000;
@@ -334,6 +335,7 @@ pub struct ToolResultFactsV1 {
 
 impl ToolResultFactsV1 {
     pub fn from_result(result: &ToolResult) -> Self {
+        let mut error_details = Value::Null;
         let error = match &result.status {
             crate::ToolResultStatus::Ok => None,
             crate::ToolResultStatus::Error(error) => {
@@ -342,45 +344,59 @@ impl ToolResultFactsV1 {
                     &safe_persistence_text(&error.message),
                     TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
                 );
-                error.details = safe_persistence_json_value(error.details);
+                // JSON escaping also consumes the durable facts budget.
+                while serde_json::to_vec(&error.message)
+                    .expect("error summary serializes")
+                    .len()
+                    > TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES
+                {
+                    error.message = bounded_utf8(&error.message, error.message.len() / 2);
+                }
+                error_details = std::mem::take(&mut error.details);
                 Some(error)
             }
         };
-        let tool_specific = bounded_tool_specific(&result.metadata.details);
-        let changed_files = result
-            .metadata
-            .changed_files
-            .iter()
-            .take(TOOL_RESULT_FACT_PATH_LIMIT)
-            .map(|path| {
-                let safe = safe_persistence_text(path);
-                bounded_utf8(&safe, TOOL_RESULT_FACT_PATH_MAX_BYTES)
-            })
-            .collect();
-        let mutation_receipt_refs = result
-            .metadata
-            .receipt
-            .as_ref()
-            .map(|receipt| {
-                receipt
-                    .mutation_operation_ids
-                    .iter()
-                    .map(|value| bounded_utf8(&safe_persistence_text(value), 256))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
+        let tool_specific =
+            bounded_tool_specific(&result.metadata.details, TOOL_RESULT_FACTS_MAX_BYTES / 2);
+        let mut facts = Self {
             status: if error.is_some() { "error" } else { "ok" }.to_owned(),
             exit_code: result.metadata.exit_code,
             duration_ms: result.metadata.duration_ms,
-            changed_files,
+            changed_files: Vec::new(),
             error,
-            mutation_receipt_refs,
+            mutation_receipt_refs: Vec::new(),
             approval_receipt_refs: Vec::new(),
             verification_receipt_refs: Vec::new(),
             external_provenance_refs: Vec::new(),
             tool_specific,
+        };
+        let encoded_bytes = serde_json::to_vec(&facts)
+            .expect("tool result facts serialize")
+            .len();
+        if let Some(error) = &mut facts.error {
+            // Replace the four bytes occupied by null; error details share the total budget
+            // with metadata instead of duplicating an unbounded command output preview.
+            let available = TOOL_RESULT_FACTS_MAX_BYTES.saturating_sub(encoded_bytes) + 4;
+            error.details = bounded_tool_specific(&error_details, available);
         }
+        if let Some(receipt) = &result.metadata.receipt {
+            for value in receipt
+                .mutation_operation_ids
+                .iter()
+                .take(TOOL_RESULT_FACT_REF_LIMIT)
+            {
+                facts.add_mutation_receipt_ref(value);
+            }
+        }
+        for path in result
+            .metadata
+            .changed_files
+            .iter()
+            .take(TOOL_RESULT_FACT_PATH_LIMIT)
+        {
+            facts.add_changed_file(path);
+        }
+        facts
     }
 
     pub(super) fn add_approval_receipt_ref(&mut self, receipt_ref: &str) {
@@ -417,7 +433,6 @@ impl ToolResultFactsV1 {
     }
 
     fn add_bounded_ref(&mut self, kind: ToolResultFactRefKind, receipt_ref: &str) {
-        const REF_LIMIT: usize = 16;
         const REF_MAX_BYTES: usize = 256;
 
         let value = bounded_utf8(&safe_persistence_text(receipt_ref), REF_MAX_BYTES);
@@ -430,7 +445,7 @@ impl ToolResultFactsV1 {
             ToolResultFactRefKind::Verification => &mut self.verification_receipt_refs,
             ToolResultFactRefKind::ExternalProvenance => &mut self.external_provenance_refs,
         };
-        if target.len() >= REF_LIMIT || target.contains(&value) {
+        if target.len() >= TOOL_RESULT_FACT_REF_LIMIT || target.contains(&value) {
             return;
         }
         target.push(value);
@@ -465,18 +480,18 @@ enum ToolResultFactRefKind {
     ExternalProvenance,
 }
 
-fn bounded_tool_specific(value: &Value) -> Value {
+fn bounded_tool_specific(value: &Value, max_bytes: usize) -> Value {
     let safe = safe_persistence_json_value(value.clone());
     match serde_json::to_vec(&safe) {
-        Ok(encoded) if encoded.len() <= TOOL_RESULT_FACTS_MAX_BYTES / 2 => safe,
-        Ok(encoded) => bounded_execution_display_facts(&safe, encoded.len()),
+        Ok(encoded) if encoded.len() <= max_bytes => safe,
+        Ok(encoded) => bounded_execution_display_facts(&safe, encoded.len(), max_bytes),
         Err(_) => json!({
             "projection": "unavailable",
         }),
     }
 }
 
-fn bounded_execution_display_facts(safe: &Value, original_bytes: usize) -> Value {
+fn bounded_execution_display_facts(safe: &Value, original_bytes: usize, max_bytes: usize) -> Value {
     let mut projection = json!({"projection":"truncated", "original_bytes":original_bytes});
     let Some(id) = safe.get("execution_id").and_then(Value::as_str) else {
         return projection;
@@ -513,14 +528,15 @@ fn bounded_execution_display_facts(safe: &Value, original_bytes: usize) -> Value
         projection["output_preview"] = json!(bounded_utf8(output, 512));
     }
     for field in ["output_preview", "call"] {
-        if serde_json::to_vec(&projection)
-            .is_ok_and(|value| value.len() > TOOL_RESULT_FACTS_MAX_BYTES / 2)
-        {
+        if serde_json::to_vec(&projection).is_ok_and(|value| value.len() > max_bytes) {
             projection
                 .as_object_mut()
                 .expect("execution projection object")
                 .remove(field);
         }
+    }
+    if serde_json::to_vec(&projection).is_ok_and(|value| value.len() > max_bytes) {
+        return json!({"projection":"truncated", "original_bytes":original_bytes});
     }
     projection
 }
