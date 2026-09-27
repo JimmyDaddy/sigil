@@ -44,21 +44,19 @@ where
     Ok(exact_overlay)
 }
 
-pub(super) fn append_final_answer_message<H>(
+pub(super) fn append_answer_message<H>(
     session: &mut Session,
     handler: &mut H,
     assistant_text: &str,
     pending_states: Vec<ProviderContinuationState>,
     mut url_capability_registrations: Vec<crate::UserUrlCapabilityRegistration>,
+    kind: AssistantMessageKind,
 ) -> Result<String>
 where
     H: EventHandler,
 {
-    let exact_assistant_message = ModelMessage::assistant_with_kind(
-        Some(assistant_text.to_owned()),
-        Vec::new(),
-        AssistantMessageKind::FinalAnswer,
-    );
+    let exact_assistant_message =
+        ModelMessage::assistant_with_kind(Some(assistant_text.to_owned()), Vec::new(), kind);
     let (assistant_message, _) = crate::project_message_for_persistence(exact_assistant_message)?;
     let final_message_id = assistant_message.id.clone();
     for registration in &mut url_capability_registrations {

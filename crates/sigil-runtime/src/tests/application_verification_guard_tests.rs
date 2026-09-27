@@ -1,4 +1,7 @@
 //! Actual managed check execution feeds the same Direct Task readiness used by the product.
+#[cfg(unix)]
+#[path = "task_verification_feedback_tests.rs"]
+mod feedback;
 use super::*;
 use sigil_kernel::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry,

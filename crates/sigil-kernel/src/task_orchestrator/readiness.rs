@@ -1,5 +1,6 @@
 use super::*;
 use crate::verification::VerificationExecutionPortV1;
+use anyhow::Context;
 
 pub(super) fn append_task_readiness<H>(
     session: &mut Session,
@@ -43,7 +44,10 @@ where
     let projection = session.verification_state_projection();
     let step_scope = scope;
     let task_scope = EvidenceScope::Task(task_id.as_str().to_owned());
-    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let workspace_root = options.workspace_root.clone();
+    let workspace_id = tokio::task::spawn_blocking(move || stable_workspace_id(&workspace_root))
+        .await
+        .context("verification workspace identity worker failed")??;
     let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let policy = task_step_default_policy(&projection, &step_scope, &task_scope, &workspace_scope)?;
     let policy_hash = Some(policy.stable_hash()?);

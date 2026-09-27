@@ -1018,6 +1018,7 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::TaskCreatedFromPlan(_)
             | ControlEntry::TaskDirectExecutionAdmittedV1(_)
             | ControlEntry::TaskDirectExecutionAttemptV1(_)
+            | ControlEntry::TaskVerificationFeedbackV1(_)
             | ControlEntry::TaskChecklistUpdatedV1(_)
             | ControlEntry::TaskContinuationSelected(_)
             | ControlEntry::TaskRunCancellationScopeBound(_)

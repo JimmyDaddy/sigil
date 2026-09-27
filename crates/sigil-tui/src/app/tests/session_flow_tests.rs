@@ -2277,3 +2277,45 @@ fn session_terminal_entry(
         updated_at_ms: 20,
     })
 }
+
+#[test]
+fn session_view_audit_preserves_failed_check_and_repair_feedback_history() -> Result<()> {
+    use sigil_kernel::{TaskVerificationFeedbackStatusV1, TaskVerificationFeedbackV1};
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let binding = json!({
+        "task": "repair-task", "admission": "admission-1", "attempt": "attempt-1",
+        "receipts": ["failed-check-1", "failed-check-2"], "policy": "policy-1",
+        "snapshot": "before-repair",
+    });
+    let mut feedback = TaskVerificationFeedbackV1 {
+        feedback_id: sigil_kernel::stable_event_uuid(
+            "task-verification-feedback-v1",
+            &binding.to_string(),
+        ),
+        task_id: sigil_kernel::TaskId::new("repair-task")?,
+        admission_id: "admission-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        receipt_ids: vec!["failed-check-1".to_owned(), "failed-check-2".to_owned()],
+        policy_hash: "policy-1".to_owned(),
+        workspace_snapshot_id: "before-repair".to_owned(),
+        status: TaskVerificationFeedbackStatusV1::Pending,
+        reason: None,
+    };
+    feedback.validate()?;
+    let pending =
+        SessionLogEntry::Control(ControlEntry::TaskVerificationFeedbackV1(feedback.clone()));
+    feedback.status = TaskVerificationFeedbackStatusV1::Repair;
+    feedback.reason = Some("Repair the failed check".to_owned());
+    feedback.validate()?;
+    let repair = SessionLogEntry::Control(ControlEntry::TaskVerificationFeedbackV1(feedback));
+    // Reopened typed history must retain both facts, rather than replacing a failed check with
+    // a successful-looking result merely because the model chose to attempt a repair.
+    app.session_browser.current_entries =
+        serde_json::from_value(serde_json::to_value(vec![pending, repair])?)?;
+    app.session_browser.view_mode = SessionViewMode::Audit;
+    let rendered = app.session_view_lines().join("\n");
+    assert!(rendered.contains("[ctl] task repair-task verification feedback Pending checks=2"));
+    assert!(rendered.contains("[ctl] task repair-task verification feedback Repair checks=2"));
+    assert!(!rendered.contains("Passed"));
+    Ok(())
+}

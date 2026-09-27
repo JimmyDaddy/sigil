@@ -1845,6 +1845,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::TaskDirectExecutionAdmittedV1(_)
         | ControlEntry::TaskDirectRequirementsBoundV1(_)
         | ControlEntry::TaskDirectExecutionAttemptV1(_)
+        | ControlEntry::TaskVerificationFeedbackV1(_)
         | ControlEntry::TaskChecklistUpdatedV1(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,
         ControlEntry::TaskHandoffResolved(_) => DurableEventType::TaskHandoffResolved,

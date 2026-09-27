@@ -272,7 +272,10 @@ fn run_verification_check_with_fake_backend(
     request: VerificationCheckRunRequest,
 ) -> Result<crate::VerificationRecordedEntry> {
     let backend = FakeVerificationBackend;
-    futures::executor::block_on(run_verification_check(session, &backend, request))
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_verification_check(session, &backend, request))
 }
 
 fn run_verification_check_with_sandbox_backend(
@@ -280,7 +283,10 @@ fn run_verification_check_with_sandbox_backend(
     request: VerificationCheckRunRequest,
 ) -> Result<crate::VerificationRecordedEntry> {
     let backend = FakeSandboxVerificationBackend;
-    futures::executor::block_on(run_verification_check(session, &backend, request))
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_verification_check(session, &backend, request))
 }
 
 #[test]
@@ -2151,6 +2157,23 @@ fn write_after_successful_check_maps_to_stale() {
             }) if event_id == "event-write-2"
         )
     }));
+    assert_eq!(
+        evaluation.required_actions,
+        vec![RequiredAction::RunCheck {
+            check_spec_id: check.check_spec_id.clone(),
+        }]
+    );
+    input.verification_receipts.push(verification_receipt(
+        "receipt-fresh-pass",
+        &check,
+        "snapshot-after-second-write",
+        14,
+        ReceiptStatus::Succeeded,
+        false,
+    ));
+    let refreshed = evaluate_readiness(&input);
+    assert_eq!(refreshed.verification_verdict, VerificationVerdict::Passed);
+    assert!(refreshed.required_actions.is_empty());
 }
 
 #[test]

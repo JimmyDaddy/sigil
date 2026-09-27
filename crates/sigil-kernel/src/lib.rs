@@ -846,9 +846,10 @@ pub use task_memory::{
     extract_task_memory_from_stream_records, task_memory_context_items,
 };
 pub use task_orchestrator::{
-    DirectTaskRequest, DirectTaskRunOutput, DirectTaskRuntime, TaskChildChangeSetArtifact,
-    TaskChildChangeSetProposal, TaskChildSessionRunner, TaskDirectExecutionSessionRunOutput,
-    TaskDirectExecutionSessionRunRequest, TaskVerificationRerunOutput,
+    DirectTaskRequest, DirectTaskRunOutput, DirectTaskRuntime, DirectTaskVerificationContext,
+    TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionRunner,
+    TaskDirectExecutionSessionRunOutput, TaskDirectExecutionSessionRunRequest,
+    TaskVerificationFeedbackStatusV1, TaskVerificationFeedbackV1, TaskVerificationRerunOutput,
     TaskVerificationRerunRequest, changeset_only_child_contract_prompt,
     changeset_only_child_tool_registry, changeset_only_child_tool_scope,
     decode_changeset_only_child_output, rerun_task_verification_check,

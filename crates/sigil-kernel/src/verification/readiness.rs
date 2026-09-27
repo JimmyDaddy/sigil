@@ -530,6 +530,11 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
 
     if let Some(stale_cause) = latest_stale_cause(input) {
         reasons.push(ReadinessReason::VerificationStale(stale_cause));
+        // Re-enter the normal required-check reducer on fresh evidence. Start with the
+        // first check so AllRequiredChecks still stops at the first actual failure.
+        required_actions.push(RequiredAction::RunCheck {
+            check_spec_id: input.policy.required_checks[0].check_spec_id.clone(),
+        });
         return finalize_new_run(
             input.run_status,
             VerificationVerdict::Stale,

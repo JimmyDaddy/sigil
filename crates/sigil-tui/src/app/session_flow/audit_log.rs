@@ -461,6 +461,12 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.ordinal,
             entry.status
         ),
+        ControlEntry::TaskVerificationFeedbackV1(entry) => format!(
+            "[ctl] task {} verification feedback {:?} checks={}",
+            entry.task_id.as_str(),
+            entry.status,
+            entry.receipt_ids.len()
+        ),
         ControlEntry::TaskChecklistUpdatedV1(entry) => format!(
             "[ctl] task checklist task={} revision={} items={}",
             entry.task_id.as_str(),

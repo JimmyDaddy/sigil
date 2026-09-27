@@ -74,14 +74,18 @@ mod readiness;
 mod run_lifecycle;
 mod task_checklist;
 mod task_handoff;
+mod task_verification;
 pub(crate) mod tool_audit;
 mod tool_results;
 mod user_input;
+use crate::task_orchestrator::verification_feedback::{
+    RESPOND_TO_TASK_VERIFICATION, TaskVerificationFinalAction, verification_feedback_tool_spec,
+};
 use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,
     plan_approval_decision_override, tool_session_grant_decision_override,
 };
-use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
+use assistant_messages::{append_answer_message, append_tool_preamble_message};
 use plan_draft::{
     append_tool_ignored_after_plan_draft, handle_submit_plan_review_result_call,
     submit_plan_review_result_call_outcome,
@@ -349,6 +353,7 @@ pub struct AgentRunInput {
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_checklist_update: Option<TaskChecklistUpdateContextV1>,
+    task_verification: Option<crate::DirectTaskVerificationContext>,
     pub plan_review_draft: Option<PlanReviewDraftContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
@@ -400,6 +405,7 @@ impl fmt::Debug for AgentRunInput {
                 &self.tool_artifact_read_budget.is_some(),
             )
             .field("task_checklist_update", &self.task_checklist_update)
+            .field("task_verification", &self.task_verification)
             .field("agent_delegation", &self.agent_delegation)
             .field("purpose", &self.purpose)
             .field(
@@ -502,6 +508,7 @@ impl AgentRunInput {
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_checklist_update: None,
+            task_verification: None,
             plan_review_draft: None,
             agent_delegation: None,
             purpose: None,
@@ -538,6 +545,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_checklist_update: None,
+            task_verification: None,
             plan_review_draft: None,
             agent_delegation: None,
             purpose: None,
@@ -573,6 +581,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_checklist_update: None,
+            task_verification: None,
             plan_review_draft: None,
             agent_delegation: None,
             purpose: None,
@@ -659,6 +668,13 @@ impl AgentRunInput {
                     })
                     .and_then(|message| message.content.as_deref())
             })
+    }
+
+    /// Attaches trusted Task verification to the existing loop, without changing tool authority.
+    #[must_use]
+    pub fn with_task_verification(mut self, context: crate::DirectTaskVerificationContext) -> Self {
+        self.task_verification = Some(context);
+        self
     }
 
     /// Enables best-effort display checklist updates for one exact Task.
@@ -1928,6 +1944,7 @@ where
             mut transient_context,
             mut runtime_context,
             mut task_checklist_update,
+            mut task_verification,
             plan_review_draft,
             agent_delegation,
             purpose,
@@ -2336,6 +2353,11 @@ where
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
+        if let Some(context) = task_verification.as_ref()
+            && let Some(prompt) = context.restore_prompt(session, &options).await?
+        {
+            transient_context.push(ModelMessage::user(prompt));
+        }
         if agent_delegation.is_some() && !tool_registry_has_agent_tools(tools) {
             return Err(anyhow!(
                 "agent delegation is required, but this run has no agent tools"
@@ -2492,6 +2514,12 @@ where
             }
             if task_checklist_update.is_some() {
                 tool_specs.push(update_task_checklist_tool_spec());
+            }
+            if task_verification
+                .as_ref()
+                .is_some_and(|context| context.tool_available())
+            {
+                tool_specs.push(verification_feedback_tool_spec());
             }
             if plan_review_draft.is_some() {
                 tool_specs.push(submit_plan_review_result_tool_spec());
@@ -2820,6 +2848,9 @@ where
                 };
                 let mut execution_calls = completed_calls;
                 if writable_memory_routing
+                    && !task_verification
+                        .as_ref()
+                        .is_some_and(|context| context.tool_available() || context.blocked())
                     && (accepted_run_pending_plan_in_batch
                         || accepted_task_continuation_in_batch
                         || accepted_task_handoff_in_batch
@@ -2885,6 +2916,33 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    if call.name == RESPOND_TO_TASK_VERIFICATION {
+                        task_verification::handle_verification_feedback_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            task_verification.as_mut(),
+                            &options,
+                            cancellation.as_ref(),
+                            &mut assistant_batch_results,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    if task_verification
+                        .as_ref()
+                        .is_some_and(|context| context.tool_available() || context.blocked())
+                        && call.name != crate::REQUEST_USER_INPUT_TOOL_NAME
+                    {
+                        task_verification::reject_before_verification_choice(
+                            session,
+                            &mut outcome,
+                            &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
                     if mixed_handoff_batch {
                         let mut result = ToolResult::error(
                             call.id.clone(),
@@ -3404,6 +3462,33 @@ where
                         disposition: AgentRunDisposition::AwaitingUserInput(request),
                     });
                 }
+                if task_verification
+                    .as_ref()
+                    .is_some_and(|context| context.blocked())
+                {
+                    outcome.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "blocked",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::Blocked,
+                    });
+                }
                 let settled_join_context = match agent_delegate.as_deref_mut() {
                     Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,
                     None => None,
@@ -3653,18 +3738,36 @@ where
                 continue;
             }
             outcome.tool_calls = total_tool_calls;
-            claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
+            let verification_action = match task_verification.as_mut() {
+                Some(context) => {
+                    context
+                        .evaluate_final(session, &options, &outcome, handler, cancellation.as_ref())
+                        .await?
+                }
+                None => TaskVerificationFinalAction::Ready,
+            };
+            if !matches!(
+                verification_action,
+                TaskVerificationFinalAction::Continue(_)
+            ) {
+                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
+            }
             let mut hosted_finalized = hosted_finalized;
             let url_capability_registrations = hosted_finalized
                 .as_mut()
                 .map(|finalized| std::mem::take(&mut finalized.url_capability_registrations))
                 .unwrap_or_default();
-            let final_message_id = append_final_answer_message(
+            let final_message_id = append_answer_message(
                 session,
                 handler,
                 &assistant_text,
                 pending_states,
                 url_capability_registrations,
+                if matches!(verification_action, TaskVerificationFinalAction::Ready) {
+                    crate::AssistantMessageKind::FinalAnswer
+                } else {
+                    crate::AssistantMessageKind::Progress
+                },
             )?;
             if let Some(finalized) = hosted_finalized {
                 let final_safe_text = session
@@ -3687,6 +3790,37 @@ where
                 if !provenance.sources.is_empty() || !provenance.citations.is_empty() {
                     session.append_external_provenance(provenance)?;
                 }
+            }
+
+            match verification_action {
+                TaskVerificationFinalAction::Continue(prompt) => {
+                    handler.handle(RunEvent::Notice(
+                        "task checks found failures; returning their evidence to the model"
+                            .to_owned(),
+                    ))?;
+                    transient_context.push(ModelMessage::user(prompt));
+                    continue;
+                }
+                TaskVerificationFinalAction::Blocked => {
+                    outcome.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
+                    append_run_lifecycle_events(
+                        session,
+                        "blocked",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::Blocked,
+                    });
+                }
+                TaskVerificationFinalAction::Ready => {}
             }
 
             // Readiness is a durable workspace projection and must not inspect paths or emit a

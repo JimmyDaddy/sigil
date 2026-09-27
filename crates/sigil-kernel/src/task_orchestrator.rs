@@ -43,6 +43,7 @@ mod readiness;
 mod runner;
 mod shared;
 mod types;
+pub(crate) mod verification_feedback;
 
 pub use changeset_only::{
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
@@ -54,6 +55,9 @@ pub use types::{
     DirectTaskRequest, DirectTaskRunOutput, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
     TaskDirectExecutionSessionRunOutput, TaskDirectExecutionSessionRunRequest,
     TaskVerificationRerunOutput, TaskVerificationRerunRequest,
+};
+pub use verification_feedback::{
+    DirectTaskVerificationContext, TaskVerificationFeedbackStatusV1, TaskVerificationFeedbackV1,
 };
 
 use evidence::durable_workspace_mutation_evidence;

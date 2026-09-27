@@ -243,7 +243,25 @@ where
             .get(&request.task_id)
             .and_then(|task| task.checklist.as_ref())
             .map_or(0, |checklist| checklist.revision);
-        let input = if recovering {
+        let verification = DirectTaskVerificationContext::new(
+            request.clone(),
+            &attempt,
+            self.verification_execution_port.clone(),
+            session,
+        )?;
+        let recovery = if recovering {
+            verification.feedback_recovery(session).await?
+        } else {
+            None
+        };
+        let allow_fresh_dispatch = recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.allow_fresh_dispatch);
+        let logical_run_id = recovery.map_or_else(
+            || crate::task_direct_execution_logical_run_id(&attempt.attempt_id),
+            |recovery| recovery.logical_run_id,
+        );
+        let input = if recovering && !allow_fresh_dispatch {
             AgentRunInput::without_persisted_user_message(Vec::new())
                 .with_durable_provider_recovery_only()
         } else {
@@ -251,6 +269,7 @@ where
                 direct_execution_prompt(&request.objective, guidance.map(|(text, _)| text)),
             )])
         }
+        .with_task_verification(verification)
         .with_task_checklist_update(crate::TaskChecklistUpdateContextV1 {
             task_id: request.task_id.clone(),
             current_revision: checklist_revision,
@@ -262,9 +281,7 @@ where
                 attempt_id: attempt.attempt_id.clone(),
             },
         ))
-        .with_logical_run_id(crate::task_direct_execution_logical_run_id(
-            &attempt.attempt_id,
-        ));
+        .with_logical_run_id(logical_run_id);
         let input = self.bind_cancellation(input);
         let output = self
             .child_runner
@@ -402,38 +419,14 @@ where
                     "direct execution has unfinished Task dependencies".to_owned()
                 });
             } else if completion_blocker.is_none() {
-                let (mut readiness, auto_run, blocker) =
-                    super::readiness::direct_task_completion_readiness(
-                        session,
-                        &request,
-                        &output.outcome,
-                        &executor_options,
-                    )
-                    .await?;
+                let (readiness, _, blocker) = super::readiness::direct_task_completion_readiness(
+                    session,
+                    &request,
+                    &output.outcome,
+                    &executor_options,
+                )
+                .await?;
                 completion_blocker = blocker;
-                if completion_blocker.is_none()
-                    && auto_run == VerificationAutoRunPolicy::TrustedOnly
-                    && super::readiness::run_task_scope_verification_checks(
-                        session,
-                        handler,
-                        self.verification_execution_port.as_deref(),
-                        &request.task_id,
-                        EvidenceScope::Task(request.task_id.as_str().to_owned()),
-                        &executor_options,
-                        &readiness,
-                    )
-                    .await?
-                {
-                    let (updated, _, blocker) = super::readiness::direct_task_completion_readiness(
-                        session,
-                        &request,
-                        &output.outcome,
-                        &executor_options,
-                    )
-                    .await?;
-                    readiness = updated;
-                    completion_blocker = blocker;
-                }
                 if completion_blocker.is_none() && readiness_blocks_task(&readiness) {
                     completion_blocker = Some(
                         "direct execution requires verification or workspace recovery".to_owned(),
@@ -681,13 +674,19 @@ fn unix_time_ms() -> u64 {
 }
 
 fn readiness_blocks_task(readiness: &ReadinessEvaluatedEntry) -> bool {
-    readiness
-        .evaluation
-        .required_actions
-        .iter()
-        .any(|action| !matches!(action, RequiredAction::ProvideVerificationConfig))
+    // A stale verdict cannot certify a Task even if an older projection has no action hint.
+    readiness.evaluation.verification_verdict == crate::VerificationVerdict::Stale
+        || readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| !matches!(action, RequiredAction::ProvideVerificationConfig))
 }
 
 #[cfg(test)]
 #[path = "tests/direct_guidance_tests.rs"]
 mod direct_guidance_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_verification_tests.rs"]
+mod direct_verification_tests;

@@ -890,6 +890,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskDirectExecutionAdmittedV1(_)
                 | ControlEntry::TaskDirectRequirementsBoundV1(_)
                 | ControlEntry::TaskDirectExecutionAttemptV1(_)
+                | ControlEntry::TaskVerificationFeedbackV1(_)
                 | ControlEntry::TaskChecklistUpdatedV1(_)
                 | ControlEntry::TaskPlan(_)
                 | ControlEntry::TaskStepContractBoundV2(_)
@@ -1901,6 +1902,7 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskDirectExecutionAdmittedV1(_) => "task_direct_execution_admitted_v1",
         ControlEntry::TaskDirectExecutionAttemptV1(_) => "task_direct_execution_attempt_v1",
+        ControlEntry::TaskVerificationFeedbackV1(_) => "task_verification_feedback_v1",
         ControlEntry::TaskDirectRequirementsBoundV1(_) => "task_direct_requirements_bound_v1",
         ControlEntry::TaskChecklistUpdatedV1(_) => "task_checklist_updated_v1",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",

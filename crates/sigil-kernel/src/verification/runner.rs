@@ -10,7 +10,26 @@ use super::*;
 /// planner/broker/sandbox path directly.
 #[async_trait::async_trait]
 pub trait VerificationExecutionPortV1: Send + Sync {
+    /// Settles idle host-owned writers before observing verification readiness or snapshots.
+    /// It does not grant execution authority or substitute for check evidence.
+    ///
+    /// # Errors
+    /// Returns an error if a selected resource cannot be joined or its effects cannot be settled.
+    async fn prepare_verification(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt>;
+
+    /// Executes through the same owner while observing cancellation. The default joins the
+    /// finite check; managed production ports propagate the signal to their process owner.
+    async fn execute_check_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        _cancellation: Option<crate::RunCancellationHandle>,
+    ) -> anyhow::Result<ExecutionReceipt> {
+        self.execute_check(request).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -20,6 +39,14 @@ where
 {
     async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt> {
         self.execute(request).await
+    }
+
+    async fn execute_check_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<crate::RunCancellationHandle>,
+    ) -> anyhow::Result<ExecutionReceipt> {
+        self.execute_with_cancellation(request, cancellation).await
     }
 }
 
@@ -65,6 +92,11 @@ pub struct PluginVerificationHookReceiptRequest {
 ///
 /// Returns an error when the workspace cannot be snapshotted, the durable check/command facts
 /// cannot be recorded, or the configured command cannot be spawned.
+///
+/// # Panics
+///
+/// Requires a Tokio runtime: finite filesystem snapshot work runs on its blocking pool and is
+/// joined before the check or receipt can proceed. Panics when polled outside a Tokio runtime.
 pub async fn run_verification_check<E>(
     session: &mut Session,
     execution_port: &E,
@@ -93,13 +125,6 @@ pub(crate) async fn run_verification_check_with_evidence<E>(
 where
     E: VerificationExecutionPortV1 + ?Sized,
 {
-    let workspace_root = fs::canonicalize(&request.workspace_root).with_context(|| {
-        format!(
-            "failed to canonicalize verification workspace {}",
-            request.workspace_root.display()
-        )
-    })?;
-    let workspace_id = stable_workspace_id(&workspace_root)?;
     let check = &request.trusted_check.check_spec;
     let approval_event_id = request
         .workspace_trust_approval_event_id
@@ -119,12 +144,22 @@ where
             check.check_spec_id
         );
     }
-    let before_snapshot = build_workspace_snapshot(
-        &workspace_root,
-        workspace_id.clone(),
-        &request.policy.verification_scope,
-        0,
-    )?;
+    execution_port.prepare_verification().await?;
+    let requested_root = request.workspace_root.clone();
+    let scope = request.policy.verification_scope.clone();
+    let (workspace_root, workspace_id, before_snapshot) = tokio::task::spawn_blocking(move || {
+        let workspace_root = fs::canonicalize(&requested_root).with_context(|| {
+            format!(
+                "failed to canonicalize verification workspace {}",
+                requested_root.display()
+            )
+        })?;
+        let workspace_id = stable_workspace_id(&workspace_root)?;
+        let snapshot = build_workspace_snapshot(&workspace_root, workspace_id.clone(), &scope, 0)?;
+        Ok::<_, anyhow::Error>((workspace_root, workspace_id, snapshot))
+    })
+    .await
+    .context("verification source snapshot worker failed")??;
 
     let started_at = Instant::now();
     let command_output = execute_check_command(
@@ -138,12 +173,14 @@ where
 
     let command_event =
         append_command_finished_event(session, check, &request.scope, &command_output, elapsed_ms)?;
-    let after_snapshot = build_workspace_snapshot(
-        &workspace_root,
-        workspace_id.clone(),
-        &request.policy.verification_scope,
-        0,
-    )?;
+    let snapshot_root = workspace_root.clone();
+    let snapshot_workspace_id = workspace_id.clone();
+    let scope = request.policy.verification_scope.clone();
+    let after_snapshot = tokio::task::spawn_blocking(move || {
+        build_workspace_snapshot(&snapshot_root, snapshot_workspace_id, &scope, 0)
+    })
+    .await
+    .context("verification result snapshot worker failed")??;
     let snapshot_unavailable = before_snapshot.workspace_snapshot_id.is_none()
         || after_snapshot.workspace_snapshot_id.is_none();
     let observed_change = !snapshot_unavailable

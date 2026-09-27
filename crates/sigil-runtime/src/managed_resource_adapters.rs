@@ -1520,6 +1520,14 @@ impl sigil_kernel::verification::VerificationExecutionPortV1
     async fn execute_check(&self, request: ExecutionRequest) -> anyhow::Result<ExecutionReceipt> {
         self.execute_managed(request, None).await
     }
+
+    async fn execute_check_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> anyhow::Result<ExecutionReceipt> {
+        self.execute_managed(request, cancellation).await
+    }
 }
 
 #[async_trait::async_trait]

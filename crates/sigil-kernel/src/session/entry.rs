@@ -283,6 +283,8 @@ pub enum ControlEntry {
     TaskDirectExecutionAdmittedV1(crate::TaskDirectExecutionAdmittedV1),
     /// Durable lifecycle of one direct execution attempt.
     TaskDirectExecutionAttemptV1(crate::TaskDirectExecutionAttemptV1),
+    /// Failed trusted-check feedback and model choice within the same direct Task attempt.
+    TaskVerificationFeedbackV1(crate::TaskVerificationFeedbackV1),
     /// Once-only source interpretation admitted before Direct execution.
     TaskDirectRequirementsBoundV1(crate::TaskDirectRequirementsBoundV1),
     /// Display-only progress checklist; never execution or completion authority.
@@ -396,6 +398,7 @@ impl ControlEntry {
             Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
             Self::TaskDirectExecutionAdmittedV1(entry) => entry.validate(),
             Self::TaskDirectExecutionAttemptV1(entry) => entry.validate(),
+            Self::TaskVerificationFeedbackV1(entry) => entry.validate(),
             Self::TaskDirectRequirementsBoundV1(entry) => entry.validate(),
             Self::TaskChecklistUpdatedV1(entry) => entry.validate(),
             Self::TaskStepContractBoundV2(entry) => entry.validate(),
