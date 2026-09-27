@@ -629,7 +629,9 @@ fn attachment_submission_rejects_non_build_routes_and_keeps_the_draft() -> Resul
     assert_eq!(app.composer.image_attachments.len(), 1);
     assert_eq!(
         app.last_notice(),
-        Some("images support direct input and inline skills; this input path cannot carry images yet, so the draft was kept")
+        Some(
+            "images support direct input and inline skills; this input path cannot carry images yet, so the draft was kept"
+        )
     );
     Ok(())
 }
