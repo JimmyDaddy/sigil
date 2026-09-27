@@ -169,8 +169,7 @@ impl UpdateService {
             outcome.checked_at_unix_seconds = now;
             outcome.cached = true;
             let persisted = UpdateCacheEntry::new(cache_key, now, entry.etag, outcome.clone());
-            self.product_state.replace(&persisted).await?;
-            return Ok(outcome);
+            return Ok(self.finish_check(outcome, persisted).await);
         }
         if !response.status().is_success() {
             return Err(UpdateError::HttpStatus(response.status()));
@@ -193,15 +192,22 @@ impl UpdateService {
             candidate,
             managed_update_command: managed_command,
         };
-        self.product_state
-            .replace(&UpdateCacheEntry::new(
-                cache_key,
-                now,
-                etag,
-                outcome.clone(),
-            ))
-            .await?;
-        Ok(outcome)
+        let persisted = UpdateCacheEntry::new(cache_key, now, etag, outcome.clone());
+        Ok(self.finish_check(outcome, persisted).await)
+    }
+
+    async fn finish_check(
+        &self,
+        outcome: UpdateCheckOutcome,
+        persisted: UpdateCacheEntry,
+    ) -> UpdateCheckOutcome {
+        if let Err(error) = self.product_state.replace(&persisted).await {
+            tracing::warn!(
+                error = %error,
+                "update check succeeded but its cache could not be persisted"
+            );
+        }
+        outcome
     }
 }
 

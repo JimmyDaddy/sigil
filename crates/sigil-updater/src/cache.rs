@@ -156,9 +156,9 @@ fn replace_sync(
 ) -> Result<ProductUpdaterReceipt, UpdateError> {
     let new_hash = object_hash(entry);
     if load_sync(path).is_some_and(|current| object_hash(&current) == new_hash) {
-        return Err(UpdateError::Cache(
-            "updater cache object is already current".to_owned(),
-        ));
+        return Ok(ProductUpdaterReceipt {
+            object_hash: new_hash,
+        });
     }
     store_sync(path, entry)?;
     Ok(ProductUpdaterReceipt {

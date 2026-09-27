@@ -49,11 +49,11 @@ async fn product_updater_owner_publishes_one_closed_atomic_receipt() {
         .expect("owner publish should succeed");
     assert_ne!(receipt.object_hash(), [0; 32]);
     assert_eq!(owner.load().await.expect("published entry"), entry);
-    let error = owner
+    let repeated = owner
         .replace(&entry)
         .await
-        .expect_err("duplicate owner replace must fail closed");
-    assert!(error.to_string().contains("already current"));
+        .expect("repeating the same cache publication is idempotent");
+    assert_eq!(repeated, receipt);
 }
 
 #[test]

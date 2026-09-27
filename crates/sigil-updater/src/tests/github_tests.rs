@@ -25,6 +25,53 @@ fn asset(name: &str, digest: Option<&str>) -> GitHubAsset {
     }
 }
 
+#[tokio::test]
+async fn successful_check_retains_candidate_when_cache_publication_fails() {
+    let directory = tempfile::tempdir().expect("cache root");
+    std::fs::write(directory.path().join("updates"), b"not a directory")
+        .expect("block only the advisory cache path");
+    let service = super::UpdateService::github(directory.path()).expect("checker");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let current = Version::parse("1.0.0").expect("current version");
+    let candidate = select_candidate(
+        &current,
+        "aarch64-apple-darwin",
+        UpdateChannel::Stable,
+        &[release(
+            "v1.1.0",
+            false,
+            true,
+            vec![asset(
+                "sigil-1.1.0-aarch64-apple-darwin.tar.gz",
+                Some(&digest),
+            )],
+        )],
+    );
+    for cached in [false, true] {
+        let outcome = super::UpdateCheckOutcome {
+            current_version: "1.0.0".to_owned(),
+            target: "aarch64-apple-darwin".to_owned(),
+            channel: UpdateChannel::Stable,
+            install_source: crate::InstallSource::StandaloneGitHubArchive,
+            checked_at_unix_seconds: 42,
+            cached,
+            candidate: candidate.clone(),
+            managed_update_command: None,
+        };
+        let persisted = super::UpdateCacheEntry::new(
+            "key".to_owned(),
+            42,
+            Some("etag".to_owned()),
+            outcome.clone(),
+        );
+        let retained = service.finish_check(outcome.clone(), persisted).await;
+        assert_eq!(retained, outcome);
+        assert!(retained.update_available());
+        assert!(retained.apply_permitted());
+        assert!(service.product_state.load().await.is_none());
+    }
+}
+
 #[test]
 fn beta_selects_highest_semver_and_can_promote_to_stable() -> Result<(), Box<dyn std::error::Error>>
 {
