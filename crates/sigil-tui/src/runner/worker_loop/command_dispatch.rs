@@ -127,6 +127,7 @@ pub(in crate::runner) enum RunPlanCommand {
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
+        attachments: Vec<sigil_kernel::ImageAttachment>,
         reasoning_effort: ReasoningEffort,
     },
     ApprovalCommand(WorkerCommandEnvelope<WorkerApprovalCommand>),
@@ -434,10 +435,12 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::InvokeInlineSkill {
             skill_id,
             arguments,
+            attachments,
             reasoning_effort,
         } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::InvokeInlineSkill {
             skill_id,
             arguments,
+            attachments,
             reasoning_effort,
         }),
         WorkerCommand::ApprovalCommand(command) => {

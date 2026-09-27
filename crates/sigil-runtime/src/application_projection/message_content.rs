@@ -18,6 +18,7 @@ fn message_body<'a>(entry: &'a SessionLogEntry, event_id: &'a str) -> Option<(&'
         SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => message
             .content
             .as_deref()
+            .or_else(|| (!message.image_attachments.is_empty()).then_some(""))
             .map(|text| (message.id.as_str(), text)),
         SessionLogEntry::Control(ControlEntry::Note { kind, data })
             if kind == "reasoning_trace" =>
@@ -37,7 +38,8 @@ pub(super) fn index_message_content(
     entry: &SessionLogEntry,
 ) -> Result<(), ApplicationError> {
     if let Some((message_id, text)) = message_body(entry, record.event_id())
-        && !text.is_empty()
+        && (!text.is_empty()
+            || matches!(entry, SessionLogEntry::User(message) if !message.image_attachments.is_empty()))
     {
         let display_id = crate::conversation_display::stable_display_id(
             record.session_id(),
@@ -76,6 +78,59 @@ fn query_error(error: ApplicationError) -> MessageContentError {
 }
 
 impl RuntimeSessionProjectionOwner {
+    /// Resolves a selected attachment from this session's immutable indexed message record.
+    pub fn message_image_attachment(
+        &self,
+        expected_scope: &str,
+        display_id: &str,
+        attachment_id: &str,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<sigil_kernel::ImageAttachment, MessageContentError> {
+        MessageContentQuery {
+            display_id: display_id.to_owned(),
+            offset: 0,
+            limit: 4,
+            content_version: None,
+        }
+        .validate()?;
+        if attachment_id.is_empty() || attachment_id.len() > 128 {
+            return Err(MessageContentError::InvalidQuery);
+        }
+        let mut state = self.state(budget).map_err(query_error)?;
+        if state.session_id.as_deref() != Some(expected_scope) {
+            return Err(MessageContentError::NotFound);
+        }
+        let selected = state
+            .message_content
+            .get(display_id)
+            .cloned()
+            .ok_or(MessageContentError::NotFound)?;
+        if selected.position.end - selected.position.offset > 2 * 1024 * 1024 {
+            return Err(MessageContentError::Corrupt);
+        }
+        let record = state
+            .read_position(self, &selected.position, budget, true)
+            .map_err(query_error)?;
+        let entry = sigil_kernel::conversation_transcript_entry_from_record(&record)
+            .map_err(|_| MessageContentError::Corrupt)?
+            .ok_or(MessageContentError::Stale)?;
+        let SessionLogEntry::User(message) = entry else {
+            return Err(MessageContentError::NotFound);
+        };
+        if message.id != selected.message_id {
+            return Err(MessageContentError::Stale);
+        }
+        let attachment = message
+            .image_attachments
+            .into_iter()
+            .find(|image| image.attachment_id == attachment_id)
+            .ok_or(MessageContentError::NotFound)?;
+        attachment
+            .validate()
+            .map_err(|_| MessageContentError::Corrupt)?;
+        Ok(attachment)
+    }
+
     /// Hydrates one immutable message record, never a history prefix, into a UTF-8-safe page.
     pub fn message_content_page(
         &self,

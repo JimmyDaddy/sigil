@@ -900,6 +900,7 @@ disallowed-tools: [write_file]
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::InvokeInlineSkill {
+        attachments: Vec::new(),
         skill_id: "readonly".to_owned(),
         arguments: "target".to_owned(),
         reasoning_effort: ReasoningEffort::Medium,
@@ -954,6 +955,7 @@ run-as: child-session
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::InvokeInlineSkill {
+        attachments: Vec::new(),
         skill_id: "child-only".to_owned(),
         arguments: String::new(),
         reasoning_effort: ReasoningEffort::Medium,

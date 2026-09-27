@@ -88,3 +88,15 @@ describe("native history observation cancellation", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "desktop_cancel_history_query")).toHaveLength(1);
   });
 });
+
+it("keeps image selection and exact historical reads in narrow native commands", async () => {
+  invoke.mockResolvedValue(null);
+  await desktopBridge.pickImage("workspace");
+  expect(invoke).toHaveBeenLastCalledWith("desktop_pick_image", { workspaceId: "workspace" });
+  await desktopBridge.ingestImage("workspace", [1, 2, 3]);
+  expect(invoke).toHaveBeenLastCalledWith("desktop_ingest_image", { workspaceId: "workspace", bytes: [1, 2, 3] });
+  await desktopBridge.messageImage("workspace", "session", "display", "image");
+  expect(invoke).toHaveBeenLastCalledWith("desktop_message_image", { workspaceId: "workspace", sessionId: "session", displayId: "display", attachmentId: "image" });
+  await desktopBridge.startRun("workspace", "session", "", "manual", undefined, undefined, undefined, undefined, undefined, undefined, undefined, ["native-image"]);
+  expect(invoke).toHaveBeenLastCalledWith("desktop_start_run", { workspaceId: "workspace", input: expect.objectContaining({ sessionId: "session", prompt: "", imageHandles: ["native-image"] }) });
+});

@@ -114,7 +114,7 @@ pub(crate) enum DesktopRecoveryAction {
 }
 
 impl DesktopCommandError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -599,6 +599,11 @@ pub(crate) async fn desktop_close_workspace(
         .close(&workspace_id)
         .await
         .map_err(project_manager_error)?;
+    state
+        .images
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear_workspace(&workspace_id);
     state.manager.list().map_err(project_manager_error)
 }
 
@@ -951,7 +956,9 @@ pub(crate) async fn desktop_start_run(
 ) -> Result<DesktopRunSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
     validate_session_id(&input.session_id)?;
-    validate_prompt(&input.prompt)?;
+    if !input.prompt.is_empty() || input.image_handles.is_empty() {
+        validate_prompt(&input.prompt)?;
+    }
     let client = state
         .manager
         .client(&workspace_id)
@@ -960,10 +967,16 @@ pub(crate) async fn desktop_start_run(
         .session(&input.session_id)
         .await
         .map_err(project_client_error)?;
+    let image_attachments = state
+        .images
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .resolve(&workspace_id, &input.image_handles)?;
     let receipt = client
         .start_run(
             &input.session_id,
             DesktopRunStartRequest {
+                image_attachments,
                 prompt: input.prompt,
                 permission_mode: input.permission_mode,
                 model_ref: input.model_ref.map(|model_ref| {
@@ -1037,6 +1050,7 @@ pub(crate) async fn desktop_continue_task(
         .start_run(
             &input.session_id,
             DesktopRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: String::new(),
                 permission_mode: input.permission_mode,
                 model_ref: None,
@@ -2942,6 +2956,18 @@ fn project_session_open_client_error(error: DesktopClientError) -> DesktopComman
 
 fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
     match error {
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "image_input_unsupported" => DesktopCommandError::new(
+            "image_input_unsupported",
+            "Choose an image-capable model. Your draft is preserved.",
+        ),
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "image_attachment_invalid" => DesktopCommandError::new(
+            "image_attachment_invalid",
+            "The image reference is unavailable. Attach the original again.",
+        ),
         DesktopClientError::Rejected {
             code: Some(code), ..
         } if code == "stale_cursor" => DesktopCommandError::new(

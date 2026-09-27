@@ -599,6 +599,40 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/image-attachments": {
+                "post": {
+                    "summary": "Admit one local encoded image to the controlled workspace cache",
+                    "description": "Accepts PNG, JPEG or WebP bytes up to 8 MiB. The host decodes the image and derives all durable metadata; source paths and names are never accepted.",
+                    "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary", "maxLength": 8388608 } } } },
+                    "responses": {
+                        "201": { "description": "Verified attachment reference", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImageAttachment" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/message-image": {
+                "get": {
+                    "summary": "View an image attached to an exact durable user message",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/CancelObservationOnClose" },
+                        { "name": "display_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 256 } },
+                        { "name": "attachment_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+                    ],
+                    "responses": {
+                        "200": { "description": "Revalidated saved image", "content": { "application/json": { "schema": { "type": "object", "required": ["mime_type", "data_base64"], "properties": {
+                            "mime_type": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp"] },
+                            "data_base64": { "type": "string", "contentEncoding": "base64", "maxLength": 11184812 }
+                        } } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "503": { "description": "The image is unavailable or changed" }
+                    }
+                }
+            },
             "/sessions/{session_id}/message-content": {
                 "get": {
                     "summary": "Read one bounded UTF-8 page of a complete saved message",
@@ -1337,12 +1371,13 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ServerCapabilities": {
                     "type": "object",
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "durable_user_input", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "image_attachments", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "durable_user_input", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
                         "bounded_transcript_replay": { "type": "boolean" },
                         "canonical_conversation_display": { "type": "boolean" },
+                        "image_attachments": { "type": "boolean" },
                         "typed_tool_artifact_retrieval": { "type": "boolean" },
                         "conversation_recovery": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
@@ -2205,6 +2240,7 @@ pub fn http_openapi_document() -> Value {
                                     ]
                                 },
                                 "assistant_phase": { "type": ["string", "null"], "enum": ["tool_preamble", "progress", "final_answer", null] },
+                                "image_attachments": { "type": "array", "maxItems": 4, "items": { "$ref": "#/components/schemas/ImageAttachment" } },
                                 "image_attachment_count": { "type": "integer", "format": "uint64" },
                                 "truncated": { "type": "boolean" },
                                 "original_content_bytes": { "type": "integer", "format": "uint64" }
@@ -3524,11 +3560,26 @@ pub fn http_openapi_document() -> Value {
                         }
                     ]
                 },
+                "ImageAttachment": {
+                    "type": "object",
+                    "required": ["attachment_id", "sha256", "mime_type", "width", "height", "byte_len", "estimated_visual_tokens", "artifact_ref"],
+                    "properties": {
+                        "attachment_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                        "mime_type": { "type": "string", "enum": ["png", "jpeg", "webp"] },
+                        "width": { "type": "integer", "minimum": 1 },
+                        "height": { "type": "integer", "minimum": 1 },
+                        "byte_len": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+                        "estimated_visual_tokens": { "type": "integer", "minimum": 1 },
+                        "artifact_ref": { "type": "string", "pattern": "^[0-9a-f]{64}\\.(png|jpg|webp)$" }
+                    }
+                },
                 "RunStartRequest": {
                     "type": "object",
                     "required": ["prompt", "permission_mode"],
                     "properties": {
                         "prompt": { "type": "string" },
+                        "image_attachments": { "type": "array", "maxItems": 4, "items": { "$ref": "#/components/schemas/ImageAttachment" } },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "model_ref": { "oneOf": [{ "$ref": "#/components/schemas/ProviderModelRef" }, { "type": "null" }] },
                         "model_selection_binding": { "type": ["string", "null"] },

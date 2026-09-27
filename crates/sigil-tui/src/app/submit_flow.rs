@@ -23,6 +23,16 @@ impl AppState {
                     self.set_input_and_cursor(prompt.clone());
                     self.composer.image_attachments = attachments.clone();
                 }
+                AppAction::InvokeInlineSkill {
+                    skill_id,
+                    arguments,
+                    attachments,
+                } => {
+                    self.set_input_and_cursor(
+                        format!("/{skill_id} {arguments}").trim_end().to_owned(),
+                    );
+                    self.composer.image_attachments = attachments.clone();
+                }
                 AppAction::SubmitPlanPrompt(prompt) => {
                     self.set_input_and_cursor(format!("/plan {prompt}"))
                 }
@@ -43,7 +53,6 @@ impl AppState {
         }
         if has_attachments
             && (self.composer.queue_edit_target.is_some()
-                || prompt.starts_with('/')
                 || prompt.trim_start().starts_with('@')
                 || self.runtime.is_busy
                 || self.composer.mode == ComposerMode::Plan)
@@ -72,6 +81,28 @@ impl AppState {
                 return Ok(None);
             };
 
+            if has_attachments {
+                let inline_skill = Self::executable_slash_command(&command.canonical).is_none()
+                    && command
+                        .canonical
+                        .strip_prefix('/')
+                        .and_then(|id| self.exact_skill_descriptor(id))
+                        .is_some_and(|skill| skill.run_as == SkillRunMode::Inline);
+                if !inline_skill {
+                    self.reject_non_build_attachment_submission();
+                    return Ok(None);
+                }
+                let action = self.execute_skill_slash_command(&command, &prompt)?;
+                if action.is_some() {
+                    self.composer.input.clear();
+                    self.composer.input_cursor = 0;
+                    self.composer.input_paste_spans.clear();
+                    self.pending_mouse_slash_confirmation = None;
+                    self.reset_slash_selector();
+                    self.push_event("slash", sigil_kernel::safe_persistence_text(&prompt));
+                }
+                return Ok(action);
+            }
             return self.execute_slash_command(command, prompt);
         }
 
@@ -574,9 +605,11 @@ impl AppState {
             SkillRunMode::Inline => {
                 self.last_notice = Some(format!("using {item_kind} {skill_id}"));
                 self.push_phase_marker(format!("preparing|{}", self.runtime.model_name));
+                self.composer.selected_image_attachment = None;
                 Ok(Some(AppAction::InvokeInlineSkill {
                     skill_id: skill_id.to_owned(),
                     arguments,
+                    attachments: std::mem::take(&mut self.composer.image_attachments),
                 }))
             }
             SkillRunMode::ChildSession => {

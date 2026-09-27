@@ -15,6 +15,7 @@ interface TimelineRowBase {
   skill?: MessageView["skill"];
   status?: string;
   contentTruncated?: boolean;
+  images?: MessageView["images"];
 }
 
 export type ConversationTimelineRow =
@@ -169,6 +170,7 @@ function projectDisplayItem(
           label: t("you"),
           text,
           skill: content.skill,
+          images: content.imageAttachments,
           status: previewStatus,
           contentTruncated: content.truncated,
         }];

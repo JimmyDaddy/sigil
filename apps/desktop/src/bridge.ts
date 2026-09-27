@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { AppearanceSnapshot, ThemePreference } from "./appearance/contract";
 
 import type {
+  DraftImage,
   AgentActivitySummary,
   AgentBinding,
   CatalogPage,
@@ -189,6 +190,10 @@ export interface DesktopBridge {
   ): Promise<ConversationRecoveryCommandReceipt>;
   runContext(workspaceId: string, sessionId: string): Promise<RunContext>;
   agentActivity(workspaceId: string, sessionId: string): Promise<AgentActivitySummary>;
+  ingestImage(workspaceId: string, bytes: number[]): Promise<DraftImage>;
+  pickImage(workspaceId: string): Promise<DraftImage | null>;
+  releaseImages(workspaceId: string, handles: string[]): Promise<void>;
+  messageImage(workspaceId: string, sessionId: string, displayId: string, attachmentId: string): Promise<string>;
   startRun(
     workspaceId: string,
     sessionId: string,
@@ -201,6 +206,7 @@ export interface DesktopBridge {
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
     routeRecoveryBinding?: string,
+    imageHandles?: string[],
   ): Promise<RunSummary>;
   continueTask(
     workspaceId: string,
@@ -454,6 +460,10 @@ export const desktopBridge: DesktopBridge = {
     invoke<RunContext>("desktop_run_context", { workspaceId, sessionId }),
   agentActivity: (workspaceId, sessionId) =>
     invoke<AgentActivitySummary>("desktop_agent_activity", { workspaceId, sessionId }),
+  ingestImage: (workspaceId, bytes) => invoke<DraftImage>("desktop_ingest_image", { workspaceId, bytes }),
+  pickImage: (workspaceId) => invoke<DraftImage | null>("desktop_pick_image", { workspaceId }),
+  releaseImages: (workspaceId, handles) => invoke<void>("desktop_release_images", { workspaceId, handles }),
+  messageImage: (workspaceId, sessionId, displayId, attachmentId) => invoke<string>("desktop_message_image", { workspaceId, sessionId, displayId, attachmentId }),
   startRun: (
     workspaceId,
     sessionId,
@@ -466,6 +476,7 @@ export const desktopBridge: DesktopBridge = {
     skillBinding,
     agentBinding,
     routeRecoveryBinding,
+    imageHandles,
   ) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
@@ -476,6 +487,7 @@ export const desktopBridge: DesktopBridge = {
         modelRef,
         modelSelectionBinding,
         routeRecoveryBinding,
+        imageHandles,
         reasoningEffort,
         reasoningEffortBinding,
         skillBinding,

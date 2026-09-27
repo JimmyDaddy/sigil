@@ -768,6 +768,77 @@ impl DesktopHttpClient {
         Ok(receipt)
     }
 
+    /// Admits one encoded image; the server derives its format, dimensions and content binding.
+    pub async fn ingest_image(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<crate::DesktopImageAttachment, DesktopClientError> {
+        if bytes.is_empty() || bytes.len() > crate::MAX_DESKTOP_IMAGE_BYTES {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        let expected_hash = sha256_hex(&bytes);
+        let expected_len = bytes.len() as u64;
+        let attachment: crate::DesktopImageAttachment = self
+            .send_json(
+                self.client
+                    .post(self.route(["image-attachments"])?)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(bytes),
+                StatusCode::CREATED,
+            )
+            .await?;
+        let extension = match attachment.mime_type.as_str() {
+            "png" => "png",
+            "jpeg" => "jpg",
+            "webp" => "webp",
+            _ => return Err(DesktopClientError::InvalidResponse),
+        };
+        if attachment.sha256 != expected_hash
+            || attachment.byte_len != expected_len
+            || attachment.artifact_ref != format!("{expected_hash}.{extension}")
+            || attachment.width == 0
+            || attachment.height == 0
+            || attachment.attachment_id.is_empty()
+            || attachment.attachment_id.len() > 128
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(attachment)
+    }
+
+    /// Reads one attachment selected from the exact durable message, never from a path.
+    pub async fn message_image(
+        &self,
+        session_id: &str,
+        display_id: &str,
+        attachment_id: &str,
+    ) -> Result<crate::DesktopImageContent, DesktopClientError> {
+        let mut url = self.route(["sessions", session_id, "message-image"])?;
+        url.query_pairs_mut()
+            .append_pair("display_id", display_id)
+            .append_pair("attachment_id", attachment_id);
+        let content: crate::DesktopImageContent = self
+            .get_json_with_limit(
+                url,
+                StatusCode::OK,
+                (crate::MAX_DESKTOP_IMAGE_BYTES / 3 + 1) * 4 + 1024,
+            )
+            .await?;
+        if !matches!(
+            content.mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp"
+        ) {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        let bytes = BASE64_STANDARD
+            .decode(&content.data_base64)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        if bytes.is_empty() || bytes.len() > crate::MAX_DESKTOP_IMAGE_BYTES {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(content)
+    }
+
     /// Starts a run with an idempotent command identity.
     pub async fn start_run(
         &self,

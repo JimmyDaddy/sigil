@@ -1807,6 +1807,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: "hello from desktop".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
@@ -1862,6 +1863,7 @@ async fn local_server_routes_typed_task_continuation_through_run_start() {
         "desktop-client",
         session_id,
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: String::new(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
@@ -2362,6 +2364,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
                 skill: None,
                 assistant_phase: None,
                 image_attachment_count: 0,
+                image_attachments: Vec::new(),
                 truncated: false,
                 original_content_bytes: 5,
             },
@@ -3445,6 +3448,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: "approval needed".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
@@ -3535,6 +3539,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: "run desktop smoke".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
@@ -8437,6 +8442,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
         registry.start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: None,
                 model_ref: None,
@@ -8548,6 +8554,7 @@ fn task_continuation_uses_the_foreground_run_control_plane() {
     let (registry, driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let request = HttpRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: String::new(),
         permission_mode: Some(HttpPermissionMode::Manual),
         model_ref: None,
@@ -9542,6 +9549,7 @@ fn approval_driver_failure_keeps_pending_call() {
 #[test]
 fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: "hello".to_owned(),
         permission_mode: Some(HttpPermissionMode::ReadOnly),
         model_ref: None,
@@ -9658,6 +9666,7 @@ fn wait_for_registry_activity(
 
 fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartRequest {
     HttpRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: prompt.to_owned(),
         permission_mode: Some(permission_mode),
         model_ref: None,

@@ -204,6 +204,7 @@ async fn build_provider_for_model_ref_with_credentials_and_client(
             let mut config: OpenAiResponsesProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
+            config.authentication = openai_responses_authentication(&connection.config);
             Ok(Box::new(match client {
                 Some(client) => {
                     OpenAiResponsesProvider::new_exact_with_client(config, timeouts, client)?
@@ -624,6 +625,19 @@ pub fn load_openai_compat_config(
     Ok(config)
 }
 
+fn openai_responses_authentication(
+    connection: &crate::provider_connections::ProviderConnectionConfig,
+) -> sigil_provider_openai_responses::OpenAiResponsesAuthentication {
+    use crate::provider_connections::{CredentialRefConfig, ProviderFamily};
+    if connection.provider == ProviderFamily::Custom
+        && matches!(connection.credential, CredentialRefConfig::None)
+    {
+        sigil_provider_openai_responses::OpenAiResponsesAuthentication::UnauthenticatedLoopback
+    } else {
+        sigil_provider_openai_responses::OpenAiResponsesAuthentication::Bearer
+    }
+}
+
 /// Resolves the active OpenAI Responses connection options.
 pub fn load_openai_responses_config(
     root_config: &RootConfig,
@@ -643,6 +657,7 @@ pub fn load_openai_responses_config(
     let mut config: OpenAiResponsesProviderConfig =
         exact_connection_provider_config(&connection, None)?;
     config.model = model;
+    config.authentication = openai_responses_authentication(&connection);
     Ok(config)
 }
 

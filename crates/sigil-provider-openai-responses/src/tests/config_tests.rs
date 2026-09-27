@@ -85,3 +85,37 @@ impl Drop for EnvScope {
         }
     }
 }
+
+#[test]
+fn provider_options_cannot_enable_unauthenticated_responses() -> Result<()> {
+    let config: OpenAiResponsesProviderConfig = serde_json::from_value(serde_json::json!({
+        "authentication": "unauthenticated_loopback",
+        "base_url": "http://127.0.0.1:1"
+    }))?;
+    assert_eq!(
+        config.authentication,
+        crate::OpenAiResponsesAuthentication::Bearer
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_no_credential_responses_does_not_acquire_ambient_credentials() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[
+        (OPENAI_RESPONSES_API_KEY_ENV, "ambient-key"),
+        (
+            OPENAI_RESPONSES_BASE_URL_ENV,
+            "https://different.example.test",
+        ),
+    ]);
+    let resolved = OpenAiResponsesProviderConfig {
+        authentication: crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback,
+        base_url: "http://127.0.0.1:1".to_owned(),
+        ..Default::default()
+    }
+    .resolved()?;
+    assert_eq!(resolved.base_url, "http://127.0.0.1:1");
+    assert!(resolved.api_key.is_none());
+    Ok(())
+}

@@ -82,6 +82,23 @@ impl OpenAiResponsesProvider {
         timeouts: ModelRequestTimeouts,
         client: reqwest::Client,
     ) -> Result<Self> {
+        if config.authentication == crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback {
+            let endpoint = reqwest::Url::parse(&config.base_url)
+                .context("invalid unauthenticated Responses endpoint")?;
+            anyhow::ensure!(
+                config.api_key.is_none()
+                    && matches!(endpoint.scheme(), "http" | "https")
+                    && matches!(
+                        endpoint.host_str(),
+                        Some("localhost" | "127.0.0.1" | "[::1]")
+                    )
+                    && endpoint.username().is_empty()
+                    && endpoint.password().is_none()
+                    && endpoint.query().is_none()
+                    && endpoint.fragment().is_none(),
+                "unauthenticated Responses requires an explicit loopback endpoint without credentials"
+            );
+        }
         Ok(Self {
             timeouts,
             client,
@@ -90,11 +107,16 @@ impl OpenAiResponsesProvider {
         })
     }
 
-    fn api_key(&self) -> Result<String> {
+    fn api_key(&self) -> Result<Option<String>> {
+        if self.config.authentication
+            == crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback
+        {
+            return Ok(None);
+        }
         if let Some(api_key) = &self.config.api_key
             && !api_key.trim().is_empty()
         {
-            return Ok(api_key.clone());
+            return Ok(Some(api_key.clone()));
         }
         Err(OpenAiResponsesProviderError::MissingApiKey.into())
     }
@@ -150,7 +172,7 @@ impl OpenAiResponsesProvider {
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
-                &SecretRedactor::from_values([self.api_key()?]),
+                &SecretRedactor::from_values(self.api_key()?),
                 self.name(),
                 &request.model_name,
                 status_code,
@@ -304,7 +326,7 @@ impl OpenAiResponsesProvider {
             let error_body = read_error_response_body(
                 response,
                 self.timeouts.request_timeout,
-                &SecretRedactor::from_values([self.api_key()?]),
+                &SecretRedactor::from_values(self.api_key()?),
                 self.name(),
                 &request.model_name,
                 status_code,
@@ -525,7 +547,7 @@ impl Provider for OpenAiResponsesProvider {
         let error_body = read_error_response_body(
             response,
             self.timeouts.request_timeout,
-            &SecretRedactor::from_values([self.api_key()?]),
+            &SecretRedactor::from_values(self.api_key()?),
             self.name(),
             &request.model_name,
             status_code,
@@ -570,11 +592,13 @@ impl OpenAiResponsesProvider {
     ) -> Result<reqwest::Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let auth = format!("Bearer {}", self.api_key()?);
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth).context("invalid OpenAI Responses auth header")?,
-        );
+        if let Some(api_key) = self.api_key()? {
+            let auth = format!("Bearer {api_key}");
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&auth).context("invalid OpenAI Responses auth header")?,
+            );
+        }
         if let Some(organization) = header_value(self.config.organization.as_deref())? {
             headers.insert("OpenAI-Organization", organization);
         }

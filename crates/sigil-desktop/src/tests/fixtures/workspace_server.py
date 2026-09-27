@@ -29,7 +29,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
 info = {
-    "schema_version": 14,
+    "schema_version": 15,
     "protocol_version": 2,
     "server_version": "1.0.0",
     "workspace_id": (root / "identity").read_text() if (root / "identity").exists() else root.name,
@@ -38,7 +38,7 @@ info = {
     "shutdown_on_stdin_close": True,
     "capabilities": dict.fromkeys([
         "session_catalog", "durable_session_reopen", "bounded_transcript_replay",
-        "canonical_conversation_display", "typed_tool_artifact_retrieval",
+        "canonical_conversation_display", "image_attachments", "typed_tool_artifact_retrieval",
         "conversation_recovery", "durable_event_replay", "live_events", "approval",
         "durable_user_input", "cancellation", "terminal_task_cancel", "task_pause",
         "verification", "task_integration", "intent_stack", "run_context",

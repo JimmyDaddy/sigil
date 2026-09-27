@@ -44,9 +44,11 @@ The TUI keeps the same content order without pretending that a terminal can repr
 
 ## Image Attachments
 
-From an idle composer, paste a local PNG, JPEG, or WebP path, or press `Ctrl-V` when the clipboard contains an image. Review the metadata chip before sending; select a chip with `Up`, move with `Left/Right`, and remove it with `Backspace` or `Delete`.
+In Desktop, use **Attach image** to select a local PNG, JPEG, or WebP, or paste an image from the clipboard. The preview has a remove button; sending errors keep the text and images for retry. You can send images with or without text. Saved messages offer **View image** after reopening the conversation.
 
-Each turn accepts up to 4 images, 8 MiB per image, 24 MiB total, and bounded dimensions. Images cannot be queued or attached to plan, command, skill, task, or agent input. Only recognized image-capable OpenAI Responses, Anthropic, and Gemini models accept them. If a saved session refers to a missing local image, paste the original again or continue from a conversation that does not need it.
+In TUI, from an idle composer, paste a local PNG, JPEG, or WebP path, or press `Ctrl-V` when the clipboard contains an image. Review the metadata chip before sending; select a chip with `Up`, move with `Left/Right`, and remove it with `Backspace` or `Delete`.
+
+Each turn accepts up to 4 images, 8 MiB per image, 24 MiB total, and bounded dimensions. Direct messages and inline skills can carry images. Follow-up queues, native commands, plans, tasks, and agent sessions do not yet carry attachments; their drafts are kept instead of silently dropping images. Only recognized image-capable models accept them, including OpenAI Responses, Anthropic, Gemini, and recognized DeepSeek image-capable model aliases. If a saved session refers to a missing local image, paste the original again or continue from a conversation that does not need it.
 
 ## Slash Commands
 

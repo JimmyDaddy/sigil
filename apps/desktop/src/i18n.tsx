@@ -5,6 +5,19 @@ export type Locale = "en" | "zh-CN";
 const LOCALE_STORAGE_KEY = "sigil.desktop.locale.v1";
 
 const en = {
+  imageModelUnsupported: "Choose an image-capable model to send these images. Your draft is preserved.",
+  attachImage: "Attach image",
+  attachingImage: "Attaching image…",
+  attachedImages: "Attached images",
+  imageNumber: "Image {count}",
+  removeImage: "Remove image {count}",
+  imageForegroundOnly: "Send images with a message or inline skill while the conversation is idle. Queued, command, and agent image input is not available yet. Your draft is preserved.",
+  imageCountLimit: "A message accepts up to four images.",
+  imageSizeLimit: "Use images up to 8 MiB each and 24 MiB in total.",
+  imageAttachFailed: "The image could not be attached. Use a valid PNG, JPEG, or WebP within the image limits.",
+  viewImage: "View image",
+  imageUnavailable: "The saved image is missing or changed. Attach the original again.",
+
   language: "Language: English. Switch to Chinese",
   settings: "Settings",
   openSettings: "Open settings",
@@ -1112,6 +1125,19 @@ const en = {
 type MessageKey = keyof typeof en;
 
 const zh: Record<MessageKey, string> = {
+  imageModelUnsupported: "请选择支持图片的模型发送这些图片。草稿已保留。",
+  attachImage: "添加图片",
+  attachingImage: "正在添加图片…",
+  attachedImages: "已添加的图片",
+  imageNumber: "图片 {count}",
+  removeImage: "移除图片 {count}",
+  imageForegroundOnly: "会话空闲时可随消息或内联技能发送图片。暂不支持图片队列、命令和子智能体输入，草稿已保留。",
+  imageCountLimit: "每条消息最多添加 4 张图片。",
+  imageSizeLimit: "单张图片最多 8 MiB，合计最多 24 MiB。",
+  imageAttachFailed: "无法添加图片。请使用大小和尺寸符合限制的有效 PNG、JPEG 或 WebP 图片。",
+  viewImage: "查看图片",
+  imageUnavailable: "保存的图片已丢失或改变，请重新添加原图。",
+
   language: "语言：中文。切换为英文",
   settings: "设置",
   openSettings: "打开设置",

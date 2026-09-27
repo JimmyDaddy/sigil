@@ -477,7 +477,10 @@ async fn handle_http_connection(
                     .is_some_and(|suffix| {
                         suffix.split_once('/').is_some_and(|(session_id, route)| {
                             !session_id.is_empty()
-                                && matches!(route, "display" | "transcript" | "message-content")
+                                && matches!(
+                                    route,
+                                    "display" | "transcript" | "message-content" | "message-image"
+                                )
                         })
                     })
                 && request
@@ -1041,6 +1044,62 @@ fn route_http_request(
         return match journal.replay_after(request.header("last-event-id").map(String::as_str)) {
             Ok(records) => json_response(200, json!({ "disclosures": records })),
             Err(error) => http_error_response(409, "replay_error", error.to_string()),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/image-attachments" {
+        return match registry.ingest_image(request.body) {
+            Ok(image) => json_response(201, json!(image)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/message-image"))
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        let pairs =
+            url::form_urlencoded::parse(request.query.as_deref().unwrap_or_default().as_bytes())
+                .collect::<Vec<_>>();
+        if pairs.iter().filter(|(key, _)| key == "display_id").count() != 1
+            || pairs
+                .iter()
+                .filter(|(key, _)| key == "attachment_id")
+                .count()
+                != 1
+        {
+            return http_error_response(
+                400,
+                "invalid_query",
+                "expected display and image identities",
+            );
+        }
+        let display_id = pairs
+            .iter()
+            .find(|(key, _)| key == "display_id")
+            .map(|(_, value)| value.as_ref())
+            .unwrap_or_default();
+        let attachment_id = pairs
+            .iter()
+            .find(|(key, _)| key == "attachment_id")
+            .map(|(_, value)| value.as_ref())
+            .unwrap_or_default();
+        return match registry.message_image(
+            session_id,
+            display_id,
+            attachment_id,
+            observation_budget,
+        ) {
+            Ok((mime_type, bytes)) => {
+                use base64::Engine as _;
+                json_response(
+                    200,
+                    json!({ "mime_type": mime_type, "data_base64": base64::engine::general_purpose::STANDARD.encode(bytes) }),
+                )
+            }
+            Err(error) => registry_error_response(error),
         };
     }
 
@@ -2491,7 +2550,12 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpLi
         })
         .transpose()?
         .unwrap_or(0);
-    if content_length > HTTP_MAX_BODY_BYTES {
+    let body_limit = if method == "POST" && path == "/image-attachments" {
+        sigil_kernel::MAX_IMAGE_ATTACHMENT_BYTES as usize
+    } else {
+        HTTP_MAX_BODY_BYTES
+    };
+    if content_length > body_limit {
         return Err(HttpListenerError::Request {
             message: "request body exceeds limit".to_owned(),
         });
@@ -2578,6 +2642,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         );
     }
     let status = match &error {
+        HttpRegistryError::ImageInputUnsupported | HttpRegistryError::ImageAttachmentInvalid => 400,
         HttpRegistryError::SessionNotFound { .. }
         | HttpRegistryError::RunNotFound { .. }
         | HttpRegistryError::TerminalTaskNotFound { .. } => 404,
@@ -2664,6 +2729,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         },
     };
     let code = match &error {
+        HttpRegistryError::ImageInputUnsupported => "image_input_unsupported",
+        HttpRegistryError::ImageAttachmentInvalid => "image_attachment_invalid",
         HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
         HttpRegistryError::DurableSessionNotFound => "durable_session_not_found",
         HttpRegistryError::DurableSessionNotReady => "durable_session_not_ready",

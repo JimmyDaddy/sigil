@@ -1599,6 +1599,7 @@ pub(crate) enum DesktopConversationDisplayContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<&'static str>,
         image_attachment_count: u64,
+        image_attachments: Vec<crate::image_attachments::ImageReference>,
         truncated: bool,
         original_content_bytes: u64,
     },
@@ -1693,6 +1694,8 @@ pub(crate) struct DesktopConversationLiveProvisionalAnchor {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
+    #[serde(default)]
+    pub(crate) image_handles: Vec<String>,
     pub(crate) prompt: String,
     pub(crate) permission_mode: DesktopPermissionMode,
     pub(crate) model_ref: Option<DesktopProviderModelRefSummary>,
@@ -3200,6 +3203,7 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 skill,
                 assistant_phase,
                 image_attachment_count,
+                image_attachments,
                 truncated,
                 original_content_bytes,
             } => Self::Message {
@@ -3218,6 +3222,7 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                     NativeConversationDisplayAssistantPhase::FinalAnswer => "final_answer",
                 }),
                 image_attachment_count,
+                image_attachments: image_attachments.into_iter().map(Into::into).collect(),
                 truncated,
                 original_content_bytes,
             },

@@ -780,6 +780,47 @@ impl HttpApplicationCommandExecutor {
         request: &ApplicationCommandRequest,
     ) -> Result<RuntimeApplicationDispatch, ApplicationError> {
         match &request.envelope.command {
+            ApplicationCommand::Conversation(
+                ConversationCommand::SubmitPromptWithAttachments {
+                    prompt,
+                    attachments,
+                    options: Some(options),
+                },
+            ) => {
+                if attachments.is_empty()
+                    || options.task_continuation.is_some()
+                    || options.agent.is_some()
+                {
+                    return Err(ApplicationError::InvalidRequest(
+                        "images require a foreground prompt or inline skill".to_owned(),
+                    ));
+                }
+                // Images supply the ordinary foreground input even without textual content.
+                let mut run_request = http_run_start_request(prompt.as_ref(), options, true)?;
+                run_request.image_attachments = attachments.clone();
+                match self.registry.start_run(&self.session_id, run_request) {
+                    Ok(run) => uncertain_dispatch(request, format!("http-run-start:{}", run.id)),
+                    Err(
+                        error @ (crate::HttpRegistryError::ImageInputUnsupported
+                        | crate::HttpRegistryError::ImageAttachmentInvalid),
+                    ) => confirmed_no_effect(
+                        request,
+                        sigil_application::CommandRejection {
+                            kind: if matches!(
+                                error,
+                                crate::HttpRegistryError::ImageInputUnsupported
+                            ) {
+                                "image_input_unsupported"
+                            } else {
+                                "image_attachment_invalid"
+                            }
+                            .to_owned(),
+                            reason: error.to_string(),
+                        },
+                    ),
+                    Err(_) => Err(ApplicationError::Unavailable),
+                }
+            }
             ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
                 prompt,
                 options: Some(options),
@@ -792,7 +833,7 @@ impl HttpApplicationCommandExecutor {
                             .to_owned(),
                     ));
                 }
-                let run_request = http_run_start_request(prompt.as_ref(), options)?;
+                let run_request = http_run_start_request(prompt.as_ref(), options, false)?;
                 let run = self
                     .registry
                     .start_run(&self.session_id, run_request)
@@ -1569,8 +1610,9 @@ fn parse_approval_binding(binding: &str) -> Result<(String, String, String), App
 fn http_run_start_request(
     prompt: Option<&sigil_application::SafeText>,
     options: &RunStartOptions,
+    has_images: bool,
 ) -> Result<crate::HttpRunStartRequest, ApplicationError> {
-    let has_prompt = prompt.is_some();
+    let has_prompt = prompt.is_some() || has_images;
     let has_task_continuation = options.task_continuation.is_some();
     if has_prompt == has_task_continuation {
         return Err(ApplicationError::InvalidRequest(
@@ -1612,6 +1654,7 @@ fn http_run_start_request(
             });
     Ok(crate::HttpRunStartRequest {
         prompt: prompt.map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
+        image_attachments: Vec::new(),
         model_ref,
         model_selection_binding: options
             .model

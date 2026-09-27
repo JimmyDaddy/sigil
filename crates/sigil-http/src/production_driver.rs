@@ -2186,6 +2186,7 @@ impl HttpProductionRunDriver {
         };
 
         let standard_start = HttpRunDriverStart {
+            image_attachments: Vec::new(),
             session: start.session,
             run: start.run,
             prompt: queued.queued.prompt.clone(),
@@ -2794,6 +2795,24 @@ impl AuthorityArtifactStoreLease {
     }
 }
 
+impl HttpProductionRunDriver {
+    fn image_cache(
+        &self,
+    ) -> Result<sigil_runtime::ControlledImageAttachmentCache, HttpRunDriverError> {
+        let config = RootConfig::load(&self.options.config_path)
+            .map_err(|_| HttpRunDriverError::new("image cache configuration is unavailable"))?;
+        let workspace = sigil_kernel::resolve_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            &config.workspace.root,
+        );
+        let paths = sigil_runtime::resolve_sigil_paths(&config.storage, &config.session, workspace);
+        Ok(sigil_runtime::ControlledImageAttachmentCache::new(
+            paths.attachments_root,
+        ))
+    }
+}
+
 impl HttpRunDriver for HttpProductionRunDriver {
     fn application_operation_owner(
         &self,
@@ -3207,6 +3226,35 @@ impl HttpRunDriver for HttpProductionRunDriver {
             requested_model.as_ref(),
         )
         .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        if !request.image_attachments.is_empty() {
+            use sigil_kernel::ImageAttachmentResolver as _;
+            if request.agent_binding.is_some() || request.task_continuation.is_some() {
+                return Err(HttpRunAdmissionError::ImageAttachmentInvalid);
+            }
+            let mut message = ModelMessage::user(request.prompt.clone());
+            message.image_attachments = request.image_attachments.clone();
+            sigil_kernel::validate_message_image_attachments(&message)
+                .map_err(|_| HttpRunAdmissionError::ImageAttachmentInvalid)?;
+            let cache = self
+                .image_cache()
+                .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+            for image in &message.image_attachments {
+                cache
+                    .resolve(image)
+                    .map_err(|_| HttpRunAdmissionError::ImageAttachmentInvalid)?;
+            }
+            let config = RootConfig::load(&self.options.config_path)
+                .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+            let selected = requested_model.as_ref().unwrap_or(&context.model_ref);
+            let provider = sigil_runtime::build_provider_for_model_ref(&config, selected)
+                .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+            if !provider
+                .image_input_capability(&selected.model_id)
+                .is_supported()
+            {
+                return Err(HttpRunAdmissionError::ImageInputUnsupported);
+            }
+        }
         let Some(recovery) = context.route_recovery.map(http_route_recovery) else {
             return Ok(());
         };
@@ -3487,7 +3535,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| match error {
                 HttpRunAdmissionError::SessionAlreadyActive { .. }
                 | HttpRunAdmissionError::RouteRecovery(_) => HttpIntentStackDriverError::Conflict,
-                HttpRunAdmissionError::Unavailable => HttpIntentStackDriverError::Unavailable,
+                HttpRunAdmissionError::Unavailable
+                | HttpRunAdmissionError::ImageInputUnsupported
+                | HttpRunAdmissionError::ImageAttachmentInvalid => {
+                    HttpIntentStackDriverError::Unavailable
+                }
             })?;
         match self.application_intent_stack_command(
             session,
@@ -3565,6 +3617,49 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 .collect(),
             next_before: page.next_before,
         })
+    }
+
+    fn ingest_image(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<sigil_kernel::ImageAttachment, HttpRunDriverError> {
+        let cache = self.image_cache()?;
+        cache
+            .ingest_encoded_bytes(uuid::Uuid::new_v4().to_string(), bytes)
+            .map(|attachment| attachment.without_resolved_bytes())
+            .map_err(|_| {
+                HttpRunDriverError::new(
+                    "image could not be admitted; use a bounded PNG, JPEG, or WebP image",
+                )
+            })
+    }
+
+    fn message_image(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        display_id: &str,
+        attachment_id: &str,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<(String, Vec<u8>), HttpRunDriverError> {
+        use sigil_kernel::ImageAttachmentResolver as _;
+        let attachment = self
+            .query_projection_owner(session)
+            .map_err(|_| HttpRunDriverError::new("message image projection is unavailable"))?
+            .message_image_attachment(
+                &session.durable_session_scope_id,
+                display_id,
+                attachment_id,
+                budget,
+            )
+            .map_err(|_| {
+                HttpRunDriverError::new("image reference is not available in this conversation")
+            })?;
+        let bytes = self.image_cache()?.resolve(&attachment).map_err(|_| {
+            HttpRunDriverError::new(
+                "recorded image is missing or changed; attach the original again",
+            )
+        })?;
+        Ok((attachment.mime_type.as_str().to_owned(), bytes))
     }
 
     fn message_content_page(
@@ -4296,7 +4391,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 | HttpRunAdmissionError::RouteRecovery(_) => {
                     HttpConversationQueueDriverError::Conflict
                 }
-                HttpRunAdmissionError::Unavailable => HttpConversationQueueDriverError::Unavailable,
+                HttpRunAdmissionError::Unavailable
+                | HttpRunAdmissionError::ImageInputUnsupported
+                | HttpRunAdmissionError::ImageAttachmentInvalid => {
+                    HttpConversationQueueDriverError::Unavailable
+                }
             })?;
         let state = read_http_durable_queue_state(session)?;
         let current_generation = http_queue_generation(state.projection.current_revision());
@@ -4486,7 +4585,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 | HttpRunAdmissionError::RouteRecovery(_) => {
                     HttpConversationQueueDriverError::Conflict
                 }
-                HttpRunAdmissionError::Unavailable => HttpConversationQueueDriverError::Unavailable,
+                HttpRunAdmissionError::Unavailable
+                | HttpRunAdmissionError::ImageInputUnsupported
+                | HttpRunAdmissionError::ImageAttachmentInvalid => {
+                    HttpConversationQueueDriverError::Unavailable
+                }
             })?;
         self.reconcile_orphaned_queued_dispatches(session)?;
         let state = read_http_durable_queue_state(session)?;
@@ -4874,6 +4977,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
             let start = HttpRunDriverStart {
+                image_attachments: Vec::new(),
                 session: session.clone(),
                 run,
                 prompt: "Continue after answering a requested question".to_owned(),
@@ -5809,6 +5913,7 @@ impl HttpRunSupervisor {
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
             prompt: self.start.prompt.clone(),
+            image_attachments: self.start.image_attachments.clone(),
             run_id: self.start.run.id.clone(),
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
             session_attachment: Some(Arc::clone(&self.session_attachment)),

@@ -411,6 +411,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                     skill: None,
                     assistant_phase: Some(DesktopConversationDisplayAssistantPhase::FinalAnswer),
                     image_attachment_count: 0,
+                    image_attachments: Vec::new(),
                     truncated: false,
                     original_content_bytes: 4,
                 },

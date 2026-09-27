@@ -1221,6 +1221,7 @@ fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
 #[test]
 fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
     let request = crate::DesktopRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: String::new(),
         permission_mode: crate::DesktopPermissionMode::Manual,
         model_ref: None,
@@ -1252,6 +1253,7 @@ fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
 #[test]
 fn run_start_serializes_an_exact_same_session_model_route() {
     let request = crate::DesktopRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: "continue here".to_owned(),
         permission_mode: crate::DesktopPermissionMode::Manual,
         model_ref: Some(crate::DesktopProviderModelRef {
@@ -2652,4 +2654,49 @@ async fn new_intents_fetch_current_binding_without_rebinding_an_existing_envelop
             .is_none()
     );
     server.await.expect("server");
+}
+
+#[tokio::test]
+async fn image_ingest_binds_admitted_metadata_to_the_exact_uploaded_bytes() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    for tampered in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let bytes = b"encoded-image-transport-fixture".to_vec();
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("connection");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let read = stream.read(&mut chunk).await.expect("request");
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    && request.len() >= end + 4 + expected.len()
+                {
+                    assert_eq!(&request[end + 4..], &expected);
+                    assert!(request.starts_with(b"POST /image-attachments "));
+                    break;
+                }
+            }
+            let hash = if tampered {
+                "a".repeat(64)
+            } else {
+                sha256_hex(&expected)
+            };
+            let body = serde_json::json!({"attachment_id":"image-1","sha256":hash,"mime_type":"png","width":2,"height":3,"byte_len":expected.len(),"estimated_visual_tokens":1,"artifact_ref":format!("{hash}.png")}).to_string();
+            stream.write_all(format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("response");
+        });
+        let client = DesktopHttpClient::new(
+            Client::new(),
+            address,
+            Arc::new(DesktopBearerToken::generate().expect("token")),
+        );
+        let result = client.ingest_image(bytes).await;
+        server.await.expect("server joined");
+        assert_eq!(result.is_ok(), !tampered);
+    }
 }

@@ -42,6 +42,7 @@ pub struct HttpRunDriverStart {
     pub run: HttpRunSnapshot,
     /// Full prompt body. The preview is carried separately on the run snapshot.
     pub prompt: String,
+    pub image_attachments: Vec<sigil_kernel::ImageAttachment>,
     /// Optional model selected from the exact run-context capability set.
     pub model_ref: Option<HttpProviderModelRef>,
     /// Opaque model-selection binding supplied with an explicit selection.
@@ -444,6 +445,25 @@ pub trait HttpRunDriver: Send + Sync {
         self.transcript_page(session, before, limit)
     }
 
+    /// Admits encoded image bytes to this workspace's controlled cache.
+    fn ingest_image(
+        &self,
+        _bytes: Vec<u8>,
+    ) -> Result<sigil_kernel::ImageAttachment, HttpRunDriverError> {
+        Err(HttpRunDriverError::new("image ingestion is unavailable"))
+    }
+
+    /// Reads an image only through a validated durable message in this session.
+    fn message_image(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _display_id: &str,
+        _attachment_id: &str,
+        _budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<(String, Vec<u8>), HttpRunDriverError> {
+        Err(HttpRunDriverError::new("message image is unavailable"))
+    }
+
     /// Reads one identity-bound page of a complete safely redacted message body.
     fn message_content_page(
         &self,
@@ -781,6 +801,10 @@ pub trait HttpRunDriver: Send + Sync {
 /// Typed, secret-free run admission failures returned before a run id is allocated.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpRunAdmissionError {
+    #[error("selected model does not support image input")]
+    ImageInputUnsupported,
+    #[error("image attachment references are invalid or unavailable")]
+    ImageAttachmentInvalid,
     #[error("session route recovery is required")]
     RouteRecovery(HttpSessionRouteRecoveryView),
     #[error("session is already active")]

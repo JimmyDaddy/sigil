@@ -23,7 +23,7 @@ pub use catalog::{
 };
 pub use config::{
     OPENAI_API_KEY_ENV, OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_API_KEY_ENV_NAMES,
-    OPENAI_RESPONSES_BASE_URL_ENV, OpenAiResponsesProviderConfig,
+    OPENAI_RESPONSES_BASE_URL_ENV, OpenAiResponsesAuthentication, OpenAiResponsesProviderConfig,
 };
 pub use models::OpenAiResponsesCompactedWindow;
 pub use provider::{

@@ -2,6 +2,7 @@ use super::*;
 
 fn start_request() -> HttpRunStartRequest {
     HttpRunStartRequest {
+        image_attachments: Vec::new(),
         prompt: "continue the bound session".to_owned(),
         permission_mode: Some(HttpPermissionMode::Manual),
         model_ref: None,

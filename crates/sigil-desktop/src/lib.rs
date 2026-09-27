@@ -5,6 +5,12 @@
 //! implementation. A future native shell can depend on this crate without exposing process or
 //! credential primitives to its renderer.
 
+mod images;
+pub use images::{
+    DesktopImageAttachment, DesktopImageContent, MAX_DESKTOP_IMAGE_BYTES,
+    MAX_DESKTOP_IMAGE_BYTES_PER_TURN, MAX_DESKTOP_IMAGES_PER_TURN,
+};
+
 mod client;
 mod control_log_recovery;
 mod dto;

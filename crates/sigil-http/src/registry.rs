@@ -75,6 +75,10 @@ const MAX_CONTINUITY_TERMINAL_RUNS: usize = 16;
 /// Errors returned by the HTTP session/run registry.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpRegistryError {
+    #[error("selected model does not support image input; select an image-capable model")]
+    ImageInputUnsupported,
+    #[error("image attachment references are invalid or unavailable; attach the original again")]
+    ImageAttachmentInvalid,
     /// The requested HTTP session does not exist.
     #[error("http session not found: {session_id}")]
     SessionNotFound { session_id: String },
@@ -1175,6 +1179,56 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    /// Admits encoded bytes through the driver-owned workspace image cache.
+    /// Returns metadata only; this registry does not own a second blob store.
+    ///
+    /// # Errors
+    /// Returns a typed registry error when the driver rejects the image or panics.
+    pub fn ingest_image(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<sigil_kernel::ImageAttachment, HttpRegistryError> {
+        catch_unwind(AssertUnwindSafe(|| self.driver.ingest_image(bytes)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "image ingestion",
+                run_id: String::new(),
+            })?
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "image ingestion",
+                run_id: String::new(),
+                message: error.message,
+            })
+    }
+
+    /// Reads cache-verified bytes for an exact image reference in a bound durable message.
+    /// The caller supplies the observation budget; this read grants no filesystem authority.
+    ///
+    /// # Errors
+    /// Returns a typed error for an unknown session, rejected source/cache binding, exhausted
+    /// observation budget, or driver panic.
+    pub fn message_image(
+        &self,
+        session_id: &str,
+        display_id: &str,
+        attachment_id: &str,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<(String, Vec<u8>), HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .message_image(&session, display_id, attachment_id, budget)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "message image",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| HttpRegistryError::DriverRejected {
+            operation: "message image",
+            run_id: session_id.to_owned(),
+            message: error.message,
+        })
+    }
+
     pub fn message_content_page(
         &self,
         session_id: &str,
@@ -2162,11 +2216,12 @@ impl HttpSessionRunRegistry {
                     || request.reasoning_effort_binding.is_some()
                     || request.skill_binding.is_some()
                     || request.agent_binding.is_some()
+                    || !request.image_attachments.is_empty()
                 {
                     return Err(HttpRegistryError::InvalidTaskContinuation);
                 }
             }
-            None if request.prompt.trim().is_empty() => {
+            None if request.prompt.trim().is_empty() && request.image_attachments.is_empty() => {
                 return Err(HttpRegistryError::EmptyPrompt);
             }
             None => {}
@@ -2205,6 +2260,7 @@ impl HttpSessionRunRegistry {
         let permission_mode = request
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
+        let image_attachments = request.image_attachments;
         let model_ref = request.model_ref;
         let model_selection_binding = request.model_selection_binding;
         let route_recovery_binding = request.route_recovery_binding;
@@ -2283,6 +2339,7 @@ impl HttpSessionRunRegistry {
             session: session_snapshot,
             run: run_snapshot,
             prompt,
+            image_attachments,
             model_ref,
             model_selection_binding,
             route_recovery_binding,
@@ -2787,9 +2844,17 @@ impl HttpSessionRunRegistry {
                 &command.command_id,
                 command.command_journal.clone(),
                 sigil_application::ApplicationCommand::Conversation(
-                    sigil_application::ConversationCommand::SubmitPrompt {
-                        prompt,
-                        options: Some(Box::new(options)),
+                    if command.payload.image_attachments.is_empty() {
+                        sigil_application::ConversationCommand::SubmitPrompt {
+                            prompt,
+                            options: Some(Box::new(options)),
+                        }
+                    } else {
+                        sigil_application::ConversationCommand::SubmitPromptWithAttachments {
+                            prompt,
+                            attachments: command.payload.image_attachments.clone(),
+                            options: Some(Box::new(options)),
+                        }
                     },
                 ),
             )
@@ -2810,6 +2875,12 @@ impl HttpSessionRunRegistry {
                 true,
             ),
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
+                if rejection.kind == "image_input_unsupported" {
+                    return Err(HttpRegistryError::ImageInputUnsupported);
+                }
+                if rejection.kind == "image_attachment_invalid" {
+                    return Err(HttpRegistryError::ImageAttachmentInvalid);
+                }
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application run start",
                     run_id: session_id.to_owned(),
@@ -4938,6 +5009,12 @@ fn terminal_lifecycle_closes_stream_for_tasks(
 
 fn http_run_admission_registry_error(error: HttpRunAdmissionError) -> HttpRegistryError {
     let recovery = match error {
+        HttpRunAdmissionError::ImageInputUnsupported => {
+            return HttpRegistryError::ImageInputUnsupported;
+        }
+        HttpRunAdmissionError::ImageAttachmentInvalid => {
+            return HttpRegistryError::ImageAttachmentInvalid;
+        }
         HttpRunAdmissionError::RouteRecovery(recovery) => recovery,
         HttpRunAdmissionError::SessionAlreadyActive { recovery_binding } => {
             HttpSessionRouteRecoveryView {

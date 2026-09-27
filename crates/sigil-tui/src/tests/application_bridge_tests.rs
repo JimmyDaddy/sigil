@@ -880,3 +880,73 @@ fn stable_tui_client_epoch_is_stable_per_scope_and_changes_with_scope() -> Resul
     assert_ne!(repeated, stable_tui_client_epoch(&different_scope));
     Ok(())
 }
+
+#[test]
+fn image_only_action_crosses_application_boundary_without_placeholder_text() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("image-only")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("session")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let application = session(port, scope)?;
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "image-1",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )?;
+    let request = application
+        .prepare_action(
+            &AppAction::SubmitPromptWithAttachments {
+                prompt: String::new(),
+                attachments: vec![image.clone()],
+            },
+            None,
+            None,
+        )?
+        .expect("image action");
+    assert!(matches!(request.envelope.command,
+        sigil_application::ApplicationCommand::Conversation(sigil_application::ConversationCommand::SubmitPromptWithAttachments { prompt: None, attachments, .. }) if attachments == vec![image]));
+    Ok(())
+}
+
+#[test]
+fn inline_skill_images_cross_application_boundary_without_placeholder_arguments() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("skill-image")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("session")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let application = session(port, scope)?;
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "image-1",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )?;
+    let request = application
+        .prepare_action(
+            &AppAction::InvokeInlineSkill {
+                skill_id: "review".to_owned(),
+                arguments: String::new(),
+                attachments: vec![image.clone()],
+            },
+            None,
+            None,
+        )?
+        .expect("inline skill action");
+    assert!(matches!(request.envelope.command,
+        sigil_application::ApplicationCommand::Agent(sigil_application::AgentCommand::InvokeInlineSkill { skill_id, arguments: None, attachments, .. })
+        if skill_id.as_str() == "review" && attachments == vec![image]));
+    Ok(())
+}

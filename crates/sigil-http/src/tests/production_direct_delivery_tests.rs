@@ -232,6 +232,7 @@ async fn production_direct_continuation_retry_and_delivery_replay_do_not_repeat_
         "desktop-client",
         &session.id,
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: String::new(),
             permission_mode: Some(HttpPermissionMode::DangerFullAccess),
             model_ref: None,

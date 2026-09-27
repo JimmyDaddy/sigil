@@ -293,7 +293,7 @@ pub enum ConversationCommand {
         options: Option<Box<RunStartOptions>>,
     },
     SubmitPromptWithAttachments {
-        prompt: SafeText,
+        prompt: Option<SafeText>,
         attachments: Vec<sigil_kernel::ImageAttachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         options: Option<Box<RunStartOptions>>,
@@ -713,7 +713,9 @@ pub enum AgentCommand {
     },
     InvokeInlineSkill {
         skill_id: SafeText,
-        arguments: SafeText,
+        arguments: Option<SafeText>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<sigil_kernel::ImageAttachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<ApplicationReasoningEffort>,
     },

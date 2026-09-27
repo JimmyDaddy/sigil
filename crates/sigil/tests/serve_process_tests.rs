@@ -179,6 +179,78 @@ fn spawn_provider_fixture_with_listener(
     })
 }
 
+struct VisionProviderFixture {
+    base_url: String,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<anyhow::Result<Vec<serde_json::Value>>>>,
+}
+
+impl VisionProviderFixture {
+    fn start() -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut requests = Vec::new();
+            while !worker_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                let request = read_http_message(&mut stream);
+                let (_, body) = request.split_once("\r\n\r\n").context("provider body")?;
+                anyhow::ensure!(requests.len() < 16, "unexpected provider request loop");
+                requests.push(serde_json::from_str(body)?);
+                let body = concat!(
+                    "event: response.output_text.delta\n",
+                    "data: {\"delta\":\"Image received.\"}\n\n",
+                    "event: response.completed\n",
+                    "data: {\"response\":{\"id\":\"resp_image\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_image\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Image received.\"}]}]}}\n\n"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+            }
+            Ok(requests)
+        });
+        Ok(Self {
+            base_url: format!("http://{address}"),
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn finish(mut self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.stop.store(true, Ordering::Release);
+        self.worker
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("provider fixture already joined"))?
+            .join()
+            .map_err(|_| anyhow::anyhow!("provider fixture panicked"))?
+    }
+}
+
+impl Drop for VisionProviderFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn read_http_message(stream: &mut TcpStream) -> String {
     const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
     let mut request = Vec::new();
@@ -806,6 +878,10 @@ fn desktop_server_starts_first_run_without_config_and_exposes_empty_provider_set
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
     assert_eq!(server.server_info["capabilities"]["provider_setup"], true);
+    assert_eq!(
+        server.server_info["capabilities"]["image_attachments"],
+        true
+    );
     let (status, body) = http_request(
         server.address,
         "GET",
@@ -1495,6 +1571,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         .start_run(
             &session.id,
             sigil_desktop::DesktopRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "answer from the fixture".to_owned(),
                 permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
                 model_ref: None,
@@ -1652,6 +1729,206 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
             .success
     );
     fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_image_only_serve_contract_reaches_provider_and_survives_restart()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use sigil_desktop::{DesktopConversationDisplayContent, DesktopConversationDisplayMessageRole};
+
+    const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAEElEQVR4nGP4z8AARAwoFABE0AX7pM/egAAAAABJRU5ErkJggg==";
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 3, 8, 2,
+        0, 0, 0, 54, 136, 73, 214, 0, 0, 0, 16, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 68,
+        12, 40, 20, 0, 68, 208, 5, 251, 164, 207, 222, 128, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+        96, 130,
+    ];
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let provider = VisionProviderFixture::start()?;
+    write_config(&config_path, &provider.base_url);
+    let config = fs::read_to_string(&config_path)?.replace("chat_completions", "responses");
+    fs::write(&config_path, config)?;
+    let launch = sigil_desktop::DesktopLaunchRequest::new(
+        env!("CARGO_BIN_EXE_sigil"),
+        &config_path,
+        workspace.path(),
+    );
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager
+            .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+                launch.clone(),
+                "images",
+            ))
+            .await?;
+        let client = manager.client(&opened.id)?;
+        let image = client.ingest_image(PNG.to_vec()).await?;
+        anyhow::ensure!(
+            image.width == 2 && image.height == 3 && image.byte_len == PNG.len() as u64
+        );
+        let session = client
+            .create_session(sigil_desktop::DesktopSessionCreateRequest {
+                label: Some("image-only contract".to_owned()),
+                model_ref: None,
+            })
+            .await?;
+        let receipt = client
+            .start_run(
+                &session.id,
+                sigil_desktop::DesktopRunStartRequest {
+                    image_attachments: vec![image.clone()],
+                    prompt: String::new(),
+                    permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
+                    model_ref: None,
+                    model_selection_binding: None,
+                    route_recovery_binding: None,
+                    reasoning_effort: None,
+                    reasoning_effort_binding: None,
+                    skill_binding: None,
+                    agent_binding: None,
+                    task_continuation: None,
+                },
+            )
+            .await?;
+        let terminal = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(&receipt.run.id).await?;
+                if run.status.is_terminal() {
+                    break Ok::<_, sigil_desktop::DesktopClientError>(run);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        if terminal.status != sigil_desktop::DesktopRunStatus::Finished {
+            let display = client
+                .conversation_display(&session.id, &Default::default())
+                .await;
+            anyhow::bail!("image run did not finish: {terminal:?}; display: {display:?}");
+        }
+        anyhow::ensure!(
+            terminal.prompt_preview.is_empty(),
+            "image-only request acquired fabricated prompt text"
+        );
+        let display = client
+            .conversation_display(&session.id, &Default::default())
+            .await?;
+        let user = display
+            .items
+            .iter()
+            .find(|item| {
+                matches!(
+                    &item.content,
+                    DesktopConversationDisplayContent::Message {
+                        role: DesktopConversationDisplayMessageRole::User,
+                        image_attachments, ..
+                    } if image_attachments == &vec![image.clone()]
+                )
+            })
+            .context("durable image message")?;
+        anyhow::ensure!(
+            display.items.iter().any(|item| matches!(
+                &item.content,
+                DesktopConversationDisplayContent::Message {
+                    role: DesktopConversationDisplayMessageRole::Assistant,
+                    text: Some(text), ..
+                } if text == "Image received."
+            )),
+            "real provider answer missing from durable display"
+        );
+        let display_id = user.display_id.clone();
+        let content = client
+            .message_image(&session.id, &display_id, &image.attachment_id)
+            .await?;
+        anyhow::ensure!(content.mime_type == "image/png" && content.data_base64 == PNG_BASE64);
+        let catalog = client.catalog(&Default::default()).await?;
+        let historical = catalog
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.session_id.as_deref() == Some(session.durable_session_scope_id.as_str())
+            })
+            .context("durable catalog entry")?;
+        let session_ref = historical.session_ref.clone();
+        drop(client);
+        anyhow::ensure!(
+            manager.close(&opened.id).await?.success,
+            "first server did not close"
+        );
+        let restarted = manager
+            .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+                launch, "images",
+            ))
+            .await?;
+        let client = manager.client(&restarted.id)?;
+        let reopened = client
+            .open_session(sigil_desktop::DesktopSessionOpenRequest {
+                session_ref,
+                session_id: session.durable_session_scope_id,
+                label: None,
+                recovery_binding: None,
+            })
+            .await?;
+        let restored = client
+            .message_image(&reopened.id, &display_id, &image.attachment_id)
+            .await?;
+        anyhow::ensure!(
+            restored.mime_type == "image/png" && restored.data_base64 == PNG_BASE64,
+            "restarted server lost exact image content"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    if let Err(error) = result {
+        // This isolated fixture contains no credentials. Still use the production redactor and
+        // bounded tails so diagnostics cannot accidentally expose future secret-bearing fields.
+        let logs = walkdir::WalkDir::new(workspace.path().join("state/managed/session-log"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && entry.file_name() == "records.jsonl")
+            .take(4)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .map(|log| {
+                let tail = log
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .find(|index| log.len().saturating_sub(*index) <= 16_000)
+                    .unwrap_or(0);
+                sigil_kernel::safe_persistence_text(&log[tail..])
+            })
+            .collect::<Vec<_>>();
+        let request_diagnostics =
+            sigil_kernel::safe_persistence_text(&serde_json::to_string(&requests)?);
+        anyhow::bail!(
+            "{error:#}; actual provider requests: {request_diagnostics}; durable events: {logs:?}"
+        );
+    }
+    for (_, report) in cleanup {
+        anyhow::ensure!(report?.success, "image server cleanup failed");
+    }
+    let expected = format!("data:image/png;base64,{PNG_BASE64}");
+    let image_blocks = requests
+        .iter()
+        .filter_map(|request| request["input"].as_array())
+        .flatten()
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "input_image")
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        image_blocks.len() == 1,
+        "provider did not receive exactly one image: {}",
+        image_blocks.len()
+    );
+    anyhow::ensure!(
+        image_blocks[0]["image_url"] == expected,
+        "actual provider image bytes changed"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]

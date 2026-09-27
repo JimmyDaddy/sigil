@@ -127,9 +127,11 @@ impl AppState {
             AppAction::InvokeInlineSkill {
                 skill_id,
                 arguments,
+                attachments,
             } => WorkerCommand::InvokeInlineSkill {
                 skill_id,
                 arguments,
+                attachments,
                 reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
             AppAction::InvokeChildSessionSkill {

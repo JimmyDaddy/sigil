@@ -45,6 +45,9 @@ use crate::{
 #[path = "production_projection_owner_tests.rs"]
 mod projection_owner;
 
+#[path = "production_image_tests.rs"]
+mod image_attachments;
+
 #[path = "production_run_start_tests.rs"]
 mod run_start;
 
@@ -602,6 +605,7 @@ async fn production_run_admission_reports_external_attachment_before_allocating_
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "must not allocate a run".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
@@ -777,6 +781,7 @@ credential = {{ source = "none" }}
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "must not allocate without the exact route binding".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: Some(replacement.clone()),
@@ -801,6 +806,7 @@ credential = {{ source = "none" }}
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "must not allocate with stale catalog binding".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: Some(replacement),
@@ -895,6 +901,7 @@ enabled = true
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: String::new(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
@@ -4109,6 +4116,7 @@ async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_r
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "wait in preparation".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
@@ -4330,6 +4338,7 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
@@ -4464,6 +4473,7 @@ async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
@@ -6270,6 +6280,7 @@ fn attachment_reprojects_registered_uncertain_run_after_terminal_receipt_was_alr
     let run = registry.start_run(
         &adapter_session.id,
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: "repair the terminal registry".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
@@ -6443,6 +6454,7 @@ fn attachment_rejects_terminal_for_registered_run_bound_to_another_durable_sessi
     let foreign_run = registry.start_run(
         &foreign_adapter_session.id,
         HttpRunStartRequest {
+            image_attachments: Vec::new(),
             prompt: "must remain owned by the foreign session".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,

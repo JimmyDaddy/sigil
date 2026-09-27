@@ -68,7 +68,7 @@ impl ControlledImageAttachmentCache {
         ensure_cache_root(&self.root)?;
         let target = self.root.join(&attachment.artifact_ref);
         if target.exists() {
-            self.verify_cached_attachment(attachment)?;
+            self.read_bound_bytes(attachment)?;
             return Ok(());
         }
 
@@ -93,7 +93,7 @@ impl ControlledImageAttachmentCache {
                 sync_parent_directory(&self.root)?;
             }
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.verify_cached_attachment(attachment)?;
+                self.read_bound_bytes(attachment)?;
             }
             Err(error) => {
                 return Err(error.error).with_context(|| {
@@ -101,15 +101,24 @@ impl ControlledImageAttachmentCache {
                 });
             }
         }
-        self.verify_cached_attachment(attachment).map(drop)
+        self.read_bound_bytes(attachment).map(drop)
     }
 
-    fn verify_cached_attachment(&self, attachment: &ImageAttachment) -> Result<Vec<u8>> {
+    // Ingress already decoded these exact bytes. Hash the actual persisted bytes against that
+    // binding without decoding the same image twice; recovery still validates untrusted metadata.
+    fn read_bound_bytes(&self, attachment: &ImageAttachment) -> Result<Vec<u8>> {
         attachment.validate()?;
         ensure_cache_root(&self.root)?;
         let path = self.root.join(&attachment.artifact_ref);
         let bytes = read_bounded_regular_file(&path, MAX_IMAGE_ATTACHMENT_BYTES)
             .with_context(|| format!("failed to resolve cached image {}", path.display()))?;
+        let mut verified = attachment.clone();
+        verified.set_resolved_bytes(bytes.clone())?;
+        Ok(bytes)
+    }
+
+    fn verify_cached_attachment(&self, attachment: &ImageAttachment) -> Result<Vec<u8>> {
+        let bytes = self.read_bound_bytes(attachment)?;
         let identified = identify_and_decode_image(&bytes)?;
         if identified.mime_type != attachment.mime_type
             || identified.width != attachment.width
@@ -117,8 +126,6 @@ impl ControlledImageAttachmentCache {
         {
             bail!("cached image format or dimensions do not match durable metadata");
         }
-        let mut verified = attachment.clone();
-        verified.set_resolved_bytes(bytes.clone())?;
         Ok(bytes)
     }
 }
@@ -136,7 +143,12 @@ struct IdentifiedImage {
     height: u32,
 }
 
+#[cfg(test)]
+thread_local! { static IMAGE_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn identify_and_decode_image(bytes: &[u8]) -> Result<IdentifiedImage> {
+    #[cfg(test)]
+    IMAGE_DECODE_COUNT.with(|count| count.set(count.get() + 1));
     let format = image::guess_format(bytes).context("image format could not be identified")?;
     let mime_type = match format {
         ImageFormat::Png => ImageMimeType::Png,

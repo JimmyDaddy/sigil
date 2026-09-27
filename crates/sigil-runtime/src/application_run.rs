@@ -526,6 +526,8 @@ pub struct ApplicationRunRequest {
     pub launch_cwd: PathBuf,
     /// User prompt.
     pub prompt: String,
+    /// Host-admitted references to the workspace image cache; bytes are never persisted inline.
+    pub image_attachments: Vec<sigil_kernel::ImageAttachment>,
     /// Adapter-owned run identifier.
     pub run_id: String,
     /// Optional existing or preallocated durable V2 session path.
@@ -584,6 +586,7 @@ impl ApplicationRunRequest {
             config_path: config_path.into(),
             launch_cwd: launch_cwd.into(),
             prompt: prompt.into(),
+            image_attachments: Vec::new(),
             run_id: run_id.into(),
             session_path: None,
             session_attachment: None,
@@ -3853,7 +3856,7 @@ async fn prepare_application_run_internal(
     ),
     ApplicationRunPrepareError,
 > {
-    if request.prompt.trim().is_empty() {
+    if request.prompt.trim().is_empty() && request.image_attachments.is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "prompt must not be empty".to_owned(),
         });
@@ -3861,6 +3864,14 @@ async fn prepare_application_run_internal(
     if request.run_id.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "run id must not be empty".to_owned(),
+        });
+    }
+    if !request.image_attachments.is_empty()
+        && (request.agent_binding.is_some() || queued_first_request.is_some())
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "image attachments require a foreground conversation or inline skill"
+                .to_owned(),
         });
     }
     let _preparation_timer = PreparationPhaseTimer::new(&request.run_id, "total");
@@ -3942,6 +3953,16 @@ async fn prepare_application_run_internal(
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
     drop(provider_timer);
+    if !input.persisted_image_attachments.is_empty()
+        && !provider
+            .image_input_capability(session.model_name())
+            .is_supported()
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "selected model does not support image input; choose an image-capable model"
+                .to_owned(),
+        });
+    }
     if target_max_tokens.is_none() {
         let effective_context_window = crate::resolve_model_context_window_tokens(
             &root_config,
@@ -6259,6 +6280,15 @@ fn prepare_application_run_blocking_with_writer(
     };
     attach_session_url_capability_store(&mut session)
         .map_err(ApplicationRunPrepareError::execution)?;
+    session
+        .try_attach_image_attachment_resolver(Arc::new(crate::ControlledImageAttachmentCache::new(
+            sigil_paths.attachments_root.clone(),
+        )))
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let mut image_message = ModelMessage::user("");
+    image_message.image_attachments = request.image_attachments.clone();
+    sigil_kernel::validate_message_image_attachments(&image_message)
+        .map_err(ApplicationRunPrepareError::execution)?;
 
     let cancellation_recorder = session
         .run_cancellation_recorder()
@@ -6291,6 +6321,7 @@ fn prepare_application_run_blocking_with_writer(
     }
     let configured_max_output_tokens = crate::configured_max_output_tokens(&root_config);
     let mut input = AgentRunInput::user(request.prompt.clone())
+        .with_image_attachments(request.image_attachments.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone())
         .with_pending_input_provider(Arc::new(

@@ -3876,6 +3876,7 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::InvokeInlineSkill {
+            attachments: Vec::new(),
             skill_id: "repo-review".to_owned(),
             arguments: "crates".to_owned(),
         }),

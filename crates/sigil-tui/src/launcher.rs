@@ -2954,13 +2954,15 @@ fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
             AppAction::InvokeInlineSkill {
                 skill_id: a,
                 arguments: b,
+                attachments: e,
             },
             AppAction::InvokeInlineSkill {
                 skill_id: c,
                 arguments: d,
+                attachments: f,
             },
-        )
-        | (
+        ) => a == c && b == d && e == f,
+        (
             AppAction::InvokeChildSessionSkill {
                 skill_id: a,
                 arguments: b,

@@ -142,7 +142,7 @@ impl AppState {
             return false;
         }
         self.show_image_attachment_notice(
-            "images can only be sent directly from an idle Build composer; the draft was kept",
+            "images support direct input and inline skills; this input path cannot carry images yet, so the draft was kept",
         );
         true
     }

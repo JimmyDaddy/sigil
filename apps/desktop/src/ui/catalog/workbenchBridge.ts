@@ -473,6 +473,10 @@ export function createCatalogWorkbenchBridge(
 ): DesktopBridge {
   let currentPreference = preference;
   return {
+    pickImage: async () => null,
+    ingestImage: async () => { throw new Error("Image ingestion is unavailable in the component catalog."); },
+    releaseImages: async () => {},
+    messageImage: async () => { throw new Error("Recorded images are unavailable in the component catalog."); },
     bootstrap: async () => ({
       protocolVersion: 2,
       workspaces: [workspace],

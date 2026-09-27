@@ -133,6 +133,7 @@ interface PendingPrompt {
 }
 
 interface RetryableRunStartRequest {
+  readonly imageHandles?: string[];
   readonly prompt: string;
   readonly permissionMode: PermissionMode;
   readonly modelRef?: ProviderModelRef;
@@ -1609,9 +1610,10 @@ export function ConversationPanel({
     agentBinding?: AgentBinding,
     recoveryRetry = false,
     exactRetry?: RetryableRunStartRequest,
+    images?: import("./types").DraftImage[],
   ): Promise<boolean> => {
     if (
-      nextPrompt === ""
+      (nextPrompt === "" && (images?.length ?? exactRetry?.imageHandles?.length ?? 0) === 0)
       || (!active && submissionBlocked && !recoveryRetry)
       || submitting
       || conversationQueueBusy
@@ -1693,6 +1695,7 @@ export function ConversationPanel({
       setPendingPrompt(optimisticPrompt);
       const runRequest: RetryableRunStartRequest = exactRetry ?? {
         prompt: nextPrompt,
+        imageHandles: images?.map((image) => image.attachmentId),
         permissionMode,
         modelRef: modelChanged ? selectedModelOption?.modelRef : undefined,
         modelSelectionBinding: modelChanged ? runContext?.modelSelectionBinding : undefined,
@@ -1717,6 +1720,7 @@ export function ConversationPanel({
         runRequest.skillBinding,
         runRequest.agentBinding,
         runRequest.routeRecoveryBinding,
+        runRequest.imageHandles,
       );
       activeRunIdRef.current = started.id;
       startedRunProjectionExpected.current = started.id;
@@ -1741,13 +1745,14 @@ export function ConversationPanel({
       }
       setContinuityReload((current) => current + 1);
       return true;
-    } catch {
+    } catch (error) {
       pendingPromptRef.current = undefined;
       setPendingPrompt(undefined);
       setRunContextReload((current) => current + 1);
       dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
       setContinuityReload((current) => current + 1);
-      onNotice(t("runStartFailed"), true);
+      const imageCode = error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
+      onNotice(t(imageCode === "image_input_unsupported" ? "imageModelUnsupported" : imageCode === "image_attachment_invalid" ? "imageUnavailable" : "runStartFailed"), true);
       return false;
     } finally {
       startRunPendingRef.current = false;
@@ -2769,7 +2774,8 @@ export function ConversationPanel({
               />
             )
             : <Message key={row.key} displayId={row.key} message={row}
-              onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent} />)
+              onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent}
+              onReadImage={(displayId, attachmentId) => bridge.messageImage(workspaceId, session.id, displayId, attachmentId)} />)
         ) : null}
         {terminalTasks.filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
           <TerminalTaskCard
@@ -2855,7 +2861,10 @@ export function ConversationPanel({
         onCompact={compactConversation}
         onOpenIntentStack={openIntentStack}
         onNotice={onNotice}
-        onSubmit={submit}
+        onPickImage={() => bridge.pickImage(workspaceId)}
+        onIngestImage={(bytes) => bridge.ingestImage(workspaceId, bytes)}
+        onReleaseImages={(handles) => bridge.releaseImages(workspaceId, handles)}
+        onSubmit={(prompt, skill, agent, images) => submit(prompt, skill, agent, false, undefined, images)}
         onCancel={() => void cancel()}
       />
       </section>

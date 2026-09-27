@@ -171,6 +171,7 @@ pub async fn prepare_application_task_continuation(
         safe_persistence_text,
     );
     let blocking_request = ApplicationRunRequest {
+        image_attachments: Vec::new(),
         config_path: request.config_path,
         launch_cwd: request.launch_cwd,
         prompt: public_prompt.clone(),

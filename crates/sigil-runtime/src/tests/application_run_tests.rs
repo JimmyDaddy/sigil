@@ -2224,6 +2224,68 @@ Inspect the requested code and report concrete findings.
     Ok(())
 }
 
+#[tokio::test]
+async fn inline_skill_image_only_preparation_preserves_images_and_exact_skill_context() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config
+            .replace("gpt-test", "gpt-4.1")
+            .replace("chat_completions", "responses"),
+    )?;
+    let skill_path = temp.path().join(".sigil/skills/review-image/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().expect("skill parent"))?;
+    std::fs::write(
+        &skill_path,
+        "---\nname: review-image\ndescription: Review attached image.\ntrust: trusted\nrun-as: inline\nuser-invocable: true\n---\nInspect the attached screenshot and report concrete findings.\n",
+    )?;
+    let config = RootConfig::load(&config_path)?;
+    let catalog = crate::application_extension_catalog_view(&config, temp.path(), &[])?;
+    let binding = catalog
+        .skills
+        .iter()
+        .find(|skill| skill.id == "review-image")
+        .expect("image skill")
+        .binding
+        .clone()
+        .expect("available skill binding");
+    let paths = crate::resolve_sigil_paths(&config.storage, &config.session, temp.path());
+    let cache = crate::ControlledImageAttachmentCache::new(paths.attachments_root);
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3).write_to(&mut encoded, image::ImageFormat::Png)?;
+    let image = cache
+        .ingest_encoded_bytes("skill-image", encoded.into_inner())?
+        .without_resolved_bytes();
+    let mut request =
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "", "inline-skill-image");
+    request.skill_binding = Some(binding);
+    request.image_attachments = vec![image.clone()];
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+        &config_path,
+        temp.path(),
+    )?;
+    let prepared = prepare_application_run(request, &services).await?;
+    let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
+        panic!("inline skill remains in the foreground conversation");
+    };
+    assert_eq!(input.persisted_image_attachments, vec![image]);
+    assert_eq!(input.persisted_user_message.as_deref(), Some(""));
+    assert!(input.transient_context.iter().any(|context| {
+        context
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("Inspect the attached screenshot"))
+    }));
+    assert!(prepared.execution.session.entries().iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::SkillLoaded(loaded)) if loaded.skill_id == "review-image")));
+    Ok(())
+}
+
 #[test]
 fn exact_agent_binding_admits_current_snapshot_and_rejects_stale_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;

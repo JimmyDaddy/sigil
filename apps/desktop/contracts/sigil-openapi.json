@@ -2422,6 +2422,13 @@
                 "format": "uint64",
                 "type": "integer"
               },
+              "image_attachments": {
+                "items": {
+                  "$ref": "#/components/schemas/ImageAttachment"
+                },
+                "maxItems": 4,
+                "type": "array"
+              },
               "original_content_bytes": {
                 "format": "uint64",
                 "type": "integer"
@@ -4182,6 +4189,59 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "ImageAttachment": {
+        "properties": {
+          "artifact_ref": {
+            "pattern": "^[0-9a-f]{64}\\.(png|jpg|webp)$",
+            "type": "string"
+          },
+          "attachment_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "byte_len": {
+            "maximum": 8388608,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "estimated_visual_tokens": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "height": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mime_type": {
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "width": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "sha256",
+          "mime_type",
+          "width",
+          "height",
+          "byte_len",
+          "estimated_visual_tokens",
+          "artifact_ref"
         ],
         "type": "object"
       },
@@ -7635,6 +7695,13 @@
               }
             ]
           },
+          "image_attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ImageAttachment"
+            },
+            "maxItems": 4,
+            "type": "array"
+          },
           "model_ref": {
             "oneOf": [
               {
@@ -7769,6 +7836,9 @@
           "durable_user_input": {
             "type": "boolean"
           },
+          "image_attachments": {
+            "type": "boolean"
+          },
           "intent_stack": {
             "type": "boolean"
           },
@@ -7811,6 +7881,7 @@
           "durable_session_reopen",
           "bounded_transcript_replay",
           "canonical_conversation_display",
+          "image_attachments",
           "typed_tool_artifact_retrieval",
           "conversation_recovery",
           "durable_event_replay",
@@ -7850,7 +7921,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 14,
+            "const": 15,
             "type": "integer"
           },
           "server_version": {
@@ -11298,6 +11369,45 @@
         "summary": "Local listener health check"
       }
     },
+    "/image-attachments": {
+      "post": {
+        "description": "Accepts PNG, JPEG or WebP bytes up to 8 MiB. The host decodes the image and derives all durable metadata; source paths and names are never accepted.",
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "maxLength": 8388608,
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageAttachment"
+                }
+              }
+            },
+            "description": "Verified attachment reference"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Admit one local encoded image to the controlled workspace cache"
+      }
+    },
     "/openapi.json": {
       "get": {
         "responses": {
@@ -12929,6 +13039,82 @@
           }
         },
         "summary": "Read one bounded UTF-8 page of a complete saved message"
+      }
+    },
+    "/sessions/{session_id}/message-image": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/CancelObservationOnClose"
+          },
+          {
+            "in": "query",
+            "name": "display_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "attachment_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data_base64": {
+                      "contentEncoding": "base64",
+                      "maxLength": 11184812,
+                      "type": "string"
+                    },
+                    "mime_type": {
+                      "enum": [
+                        "image/png",
+                        "image/jpeg",
+                        "image/webp"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "mime_type",
+                    "data_base64"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revalidated saved image"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "description": "The image is unavailable or changed"
+          }
+        },
+        "summary": "View an image attached to an exact durable user message"
       }
     },
     "/sessions/{session_id}/queue": {

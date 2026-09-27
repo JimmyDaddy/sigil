@@ -101,3 +101,63 @@ fn pasted_image_path_recognizes_single_supported_path_and_file_url() -> Result<(
     assert!(image_path_from_pasted_text("one.png\ntwo.png").is_none());
     Ok(())
 }
+
+#[test]
+fn image_ingress_ablation_removes_one_redundant_decode_and_preserves_recovery_validation()
+-> Result<()> {
+    // Restore the pre-A3 cache-hit algorithm as the control: ingress decode + full cached decode.
+    // The experiment uses actual PNG decoding and the same persisted bytes in both conditions.
+    let temp = tempfile::tempdir()?;
+    let cache = ControlledImageAttachmentCache::new(temp.path().join("attachments"));
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::new_rgb8(1920, 1080).write_to(&mut encoded, ImageFormat::Png)?;
+    let bytes = encoded.into_inner();
+    let expected = cache.ingest_encoded_bytes("experiment", bytes.clone())?;
+    let iterations = 5;
+    IMAGE_DECODE_COUNT.with(|count| count.set(0));
+    let baseline_started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let identified = identify_and_decode_image(&bytes)?;
+        let attachment = sigil_kernel::ImageAttachment::from_bytes(
+            "experiment",
+            identified.mime_type,
+            identified.width,
+            identified.height,
+            bytes.clone(),
+        )?;
+        cache.verify_cached_attachment(&attachment)?;
+        assert_eq!(
+            attachment.without_resolved_bytes(),
+            expected.without_resolved_bytes()
+        );
+    }
+    let baseline_elapsed = baseline_started.elapsed();
+    let baseline_decodes = IMAGE_DECODE_COUNT.with(std::cell::Cell::get);
+    IMAGE_DECODE_COUNT.with(|count| count.set(0));
+    let optimized_started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let attachment = cache.ingest_encoded_bytes("experiment", bytes.clone())?;
+        assert_eq!(
+            attachment.without_resolved_bytes(),
+            expected.without_resolved_bytes()
+        );
+    }
+    let optimized_elapsed = optimized_started.elapsed();
+    let optimized_decodes = IMAGE_DECODE_COUNT.with(std::cell::Cell::get);
+    assert_eq!(baseline_decodes, iterations * 2);
+    assert_eq!(optimized_decodes, iterations);
+    eprintln!(
+        "A3 image ingress ablation: iterations={iterations} baseline_decodes={baseline_decodes} optimized_decodes={optimized_decodes} baseline_ms={} optimized_ms={}",
+        baseline_elapsed.as_millis(),
+        optimized_elapsed.as_millis()
+    );
+
+    // A durable record is untrusted input: dimensions/MIME must still match decoded cached bytes.
+    let mut forged = expected.without_resolved_bytes();
+    forged.width += 1;
+    forged.estimated_visual_tokens =
+        sigil_kernel::estimate_visual_tokens(forged.width, forged.height);
+    assert!(cache.resolve(&forged).is_err());
+    assert_eq!(cache.resolve(&expected.without_resolved_bytes())?, bytes);
+    Ok(())
+}

@@ -1,6 +1,7 @@
 mod appearance;
 mod commands;
 mod history_queries;
+mod image_attachments;
 mod ipc;
 mod recent;
 mod run_streams;
@@ -17,6 +18,10 @@ use std::sync::{
 };
 
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+use crate::image_attachments::{
+    desktop_ingest_image, desktop_message_image, desktop_pick_image, desktop_release_images,
+};
 
 use crate::{
     appearance::{
@@ -173,6 +178,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_ingest_image,
+            desktop_pick_image,
+            desktop_release_images,
+            desktop_message_image,
             desktop_bootstrap,
             desktop_open_external_url,
             desktop_support_doctor,

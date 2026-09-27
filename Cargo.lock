@@ -5645,6 +5645,8 @@ dependencies = [
 name = "sigil-desktop-app"
 version = "0.0.1-beta.4"
 dependencies = [
+ "base64 0.22.1",
+ "libc",
  "serde",
  "serde_json",
  "sigil-desktop",

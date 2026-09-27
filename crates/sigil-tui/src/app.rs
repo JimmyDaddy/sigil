@@ -751,6 +751,7 @@ pub enum AppAction {
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
+        attachments: Vec<sigil_kernel::ImageAttachment>,
     },
     InvokeChildSessionSkill {
         skill_id: String,

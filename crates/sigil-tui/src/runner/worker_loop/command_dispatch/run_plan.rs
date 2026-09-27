@@ -844,6 +844,7 @@ where
             RunPlanCommand::InvokeInlineSkill {
                 skill_id,
                 arguments,
+                attachments,
                 reasoning_effort,
             } => {
                 if state.run.active.is_some() {
@@ -930,6 +931,7 @@ where
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
                     let input = AgentRunInput::transient(prompt, vec![loaded.transient_context])
+                        .with_image_attachments(attachments)
                         .with_tool_artifact_read_budget(tool_artifact_read_budget)
                         .with_cancellation(cancellation_handle);
                     let result =

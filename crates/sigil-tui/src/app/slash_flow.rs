@@ -81,7 +81,7 @@ impl AppState {
             .find(|spec| spec.canonical == token || spec.aliases.contains(&token))
     }
 
-    fn executable_slash_command(token: &str) -> Option<&'static SlashCommandSpec> {
+    pub(super) fn executable_slash_command(token: &str) -> Option<&'static SlashCommandSpec> {
         Self::exact_slash_command(token)
     }
 

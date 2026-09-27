@@ -9,8 +9,21 @@ pub const OPENAI_RESPONSES_API_KEY_ENV_NAMES: &[&str] =
     &[OPENAI_RESPONSES_API_KEY_ENV, OPENAI_API_KEY_ENV];
 pub const OPENAI_RESPONSES_BASE_URL_ENV: &str = "SIGIL_OPENAI_RESPONSES_BASE_URL";
 
+/// Authentication selected by the validated host connection, never by provider JSON options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAiResponsesAuthentication {
+    /// A missing key remains an error, including on a local endpoint.
+    #[default]
+    Bearer,
+    /// The host explicitly selected a no-credential custom loopback connection.
+    UnauthenticatedLoopback,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OpenAiResponsesProviderConfig {
+    /// Runtime-only exact authentication choice; persisted provider options cannot enable it.
+    #[serde(skip)]
+    pub authentication: OpenAiResponsesAuthentication,
     #[serde(default = "default_base_url")]
     pub base_url: String,
     #[serde(
@@ -32,6 +45,7 @@ impl fmt::Debug for OpenAiResponsesProviderConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiResponsesProviderConfig")
+            .field("authentication", &self.authentication)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
@@ -51,6 +65,11 @@ impl OpenAiResponsesProviderConfig {
 
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
+        // This connection intentionally has no credentials; ambient key/endpoint overrides must
+        // not turn it into a different authenticated or remote route.
+        if resolved.authentication == OpenAiResponsesAuthentication::UnauthenticatedLoopback {
+            return Ok(resolved);
+        }
         if let Some(value) = read_env_string(OPENAI_RESPONSES_BASE_URL_ENV) {
             resolved.base_url = value;
         }
@@ -64,6 +83,7 @@ impl OpenAiResponsesProviderConfig {
 impl Default for OpenAiResponsesProviderConfig {
     fn default() -> Self {
         Self {
+            authentication: OpenAiResponsesAuthentication::Bearer,
             base_url: default_base_url(),
             model: default_model(),
             api_key: None,

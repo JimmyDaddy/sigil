@@ -9,6 +9,7 @@ import { LocaleProvider, translateEnglish } from "./i18n";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import type {
   AgentBinding,
+  DraftImage,
   ProviderConnection,
   ProviderModelRef,
   ReasoningEffort,
@@ -272,7 +273,10 @@ function renderComposer(overrides: {
   queuePaused?: boolean;
   queueBusy?: boolean;
   queuePanel?: ReactNode;
-  onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
+  onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding, images?: DraftImage[]) => Promise<boolean>;
+  onPickImage?: () => Promise<DraftImage | null>;
+  onIngestImage?: (bytes: number[]) => Promise<DraftImage>;
+  onReleaseImages?: (handles: string[]) => Promise<void>;
   onOpenQueue?: () => void;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
@@ -349,6 +353,9 @@ function renderComposer(overrides: {
         onOpenIntentStack={onOpenIntentStack}
         onNotice={onNotice}
         onSubmit={onSubmit}
+        onPickImage={overrides.onPickImage}
+        onIngestImage={overrides.onIngestImage}
+        onReleaseImages={overrides.onReleaseImages}
         onCancel={() => undefined}
       />
     </LocaleProvider>,
@@ -855,5 +862,112 @@ describe("structured composer", () => {
     expect(screen.getByRole("dialog", { name: "Open follow-up queue, 2 messages" })).toBeTruthy();
     expect(screen.getByText("Queued prompt controls")).toBeTruthy();
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+  });
+});
+
+
+const draftImage: DraftImage = {
+  attachmentId: "admitted-image-1", mimeType: "image/png", width: 2, height: 3,
+  byteLen: 72, previewDataUrl: "data:image/png;base64,aW1hZ2U=",
+};
+
+describe("image attachments", () => {
+  it("keeps images when a native command suggestion cannot carry them", async () => {
+    const release = vi.fn(async () => undefined);
+    const { onCompact } = renderComposer({ onPickImage: async () => draftImage, onReleaseImages: release });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Attach image" }));
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    await user.type(input, "/comp");
+    await user.click(screen.getByRole("option", { name: /Compact context/ }));
+    expect(onCompact).not.toHaveBeenCalled();
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("retains an image and exact inline skill binding after rejection, then submits both", async () => {
+    const submit = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const release = vi.fn(async () => undefined);
+    renderComposer({ onPickImage: async () => draftImage, onSubmit: submit, onReleaseImages: release });
+    const user = userEvent.setup();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    await user.type(input, "$rev");
+    await user.click(screen.getByRole("option", { name: /Review/ }));
+    await user.click(screen.getByRole("button", { name: "Attach image" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(submit).toHaveBeenLastCalledWith("", {
+      skillId: "review", skillSha256: "skill-sha", indexFingerprint: "index-sha",
+    }, undefined, [draftImage]);
+    expect(screen.getByText("$review")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect(release).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
+  });
+
+  it("sends image-only input without manufacturing prompt text", async () => {
+    const submit = vi.fn(async () => true);
+    renderComposer({ onPickImage: async () => draftImage, onSubmit: submit });
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Attach image" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Send message" }));
+    expect(submit).toHaveBeenCalledWith("", undefined, undefined, [draftImage]);
+  });
+
+  it("previews a native selection and releases it on explicit removal", async () => {
+    const release = vi.fn(async () => undefined);
+    renderComposer({ onPickImage: async () => draftImage, onReleaseImages: release });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Attach image" }));
+    expect(screen.getByRole("img", { name: "Image 1" }).getAttribute("src")).toBe(draftImage.previewDataUrl);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Remove image 1" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
+  });
+
+  it("pastes encoded bytes through the image ingress without interpreting a file path", async () => {
+    const ingest = vi.fn(async () => draftImage);
+    renderComposer({ onIngestImage: ingest });
+    const file = new File([new Uint8Array([1, 2, 3])], "private-source-name.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", { value: async () => new Uint8Array([1, 2, 3]).buffer });
+    fireEvent.paste(screen.getByRole("combobox", { name: "Message Sigil" }), { clipboardData: { files: [file] } });
+    await waitFor(() => expect(ingest).toHaveBeenCalledWith([1, 2, 3]));
+    expect(await screen.findByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect(screen.queryByText("private-source-name.png")).toBeNull();
+  });
+
+  it("retains text and preview through a pending or rejected send, then releases an accepted draft", async () => {
+    let settle!: (accepted: boolean) => void;
+    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
+    const submit = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(true);
+    const release = vi.fn(async () => undefined);
+    renderComposer({ onPickImage: async () => draftImage, onSubmit: submit, onReleaseImages: release });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Attach image" }));
+    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+    await user.type(input, "Describe this diagram");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(submit).toHaveBeenCalledWith("Describe this diagram", undefined, undefined, [draftImage]);
+    expect(input.value).toBe("Describe this diagram");
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    await act(async () => { settle(false); await pending; });
+    expect(input.value).toBe("Describe this diagram");
+    expect(release).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(input.value).toBe("");
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
+  });
+
+  it("releases a native selection that completes after its composer unmounts", async () => {
+    let settle!: (image: DraftImage) => void;
+    const pending = new Promise<DraftImage>((resolve) => { settle = resolve; });
+    const release = vi.fn(async () => undefined);
+    renderComposer({ onPickImage: () => pending, onReleaseImages: release });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Attach image" }));
+    cleanup();
+    await act(async () => { settle(draftImage); await pending; });
+    expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
   });
 });

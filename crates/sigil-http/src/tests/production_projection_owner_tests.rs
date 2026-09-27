@@ -35,6 +35,7 @@ async fn production_application_refresh_reads_a_switched_session_without_acquiri
         .admit_run_start(
             &current,
             &HttpRunStartRequest {
+                image_attachments: Vec::new(),
                 prompt: "must retain exact admission".into(),
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,

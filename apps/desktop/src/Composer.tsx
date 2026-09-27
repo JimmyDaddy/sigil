@@ -15,6 +15,7 @@ import type { ComposerActivityState } from "./features/conversation/composerActi
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import { modelOptionIsSelectable, providerModelRefKey, providerModelRefsEqual } from "./types";
 import type {
+  DraftImage,
   AgentBinding,
   AgentCatalogEntry,
   ProviderConnection,
@@ -71,6 +72,9 @@ export function Composer({
   onNotice,
   onSubmit,
   onCancel,
+  onPickImage,
+  onIngestImage,
+  onReleaseImages,
 }: {
   draftKey: string;
   active: boolean;
@@ -107,12 +111,55 @@ export function Composer({
   onCompact: () => Promise<boolean>;
   onOpenIntentStack: () => void;
   onNotice: (message: string, error?: boolean) => void;
-  onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
+  onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding, images?: DraftImage[]) => Promise<boolean>;
+  onPickImage?: () => Promise<DraftImage | null>;
+  onIngestImage?: (bytes: number[]) => Promise<DraftImage>;
+  onReleaseImages?: (handles: string[]) => Promise<void>;
   onCancel: () => void;
 }) {
   const { t } = useLocale();
   const [prompt, setPrompt] = useState(() => readDraft(draftKey));
   const draftRevision = useRef(0);
+  const [images, setImages] = useState<DraftImage[]>([]);
+  const imagesRef = useRef<DraftImage[]>([]);
+  const [imageBusy, setImageBusy] = useState(false);
+  const imagePending = useRef(false);
+  const imageScope = useRef(0);
+  const releaseImagesRef = useRef(onReleaseImages);
+  releaseImagesRef.current = onReleaseImages;
+  useEffect(() => () => {
+    imageScope.current += 1;
+    const handles = imagesRef.current.map((image) => image.attachmentId);
+    if (handles.length > 0) void releaseImagesRef.current?.(handles).catch(() => {});
+    imagesRef.current = [];
+  }, [draftKey]);
+  const removeImage = (id: string) => {
+    draftRevision.current += 1;
+    imagesRef.current = imagesRef.current.filter((image) => image.attachmentId !== id);
+    setImages(imagesRef.current);
+    void onReleaseImages?.([id]).catch(() => {});
+  };
+  const addImage = async (load: () => Promise<DraftImage | null>) => {
+    if (imagePending.current) return;
+    if (active || imagesRef.current.length >= 4) { onNotice(t(active ? "imageForegroundOnly" : "imageCountLimit"), true); return; }
+    const scope = imageScope.current;
+    imagePending.current = true; setImageBusy(true);
+    try {
+      const image = await load();
+      if (image === null) return;
+      if (scope !== imageScope.current) {
+        void onReleaseImages?.([image.attachmentId]).catch(() => {}); return;
+      }
+      if (imagesRef.current.reduce((sum, entry) => sum + entry.byteLen, 0) + image.byteLen > 24 * 1024 * 1024) {
+        void onReleaseImages?.([image.attachmentId]).catch(() => {});
+        onNotice(t("imageSizeLimit"), true); return;
+      }
+      draftRevision.current += 1;
+      imagesRef.current = [...imagesRef.current, image]; setImages(imagesRef.current);
+    } catch { if (scope === imageScope.current) onNotice(t("imageAttachFailed"), true); }
+    finally { imagePending.current = false; if (scope === imageScope.current) setImageBusy(false); }
+  };
+
   const [selectedSkill, setSelectedSkill] = useState<SkillCatalogEntry>();
   const [selectedAgent, setSelectedAgent] = useState<AgentCatalogEntry>();
   const [activeSuggestion, setActiveSuggestion] = useState(0);
@@ -156,12 +203,16 @@ export function Composer({
     const submittedRevision = draftRevision.current;
     let nextPrompt = prompt.trim();
     if (
-      nextPrompt === ""
+      (nextPrompt === "" && images.length === 0)
       || (active ? queueSubmissionBlocked : submissionBlocked)
       || submitting
+      || imagePending.current
       || (active && queueBusy)
     ) return;
     const command = resolveCommand(runContext, nextPrompt);
+    if (images.length > 0 && (active || selectedAgent !== undefined)) {
+      onNotice(t("imageForegroundOnly"), true); return;
+    }
     if (command !== undefined) {
       if (await executeCommand(command.suggestion, command.argument)) clearComposer(submittedRevision);
       return;
@@ -176,7 +227,7 @@ export function Composer({
       : undefined;
     const agent = selectedAgent ?? directAgent?.agent;
     if (directAgent !== undefined) nextPrompt = directAgent.prompt;
-    if (nextPrompt === "") {
+    if (nextPrompt === "" && images.length === 0) {
       onNotice(t(agent === undefined ? "skillNeedsPrompt" : "agentNeedsPrompt"), true);
       return;
     }
@@ -192,11 +243,15 @@ export function Composer({
       onNotice(agent.unavailableReason ?? t("agentExecutionUnavailable"), true);
       return;
     }
+    if (images.length > 0 && agent !== undefined) { onNotice(t("imageForegroundOnly"), true); return; }
     if (active && (skill !== undefined || agent !== undefined)) {
       onNotice(t("queueExtensionBindingUnavailable"), true);
       return;
     }
-    if (await onSubmit(nextPrompt, skill?.binding, agent?.binding)) {
+    const accepted = images.length === 0
+      ? await onSubmit(nextPrompt, skill?.binding, agent?.binding)
+      : await onSubmit(nextPrompt, skill?.binding, agent?.binding, images);
+    if (accepted) {
       clearComposer(submittedRevision);
     }
   };
@@ -205,6 +260,9 @@ export function Composer({
     if (draftRevision.current !== expectedRevision) return;
     draftRevision.current += 1;
     setPrompt("");
+    const handles = imagesRef.current.map((image) => image.attachmentId);
+    imagesRef.current = []; setImages([]);
+    if (handles.length > 0) void onReleaseImages?.(handles).catch(() => {});
     setSelectedSkill(undefined);
     setSelectedAgent(undefined);
     writeDraft(draftKey, "");
@@ -242,6 +300,10 @@ export function Composer({
     });
   };
   const executeCommand = async (suggestion: ComposerSuggestion, argument: string) => {
+    if (imagesRef.current.length > 0) {
+      onNotice(t("imageForegroundOnly"), true);
+      return false;
+    }
     switch (suggestion.clientAction) {
       case "preview_compaction":
         return onCompact();
@@ -422,6 +484,15 @@ export function Composer({
         </div>
       ) : null}
       <div className="composer-surface">
+        {images.length > 0 ? <div className="composer-images" aria-label={t("attachedImages")}>
+          {images.map((image, index) => <figure key={image.attachmentId}>
+            <img src={image.previewDataUrl} alt={t("imageNumber", { count: index + 1 })} />
+            <figcaption>{image.width} × {image.height}</figcaption>
+            <Button type="button" variant="quiet" onClick={() => removeImage(image.attachmentId)} aria-label={t("removeImage", { count: index + 1 })}>×</Button>
+          </figure>)}
+        </div> : null}
+        {onPickImage !== undefined ? <Button type="button" variant="quiet" busy={imageBusy} disabled={active || draftEditingBlocked || submitting} onClick={() => void addImage(onPickImage)}>{imageBusy ? t("attachingImage") : t("attachImage")}</Button> : null}
+
         {selectedSkill !== undefined || selectedAgent !== undefined ? (
           <div className="composer-bindings" aria-label={t("activeExtensions")}>
             {selectedSkill !== undefined ? (
@@ -479,6 +550,13 @@ export function Composer({
               event.preventDefault();
               event.currentTarget.focus({ preventScroll: true });
             }
+          }}
+          onPaste={(event) => {
+            const file = Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith("image/"));
+            if (file === undefined || onIngestImage === undefined) return;
+            event.preventDefault();
+            if (file.size > 8 * 1024 * 1024) { onNotice(t("imageSizeLimit"), true); return; }
+            void addImage(async () => onIngestImage(Array.from(new Uint8Array(await file.arrayBuffer()))));
           }}
           onChange={(event) => {
             draftRevision.current += 1;
@@ -638,7 +716,7 @@ export function Composer({
                 type="submit"
                 aria-label={t("sendMessage")}
                 icon={<Icon name="send" />}
-                disabled={prompt.trim() === "" || submissionBlocked || submitting}
+                disabled={(prompt.trim() === "" && images.length === 0) || imageBusy || submissionBlocked || submitting}
                 aria-busy={submitting || undefined}
               />
             </Tooltip>

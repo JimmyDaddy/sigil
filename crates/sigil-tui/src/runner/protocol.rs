@@ -449,6 +449,7 @@ pub enum WorkerCommand {
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
+        attachments: Vec<sigil_kernel::ImageAttachment>,
         reasoning_effort: ReasoningEffort,
     },
     InvokeChildSessionSkill {

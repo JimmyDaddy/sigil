@@ -760,7 +760,11 @@ impl TuiApplicationSession {
                 attachments,
             } => Some(ApplicationCommand::Conversation(
                 ConversationCommand::SubmitPromptWithAttachments {
-                    prompt: sigil_application::SafeText::new(prompt.clone())?,
+                    prompt: if prompt.is_empty() {
+                        None
+                    } else {
+                        Some(sigil_application::SafeText::new(prompt.clone())?)
+                    },
                     attachments: attachments.clone(),
                     options: None,
                 },
@@ -1005,9 +1009,15 @@ impl TuiApplicationSession {
             AppAction::InvokeInlineSkill {
                 skill_id,
                 arguments,
+                attachments,
             } => Some(ApplicationCommand::Agent(AgentCommand::InvokeInlineSkill {
                 skill_id: sigil_application::SafeText::new(skill_id.clone())?,
-                arguments: sigil_application::SafeText::new(arguments.clone())?,
+                arguments: if arguments.is_empty() {
+                    None
+                } else {
+                    Some(sigil_application::SafeText::new(arguments.clone())?)
+                },
+                attachments: attachments.clone(),
                 reasoning_effort: Some(self.reasoning_effort),
             })),
             AppAction::InvokeChildSessionSkill {
@@ -1951,13 +1961,24 @@ impl TuiWorkerCommandExecutor {
                     options,
                 },
             ) => {
+                if attachments.is_empty()
+                    && prompt
+                        .as_ref()
+                        .is_none_or(|text| text.as_str().trim().is_empty())
+                {
+                    return Err(ApplicationError::InvalidRequest(
+                        "prompt and images are empty".to_owned(),
+                    ));
+                }
                 let reasoning_effort = options
                     .as_ref()
                     .and_then(|options| options.reasoning_effort)
                     .map(tui_reasoning_effort)
                     .unwrap_or_else(|| self.reasoning_effort.clone());
                 WorkerCommand::SubmitPromptWithAttachments {
-                    prompt: prompt.as_str().to_owned(),
+                    prompt: prompt
+                        .as_ref()
+                        .map_or_else(String::new, |text| text.as_str().to_owned()),
                     attachments: attachments.clone(),
                     reasoning_effort,
                 }
@@ -2153,10 +2174,14 @@ impl TuiWorkerCommandExecutor {
             ApplicationCommand::Agent(AgentCommand::InvokeInlineSkill {
                 skill_id,
                 arguments,
+                attachments,
                 reasoning_effort,
             }) => WorkerCommand::InvokeInlineSkill {
                 skill_id: skill_id.as_str().to_owned(),
-                arguments: arguments.as_str().to_owned(),
+                arguments: arguments
+                    .as_ref()
+                    .map_or_else(String::new, |text| text.as_str().to_owned()),
+                attachments: attachments.clone(),
                 reasoning_effort: reasoning_effort
                     .map(tui_reasoning_effort)
                     .unwrap_or_else(|| self.reasoning_effort.clone()),

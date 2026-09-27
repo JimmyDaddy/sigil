@@ -126,6 +126,10 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
   } = overrides;
   let simulatedOwner: ConversationContinuity["foregroundOwner"];
   return {
+    pickImage: vi.fn(async () => null),
+    ingestImage: vi.fn(async () => { throw new Error("no fixture image"); }),
+    releaseImages: vi.fn(async () => {}),
+    messageImage: vi.fn(async () => { throw new Error("no fixture image"); }),
     bootstrap: async () => ({
       appearance: defaultAppearance,
       ...(bootstrap === undefined
@@ -7353,4 +7357,28 @@ describe("desktop workspace and history shell", () => {
     await user.click(dismiss);
     expect(onDismiss).toHaveBeenCalledOnce();
   });
+});
+
+it("sends image-only input through the conversation panel and retains it after model rejection", async () => {
+  const user = userEvent.setup();
+  const selectedImage = { attachmentId: "native-image-1", mimeType: "image/png" as const, width: 2, height: 3, byteLen: 72, previewDataUrl: "data:image/png;base64,aW1hZ2U=" };
+  const startRun = vi.fn<DesktopBridge["startRun"]>().mockRejectedValue({ code: "image_input_unsupported", message: "Unsupported model" });
+  const releaseImages = vi.fn(async () => undefined);
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    pickImage: async () => selectedImage,
+    releaseImages,
+    startRun,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await readyComposer();
+  await user.click(screen.getByRole("button", { name: "Attach image" }));
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+  expect(startRun.mock.calls[0][2]).toBe("");
+  expect(startRun.mock.calls[0][11]).toEqual(["native-image-1"]);
+  expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+  expect(releaseImages).not.toHaveBeenCalled();
+  expect(await screen.findByText("Choose an image-capable model to send these images. Your draft is preserved.")).toBeTruthy();
 });

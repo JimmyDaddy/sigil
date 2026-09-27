@@ -236,6 +236,8 @@ pub enum ConversationDisplayContentV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<ConversationDisplayAssistantPhaseV1>,
         image_attachment_count: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_attachments: Vec<sigil_kernel::ImageAttachment>,
         truncated: bool,
         original_content_bytes: usize,
     },
@@ -1525,7 +1527,7 @@ fn project_session_entry(
                         Some(content),
                         None,
                         map_assistant_phase(message.assistant_kind),
-                        message.image_attachments.len(),
+                        &message.image_attachments,
                     );
                     item.reconciles = assistant_provisional.clone().map(|id| vec![id]);
                     items.push(item);
@@ -1904,7 +1906,7 @@ fn project_durable_user_message(
         content,
         skill,
         None,
-        message.image_attachments.len(),
+        &message.image_attachments,
     );
     if reconcile_live_user && let Some(run_id) = run_id {
         item.reconciles = Some(vec![conversation_live_provisional_id(
@@ -1951,7 +1953,7 @@ fn new_message_item(
     text: Option<ProjectedText>,
     skill: Option<ConversationDisplaySkillReferenceV1>,
     assistant_phase: Option<ConversationDisplayAssistantPhaseV1>,
-    image_attachment_count: usize,
+    image_attachments: &[sigil_kernel::ImageAttachment],
 ) -> ConversationDisplayItemV1 {
     let kind = match role {
         ConversationDisplayMessageRoleV1::User => ConversationDisplayItemKindV1::UserMessage,
@@ -1972,7 +1974,11 @@ fn new_message_item(
             text: text.as_ref().map(|text| text.text.clone()),
             skill,
             assistant_phase,
-            image_attachment_count,
+            image_attachment_count: image_attachments.len(),
+            image_attachments: image_attachments
+                .iter()
+                .map(sigil_kernel::ImageAttachment::without_resolved_bytes)
+                .collect(),
             truncated: text.as_ref().is_some_and(|text| text.truncated),
             original_content_bytes: text.map_or(0, |text| text.original_bytes),
         },

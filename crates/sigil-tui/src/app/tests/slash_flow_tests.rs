@@ -820,13 +820,62 @@ run-as: inline
 
     assert!(matches!(
         action,
-        Some(AppAction::InvokeInlineSkill { skill_id, arguments })
+        Some(AppAction::InvokeInlineSkill { skill_id, arguments, .. })
             if skill_id == "repo-review" && arguments == "crates/sigil-tui"
     ));
     assert!(app.runtime.is_busy);
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "/repo-review crates/sigil-tui"
     }));
+    Ok(())
+}
+
+#[test]
+fn inline_skill_images_are_preserved_through_validation_and_unadmitted_recovery() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "review-image",
+        r#"---
+name: review-image
+description: Review the attached image.
+trust: trusted
+user-invocable: true
+run-as: inline
+---
+Review the attached image.
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "image-1",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )?;
+    app.composer.input = "/review-image".to_owned();
+    app.composer.image_attachments = vec![image.clone()];
+    let action = app
+        .submit_input()?
+        .expect("inline skill accepts image-only arguments");
+    assert!(
+        matches!(&action, AppAction::InvokeInlineSkill { skill_id, arguments, attachments }
+        if skill_id == "review-image" && arguments.is_empty() && attachments == &vec![image.clone()])
+    );
+    assert!(app.composer.input.is_empty());
+    assert!(app.composer.image_attachments.is_empty());
+    app.restore_unadmitted_run_input(&action);
+    assert_eq!(app.composer.input, "/review-image");
+    assert_eq!(app.composer.image_attachments, vec![image.clone()]);
+    assert!(!app.runtime.is_busy);
+
+    // A native command cannot silently consume an attachment it cannot represent.
+    app.composer.input = "/compact".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.composer.input, "/compact");
+    assert_eq!(app.composer.image_attachments, vec![image]);
     Ok(())
 }
 
@@ -858,7 +907,7 @@ user-invocable: true
 
     assert!(matches!(
         action,
-        Some(AppAction::InvokeInlineSkill { skill_id, arguments })
+        Some(AppAction::InvokeInlineSkill { skill_id, arguments, .. })
             if skill_id == "plan-chapter" && arguments == "chapter 3"
     ));
     assert_eq!(app.last_notice(), Some("using command plan-chapter"));
@@ -948,6 +997,19 @@ user-invocable: true
     assert!(action.is_none());
     assert!(!app.runtime.is_busy);
     assert_eq!(app.last_notice(), Some("skill needs-review is not trusted"));
+    app.composer.input = "/needs-review target".to_owned();
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "image-untrusted",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )?;
+    app.composer.image_attachments = vec![image.clone()];
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("skill needs-review is not trusted"));
+    assert_eq!(app.composer.input, "/needs-review target");
+    assert_eq!(app.composer.image_attachments, vec![image]);
     Ok(())
 }
 

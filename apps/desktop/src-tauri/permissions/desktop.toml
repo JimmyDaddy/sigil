@@ -112,3 +112,8 @@ commands.allow = ["desktop_provider_connections", "desktop_provider_setup_catalo
 identifier = "allow-desktop-update"
 description = "Allows the main local window to inspect and explicitly apply one native-owned signed Desktop beta update without generic updater or process access."
 commands.allow = ["desktop_update_state", "desktop_check_for_update", "desktop_download_and_install_update", "desktop_restart_after_update"]
+
+[[permission]]
+identifier = "allow-desktop-images"
+description = "Allows selected or pasted image bytes, bounded native draft handles and exact durable message image reads; no arbitrary filesystem paths."
+commands.allow = ["desktop_ingest_image", "desktop_pick_image", "desktop_release_images", "desktop_message_image"]

@@ -404,3 +404,124 @@ impl Drop for EnvScope {
         }
     }
 }
+
+#[test]
+fn unauthenticated_responses_requires_explicit_loopback_and_absent_key() -> Result<()> {
+    use crate::OpenAiResponsesAuthentication;
+    for base_url in [
+        "https://api.openai.com/v1",
+        "https://remote.example/v1",
+        "http://user@localhost/v1",
+    ] {
+        assert!(
+            OpenAiResponsesProvider::new_exact(
+                OpenAiResponsesProviderConfig {
+                    authentication: OpenAiResponsesAuthentication::UnauthenticatedLoopback,
+                    base_url: base_url.to_owned(),
+                    ..Default::default()
+                },
+                ModelRequestTimeouts::default()
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        OpenAiResponsesProvider::new_exact(
+            OpenAiResponsesProviderConfig {
+                authentication: OpenAiResponsesAuthentication::UnauthenticatedLoopback,
+                base_url: "http://127.0.0.1:1".to_owned(),
+                api_key: Some("unexpected-key".to_owned()),
+                ..Default::default()
+            },
+            ModelRequestTimeouts::default()
+        )
+        .is_err()
+    );
+    let implicit = OpenAiResponsesProvider::new_exact(
+        OpenAiResponsesProviderConfig {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            ..Default::default()
+        },
+        ModelRequestTimeouts::default(),
+    )?;
+    assert!(
+        implicit.api_key().is_err(),
+        "missing credentials are never inferred as none"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unauthenticated_responses_uses_one_auth_choice_for_stream_compact_and_count() -> Result<()>
+{
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let worker = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            let (mut socket, _) =
+                tokio::time::timeout(Duration::from_secs(3), listener.accept()).await??;
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0_u8; 1024];
+                let read = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut buffer))
+                    .await??;
+                anyhow::ensure!(
+                    read > 0 && request.len() < 8192,
+                    "incomplete auth fixture request"
+                );
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = request
+                    .windows(4)
+                    .position(|bytes| bytes == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                    && request.len()
+                        >= header_end + content_length(&request[..header_end]).unwrap_or_default()
+                {
+                    break;
+                }
+            }
+            requests.push(String::from_utf8(request)?);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await?;
+        }
+        Ok::<_, anyhow::Error>(requests)
+    });
+    let result: Result<()> = async {
+        let provider = OpenAiResponsesProvider::new_exact(
+            OpenAiResponsesProviderConfig {
+                authentication: crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback,
+                base_url,
+                ..Default::default()
+            },
+            ModelRequestTimeouts::default(),
+        )?;
+        // The three protocol methods share this request seam. This does not grant a loopback
+        // server the separate official-endpoint input-token proof capability.
+        for url in [
+            provider.responses_url(),
+            provider.compact_url(),
+            provider.input_token_count_url(),
+        ] {
+            provider
+                .post_json(&url, &serde_json::json!({"model": "gpt-4.1"}))
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    let requests = worker.await?;
+    result?;
+    let requests = requests?;
+    for (request, path) in requests.iter().zip([
+        "/responses",
+        "/responses/compact",
+        "/responses/input_tokens",
+    ]) {
+        assert!(request.starts_with(&format!("POST {path} HTTP/1.1")));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    }
+    Ok(())
+}

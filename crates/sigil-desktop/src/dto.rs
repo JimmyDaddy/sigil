@@ -813,6 +813,8 @@ pub enum DesktopConversationDisplayContent {
         #[serde(default)]
         assistant_phase: Option<DesktopConversationDisplayAssistantPhase>,
         image_attachment_count: u64,
+        #[serde(default)]
+        image_attachments: Vec<crate::DesktopImageAttachment>,
         truncated: bool,
         original_content_bytes: u64,
     },
@@ -1513,6 +1515,8 @@ pub struct DesktopAgentActivityView {
 #[serde(rename_all = "snake_case")]
 pub struct DesktopRunStartRequest {
     pub prompt: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<crate::DesktopImageAttachment>,
     pub permission_mode: DesktopPermissionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_ref: Option<DesktopProviderModelRef>,

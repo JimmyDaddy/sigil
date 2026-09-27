@@ -729,6 +729,7 @@ export type ConversationDisplayContent =
       };
       assistantPhase?: "tool_preamble" | "progress" | "final_answer";
       imageAttachmentCount: number;
+      imageAttachments?: ImageReference[];
       truncated: boolean;
       originalContentBytes: number;
     }
@@ -2075,3 +2076,12 @@ export interface RunApprovalSnapshot {
   pendingApprovals: TimelineEvent[];
   approvalLifecycles: RunApprovalLifecycleSnapshot[];
 }
+
+export interface ImageReference {
+  attachmentId: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  width: number;
+  height: number;
+  byteLen: number;
+}
+export interface DraftImage extends ImageReference { previewDataUrl: string; }

@@ -1,5 +1,7 @@
 import { useLayoutEffect, useState } from "react";
 
+import type { ImageReference } from "./types";
+import { Button } from "./ui/primitives";
 import { useLocale } from "./i18n";
 import { MessageContent } from "./MessageContent";
 import { MessageContentPager, type ReadMessageContent } from "./MessageContentPager";
@@ -18,6 +20,7 @@ export interface MessageView {
   };
   status?: string;
   contentTruncated?: boolean;
+  images?: ImageReference[];
 }
 
 export function Message({
@@ -25,11 +28,13 @@ export function Message({
   displayId,
   onOpenExternalUrl,
   onReadContent,
+  onReadImage,
 }: {
   readonly message: MessageView;
   readonly displayId?: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
   readonly onReadContent?: ReadMessageContent;
+  readonly onReadImage?: (displayId: string, attachmentId: string) => Promise<string>;
 }) {
   const { t } = useLocale();
   const streaming = message.status === "streaming";
@@ -62,7 +67,7 @@ export function Message({
           contentId={message.key}
           onOpenExternalUrl={onOpenExternalUrl}
         />
-        {message.contentTruncated && displayId !== undefined && onReadContent !== undefined
+      {message.contentTruncated && displayId !== undefined && onReadContent !== undefined
           ? <MessageContentPager key={displayId} displayId={displayId} onRead={onReadContent} /> : null}
       </details>
     );
@@ -91,6 +96,9 @@ export function Message({
         contentId={message.key}
         onOpenExternalUrl={onOpenExternalUrl}
       />
+        {message.images?.length && displayId !== undefined ? <div className="message-images">
+        {message.images.map((image) => <RecordedImage key={image.attachmentId} image={image} onRead={onReadImage === undefined ? undefined : () => onReadImage(displayId, image.attachmentId)} />)}
+      </div> : null}
       {message.contentTruncated && displayId !== undefined && onReadContent !== undefined
         ? <MessageContentPager key={displayId} displayId={displayId} onRead={onReadContent} /> : null}
     </article>
@@ -103,4 +111,21 @@ function disclosurePreview(text: string): string {
   const linePreview = trimmed.split("\n").slice(0, DISCLOSURE_PREVIEW_LINES).join("\n");
   if (linePreview.length <= DISCLOSURE_PREVIEW_CHARACTERS) return linePreview;
   return `${linePreview.slice(0, DISCLOSURE_PREVIEW_CHARACTERS - 1).trimEnd()}…`;
+}
+
+function RecordedImage({ image, onRead }: { image: ImageReference; onRead?: () => Promise<string> }) {
+  const { t } = useLocale();
+  const [source, setSource] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const load = async () => {
+    if (onRead === undefined || busy) return;
+    setBusy(true); setFailed(false);
+    try { setSource(await onRead()); } catch { setFailed(true); } finally { setBusy(false); }
+  };
+  return <figure className="message-image">
+    <figcaption>{image.mimeType} · {image.width} × {image.height} · {Math.ceil(image.byteLen / 1024)} KiB</figcaption>
+    {source === undefined ? <Button type="button" variant="quiet" busy={busy} disabled={onRead === undefined} onClick={() => void load()}>{t("viewImage")}</Button> : <img src={source} alt={`${image.width} × ${image.height}`} />}
+    {failed ? <p role="alert">{t("imageUnavailable")}</p> : null}
+  </figure>;
 }

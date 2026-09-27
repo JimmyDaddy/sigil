@@ -340,3 +340,10 @@ workspace、文档、站点和分发 gate。
 | 依赖 | 版本 / feature | Owner | 用途 | 许可 / 来源 | 验证与边界 |
 | --- | --- | --- | --- | --- | --- |
 | `sigil-resource-authority` | workspace path crate；`sigil-tools-builtin` dev-dependency，无新增 feature | `sigil-tools-builtin/tests/file_tool_fixture` | 用真实 RA、capability broker 与独立临时 storage 验证生产文件工具，清除 `cfg(test)` legacy 业务实现 | Sigil first-party crate；本仓库维护 | 仅增加测试依赖边，不改变 shipping crate 图；验证连续读写、CAS、拒绝、mutation 事实、流式输出与取消预算，fixture 经统一隔离入口运行 |
+
+## Desktop 原生图片输入（A3）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `base64` | `0.22.1`；复用 workspace 默认 `std` / `alloc` | `sigil-desktop-app/image_attachments` | 将已通过共享图片校验的有界 bytes 转成 renderer 可展示的 data URL；不传源路径、文件名或凭证 | MIT OR Apache-2.0；marshallpierce/rust-base64 | 增加直接依赖边，复用已锁版本；发布前仍执行仓库 supply-chain gate |
+| `libc` | lock `0.2.189`（workspace `0.2.186` semver）；默认 `std`，调用仅 `cfg(unix)` | `sigil-desktop-app/image_attachments` | 系统 picker 已授权目标的读取使用 `O_NONBLOCK`，避免 FIFO 在 opened descriptor 的 regular-file/大小检查前卡住；允许明确选择的符号链接，不授予 renderer 通用文件权限 | MIT OR Apache-2.0；rust-lang/libc | 增加直接依赖边，复用已锁版本；共享 HTTP/runtime 图片 cache 边界不变，发布前仍执行仓库 supply-chain gate |

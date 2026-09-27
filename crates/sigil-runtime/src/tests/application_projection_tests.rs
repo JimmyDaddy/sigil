@@ -1629,3 +1629,78 @@ async fn worker_projection_replacement_waits_for_real_observation_and_keeps_scop
     assert!(Arc::ptr_eq(&binding.owner()?.cache, &next.cache));
     Ok(())
 }
+
+#[test]
+fn message_image_reference_survives_reopen_and_is_bound_to_exact_session_and_message()
+-> anyhow::Result<()> {
+    use sigil_application::message_content::MessageContentError;
+    let (fixture, mut session, store, binding) = owned_projection_fixture()?;
+    let cache = crate::ControlledImageAttachmentCache::new(fixture.path().join("images"));
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3).write_to(&mut encoded, image::ImageFormat::Png)?;
+    let image = cache.ingest_encoded_bytes("image-1", encoded.into_inner())?;
+    session.try_attach_image_attachment_resolver(std::sync::Arc::new(cache))?;
+    let mut message = sigil_kernel::ModelMessage::user("");
+    message.image_attachments = vec![image.clone()];
+    session.append_user_message(message)?;
+    session.append_user_message(sigil_kernel::ModelMessage::user("unrelated message"))?;
+    let owner = binding.owner().expect("projection owner");
+    let budget = sigil_kernel::SessionReadBudget::default();
+    let display = owner.conversation_display_page(
+        ConversationDisplayQuery {
+            expected_session_scope_id: session.session_scope_id(),
+            cursor: None,
+            limit: 100,
+            current_workspace_snapshot_id: None,
+            artifact_store: None,
+        },
+        &budget,
+    )?;
+    let selected = &display.items[0];
+    let crate::conversation_display::ConversationDisplayContentV1::Message {
+        image_attachments,
+        ..
+    } = &selected.content
+    else {
+        panic!("user message");
+    };
+    assert_eq!(image_attachments, &vec![image.without_resolved_bytes()]);
+    let reopened = crate::RuntimeSessionProjectionOwner::from_store(&store);
+    assert_eq!(
+        reopened.message_image_attachment(
+            session.session_scope_id(),
+            &selected.display_id,
+            "image-1",
+            &budget
+        )?,
+        image.without_resolved_bytes()
+    );
+    assert!(matches!(
+        reopened.message_image_attachment(
+            "other-session",
+            &selected.display_id,
+            "image-1",
+            &budget
+        ),
+        Err(MessageContentError::NotFound)
+    ));
+    assert!(matches!(
+        reopened.message_image_attachment(
+            session.session_scope_id(),
+            &display.items[1].display_id,
+            "image-1",
+            &budget
+        ),
+        Err(MessageContentError::NotFound)
+    ));
+    assert!(matches!(
+        reopened.message_image_attachment(
+            session.session_scope_id(),
+            &selected.display_id,
+            "other-image",
+            &budget
+        ),
+        Err(MessageContentError::NotFound)
+    ));
+    Ok(())
+}

@@ -38,7 +38,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 14;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 15;
 /// Schema version for one bounded display-surface artifact page.
 pub const HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION: u16 = 1;
 
@@ -62,6 +62,8 @@ pub struct HttpServerCapabilities {
     pub bounded_transcript_replay: bool,
     /// A bound durable session exposes canonical identity/order display pages.
     pub canonical_conversation_display: bool,
+    /// Bounded local image ingestion and exact saved-message image retrieval are available.
+    pub image_attachments: bool,
     /// A bound durable session exposes typed, bounded artifact pages by opaque reference.
     pub typed_tool_artifact_retrieval: bool,
     /// Durable run events support cursor-bound replay.
@@ -107,6 +109,7 @@ impl HttpServerCapabilities {
             durable_session_reopen: true,
             bounded_transcript_replay: true,
             canonical_conversation_display: true,
+            image_attachments: true,
             typed_tool_artifact_retrieval: true,
             durable_event_replay: true,
             live_events: true,
@@ -1042,6 +1045,8 @@ pub enum HttpConversationDisplayContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_phase: Option<HttpConversationDisplayAssistantPhase>,
         image_attachment_count: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_attachments: Vec<sigil_kernel::ImageAttachment>,
         truncated: bool,
         original_content_bytes: u64,
     },
@@ -1737,6 +1742,7 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 skill,
                 assistant_phase,
                 image_attachment_count,
+                image_attachments,
                 truncated,
                 original_content_bytes,
             } => Self::Message {
@@ -1748,6 +1754,7 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 }),
                 assistant_phase: assistant_phase.map(Into::into),
                 image_attachment_count: usize_as_u64(image_attachment_count),
+                image_attachments,
                 truncated,
                 original_content_bytes: usize_as_u64(original_content_bytes),
             },
@@ -1967,6 +1974,8 @@ pub struct HttpSessionBinding {
 pub struct HttpRunStartRequest {
     /// User prompt for the run.
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<sigil_kernel::ImageAttachment>,
     /// Optional exact connection/model selected for this and subsequent session runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_ref: Option<HttpProviderModelRef>,

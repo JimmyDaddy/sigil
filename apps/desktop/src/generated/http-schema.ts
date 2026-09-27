@@ -81,6 +81,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/image-attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admit one local encoded image to the controlled workspace cache
+         * @description Accepts PNG, JPEG or WebP bytes up to 8 MiB. The host decodes the image and derives all durable metadata; source paths and names are never accepted.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            responses: {
+                /** @description Verified attachment reference */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ImageAttachment"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/openapi.json": {
         parameters: {
             query?: never;
@@ -1719,6 +1765,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/message-image": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** View an image attached to an exact durable user message */
+        get: {
+            parameters: {
+                query: {
+                    display_id: string;
+                    attachment_id: string;
+                };
+                header?: {
+                    /** @description Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write. */
+                    "x-sigil-cancel-observation-on-close"?: components["parameters"]["CancelObservationOnClose"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Revalidated saved image */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data_base64: string;
+                            /** @enum {string} */
+                            mime_type: "image/png" | "image/jpeg" | "image/webp";
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                /** @description The image is unavailable or changed */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/queue": {
         parameters: {
             query?: never;
@@ -3171,6 +3275,7 @@ export interface components {
             assistant_phase?: "tool_preamble" | "progress" | "final_answer" | null;
             /** Format: uint64 */
             image_attachment_count: number;
+            image_attachments?: components["schemas"]["ImageAttachment"][];
             /** Format: uint64 */
             original_content_bytes: number;
             /** @enum {string} */
@@ -3557,6 +3662,17 @@ export interface components {
         HealthResponse: {
             /** @constant */
             status: "ok";
+        };
+        ImageAttachment: {
+            artifact_ref: string;
+            attachment_id: string;
+            byte_len: number;
+            estimated_visual_tokens: number;
+            height: number;
+            /** @enum {string} */
+            mime_type: "png" | "jpeg" | "webp";
+            sha256: string;
+            width: number;
         };
         /** @enum {string} */
         IntegrationLaneCandidateKind: "managed_ref" | "snapshot_workspace";
@@ -4288,6 +4404,7 @@ export interface components {
         };
         RunStartRequest: {
             agent_binding?: components["schemas"]["ApplicationAgentBinding"] | null;
+            image_attachments?: components["schemas"]["ImageAttachment"][];
             model_ref?: components["schemas"]["ProviderModelRef"] | null;
             model_selection_binding?: string | null;
             permission_mode: components["schemas"]["PermissionMode"];
@@ -4317,6 +4434,7 @@ export interface components {
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
             durable_user_input: boolean;
+            image_attachments: boolean;
             intent_stack: boolean;
             live_events: boolean;
             provider_connections: boolean;
@@ -4338,7 +4456,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 14;
+            schema_version: 15;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
