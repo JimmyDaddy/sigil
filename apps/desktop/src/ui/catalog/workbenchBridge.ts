@@ -665,6 +665,7 @@ export function createCatalogWorkbenchBridge(
       outcome: "nothing_to_compact",
       recovery: { checkpoints: [], forkPoints: [], throughStreamSequence: 0 },
     }),
+    checkpointReview: async (_workspaceId, input) => ({ checkpointId: input.checkpointId, checkpointDigest: input.checkpointDigest, diffs: [], truncated: false }),
     checkpointRestorePreview: async (_workspaceId, input) => ({
       checkpointId: input.checkpointId,
       checkpointDigest: input.checkpointDigest,

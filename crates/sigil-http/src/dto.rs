@@ -1972,6 +1972,9 @@ pub struct HttpSessionBinding {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct HttpRunStartRequest {
+    /// Explicit user comments bound to immutable recorded diff ranges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     /// User prompt for the run.
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2701,6 +2704,8 @@ pub enum HttpConversationQueueCommandActionKind {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HttpConversationQueueCommandAction {
     Enqueue {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        review_annotations: Vec<sigil_application::ReviewAnnotation>,
         prompt: String,
         kind: HttpConversationQueueItemKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]

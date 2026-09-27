@@ -1409,6 +1409,93 @@
         ],
         "type": "object"
       },
+      "CheckpointReview": {
+        "properties": {
+          "checkpoint_digest": {
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "diffs": {
+            "items": {
+              "properties": {
+                "diff_digest": {
+                  "type": "string"
+                },
+                "file_state": {
+                  "enum": [
+                    "current",
+                    "changed",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "properties": {
+                      "new_line": {
+                        "minimum": 1,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "old_line": {
+                        "minimum": 1,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "text",
+                      "old_line",
+                      "new_line"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "source_call_id": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "source_call_id",
+                "diff_digest",
+                "path",
+                "lines",
+                "file_state",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "checkpoint_digest",
+          "diffs",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "CheckpointView": {
         "properties": {
           "checkpoint_digest": {
@@ -3291,6 +3378,13 @@
                 "type": "null"
               }
             ]
+          },
+          "review_annotations": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewAnnotation"
+            },
+            "maxItems": 16,
+            "type": "array"
           }
         },
         "required": [
@@ -7133,6 +7227,57 @@
         ],
         "type": "string"
       },
+      "ReviewAnnotation": {
+        "properties": {
+          "checkpoint_digest": {
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "comment": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "diff_digest": {
+            "type": "string"
+          },
+          "end_line": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "old",
+              "new"
+            ],
+            "type": "string"
+          },
+          "source_call_id": {
+            "type": "string"
+          },
+          "start_line": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "checkpoint_digest",
+          "source_call_id",
+          "diff_digest",
+          "path",
+          "side",
+          "start_line",
+          "end_line",
+          "comment"
+        ],
+        "type": "object"
+      },
       "RouteRecoveryRequiredEvent": {
         "additionalProperties": true,
         "properties": {
@@ -7739,6 +7884,13 @@
               "string",
               "null"
             ]
+          },
+          "review_annotations": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewAnnotation"
+            },
+            "maxItems": 16,
+            "type": "array"
           },
           "route_recovery_binding": {
             "type": [
@@ -13282,6 +13434,48 @@
           }
         },
         "summary": "Preview one exact controlled-file checkpoint restore"
+      }
+    },
+    "/sessions/{session_id}/recovery/checkpoint-review": {
+      "post": {
+        "operationId": "checkpointReview",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckpointRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointReview"
+                }
+              }
+            },
+            "description": "Recorded forward diffs and advisory current-file state"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Read exact recorded change lines without restore or mutation authority"
       }
     },
     "/sessions/{session_id}/recovery/commands": {

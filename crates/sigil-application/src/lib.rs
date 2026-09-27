@@ -6,6 +6,12 @@
 //! and binds it to one authenticated scope; callers can submit typed commands but cannot choose
 //! their lane, resource authority, or presentation-completion authority.
 
+mod review;
+pub use review::{
+    ApplicationCheckpointReview, ApplicationReviewDiff, ReviewAnnotation, ReviewDiffLine,
+    ReviewDiffSide, ReviewFileState,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -352,6 +358,9 @@ pub struct ApplicationTaskContinuation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStartOptions {
+    /// Exact user-selected recorded diff ranges, validated by the host before admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_annotations: Vec<ReviewAnnotation>,
     pub permission_mode: ApplicationPermissionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ApplicationModelRoute>,

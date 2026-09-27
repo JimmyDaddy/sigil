@@ -1,3 +1,4 @@
+import type { CheckpointReview, ReviewAnnotation } from "./features/conversation/reviewTypes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -180,6 +181,7 @@ export interface DesktopBridge {
     workspaceId: string,
     sessionId: string,
   ): Promise<CompactionExecutionSummary>;
+  checkpointReview(workspaceId: string, input: CheckpointRestorePreviewInput): Promise<CheckpointReview>;
   checkpointRestorePreview(
     workspaceId: string,
     input: CheckpointRestorePreviewInput,
@@ -207,6 +209,7 @@ export interface DesktopBridge {
     agentBinding?: AgentBinding,
     routeRecoveryBinding?: string,
     imageHandles?: string[],
+    reviewAnnotations?: ReviewAnnotation[],
   ): Promise<RunSummary>;
   continueTask(
     workspaceId: string,
@@ -449,6 +452,8 @@ export const desktopBridge: DesktopBridge = {
       workspaceId,
       sessionId,
     }),
+  checkpointReview: (workspaceId, input) =>
+    invoke<CheckpointReview>("desktop_checkpoint_review", { workspaceId, input }),
   checkpointRestorePreview: (workspaceId, input) =>
     invoke<CheckpointRestoreReview>("desktop_checkpoint_restore_preview", { workspaceId, input }),
   commandConversationRecovery: (workspaceId, input) =>
@@ -477,6 +482,7 @@ export const desktopBridge: DesktopBridge = {
     agentBinding,
     routeRecoveryBinding,
     imageHandles,
+    reviewAnnotations,
   ) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
@@ -488,6 +494,7 @@ export const desktopBridge: DesktopBridge = {
         modelSelectionBinding,
         routeRecoveryBinding,
         imageHandles,
+        reviewAnnotations,
         reasoningEffort,
         reasoningEffortBinding,
         skillBinding,

@@ -21,6 +21,7 @@ describe("ConversationRecoveryPanel compaction action", () => {
           error={false}
           onRefresh={vi.fn()}
           onCompact={compact}
+          onReview={vi.fn()}
           onPreview={vi.fn(async () => undefined)}
           onRestore={vi.fn(async () => undefined)}
           onFork={vi.fn(async () => undefined)}
@@ -42,7 +43,8 @@ describe("ConversationRecoveryPanel compaction action", () => {
       error: false,
       onRefresh,
       onCompact: vi.fn(async () => true),
-      onPreview: vi.fn(async () => undefined),
+      onReview: vi.fn(),
+    onPreview: vi.fn(async () => undefined),
       onRestore: vi.fn(async () => undefined),
       onFork: vi.fn(async () => undefined),
     };

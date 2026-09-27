@@ -280,6 +280,7 @@ export interface ConversationQueueView {
 export type ConversationQueueCommandAction =
   | {
       action: "enqueue";
+      reviewAnnotations?: import("./features/conversation/reviewTypes").ReviewAnnotation[];
       prompt: string;
       kind: ConversationQueueItemKind;
       reasoningEffort?: ReasoningEffort;

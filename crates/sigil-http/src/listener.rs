@@ -1473,6 +1473,26 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/recovery/checkpoint-review"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(body) = parse_json_body::<HttpCheckpointRestoreRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_recovery_command",
+                "invalid recorded review selector",
+            );
+        };
+        return match registry.checkpoint_review(session_id, body) {
+            Ok(review) => json_response(200, json!(review)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/recovery/checkpoint-preview"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {

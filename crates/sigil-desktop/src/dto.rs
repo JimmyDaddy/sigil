@@ -1514,6 +1514,9 @@ pub struct DesktopAgentActivityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DesktopRunStartRequest {
+    /// User comments with exact recorded diff references; not file-write authority.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     pub prompt: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub image_attachments: Vec<crate::DesktopImageAttachment>,
@@ -1854,6 +1857,8 @@ pub enum DesktopConversationQueueCommandActionKind {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DesktopConversationQueueCommandAction {
     Enqueue {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        review_annotations: Vec<sigil_application::ReviewAnnotation>,
         prompt: String,
         kind: DesktopConversationQueueItemKind,
         #[serde(skip_serializing_if = "Option::is_none")]

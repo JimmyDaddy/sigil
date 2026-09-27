@@ -1430,6 +1430,25 @@ impl HttpSessionRunRegistry {
         .map_err(recovery_driver_registry_error)
     }
 
+    /// Reads one exact recorded change without reserving a durable mutation or stopping a run.
+    /// Invalid selectors, foreign sessions and unavailable records return a typed query error.
+    pub fn checkpoint_review(
+        &self,
+        session_id: &str,
+        request: HttpCheckpointRestoreRequest,
+    ) -> Result<sigil_application::ApplicationCheckpointReview, HttpRegistryError> {
+        validate_checkpoint_restore_request(&request)?;
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.checkpoint_review(&session, &request)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "recorded change review",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(recovery_driver_registry_error)
+    }
+
     /// Produces a fresh reverse-diff and conflict review without mutating workspace truth.
     ///
     /// # Errors
@@ -1714,7 +1733,7 @@ impl HttpSessionRunRegistry {
     pub fn command_conversation_queue(
         &self,
         session_id: &str,
-        command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+        mut command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
     ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
         command.ensure_supported().map_err(|error| {
             HttpRegistryError::UnsupportedProtocolVersion {
@@ -1728,6 +1747,27 @@ impl HttpSessionRunRegistry {
             });
         }
         validate_conversation_queue_command(&command.payload)?;
+        if let HttpConversationQueueCommandAction::Enqueue {
+            prompt,
+            review_annotations,
+            ..
+        } = &mut command.payload.action
+            && !review_annotations.is_empty()
+        {
+            let session = self.get_session(session_id)?;
+            let context = catch_unwind(AssertUnwindSafe(|| {
+                self.driver
+                    .queued_review_context(&session, review_annotations)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "queued recorded review",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(recovery_driver_registry_error)?;
+            prompt.push_str(&context);
+            review_annotations.clear();
+            validate_conversation_queue_command(&command.payload)?;
+        }
 
         // A retained terminal owner keeps the session stream open while its process task settles.
         // Its projection owner may be unable to produce a fresh application snapshot during that
@@ -2261,6 +2301,7 @@ impl HttpSessionRunRegistry {
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
         let image_attachments = request.image_attachments;
+        let review_annotations = request.review_annotations;
         let model_ref = request.model_ref;
         let model_selection_binding = request.model_selection_binding;
         let route_recovery_binding = request.route_recovery_binding;
@@ -2336,6 +2377,7 @@ impl HttpSessionRunRegistry {
         };
 
         let start = HttpRunDriverStart {
+            review_annotations,
             session: session_snapshot,
             run: run_snapshot,
             prompt,
@@ -6617,6 +6659,7 @@ fn secret_safe_queue_command_fingerprint_payload(
             prompt,
             kind,
             reasoning_effort,
+            ..
         } => {
             let projection = project_conversation_prompt_for_persistence(prompt);
             serde_json::json!({

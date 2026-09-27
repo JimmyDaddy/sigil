@@ -30,6 +30,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
+| Comment on recorded changes | `Alt-R`; select a checkpoint, file and line range, `Enter` adds a comment, `Ctrl-S` sends or queues the batch |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Open Intent Stack review | `Alt-S`; `Up/Down` selects, `D` previews Drop, `Enter` confirms |
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |

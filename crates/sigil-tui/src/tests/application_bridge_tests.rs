@@ -950,3 +950,70 @@ fn inline_skill_images_cross_application_boundary_without_placeholder_arguments(
         if skill_id.as_str() == "review" && attachments == vec![image]));
     Ok(())
 }
+
+#[test]
+fn change_review_shared_submit_preserves_typed_references_to_existing_worker_loop() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("review-bridge")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("review-source")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let app = session(port, scope)?;
+    let mut request = app
+        .prepare_action(
+            &AppAction::SubmitPrompt("Clarify this change".to_owned()),
+            None,
+            None,
+        )?
+        .expect("submit");
+    let annotation = sigil_application::ReviewAnnotation {
+        checkpoint_id: "checkpoint".to_owned(),
+        checkpoint_digest: "a".repeat(64),
+        source_call_id: "write-call".to_owned(),
+        diff_digest: "b".repeat(64),
+        path: "note.txt".to_owned(),
+        side: sigil_application::ReviewDiffSide::New,
+        start_line: 1,
+        end_line: 2,
+        comment: SafeText::new("Clarify both lines")?,
+    };
+    request.envelope.command =
+        ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+            prompt: Some(SafeText::new("Clarify this change")?),
+            options: Some(Box::new(sigil_application::RunStartOptions {
+                review_annotations: vec![annotation.clone()],
+                permission_mode: sigil_application::ApplicationPermissionMode::Manual,
+                model: None,
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill: None,
+                agent: None,
+                task_continuation: None,
+            })),
+        });
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
+    let executor = TuiWorkerCommandExecutor {
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: "review-source".to_owned(),
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    assert!(!matches!(
+        executor.dispatch_sync(&request)?,
+        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
+    ));
+    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
+        WorkerCommand::SubmitReviewedPrompt { prompt, expected_session_id, annotations, .. }
+        if prompt == "Clarify this change" && expected_session_id == "review-source" && annotations == vec![annotation]));
+    Ok(())
+}

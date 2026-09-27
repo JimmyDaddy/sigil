@@ -1,7 +1,120 @@
 use super::*;
 
+#[tokio::test]
+async fn task_review_guidance_preserves_user_guidance_and_exact_recorded_source() -> Result<()> {
+    use sigil_application::{ReviewAnnotation, ReviewDiffSide};
+    use sigil_kernel::{
+        ControlledCheckpointProjection, ModelMessage, MutationEventRecorder, ToolDiffBudget,
+        ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, write_file_with_mutation,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    write_production_test_config(&config_path, "workspace");
+    let session_path = temp.path().join("review.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("create a note")))?;
+    let recorder =
+        MutationEventRecorder::with_artifact_root(store.clone(), temp.path().join("artifacts"));
+    let preview = ToolPreviewSnapshot::from_preview(
+        "review-call",
+        "write_file",
+        &ToolPreview {
+            title: "Note".to_owned(),
+            summary: "Recorded creation".to_owned(),
+            body: String::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            file_diffs: vec![ToolPreviewFile {
+                path: "note.txt".to_owned(),
+                diff: "--- /dev/null\n+++ note.txt\n@@ -0,0 +1 @@\n+original line\n".to_owned(),
+            }],
+        },
+        ToolDiffBudget::default(),
+        None,
+    );
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ToolPreviewCaptured(preview),
+    ))?;
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "review-call",
+        "note.txt",
+        workspace.join("note.txt"),
+        b"original line\n",
+    )?;
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let scope = records[0].session_id();
+    let checkpoints = ControlledCheckpointProjection::from_records(&records)?;
+    let checkpoint = checkpoints.latest().context("checkpoint")?;
+    let review = sigil_runtime::application_checkpoint_review(
+        &session_path,
+        scope,
+        &workspace,
+        &checkpoint.checkpoint_id,
+        &checkpoint.checkpoint_digest,
+    )?;
+    let diff = review.diffs.first().context("recorded diff")?;
+    let mut request =
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "", "review");
+    request.session_path = Some(session_path.clone());
+    request.review_annotations.push(ReviewAnnotation {
+        checkpoint_id: checkpoint.checkpoint_id.clone(),
+        checkpoint_digest: checkpoint.checkpoint_digest.clone(),
+        source_call_id: diff.source_call_id.clone(),
+        diff_digest: diff.diff_digest.clone(),
+        path: diff.path.clone(),
+        side: ReviewDiffSide::New,
+        start_line: 1,
+        end_line: 1,
+        comment: SafeText::new("clarify this line")?,
+    });
+    std::fs::write(workspace.join("note.txt"), "a later edit\n")?;
+    let before = std::fs::read(&session_path)?;
+    let guidance = super::super::run_start::task_review_guidance(
+        &request,
+        scope,
+        Some("Keep the existing Task goal.".to_owned()),
+    )
+    .await?
+    .context("review guidance")?;
+    assert!(guidance.starts_with("Keep the existing Task goal.\n"));
+    assert!(guidance.contains("User review of recorded change"));
+    assert!(guidance.contains("1: +original line"));
+    assert!(guidance.contains("clarify this line"));
+    assert!(guidance.contains("no file-write authority"));
+    assert_eq!(std::fs::read(&session_path)?, before);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("note.txt"))?,
+        "a later edit\n"
+    );
+    assert!(
+        super::super::run_start::task_review_guidance(&request, "foreign-scope", None)
+            .await
+            .is_err()
+    );
+
+    // Ordinary continuation needs no additional configuration/session read for review.
+    request.review_annotations.clear();
+    request.config_path = temp.path().join("missing-config.toml");
+    request.session_path = None;
+    assert_eq!(
+        super::super::run_start::task_review_guidance(
+            &request,
+            scope,
+            Some("unchanged".to_owned())
+        )
+        .await?,
+        Some("unchanged".to_owned())
+    );
+    Ok(())
+}
+
 fn start_request() -> HttpRunStartRequest {
     HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: "continue the bound session".to_owned(),
         permission_mode: Some(HttpPermissionMode::Manual),

@@ -2186,6 +2186,7 @@ impl HttpProductionRunDriver {
         };
 
         let standard_start = HttpRunDriverStart {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             session: start.session,
             run: start.run,
@@ -3226,6 +3227,20 @@ impl HttpRunDriver for HttpProductionRunDriver {
             requested_model.as_ref(),
         )
         .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        if !request.review_annotations.is_empty() {
+            let workspace_root = application_recovery_workspace_root(
+                &self.options.config_path,
+                &self.options.launch_cwd,
+            )
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+            sigil_runtime::materialize_review_annotations(
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &workspace_root,
+                &request.review_annotations,
+            )
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        }
         if !request.image_attachments.is_empty() {
             use sigil_kernel::ImageAttachmentResolver as _;
             if request.agent_binding.is_some() || request.task_continuation.is_some() {
@@ -4148,6 +4163,46 @@ impl HttpRunDriver for HttpProductionRunDriver {
         Ok(review.into())
     }
 
+    fn queued_review_context(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        annotations: &[sigil_application::ReviewAnnotation],
+    ) -> Result<String, HttpConversationRecoveryDriverError> {
+        let workspace_root = application_recovery_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        sigil_runtime::materialize_queued_review_annotations(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &workspace_root,
+            annotations,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)
+    }
+
+    fn checkpoint_review(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &crate::HttpCheckpointRestoreRequest,
+    ) -> Result<sigil_application::ApplicationCheckpointReview, HttpConversationRecoveryDriverError>
+    {
+        let workspace_root = application_recovery_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        sigil_runtime::application_checkpoint_review(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &workspace_root,
+            &request.checkpoint_id,
+            &request.checkpoint_digest,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)
+    }
+
     fn checkpoint_restore_review(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -4434,6 +4489,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 prompt,
                 kind,
                 reasoning_effort,
+                ..
             } => {
                 let queue_id = stable_http_queue_id(
                     &session.durable_session_scope_id,
@@ -4977,6 +5033,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
             let start = HttpRunDriverStart {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 session: session.clone(),
                 run,
@@ -5910,6 +5967,7 @@ impl HttpRunSupervisor {
             })?;
         let model_name = selected_model.map(|model_ref| model_ref.model_id.clone());
         let mut request = ApplicationRunRequest {
+            review_annotations: self.start.review_annotations.clone(),
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
             prompt: self.start.prompt.clone(),
@@ -6001,6 +6059,12 @@ impl HttpRunSupervisor {
                     .map(HttpPreparedApplicationRun::Conversation),
                 (None, Some(task)) => {
                     let task_id = sigil_kernel::TaskId::new(task.task_id)?;
+                    let guidance = run_start::task_review_guidance(
+                        &request,
+                        &expected_session_scope_id,
+                        task.guidance,
+                    )
+                    .await?;
                     preparer
                         .prepare_task(
                             ApplicationTaskContinuationRequest {
@@ -6013,7 +6077,7 @@ impl HttpRunSupervisor {
                                 expected_session_scope_id,
                                 run_id: request.run_id,
                                 task_id,
-                                guidance: task.guidance,
+                                guidance,
                                 interaction: request.interaction,
                                 permission_mode: request.permission_mode,
                             },
@@ -6086,6 +6150,7 @@ impl HttpRunSupervisor {
                 };
             }
             Err(None) => {
+                let _ = preparation.await;
                 return Err(HttpRunDriverError::new(
                     "production cancellation owner closed during run preparation",
                 ));

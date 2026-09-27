@@ -1937,6 +1937,21 @@ impl TuiWorkerCommandExecutor {
     ) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
         let command = match &request.envelope.command {
             ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                prompt,
+                options: Some(options),
+            }) if !options.review_annotations.is_empty() => WorkerCommand::SubmitReviewedPrompt {
+                prompt: prompt
+                    .as_ref()
+                    .map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
+                attachments: Vec::new(),
+                reasoning_effort: options
+                    .reasoning_effort
+                    .map(tui_reasoning_effort)
+                    .unwrap_or_else(|| self.reasoning_effort.clone()),
+                expected_session_id: self.session_id.clone(),
+                annotations: options.review_annotations.clone(),
+            },
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
                 prompt: Some(prompt),
                 ..
             }) => WorkerCommand::SubmitPrompt {
@@ -1975,12 +1990,26 @@ impl TuiWorkerCommandExecutor {
                     .and_then(|options| options.reasoning_effort)
                     .map(tui_reasoning_effort)
                     .unwrap_or_else(|| self.reasoning_effort.clone());
-                WorkerCommand::SubmitPromptWithAttachments {
-                    prompt: prompt
-                        .as_ref()
-                        .map_or_else(String::new, |text| text.as_str().to_owned()),
-                    attachments: attachments.clone(),
-                    reasoning_effort,
+                let prompt = prompt
+                    .as_ref()
+                    .map_or_else(String::new, |text| text.as_str().to_owned());
+                if let Some(options) = options
+                    .as_ref()
+                    .filter(|options| !options.review_annotations.is_empty())
+                {
+                    WorkerCommand::SubmitReviewedPrompt {
+                        prompt,
+                        attachments: attachments.clone(),
+                        reasoning_effort,
+                        expected_session_id: self.session_id.clone(),
+                        annotations: options.review_annotations.clone(),
+                    }
+                } else {
+                    WorkerCommand::SubmitPromptWithAttachments {
+                        prompt,
+                        attachments: attachments.clone(),
+                        reasoning_effort,
+                    }
                 }
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,

@@ -695,6 +695,30 @@ impl DesktopHttpClient {
         Ok(view)
     }
 
+    /// Reads one exact checkpoint's recorded changes without acquiring restore permission.
+    pub async fn checkpoint_review(
+        &self,
+        session_id: &str,
+        request: DesktopCheckpointRestoreRequest,
+    ) -> Result<crate::DesktopCheckpointReview, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_recovery_token(&request.checkpoint_id)?;
+        validate_recovery_token(&request.checkpoint_digest)?;
+        let review: crate::DesktopCheckpointReview = self
+            .post_json(
+                self.route(["sessions", session_id, "recovery", "checkpoint-review"])?,
+                &request,
+                StatusCode::OK,
+            )
+            .await?;
+        if review.checkpoint_id != request.checkpoint_id
+            || review.checkpoint_digest != request.checkpoint_digest
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(review)
+    }
+
     /// Revalidates one checkpoint and returns a bounded reverse-diff preview.
     pub async fn checkpoint_restore_review(
         &self,

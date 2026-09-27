@@ -452,6 +452,7 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                             SafeText::new("start through application port").expect("prompt"),
                         ),
                         options: Some(Box::new(RunStartOptions {
+                            review_annotations: Vec::new(),
                             permission_mode: ApplicationPermissionMode::Manual,
                             model: None,
                             route_recovery_binding: None,
@@ -605,6 +606,7 @@ async fn production_run_admission_reports_external_attachment_before_allocating_
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "must not allocate a run".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -781,6 +783,7 @@ credential = {{ source = "none" }}
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "must not allocate without the exact route binding".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -806,6 +809,7 @@ credential = {{ source = "none" }}
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "must not allocate with stale catalog binding".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -901,6 +905,7 @@ enabled = true
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: String::new(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -1967,6 +1972,7 @@ async fn production_queue_mutations_are_durable_cas_guarded_and_owner_exact() {
                 "enqueue-safe-1",
                 initial.generation.clone(),
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect Cargo.toml".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2004,6 +2010,7 @@ async fn production_queue_mutations_are_durable_cas_guarded_and_owner_exact() {
                 "enqueue-safe-2",
                 queued.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "then inspect README.md".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2141,6 +2148,7 @@ async fn production_queue_interrupt_requires_one_exact_dispatchable_next_item() 
                     "interrupt-plan-prompt",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "plan the next change".to_owned(),
                         kind: HttpConversationQueueItemKind::PlanPrompt,
                         reasoning_effort: None,
@@ -2185,6 +2193,7 @@ async fn production_queue_interrupt_requires_one_exact_dispatchable_next_item() 
                     "interrupt-paused-enqueue",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect Cargo.toml".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2240,6 +2249,7 @@ async fn production_queue_interrupt_requires_one_exact_dispatchable_next_item() 
                     "interrupt-reentry-enqueue",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect with authorization=process-local-secret".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2303,6 +2313,7 @@ async fn production_queue_exact_prompt_is_process_local_and_requires_reentry_aft
                 "enqueue-exact-1",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: raw_prompt.to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2366,6 +2377,7 @@ async fn production_queue_restart_rebinds_persisted_reasoning_effort_before_disp
                 "enqueue-effort-before-restart",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "reply with the durable queue effort".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: Some(crate::HttpReasoningEffort::Low),
@@ -2444,6 +2456,7 @@ async fn production_queue_session_delete_purges_only_matching_exact_prompt_mater
                     command_id,
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: format!("inspect with authorization={secret}"),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2517,6 +2530,7 @@ async fn production_queue_unpromoted_terminal_consumes_only_the_admitted_item() 
                 "enqueue-first",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect with authorization=first-secret".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2532,6 +2546,7 @@ async fn production_queue_unpromoted_terminal_consumes_only_the_admitted_item() 
                 "enqueue-second",
                 first.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect README.md next".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2640,6 +2655,7 @@ async fn production_queue_unpromoted_terminal_does_not_consume_mutation_drift() 
                     "edit-drift-enqueue",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect Cargo.toml".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2716,6 +2732,7 @@ async fn production_queue_unpromoted_terminal_does_not_consume_mutation_drift() 
                     "remove-drift-enqueue",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect Cargo.toml".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2773,6 +2790,7 @@ async fn production_queue_unpromoted_terminal_does_not_consume_mutation_drift() 
                     "reorder-drift-first",
                     initial.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect Cargo.toml first".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2788,6 +2806,7 @@ async fn production_queue_unpromoted_terminal_does_not_consume_mutation_drift() 
                     "reorder-drift-second",
                     first.generation,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect README.md second".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -2854,6 +2873,7 @@ async fn production_queue_cancel_before_promotion_is_terminal_without_replay() {
                 "enqueue-cancelled",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "cancel this queued run".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -2930,6 +2950,7 @@ async fn production_queue_promotion_evicts_exact_material_and_terminal_uses_atte
                 "enqueue-promoted",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect with authorization=promotion-secret".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -3016,6 +3037,7 @@ async fn production_queue_restart_reconciles_orphan_dispatch_before_next_admissi
                 "orphan-first",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect Cargo.toml first".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -3031,6 +3053,7 @@ async fn production_queue_restart_reconciles_orphan_dispatch_before_next_admissi
                 "orphan-second",
                 first.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect README.md second".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -3119,6 +3142,7 @@ async fn production_queue_orphan_reconciliation_retries_frontier_drift() {
                 "frontier-drift-enqueue",
                 initial.generation,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "inspect Cargo.toml".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -3225,6 +3249,7 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
         HttpConversationQueueCommandRequest {
             expected_generation: initial.generation,
             action: HttpConversationQueueCommandAction::Enqueue {
+                review_annotations: Vec::new(),
                 prompt: "inspect Cargo.toml".to_owned(),
                 kind: HttpConversationQueueItemKind::Chat,
                 reasoning_effort: None,
@@ -4116,6 +4141,7 @@ async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_r
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "wait in preparation".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -4338,6 +4364,7 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -4473,6 +4500,7 @@ async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_
         .start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
@@ -6280,6 +6308,7 @@ fn attachment_reprojects_registered_uncertain_run_after_terminal_receipt_was_alr
     let run = registry.start_run(
         &adapter_session.id,
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: "repair the terminal registry".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
@@ -6454,6 +6483,7 @@ fn attachment_rejects_terminal_for_registered_run_bound_to_another_durable_sessi
     let foreign_run = registry.start_run(
         &foreign_adapter_session.id,
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: "must remain owned by the foreign session".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),

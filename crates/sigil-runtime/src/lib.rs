@@ -127,6 +127,12 @@ pub mod application_operation_owner;
 pub mod application_projection;
 pub mod application_queue;
 pub mod application_recovery;
+mod application_review;
+pub use application_review::{
+    ApplicationCheckpointReview, ApplicationReviewDiff, ReviewDiffLine, ReviewFileState,
+    application_checkpoint_review, materialize_queued_review_annotations,
+    materialize_review_annotations,
+};
 pub mod application_reservation_store;
 pub mod application_run;
 pub use application_run::ApplicationRunEventRecorder;

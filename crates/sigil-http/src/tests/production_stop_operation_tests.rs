@@ -112,6 +112,7 @@ async fn common_http_stop_reaches_actual_supervisor_without_projection_or_comman
         let run = registry.start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "Read the pending stream".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),

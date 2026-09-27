@@ -521,6 +521,8 @@ pub struct ApplicationSessionRouteRecoveryView {
 /// Input required to prepare one application run.
 #[derive(Debug, Clone)]
 pub struct ApplicationRunRequest {
+    /// User-selected recorded source comments; no authority to mutate the referenced files.
+    pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     /// Resolved Sigil config path.
     pub config_path: PathBuf,
     /// Process launch working directory.
@@ -588,6 +590,7 @@ impl ApplicationRunRequest {
             launch_cwd: launch_cwd.into(),
             prompt: prompt.into(),
             image_attachments: Vec::new(),
+            review_annotations: Vec::new(),
             run_id: run_id.into(),
             session_path: None,
             session_attachment: None,
@@ -6337,7 +6340,22 @@ fn prepare_application_run_blocking_with_writer(
         options.max_turns = Some(constraints.max_turns);
     }
     let configured_max_output_tokens = crate::configured_max_output_tokens(&root_config);
-    let mut input = AgentRunInput::user(request.prompt.clone())
+    let review_context = if request.review_annotations.is_empty() {
+        String::new()
+    } else {
+        crate::materialize_review_annotations(
+            request.session_path.as_deref().ok_or_else(|| {
+                ApplicationRunPrepareError::InvalidInvocation {
+                    message: "recorded change review requires its source session".to_owned(),
+                }
+            })?,
+            session.session_scope_id(),
+            &workspace_root,
+            &request.review_annotations,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?
+    };
+    let mut input = AgentRunInput::user(format!("{}{}", request.prompt, review_context))
         .with_image_attachments(request.image_attachments.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone())

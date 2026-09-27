@@ -11,6 +11,13 @@ pub use images::{
     MAX_DESKTOP_IMAGE_BYTES_PER_TURN, MAX_DESKTOP_IMAGES_PER_TURN,
 };
 
+/// Transport-neutral recorded change review returned by the local authenticated host.
+pub use sigil_application::{
+    ApplicationCheckpointReview as DesktopCheckpointReview,
+    ReviewAnnotation as DesktopReviewAnnotation, ReviewDiffSide as DesktopReviewDiffSide,
+    ReviewFileState as DesktopReviewFileState, SafeText as DesktopReviewComment,
+};
+
 mod client;
 mod control_log_recovery;
 mod dto;

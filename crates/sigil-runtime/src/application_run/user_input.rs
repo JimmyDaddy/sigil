@@ -406,6 +406,7 @@ pub async fn prepare_application_user_input_decision(
 
     let public_prompt = "Continue after answering a requested question".to_owned();
     let blocking_request = ApplicationRunRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         config_path: request.config_path,
         launch_cwd: request.launch_cwd,

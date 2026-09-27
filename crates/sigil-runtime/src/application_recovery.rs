@@ -195,14 +195,15 @@ pub fn restore_application_checkpoint(
     )
 }
 
-fn read_bound_records(
+pub(crate) fn read_bound_records(
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<Vec<SessionStreamRecord>> {
     if expected_session_scope_id.trim().is_empty() {
         bail!("expected recovery session scope must not be empty");
     }
-    let records = JsonlSessionStore::read_event_records(session_path)
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_path)?
+        .read_event_records()
         .with_context(|| format!("failed to read recovery stream {}", session_path.display()))?;
     let Some(first) = records.first() else {
         bail!("conversation recovery requires a non-empty durable stream");
@@ -230,6 +231,36 @@ fn checkpoint_reverse_diffs(
                 && checkpoint.checkpoint_digest == preview.checkpoint_digest
         })
         .context("checkpoint restore review binding changed")?;
+    let snapshots = committed_checkpoint_previews(records, checkpoint)?;
+    let mut reverse_diffs = Vec::new();
+    for snapshot in snapshots {
+        for file in snapshot.file_diffs {
+            let Some(restore_file) = preview
+                .files
+                .iter()
+                .find(|preview_file| preview_file.path.to_string_lossy().as_ref() == file.path)
+            else {
+                continue;
+            };
+            if file.diff.trim().is_empty() {
+                continue;
+            }
+            reverse_diffs.push(ApplicationCheckpointReverseDiff {
+                path: restore_file.path.clone(),
+                diff: reverse_recorded_diff(&file.diff, restore_file).join("\n"),
+                truncated: file.truncated,
+                original_line_count: file.original_line_count,
+            });
+        }
+    }
+    reverse_diffs.reverse();
+    Ok(reverse_diffs)
+}
+
+pub(crate) fn committed_checkpoint_previews(
+    records: &[SessionStreamRecord],
+    checkpoint: &sigil_kernel::ControlledCheckpoint,
+) -> Result<Vec<sigil_kernel::ToolPreviewSnapshot>> {
     let turn_records = records
         .iter()
         .filter(|record| record.stream_sequence() > checkpoint.turn_boundary_stream_sequence)
@@ -262,37 +293,16 @@ fn checkpoint_reverse_diffs(
         .iter()
         .filter_map(|operation_id| prepared_call_ids.get(operation_id))
         .collect::<BTreeSet<_>>();
-    let mut reverse_diffs = Vec::new();
+    let mut snapshots = Vec::new();
     for record in turn_records {
-        let Some(SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))) =
+        if let Some(SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))) =
             checkpoint_session_entry(record)?
-        else {
-            continue;
-        };
-        if !committed_call_ids.contains(&snapshot.call_id) {
-            continue;
-        }
-        for file in snapshot.file_diffs {
-            let Some(restore_file) = preview
-                .files
-                .iter()
-                .find(|preview_file| preview_file.path.to_string_lossy().as_ref() == file.path)
-            else {
-                continue;
-            };
-            if file.diff.trim().is_empty() {
-                continue;
-            }
-            reverse_diffs.push(ApplicationCheckpointReverseDiff {
-                path: restore_file.path.clone(),
-                diff: reverse_recorded_diff(&file.diff, restore_file).join("\n"),
-                truncated: file.truncated,
-                original_line_count: file.original_line_count,
-            });
+            && committed_call_ids.contains(&snapshot.call_id)
+        {
+            snapshots.push(snapshot);
         }
     }
-    reverse_diffs.reverse();
-    Ok(reverse_diffs)
+    Ok(snapshots)
 }
 
 fn checkpoint_session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {

@@ -1221,6 +1221,7 @@ fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
 #[test]
 fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
     let request = crate::DesktopRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: String::new(),
         permission_mode: crate::DesktopPermissionMode::Manual,
@@ -1253,6 +1254,7 @@ fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
 #[test]
 fn run_start_serializes_an_exact_same_session_model_route() {
     let request = crate::DesktopRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: "continue here".to_owned(),
         permission_mode: crate::DesktopPermissionMode::Manual,

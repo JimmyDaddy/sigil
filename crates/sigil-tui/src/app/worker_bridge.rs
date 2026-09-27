@@ -144,6 +144,7 @@ impl AppState {
             | self.poll_connection_inventory()
             | self.reload_active_agent_child_transcript()
             | self.poll_update_task()
+            | self.poll_change_review()
     }
 
     pub fn has_pending_background_tasks(&self) -> bool {
@@ -160,6 +161,7 @@ impl AppState {
             || self.runtime.connection_inventory_rx.is_some()
             || self.active_agent_child_entry().is_some()
             || self.has_pending_update_task()
+            || self.change_review_task.is_some()
     }
 
     #[cfg(test)]
@@ -189,6 +191,7 @@ impl AppState {
     }
 
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
+        self.observe_change_review_run_message(&message);
         match message {
             WorkerMessage::LivePreviewSource { source } => self.attach_live_preview(source),
             WorkerMessage::LivePreviewDurableFrontier {

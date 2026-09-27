@@ -399,6 +399,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         nativeCarrierMaterialized: false,
       },
     }),
+    checkpointReview: async (_workspaceId, input) => ({ checkpointId: input.checkpointId, checkpointDigest: input.checkpointDigest, diffs: [], truncated: false }),
     checkpointRestorePreview: async (_workspaceId, input) => ({
       checkpointId: input.checkpointId,
       checkpointDigest: input.checkpointDigest,
@@ -7432,4 +7433,37 @@ it.each(["retired", "terminal"] as const)("A1 records only visible accepted cont
     await screen.findByText("new accepted output");
     expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
   }
+});
+
+it("reviews outdated recorded lines through the normal run and preserves comments until admission", async () => {
+  const user = userEvent.setup();
+  const checkpoint = { checkpointId: "cp-review", checkpointDigest: "cp-digest", turnIndex: 1, files: [], unknownMutationCount: 1, fullyRestorable: false };
+  const review = { checkpointId: checkpoint.checkpointId, checkpointDigest: checkpoint.checkpointDigest, truncated: false,
+    diffs: [{ sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", fileState: "changed" as const, truncated: false, lines: [{ text: "-old", oldLine: 1 }, { text: "+new", newLine: 1 }] }] };
+  const admission = deferred<Awaited<ReturnType<DesktopBridge["startRun"]>>>();
+  const startRun = vi.fn<DesktopBridge["startRun"]>(() => admission.promise);
+  const checkpointRestorePreview = vi.fn<DesktopBridge["checkpointRestorePreview"]>();
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    conversationRecovery: async () => ({ checkpoints: [checkpoint], forkPoints: [], throughStreamSequence: 8 }),
+    checkpointReview: async () => review, checkpointRestorePreview, startRun,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await readyComposer();
+  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(await screen.findByRole("button", { name: "Review changes" }));
+  const drawer = screen.getByRole("dialog", { name: "Review changes" });
+  await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));
+  await user.type(within(drawer).getByRole("textbox", { name: "Comment on selected lines" }), "Explain this changed line");
+  await user.click(within(drawer).getByRole("button", { name: "Add comment" }));
+  await user.click(within(drawer).getByRole("button", { name: "Send comments" }));
+  await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
+  expect(within(drawer).getByRole("button", { name: "Sending comments…" })).toBeTruthy();
+  expect(startRun.mock.calls[0][12]).toEqual([{ checkpointId: "cp-review", checkpointDigest: "cp-digest", sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", side: "new", startLine: 1, endLine: 1, comment: "Explain this changed line" }]);
+  expect(checkpointRestorePreview).not.toHaveBeenCalled();
+  await act(async () => admission.reject(new Error("temporary run failure")));
+  expect(await within(drawer).findByRole("alert")).toBeTruthy();
+  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
 });

@@ -776,6 +776,15 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/recovery/checkpoint-review": {
+                "post": {
+                    "operationId": "checkpointReview",
+                    "summary": "Read exact recorded change lines without restore or mutation authority",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckpointRestoreRequest" } } } },
+                    "responses": { "200": { "description": "Recorded forward diffs and advisory current-file state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckpointReview" } } } }, "400": { "$ref": "#/components/responses/BadRequest" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/Conflict" } }
+                }
+            },
             "/sessions/{session_id}/recovery/checkpoint-preview": {
                 "post": {
                     "summary": "Preview one exact controlled-file checkpoint restore",
@@ -2859,6 +2868,7 @@ pub fn http_openapi_document() -> Value {
                     "required": ["action", "prompt", "kind"],
                     "properties": {
                         "action": { "type": "string", "const": "enqueue" },
+                        "review_annotations": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/ReviewAnnotation" } },
                         "prompt": { "type": "string", "minLength": 1, "maxLength": 65536 },
                         "kind": { "$ref": "#/components/schemas/ConversationQueueItemKind" },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] }
@@ -3013,6 +3023,30 @@ pub fn http_openapi_document() -> Value {
                         "checkpoints": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointView" } },
                         "fork_points": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/ConversationForkPointView" } },
                         "through_stream_sequence": { "type": "integer", "format": "uint64", "minimum": 0 }
+                    }
+                },
+                "ReviewAnnotation": {
+                    "type": "object",
+                    "required": ["checkpoint_id", "checkpoint_digest", "source_call_id", "diff_digest", "path", "side", "start_line", "end_line", "comment"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string" }, "checkpoint_digest": { "type": "string" },
+                        "source_call_id": { "type": "string" }, "diff_digest": { "type": "string" }, "path": { "type": "string" },
+                        "side": { "type": "string", "enum": ["old", "new"] },
+                        "start_line": { "type": "integer", "minimum": 1 }, "end_line": { "type": "integer", "minimum": 1 },
+                        "comment": { "type": "string", "minLength": 1, "maxLength": 4096 }
+                    }
+                },
+                "CheckpointReview": {
+                    "type": "object", "required": ["checkpoint_id", "checkpoint_digest", "diffs", "truncated"],
+                    "properties": {
+                        "checkpoint_id": { "type": "string" }, "checkpoint_digest": { "type": "string" }, "truncated": { "type": "boolean" },
+                        "diffs": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["source_call_id", "diff_digest", "path", "lines", "file_state", "truncated"], "properties": {
+                            "source_call_id": { "type": "string" }, "diff_digest": { "type": "string" }, "path": { "type": "string" },
+                            "file_state": { "type": "string", "enum": ["current", "changed", "unknown"] }, "truncated": { "type": "boolean" },
+                            "lines": { "type": "array", "items": { "type": "object", "required": ["text", "old_line", "new_line"], "properties": {
+                                "text": { "type": "string" }, "old_line": { "type": ["integer", "null"], "minimum": 1 }, "new_line": { "type": ["integer", "null"], "minimum": 1 }
+                            } } }
+                        } } }
                     }
                 },
                 "CheckpointRestoreRequest": {
@@ -3579,6 +3613,7 @@ pub fn http_openapi_document() -> Value {
                     "required": ["prompt", "permission_mode"],
                     "properties": {
                         "prompt": { "type": "string" },
+                        "review_annotations": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/ReviewAnnotation" } },
                         "image_attachments": { "type": "array", "maxItems": 4, "items": { "$ref": "#/components/schemas/ImageAttachment" } },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "model_ref": { "oneOf": [{ "$ref": "#/components/schemas/ProviderModelRef" }, { "type": "null" }] },

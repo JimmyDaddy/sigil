@@ -19,6 +19,7 @@ export function ConversationRecoveryPanel({
   onRefresh,
   onCompact,
   onPreview,
+  onReview,
   onRestore,
   onFork,
 }: {
@@ -28,6 +29,7 @@ export function ConversationRecoveryPanel({
   readonly error: boolean;
   readonly onRefresh: () => void;
   readonly onCompact: () => Promise<boolean>;
+  readonly onReview: (checkpoint: CheckpointView) => void;
   readonly onPreview: (checkpoint: CheckpointView) => Promise<void>;
   readonly onRestore: (checkpoint: CheckpointView) => Promise<void>;
   readonly onFork: (sourceTurnDigest: string) => Promise<ConversationForkReceipt | undefined>;
@@ -121,6 +123,7 @@ export function ConversationRecoveryPanel({
                   <p>{checkpoint.prompt ?? t("checkpointWithoutPrompt")}</p>
                   <small>{t("controlledFilesCount", { count: checkpoint.files.length })}</small>
                 </div>
+                <Button type="button" variant="quiet" onClick={() => onReview(checkpoint)}>{t("reviewChanges")}</Button>
                 <Button
                   type="button"
                   variant="quiet"

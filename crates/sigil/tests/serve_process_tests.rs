@@ -187,6 +187,14 @@ struct VisionProviderFixture {
 
 impl VisionProviderFixture {
     fn start() -> anyhow::Result<Self> {
+        Self::start_with_first_response(None)
+    }
+
+    fn start_with_first_response(first_response: Option<String>) -> anyhow::Result<Self> {
+        Self::start_with_responses(vec![first_response])
+    }
+
+    fn start_with_responses(responses: Vec<Option<String>>) -> anyhow::Result<Self> {
         use anyhow::Context as _;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -196,6 +204,7 @@ impl VisionProviderFixture {
         let worker = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(60);
             let mut requests = Vec::new();
+            let mut run_request_count = 0;
             while !worker_stop.load(Ordering::Acquire) && Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
                     Ok(stream) => stream,
@@ -207,16 +216,44 @@ impl VisionProviderFixture {
                 };
                 stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                // A cancelled title request may leave a connected socket with no HTTP bytes.
+                // Once any byte arrived, keep the strict complete-request/body checks below.
+                match stream.peek(&mut [0_u8; 1]) {
+                    Ok(0) => continue,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {}
+                }
                 let request = read_http_message(&mut stream);
                 let (_, body) = request.split_once("\r\n\r\n").context("provider body")?;
                 anyhow::ensure!(requests.len() < 16, "unexpected provider request loop");
-                requests.push(serde_json::from_str(body)?);
-                let body = concat!(
+                let request = serde_json::from_str(body)?;
+                let is_title = is_session_title_fixture_request(&request);
+                if !is_title {
+                    run_request_count += 1;
+                }
+                requests.push(request);
+                let final_answer = concat!(
                     "event: response.output_text.delta\n",
                     "data: {\"delta\":\"Image received.\"}\n\n",
                     "event: response.completed\n",
                     "data: {\"response\":{\"id\":\"resp_image\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_image\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Image received.\"}]}]}}\n\n"
                 );
+                let body = if is_title {
+                    final_answer
+                } else {
+                    responses
+                        .get(run_request_count - 1)
+                        .and_then(Option::as_deref)
+                        .unwrap_or(final_answer)
+                };
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -249,6 +286,35 @@ impl Drop for VisionProviderFixture {
             let _ = worker.join();
         }
     }
+}
+
+// Only this exact, tool-free maintenance request is excluded from explicit run counts.
+// Any unexpected provider traffic remains a run request and fails the callers' exact totals.
+fn is_session_title_fixture_request(request: &serde_json::Value) -> bool {
+    let instruction = concat!(
+        "Generate a concise semantic title for a coding-agent conversation. ",
+        "Use the same language as the user's request. Capture the concrete goal, ",
+        "component, or bug. Return only one plain-text title, without quotes, markdown, ",
+        "labels, explanation, or trailing punctuation. Keep it within 12 words."
+    );
+    request["max_output_tokens"] == 64
+        && request["store"] == false
+        && request.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty))
+        && request["input"].as_array().is_some_and(|input| {
+            input.len() == 2
+                && input[0] == serde_json::json!({"role":"developer", "content":[{"type":"input_text", "text":instruction}]})
+                && input[1]["role"] == "user"
+                && input[1]["content"].as_array().is_some_and(|content| {
+                    content.len() == 1 && content[0]["type"] == "input_text" && content[0]["text"].is_string()
+                })
+        })
+}
+
+fn explicit_provider_requests(requests: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    requests
+        .iter()
+        .filter(|request| !is_session_title_fixture_request(request))
+        .collect()
 }
 
 fn read_http_message(stream: &mut TcpStream) -> String {
@@ -1571,6 +1637,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         .start_run(
             &session.id,
             sigil_desktop::DesktopRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "answer from the fixture".to_owned(),
                 permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
@@ -1778,6 +1845,7 @@ async fn desktop_image_only_serve_contract_reaches_provider_and_survives_restart
             .start_run(
                 &session.id,
                 sigil_desktop::DesktopRunStartRequest {
+                    review_annotations: Vec::new(),
                     image_attachments: vec![image.clone()],
                     prompt: String::new(),
                     permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
@@ -2891,4 +2959,278 @@ fn serve_process_rejects_unsafe_startup_before_creating_listener_state() {
     }
 
     fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_review_serve_contract_sends_outdated_exact_diff_without_restoring_files()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    async fn finish(client: &sigil_desktop::DesktopHttpClient, run_id: &str) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(run_id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(
+                        run.status == sigil_desktop::DesktopRunStatus::Finished,
+                        "review fixture run failed: {run:?}"
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let item = serde_json::json!({ "id": "review-function-item", "type": "function_call", "call_id": "review-write-call", "name": "write_file", "arguments": serde_json::to_string(&serde_json::json!({"path":"note.txt","content":"recorded line one\nrecorded line two\n"}))? });
+    let first_response = format!(
+        "event: response.output_item.added\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        serde_json::json!({"item":item}),
+        serde_json::json!({"item":item}),
+        serde_json::json!({"response":{"id":"review-write","status":"completed","output":[item]}})
+    );
+    let provider = VisionProviderFixture::start_with_first_response(Some(first_response))?;
+    write_config(&config_path, &provider.base_url);
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
+    )?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "review contract")).await?;
+        let client = manager.client(&opened.id)?;
+        let session = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("recorded change".to_owned()), model_ref: None }).await?;
+        let mut request = sigil_desktop::DesktopRunStartRequest {
+            review_annotations: Vec::new(), image_attachments: Vec::new(), prompt: "Create note.txt with two lines".to_owned(),
+            permission_mode: sigil_desktop::DesktopPermissionMode::AutoEdit, model_ref: None,
+            model_selection_binding: None, route_recovery_binding: None, reasoning_effort: None,
+            reasoning_effort_binding: None, skill_binding: None, agent_binding: None, task_continuation: None,
+        };
+        let started = client.start_run(&session.id, request.clone()).await?;
+        finish(&client, &started.run.id).await?;
+        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "recorded line one\nrecorded line two\n");
+        let checkpoint = client.conversation_recovery(&session.id).await?.checkpoints.into_iter().next().context("real write checkpoint")?;
+        let selector = sigil_desktop::DesktopCheckpointRestoreRequest { checkpoint_id: checkpoint.checkpoint_id, checkpoint_digest: checkpoint.checkpoint_digest };
+        let original = client.checkpoint_review(&session.id, selector.clone()).await?;
+        let recorded = original.diffs.iter().find(|diff| diff.path == "note.txt").context("recorded forward diff")?;
+        assert_eq!(recorded.file_state, sigil_desktop::DesktopReviewFileState::Current);
+        fs::write(workspace.path().join("note.txt"), "unrelated newer content\n")?;
+        let outdated = client.checkpoint_review(&session.id, selector.clone()).await?;
+        assert_eq!(outdated.diffs.iter().find(|diff| diff.path == "note.txt").context("outdated diff")?.file_state, sigil_desktop::DesktopReviewFileState::Changed);
+        assert!(!client.checkpoint_restore_review(&session.id, selector).await?.ready);
+        request.prompt = "Explain this original line".to_owned();
+        request.permission_mode = sigil_desktop::DesktopPermissionMode::ReadOnly;
+        request.review_annotations = vec![sigil_desktop::DesktopReviewAnnotation {
+            checkpoint_id: original.checkpoint_id, checkpoint_digest: original.checkpoint_digest,
+            source_call_id: recorded.source_call_id.clone(), diff_digest: recorded.diff_digest.clone(), path: recorded.path.clone(),
+            side: sigil_desktop::DesktopReviewDiffSide::New, start_line: 1, end_line: 1,
+            comment: sigil_desktop::DesktopReviewComment::new("Explain this original line")?,
+        }];
+        let reviewed = client.start_run(&session.id, request).await?;
+        finish(&client, &reviewed.run.id).await?;
+        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "unrelated newer content\n");
+        let display = client.conversation_display(&session.id, &Default::default()).await?;
+        assert!(display.items.iter().any(|item| matches!(&item.content, sigil_desktop::DesktopConversationDisplayContent::Message { text: Some(text), .. } if text.contains("User review of recorded change") && text.contains("recorded line one"))));
+        Ok(())
+    }.await;
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    result?;
+    anyhow::ensure!(
+        cleanup
+            .iter()
+            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
+        "review serve cleanup failed"
+    );
+    let run_requests = explicit_provider_requests(&requests);
+    assert_eq!(
+        run_requests.len(),
+        3,
+        "one write/tool-result turn then one explicitly sent review"
+    );
+    assert!(
+        requests.len() - run_requests.len() <= 1,
+        "at most one title maintenance request"
+    );
+    let review_request =
+        serde_json::to_string(run_requests.last().context("provider review request")?)?;
+    assert!(review_request.contains("User review of recorded change"));
+    assert!(review_request.contains("recorded line one"));
+    assert!(review_request.contains("Explain this original line"));
+    assert!(review_request.contains("no file-write authority"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independent_check()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    fn tool_response(call_id: &str, name: &str, args: serde_json::Value) -> anyhow::Result<String> {
+        let item = serde_json::json!({"id":format!("item-{call_id}"),"type":"function_call","call_id":call_id,"name":name,"arguments":serde_json::to_string(&args)?});
+        Ok(format!(
+            "event: response.output_item.added\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            serde_json::json!({"item":item}),
+            serde_json::json!({"item":item}),
+            serde_json::json!({"response":{"id":format!("response-{call_id}"),"status":"completed","output":[item]}})
+        ))
+    }
+    fn check_sum(workspace: &Path) -> anyhow::Result<Output> {
+        let mut command = Command::new("python3");
+        common::isolated_child_environment(workspace)?.apply_to_command(&mut command);
+        command.current_dir(workspace).args(["-I", "-c", "import runpy; total=runpy.run_path('sum_values.py')['total']; assert total([])==0; assert total([2,3])==5; print('independent sum checks passed')"]);
+        Ok(command.output()?)
+    }
+    async fn finish_with_exact_approval(
+        client: &sigil_desktop::DesktopHttpClient,
+        session_id: &str,
+        run_id: &str,
+        workspace: &Path,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut approved = Vec::new();
+        tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                let run = client.run(run_id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(
+                        run.status == sigil_desktop::DesktopRunStatus::Finished,
+                        "review repair run failed: {run:?}"
+                    );
+                    break Ok::<_, anyhow::Error>(());
+                }
+                for pending in run.pending_approvals {
+                    if approved.contains(&pending.call_id) {
+                        continue;
+                    }
+                    let expected = match pending.call_id.as_str() {
+                        "review-create-bug" => "write_file",
+                        "review-read-current" => "read_file",
+                        "review-apply-fix" => "edit_file",
+                        _ => anyhow::bail!("unexpected review fixture approval: {pending:?}"),
+                    };
+                    anyhow::ensure!(pending.tool_name == expected, "approval call changed tools");
+                    if pending.call_id == "review-apply-fix" {
+                        anyhow::ensure!(
+                            !check_sum(workspace)?.status.success(),
+                            "the file changed before explicit edit approval"
+                        );
+                    }
+                    let receipt = client
+                        .resolve_approval(
+                            session_id,
+                            run_id,
+                            &pending.call_id,
+                            run.stream_sequence,
+                            sigil_desktop::DesktopApprovalDecisionRequest {
+                                approval_request_id: pending.approval_request_id,
+                                tool_call_hash: pending.tool_call_hash,
+                                policy_version: pending.policy_version,
+                                expires_at_ms: pending.expires_at_ms,
+                                decision: sigil_desktop::DesktopApprovalDecision::Approve,
+                                family_pattern: None,
+                                reason: Some("exact isolated review fixture operation".to_owned()),
+                            },
+                        )
+                        .await?;
+                    assert_eq!(receipt.call_id, pending.call_id);
+                    approved.push(pending.call_id);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(approved)
+    }
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let provider = VisionProviderFixture::start_with_responses(vec![
+        Some(tool_response(
+            "review-create-bug",
+            "write_file",
+            serde_json::json!({"path":"sum_values.py","content":"def total(values):\n    return sum(values) + 1\n"}),
+        )?),
+        None,
+        Some(tool_response(
+            "review-read-current",
+            "read_file",
+            serde_json::json!({"path":"sum_values.py"}),
+        )?),
+        Some(tool_response(
+            "review-apply-fix",
+            "edit_file",
+            serde_json::json!({"path":"sum_values.py","old_text":"return sum(values) + 1","new_text":"return sum(values)"}),
+        )?),
+        None,
+    ])?;
+    write_config(&config_path, &provider.base_url);
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
+    )?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "review repair contract")).await?;
+        let client = manager.client(&opened.id)?;
+        let session = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("review repair".to_owned()), model_ref: None }).await?;
+        let mut request = sigil_desktop::DesktopRunStartRequest {
+            review_annotations: Vec::new(), image_attachments: Vec::new(), prompt: "Implement total(values) in sum_values.py".to_owned(), permission_mode: sigil_desktop::DesktopPermissionMode::Manual,
+            model_ref: None, model_selection_binding: None, route_recovery_binding: None, reasoning_effort: None, reasoning_effort_binding: None, skill_binding: None, agent_binding: None, task_continuation: None,
+        };
+        let initial = client.start_run(&session.id, request.clone()).await?;
+        let approved = finish_with_exact_approval(&client, &session.id, &initial.run.id, workspace.path()).await?;
+        assert!(approved.iter().any(|call| call == "review-create-bug"));
+        assert!(!check_sum(workspace.path())?.status.success(), "independent baseline must expose the actual bug");
+        let checkpoint = client.conversation_recovery(&session.id).await?.checkpoints.into_iter().next().context("created file checkpoint")?;
+        let review = client.checkpoint_review(&session.id, sigil_desktop::DesktopCheckpointRestoreRequest { checkpoint_id: checkpoint.checkpoint_id, checkpoint_digest: checkpoint.checkpoint_digest }).await?;
+        let diff = review.diffs.iter().find(|diff| diff.path == "sum_values.py").context("actual forward diff")?;
+        assert!(diff.lines.iter().any(|line| line.new_line == Some(2) && line.text.contains("+ 1")));
+        request.prompt = "Apply the selected review comment after reading the current file".to_owned();
+        request.review_annotations = vec![sigil_desktop::DesktopReviewAnnotation {
+            checkpoint_id: review.checkpoint_id, checkpoint_digest: review.checkpoint_digest, source_call_id: diff.source_call_id.clone(), diff_digest: diff.diff_digest.clone(), path: diff.path.clone(),
+            side: sigil_desktop::DesktopReviewDiffSide::New, start_line: 2, end_line: 2,
+            comment: sigil_desktop::DesktopReviewComment::new("The extra +1 is a bug. Return the sum without an offset.")?,
+        }];
+        let edited = client.start_run(&session.id, request).await?;
+        let approved = finish_with_exact_approval(&client, &session.id, &edited.run.id, workspace.path()).await?;
+        assert!(approved.iter().any(|call| call == "review-apply-fix"), "the actual edit must require and receive exact user approval");
+        let check = check_sum(workspace.path())?;
+        anyhow::ensure!(check.status.success(), "independent repaired check failed: {}", String::from_utf8_lossy(&check.stderr));
+        assert!(String::from_utf8_lossy(&check.stdout).contains("independent sum checks passed"));
+        let catalog = client.catalog(&Default::default()).await?;
+        let entry = catalog.entries.iter().find(|entry| entry.session_id.as_deref() == Some(&session.durable_session_scope_id)).context("managed session catalog")?;
+        let path = workspace.path().join("state/managed/session-log").join(Path::new(&entry.session_ref).file_stem().context("managed session key")?).join("records.jsonl");
+        let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(path)?.read_event_records()?;
+        assert!(records.iter().filter_map(|record| record.session_log_entry().ok().flatten()).any(|entry| matches!(entry, sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::ToolExecution(execution)) if execution.call_id == "review-apply-fix" && execution.tool_name == "edit_file" && execution.status == sigil_kernel::ToolExecutionStatus::Completed)));
+        assert!(client.conversation_recovery(&session.id).await?.checkpoints.len() >= 2, "real edit must produce its own durable checkpoint");
+        Ok(())
+    }.await;
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    result?;
+    anyhow::ensure!(
+        cleanup
+            .iter()
+            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
+        "review repair serve owner did not settle"
+    );
+    let run_requests = explicit_provider_requests(&requests);
+    assert_eq!(
+        run_requests.len(),
+        5,
+        "create/result, then review/read/edit/result must run exactly once"
+    );
+    assert!(
+        requests.len() - run_requests.len() <= 1,
+        "at most one title maintenance request"
+    );
+    let review = serde_json::to_string(run_requests[2])?;
+    assert!(
+        review.contains("User review of recorded change")
+            && review.contains("The extra +1 is a bug")
+            && review.contains("sum(values) + 1")
+    );
+    let edited = serde_json::to_string(run_requests[4])?;
+    assert!(edited.contains("review-apply-fix") && edited.contains("function_call_output"));
+    Ok(())
 }

@@ -24,6 +24,7 @@ pub(crate) enum UiCommand {
     CheckChangedFilesDiagnostics,
     FocusVerificationCard,
     OpenCheckpointRestore,
+    OpenChangeReview,
     OpenIntentStack,
     FocusLatestToolCard,
     SelectNextToolCard,
@@ -120,6 +121,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: None,
         label: "Info rail detail",
         help: "Toggle the right rail between compact and detailed information.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::OpenChangeReview,
+        keys: &[KeyBinding { label: "Alt-R" }],
+        slash: None,
+        label: "Review changes",
+        help: "Select recorded diff lines and send a batch of review comments through the conversation.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -347,6 +356,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::PauseActiveTask)
         }
+        KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::OpenChangeReview)
+        }
         KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::OpenCheckpointRestore)
         }
@@ -396,6 +408,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             String::new()
         },
         control_hint(UiCommand::OpenCheckpointRestore).expect("checkpoint metadata exists"),
+        control_hint(UiCommand::OpenChangeReview).expect("change review metadata exists"),
         control_hint(UiCommand::OpenIntentStack).expect("Intent Stack metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());

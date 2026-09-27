@@ -35,35 +35,36 @@ use crate::{
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
         DesktopCheckpointRestorePreviewInput, DesktopCheckpointRestoreReview,
-        DesktopCompactionExecutionSummary, DesktopCompactionReview, DesktopConversationContinuity,
-        DesktopConversationDisplayPage, DesktopConversationDisplayRequest,
-        DesktopConversationQueueCommandInput, DesktopConversationQueueCommandReceipt,
-        DesktopConversationQueueView, DesktopConversationRecoveryCommandInput,
-        DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
-        DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
-        DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
-        DesktopPlanDecisionActionInput, DesktopPlanDecisionInput, DesktopPlanDecisionSummary,
-        DesktopPlanDetailInput, DesktopPlanReviewDetailSummary,
-        DesktopProviderConnectionInventorySummary, DesktopProviderDefaultModelSaveInput,
-        DesktopProviderDefaultModelSaveSummary, DesktopProviderSetupCatalogInput,
-        DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
-        DesktopProviderSetupSaveSummary, DesktopRunAttachInput, DesktopRunAttachment,
-        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
-        DesktopSessionCatalogBatchExecuteInput, DesktopSessionCatalogBatchPlanInput,
-        DesktopSessionCatalogBatchPlanSummary, DesktopSessionCatalogBatchReceiptSummary,
-        DesktopSessionCreateInput, DesktopSessionDeleteInput,
-        DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
-        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
-        DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
-        DesktopSessionRouteRecoverySummary, DesktopSessionSummary, DesktopSupportDoctorSummary,
-        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskExecutionBindingInput,
-        DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
-        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopTerminalTaskCancelInput,
-        DesktopTerminalTaskCancelSummary, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
-        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopUserInputDecisionInput, DesktopUserInputDecisionSummary, DesktopUserInputReadInput,
-        DesktopUserInputRequestSummary, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection, desktop_session_route_recovery_summary,
+        DesktopCheckpointReview, DesktopCompactionExecutionSummary, DesktopCompactionReview,
+        DesktopConversationContinuity, DesktopConversationDisplayPage,
+        DesktopConversationDisplayRequest, DesktopConversationQueueCommandInput,
+        DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
+        DesktopConversationRecoveryCommandInput, DesktopConversationRecoveryCommandReceipt,
+        DesktopConversationRecoveryView, DesktopExternalUrlInput,
+        DesktopIntentDropExecutionSummary, DesktopIntentDropInput, DesktopIntentDropPreviewInput,
+        DesktopIntentDropPreviewSummary, DesktopIntentStackSummary, DesktopPlanDecisionActionInput,
+        DesktopPlanDecisionInput, DesktopPlanDecisionSummary, DesktopPlanDetailInput,
+        DesktopPlanReviewDetailSummary, DesktopProviderConnectionInventorySummary,
+        DesktopProviderDefaultModelSaveInput, DesktopProviderDefaultModelSaveSummary,
+        DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
+        DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
+        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
+        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
+        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
+        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
+        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
+        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
+        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
+        DesktopSessionRenameInput, DesktopSessionRouteRecoverySummary, DesktopSessionSummary,
+        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTaskContinuationInput,
+        DesktopTaskExecutionBindingInput, DesktopTaskIntegrationAcceptInput,
+        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
+        DesktopTaskPauseInput, DesktopTerminalTaskCancelInput, DesktopTerminalTaskCancelSummary,
+        DesktopToolArtifactPage, DesktopToolArtifactReadInput, DesktopToolArtifactSelector,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopUserInputDecisionInput,
+        DesktopUserInputDecisionSummary, DesktopUserInputReadInput, DesktopUserInputRequestSummary,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        desktop_session_route_recovery_summary,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -774,6 +775,33 @@ pub(crate) async fn desktop_conversation_recovery(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_checkpoint_review(
+    workspace_id: String,
+    input: DesktopCheckpointRestorePreviewInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopCheckpointReview, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_recovery_token(&input.checkpoint_id)?;
+    validate_recovery_token(&input.checkpoint_digest)?;
+    let client = state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .checkpoint_review(
+            &input.session_id,
+            DesktopCheckpointRestoreRequest {
+                checkpoint_id: input.checkpoint_id,
+                checkpoint_digest: input.checkpoint_digest,
+            },
+        )
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_checkpoint_restore_preview(
     workspace_id: String,
     input: DesktopCheckpointRestorePreviewInput,
@@ -983,6 +1011,11 @@ pub(crate) async fn desktop_start_run(
         .start_run(
             &input.session_id,
             DesktopRunStartRequest {
+                review_annotations: input
+                    .review_annotations
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 image_attachments,
                 prompt: input.prompt,
                 permission_mode: input.permission_mode,
@@ -1057,6 +1090,7 @@ pub(crate) async fn desktop_continue_task(
         .start_run(
             &input.session_id,
             DesktopRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: String::new(),
                 permission_mode: input.permission_mode,

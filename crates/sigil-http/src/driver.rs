@@ -36,6 +36,8 @@ pub struct HttpUserInputDecisionDriverCommand {
 /// Start context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRunDriverStart {
+    /// Exact source references already checked at admission, rechecked at preparation.
+    pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     /// Session snapshot at the moment the run was registered.
     pub session: HttpSessionSnapshot,
     /// Run snapshot in `starting` state.
@@ -591,6 +593,25 @@ pub trait HttpRunDriver: Send + Sync {
         &self,
         _session: &HttpSessionSnapshot,
     ) -> Result<HttpCompactionReview, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    /// Resolves exact source comments to deterministic user context before queue command binding.
+    fn queued_review_context(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _annotations: &[sigil_application::ReviewAnnotation],
+    ) -> Result<String, HttpConversationRecoveryDriverError> {
+        Err(HttpConversationRecoveryDriverError::Unavailable)
+    }
+
+    /// Reads recorded forward diffs without granting mutation or requiring restore readiness.
+    fn checkpoint_review(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpCheckpointRestoreRequest,
+    ) -> Result<sigil_application::ApplicationCheckpointReview, HttpConversationRecoveryDriverError>
+    {
         Err(HttpConversationRecoveryDriverError::Unavailable)
     }
 

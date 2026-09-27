@@ -171,7 +171,9 @@ impl AppState {
         }
         if matches!(
             command,
-            UiCommand::OpenCheckpointRestore | UiCommand::OpenIntentStack
+            UiCommand::OpenCheckpointRestore
+                | UiCommand::OpenIntentStack
+                | UiCommand::OpenChangeReview
         ) {
             return false;
         }
@@ -232,7 +234,8 @@ impl AppState {
             | UiCommand::CheckChangedFilesDiagnostics => false,
             UiCommand::FocusVerificationCard
             | UiCommand::OpenCheckpointRestore
-            | UiCommand::OpenIntentStack => false,
+            | UiCommand::OpenIntentStack
+            | UiCommand::OpenChangeReview => false,
         }
     }
 }

@@ -60,6 +60,7 @@ async fn image_run_admission_rejects_unsupported_actual_model_and_invalid_cached
     assert_ne!(image.attachment_id, same_bytes_other_draft.attachment_id);
     assert_eq!(image.artifact_ref, same_bytes_other_draft.artifact_ref);
     let request = HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: vec![image.clone()],
         prompt: String::new(),
         permission_mode: Some(HttpPermissionMode::Manual),
@@ -109,6 +110,7 @@ async fn image_only_run_admission_and_history_recovery_use_actual_vision_route_a
     let bytes = png_bytes();
     let image = registry.ingest_image(bytes.clone())?;
     let request = HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: vec![image.clone()],
         prompt: String::new(),
         permission_mode: Some(HttpPermissionMode::Manual),

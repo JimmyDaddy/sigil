@@ -635,6 +635,16 @@ async fn run_app(
         dirty |= worker_dirty;
         projection_refresh_requested |= worker_projection_refresh;
         dirty |= app.poll_background_tasks();
+        if let Some(action) = app.take_change_review_submission() {
+            process_app_action_with_spawner_and_host(
+                app,
+                worker,
+                action,
+                spawn_worker,
+                &mut host_effects,
+            )?;
+            dirty = true;
+        }
         let admission_changed = poll_application_admission(app, worker)?;
         if restart_worker_after_session_transition(app, worker, spawn_worker)? {
             dirty = true;
@@ -3606,12 +3616,23 @@ fn report_application_action_receipt(
     if let Some(failure) = failure {
         fail_pending_application_action(app, action, &failure);
     }
+    if matches!(
+        receipt,
+        ApplicationCommandReceipt::Settled(_) | ApplicationCommandReceipt::Replayed(_)
+    ) {
+        app.settle_change_review_submission(action, None);
+    }
     report_application_receipt(app, receipt)
 }
 
 fn fail_pending_application_action(app: &mut AppState, action: &AppAction, message: &str) {
+    let review_failed = app.settle_change_review_submission(action, Some(message));
     if is_run_admission_action(action) && app.approval.pending.is_none() {
-        app.restore_unadmitted_run_input(action);
+        if review_failed {
+            app.clear_worker_run_state();
+        } else {
+            app.restore_unadmitted_run_input(action);
+        }
     }
     let message = sigil_kernel::safe_persistence_text(message);
     if app.fail_queue_action(action, message.clone())

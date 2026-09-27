@@ -1807,6 +1807,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: "hello from desktop".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
@@ -1863,6 +1864,7 @@ async fn local_server_routes_typed_task_continuation_through_run_start() {
         "desktop-client",
         session_id,
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: String::new(),
             permission_mode: Some(HttpPermissionMode::Manual),
@@ -3448,6 +3450,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: "approval needed".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
@@ -3539,6 +3542,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         "desktop-client",
         "http-session-1",
         HttpRunStartRequest {
+            review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             prompt: "run desktop smoke".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
@@ -5921,6 +5925,7 @@ fn conversation_queue_contract_keeps_exact_prompt_request_only() {
     let request = HttpConversationQueueCommandRequest {
         expected_generation: HttpConversationQueueGeneration("queue-v1:17:event-1".to_owned()),
         action: HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
             prompt: "exact private prompt".to_owned(),
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: Some(HttpReasoningEffort::High),
@@ -6011,6 +6016,7 @@ fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fin
         &session.id,
         0,
         HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
             prompt: "follow up once".to_owned(),
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: Some(HttpReasoningEffort::High),
@@ -6040,7 +6046,7 @@ fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fin
     assert!(matches!(
         &delivered[0].request.action,
         HttpConversationQueueCommandAction::Enqueue {
-            prompt,
+                    review_annotations: _,            prompt,
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: Some(HttpReasoningEffort::High),
         } if prompt == "follow up once"
@@ -6052,6 +6058,7 @@ fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fin
         &session.id,
         0,
         HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
             prompt: "different payload".to_owned(),
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: Some(HttpReasoningEffort::High),
@@ -6082,6 +6089,7 @@ fn conversation_queue_stale_and_malformed_commands_have_zero_mutation() {
         &session.id,
         99,
         HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
             prompt: "must not be appended".to_owned(),
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: None,
@@ -6105,6 +6113,7 @@ fn conversation_queue_stale_and_malformed_commands_have_zero_mutation() {
         &session.id,
         0,
         HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
             prompt: " ".to_owned(),
             kind: HttpConversationQueueItemKind::Chat,
             reasoning_effort: None,
@@ -6143,6 +6152,7 @@ fn conversation_queue_enqueue_during_foreground_and_cancel_retain_pending_work()
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "run after foreground".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -6202,6 +6212,7 @@ fn conversation_queue_resume_starts_one_internal_run_when_idle() {
                 &session.id,
                 1,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "start after resume".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: Some(HttpReasoningEffort::Medium),
@@ -6260,6 +6271,7 @@ fn conversation_queue_stale_start_is_rolled_back_and_rescheduled_from_latest_gen
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "reschedule from the latest durable generation".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -6306,6 +6318,7 @@ fn conversation_queue_interrupt_owner_mismatch_fails_before_cancel() {
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "wait for exact owner".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -6389,6 +6402,7 @@ fn conversation_queue_interrupt_validation_excludes_concurrent_mutation() {
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "run after the current turn".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -6499,6 +6513,7 @@ fn conversation_queue_interrupt_promotes_head_without_cancelling_the_foreground_
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
+                    review_annotations: Vec::new(),
                     prompt: "run after the current turn".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
@@ -6570,6 +6585,7 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
             &session.id,
             0,
             HttpConversationQueueCommandAction::Enqueue {
+                review_annotations: Vec::new(),
                 prompt: "inspect with authorization=first-secret".to_owned(),
                 kind: HttpConversationQueueItemKind::Chat,
                 reasoning_effort: None,
@@ -6591,6 +6607,7 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
                     &session.id,
                     0,
                     HttpConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
                         prompt: "inspect with authorization=second-secret".to_owned(),
                         kind: HttpConversationQueueItemKind::Chat,
                         reasoning_effort: None,
@@ -8442,6 +8459,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
         registry.start_run(
             &session.id,
             HttpRunStartRequest {
+                review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 prompt: "hello".to_owned(),
                 permission_mode: None,
@@ -8554,6 +8572,7 @@ fn task_continuation_uses_the_foreground_run_control_plane() {
     let (registry, driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
     let request = HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: String::new(),
         permission_mode: Some(HttpPermissionMode::Manual),
@@ -9549,6 +9568,7 @@ fn approval_driver_failure_keeps_pending_call() {
 #[test]
 fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: "hello".to_owned(),
         permission_mode: Some(HttpPermissionMode::ReadOnly),
@@ -9666,6 +9686,7 @@ fn wait_for_registry_activity(
 
 fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartRequest {
     HttpRunStartRequest {
+        review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         prompt: prompt.to_owned(),
         permission_mode: Some(permission_mode),
@@ -9957,6 +9978,7 @@ impl HttpRunDriver for QueueTestDriver {
         }
         match &command.request.action {
             HttpConversationQueueCommandAction::Enqueue {
+                review_annotations: _,
                 prompt,
                 kind,
                 reasoning_effort,

@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 mod agent_flow;
 mod approval_flow;
+mod change_review_flow;
 mod checkpoint_flow;
 mod command_dispatch;
 mod command_elapsed;
@@ -616,6 +617,7 @@ pub struct AppState {
     >,
     support_build_info: SupportBuildInfo,
     update_state: update_flow::UpdateUiState,
+    change_review_task: Option<change_review_flow::ChangeReviewTask>,
     pub(crate) runtime: RuntimeStatusState,
     pub(crate) composer: ComposerState,
     pub(crate) approval: ApprovalState,
@@ -1269,6 +1271,7 @@ impl AppState {
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
+            change_review_task: None,
             runtime: RuntimeStatusState {
                 provider_name: configured_provider_name,
                 model_name: configured_model_name,
@@ -1433,6 +1436,7 @@ impl AppState {
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
+            change_review_task: None,
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
@@ -1750,6 +1754,10 @@ impl AppState {
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
         }
+        if self.change_review_modal_open() {
+            self.handle_change_review_key(key);
+            return Ok(None);
+        }
         if self.intent_stack_modal_open() {
             return Ok(self.handle_intent_stack_modal_key_event(key));
         }
@@ -1883,6 +1891,10 @@ impl AppState {
             // Artifact search is available when activity focus owns the
             // shortcut or the composer is empty.
             if !composer_owns_shortcut {
+                if command == UiCommand::OpenChangeReview {
+                    self.open_change_review();
+                    return Ok(None);
+                }
                 if command == UiCommand::OpenCheckpointRestore {
                     return Ok(self.open_checkpoint_restore_modal());
                 }

@@ -415,6 +415,7 @@ pub(crate) fn application_run_start_options(
         })
         .transpose()?;
     Ok(RunStartOptions {
+        review_annotations: request.review_annotations.clone(),
         permission_mode: match permission_mode {
             crate::HttpPermissionMode::ReadOnly => ApplicationPermissionMode::ReadOnly,
             crate::HttpPermissionMode::Manual => ApplicationPermissionMode::Manual,
@@ -1142,6 +1143,7 @@ fn application_queue_action(
             prompt,
             kind,
             reasoning_effort,
+            ..
         } => ApplicationQueueAction::Enqueue {
             target: ApplicationQueueTarget::MainThread,
             prompt: safe(prompt)?,
@@ -1222,6 +1224,7 @@ fn http_queue_request_action(
         } => {
             ensure_http_main_queue_target(target)?;
             crate::HttpConversationQueueCommandAction::Enqueue {
+                review_annotations: Vec::new(),
                 prompt: safe(prompt),
                 kind: match kind {
                     ApplicationQueueItemKind::Chat => crate::HttpConversationQueueItemKind::Chat,
@@ -1653,6 +1656,7 @@ fn http_run_start_request(
                     .map(|guidance| guidance.as_str().to_owned()),
             });
     Ok(crate::HttpRunStartRequest {
+        review_annotations: options.review_annotations.clone(),
         prompt: prompt.map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
         image_attachments: Vec::new(),
         model_ref,

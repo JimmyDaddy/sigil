@@ -1,3 +1,5 @@
+mod change_review;
+pub(crate) use change_review::*;
 use serde::{Deserialize, Serialize};
 mod plan_input;
 pub(crate) use plan_input::*;
@@ -936,6 +938,8 @@ pub(crate) struct DesktopConversationQueueCommandInput {
 )]
 pub(crate) enum DesktopConversationQueueActionInput {
     Enqueue {
+        #[serde(default)]
+        review_annotations: Vec<DesktopReviewAnnotationInput>,
         prompt: String,
         kind: DesktopConversationQueueItemKindInput,
         reasoning_effort: Option<DesktopReasoningEffort>,
@@ -974,10 +978,12 @@ impl DesktopConversationQueueActionInput {
     pub(crate) fn into_native(self) -> NativeConversationQueueCommandAction {
         match self {
             Self::Enqueue {
+                review_annotations,
                 prompt,
                 kind,
                 reasoning_effort,
             } => NativeConversationQueueCommandAction::Enqueue {
+                review_annotations: review_annotations.into_iter().map(Into::into).collect(),
                 prompt,
                 kind: kind.into(),
                 reasoning_effort,
@@ -1693,6 +1699,8 @@ pub(crate) struct DesktopConversationLiveProvisionalAnchor {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunStartInput {
+    #[serde(default)]
+    pub(crate) review_annotations: Vec<DesktopReviewAnnotationInput>,
     pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) image_handles: Vec<String>,

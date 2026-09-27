@@ -3,6 +3,8 @@ mod app_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod approval_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod change_review_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod command_dispatch_tests;
 pub(crate) mod common;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]

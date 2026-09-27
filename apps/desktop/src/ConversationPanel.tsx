@@ -1,3 +1,5 @@
+import { ChangeReview } from "./ChangeReview";
+import { emptyChangeReviewDraft, type CheckpointReview, type ReviewAnnotation } from "./features/conversation/reviewTypes";
 import {
   useCallback,
   useEffect,
@@ -134,6 +136,7 @@ interface PendingPrompt {
 }
 
 interface RetryableRunStartRequest {
+  readonly reviewAnnotations?: ReviewAnnotation[];
   readonly imageHandles?: string[];
   readonly prompt: string;
   readonly permissionMode: PermissionMode;
@@ -308,6 +311,14 @@ export function ConversationPanel({
   const [conversationRecoveryLoading, setConversationRecoveryLoading] = useState(false);
   const [conversationRecoveryError, setConversationRecoveryError] = useState(false);
   const [conversationRecoveryOpen, setConversationRecoveryOpen] = useState(false);
+  const [changeReview, setChangeReview] = useState<{ checkpoint: CheckpointView; review?: CheckpointReview; loading: boolean; error?: boolean }>();
+  const [changeReviewOpen, setChangeReviewOpen] = useState(false);
+  const [changeReviewDraft, setChangeReviewDraft] = useState(emptyChangeReviewDraft);
+  const changeReviewEpoch = useRef(0);
+  const changeReviewOwner = `${workspaceId}\u0000${session.id}`;
+  const changeReviewOwnerRef = useRef(changeReviewOwner);
+  changeReviewOwnerRef.current = changeReviewOwner;
+  useEffect(() => () => { changeReviewEpoch.current += 1; }, [workspaceId, session.id]);
   const timelineRef = useRef<HTMLDivElement>(null);
   const transcriptStartRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
@@ -557,6 +568,10 @@ export function ConversationPanel({
     setConversationRecoveryLoading(false);
     setConversationRecoveryError(false);
     setConversationRecoveryOpen(false);
+    setChangeReview(undefined);
+    setChangeReviewOpen(false);
+    setChangeReviewDraft(emptyChangeReviewDraft());
+    changeReviewEpoch.current += 1;
     conversationQueueEpoch.current += 1;
     queuedSuccessorExpected.current = false;
     startedRunProjectionExpected.current = undefined;
@@ -1623,6 +1638,7 @@ export function ConversationPanel({
     recoveryRetry = false,
     exactRetry?: RetryableRunStartRequest,
     images?: import("./types").DraftImage[],
+    reviewAnnotations?: ReviewAnnotation[],
   ): Promise<boolean> => {
     if (
       (nextPrompt === "" && (images?.length ?? exactRetry?.imageHandles?.length ?? 0) === 0)
@@ -1649,6 +1665,7 @@ export function ConversationPanel({
         prompt: nextPrompt,
         kind: "chat",
         reasoningEffort,
+        ...(reviewAnnotations === undefined ? {} : { reviewAnnotations }),
       });
     }
     timelinePinnedToEnd.current = true;
@@ -1710,6 +1727,7 @@ export function ConversationPanel({
       const runRequest: RetryableRunStartRequest = exactRetry ?? {
         prompt: nextPrompt,
         imageHandles: images?.map((image) => image.attachmentId),
+        reviewAnnotations,
         permissionMode,
         modelRef: modelChanged ? selectedModelOption?.modelRef : undefined,
         modelSelectionBinding: modelChanged ? runContext?.modelSelectionBinding : undefined,
@@ -1735,6 +1753,7 @@ export function ConversationPanel({
         runRequest.agentBinding,
         runRequest.routeRecoveryBinding,
         runRequest.imageHandles,
+        ...(runRequest.reviewAnnotations === undefined ? [] : [runRequest.reviewAnnotations] as const),
       );
       activeRunIdRef.current = started.id;
       bindSubmissionRun(submissionTiming, started.id);
@@ -2214,6 +2233,22 @@ export function ConversationPanel({
       return false;
     } finally {
       setConversationRecoveryBusy(false);
+    }
+  };
+
+  const previewChangeReview = async (checkpoint: CheckpointView) => {
+    const epoch = ++changeReviewEpoch.current;
+    setConversationRecoveryOpen(false);
+    setChangeReviewOpen(true);
+    setChangeReview({ checkpoint, loading: true });
+    setChangeReviewDraft((current) => ({ ...current, selection: undefined }));
+    try {
+      const review = await bridge.checkpointReview(workspaceId, {
+        sessionId: session.id, checkpointId: checkpoint.checkpointId, checkpointDigest: checkpoint.checkpointDigest,
+      });
+      if (epoch === changeReviewEpoch.current) setChangeReview({ checkpoint, review, loading: false });
+    } catch {
+      if (epoch === changeReviewEpoch.current) setChangeReview({ checkpoint, loading: false, error: true });
     }
   };
 
@@ -2940,6 +2975,20 @@ export function ConversationPanel({
           onRefresh={() => setIntentStackReload((value) => value + 1)}
         />
       </Drawer>
+      <Drawer id="change-review-inspector" open={changeReviewOpen} title={t("reviewChanges")}
+        description={t("changeReviewDetail")} returnFocusRef={recoveryTriggerRef} onOpenChange={setChangeReviewOpen}>
+        {changeReview?.loading ? <p role="status">{t("loading")}</p> : changeReview?.review === undefined ? <>
+          <p role="alert">{t("reviewUnavailable")}</p>
+          {changeReview === undefined ? null : <Button type="button" onClick={() => void previewChangeReview(changeReview.checkpoint)}>{t("retry")}</Button>}
+        </> : <ChangeReview review={changeReview.review} draft={changeReviewDraft}
+          onDraftChange={(change) => { if (changeReviewOwnerRef.current === changeReviewOwner) setChangeReviewDraft(change); }}
+          onRefresh={() => void previewChangeReview(changeReview.checkpoint)}
+          onSend={async (annotations) => {
+            const accepted = await submit(annotations.map((annotation) => annotation.comment).join("\n\n"), undefined, undefined, false, undefined, undefined, annotations);
+            return changeReviewOwnerRef.current === changeReviewOwner && accepted;
+          }} />}
+      </Drawer>
+
       <Drawer
         id="conversation-recovery-inspector"
         open={conversationRecoveryOpen}
@@ -2955,6 +3004,7 @@ export function ConversationPanel({
           error={conversationRecoveryError}
           onRefresh={refreshConversationRecovery}
           onCompact={compactConversation}
+          onReview={(checkpoint) => void previewChangeReview(checkpoint)}
           onPreview={previewCheckpointRestore}
           onRestore={restoreCheckpoint}
           onFork={forkConversation}

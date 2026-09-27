@@ -62,8 +62,27 @@ where
                 attachments,
                 reasoning_effort,
                 plan_mode,
+                review,
                 ..
             } => {
+                let prompt = if let Some((expected_session_id, annotations)) = review {
+                    match sigil_runtime::materialize_queued_review_annotations(
+                        &state.session.log_path,
+                        &expected_session_id,
+                        workspace_root,
+                        &annotations,
+                    ) {
+                        Ok(context) => format!("{prompt}\n{context}"),
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "review source could not be validated: {error:#}"
+                            )));
+                            continue;
+                        }
+                    }
+                } else {
+                    prompt
+                };
                 // A new run starts with the persisted permission mode; a runtime switch made
                 // during the previous run must not leak into it.
                 permission_mode_override.clear();

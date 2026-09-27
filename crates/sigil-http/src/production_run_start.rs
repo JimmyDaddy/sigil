@@ -3,6 +3,38 @@
 use super::*;
 use anyhow::Context;
 
+/// Runs exact recorded-source reads inside the supervisor's owned preparation future.
+/// Its caller must retain/await preparation through cancellation, including deadline failure.
+pub(super) async fn task_review_guidance(
+    request: &ApplicationRunRequest,
+    expected_session_scope_id: &str,
+    guidance: Option<String>,
+) -> Result<Option<String>> {
+    if request.review_annotations.is_empty() {
+        return Ok(guidance);
+    }
+    let config_path = request.config_path.clone();
+    let launch_cwd = request.launch_cwd.clone();
+    let session_path = request
+        .session_path
+        .clone()
+        .ok_or_else(|| anyhow!("Task review session path is unavailable"))?;
+    let scope = expected_session_scope_id.to_owned();
+    let annotations = request.review_annotations.clone();
+    tokio::task::spawn_blocking(move || {
+        let workspace = application_recovery_workspace_root(&config_path, &launch_cwd)?;
+        let context = sigil_runtime::materialize_queued_review_annotations(
+            &session_path,
+            &scope,
+            &workspace,
+            &annotations,
+        )?;
+        Ok(Some(format!("{}{context}", guidance.unwrap_or_default())))
+    })
+    .await
+    .context("Task review materialization worker failed")?
+}
+
 pub(super) fn http_route_recovery(
     recovery: sigil_runtime::application_run::ApplicationSessionRouteRecoveryView,
 ) -> crate::HttpSessionRouteRecoveryView {

@@ -1998,6 +1998,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/recovery/checkpoint-review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Read exact recorded change lines without restore or mutation authority */
+        post: operations["checkpointReview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/recovery/commands": {
         parameters: {
             query?: never;
@@ -3024,6 +3041,24 @@ export interface components {
             path: string;
             truncated: boolean;
         };
+        CheckpointReview: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+            diffs: {
+                diff_digest: string;
+                /** @enum {string} */
+                file_state: "current" | "changed" | "unknown";
+                lines: {
+                    new_line: number | null;
+                    old_line: number | null;
+                    text: string;
+                }[];
+                path: string;
+                source_call_id: string;
+                truncated: boolean;
+            }[];
+            truncated: boolean;
+        };
         CheckpointView: {
             checkpoint_digest: string;
             checkpoint_id: string;
@@ -3454,6 +3489,7 @@ export interface components {
             kind: components["schemas"]["ConversationQueueItemKind"];
             prompt: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
+            review_annotations?: components["schemas"]["ReviewAnnotation"][];
         };
         /** @description Opaque queue CAS generation. Clients must echo it unchanged. */
         ConversationQueueGeneration: string;
@@ -4260,6 +4296,18 @@ export interface components {
         };
         /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
+        ReviewAnnotation: {
+            checkpoint_digest: string;
+            checkpoint_id: string;
+            comment: string;
+            diff_digest: string;
+            end_line: number;
+            path: string;
+            /** @enum {string} */
+            side: "old" | "new";
+            source_call_id: string;
+            start_line: number;
+        };
         RouteRecoveryRequiredEvent: {
             actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
             /** @enum {string} */
@@ -4411,6 +4459,7 @@ export interface components {
             prompt: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             reasoning_effort_binding?: string | null;
+            review_annotations?: components["schemas"]["ReviewAnnotation"][];
             route_recovery_binding?: string | null;
             skill_binding?: components["schemas"]["ApplicationSkillBinding"] | null;
             task_continuation?: components["schemas"]["TaskContinuationRequest"] | null;
@@ -5377,4 +5426,34 @@ export interface components {
     pathItems: never;
 }
 export type $defs = Record<string, never>;
-export type operations = Record<string, never>;
+export interface operations {
+    checkpointReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: components["parameters"]["SessionId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckpointRestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded forward diffs and advisory current-file state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckpointReview"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+}

@@ -123,6 +123,7 @@ pub(in crate::runner) enum RunPlanCommand {
         attachments: Vec<ImageAttachment>,
         reasoning_effort: ReasoningEffort,
         plan_mode: bool,
+        review: Option<(String, Vec<sigil_application::ReviewAnnotation>)>,
     },
     InvokeInlineSkill {
         skill_id: String,
@@ -412,6 +413,7 @@ pub(in crate::runner) fn classify_worker_command(
             attachments: Vec::new(),
             reasoning_effort,
             plan_mode: false,
+            review: None,
         }),
         WorkerCommand::SubmitPromptWithAttachments {
             prompt,
@@ -422,6 +424,20 @@ pub(in crate::runner) fn classify_worker_command(
             attachments,
             reasoning_effort,
             plan_mode: false,
+            review: None,
+        }),
+        WorkerCommand::SubmitReviewedPrompt {
+            prompt,
+            attachments,
+            reasoning_effort,
+            expected_session_id,
+            annotations,
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::Submit {
+            prompt,
+            attachments,
+            reasoning_effort,
+            plan_mode: false,
+            review: Some((expected_session_id, annotations)),
         }),
         WorkerCommand::SubmitPlanPrompt {
             prompt,
@@ -431,6 +447,7 @@ pub(in crate::runner) fn classify_worker_command(
             attachments: Vec::new(),
             reasoning_effort,
             plan_mode: true,
+            review: None,
         }),
         WorkerCommand::InvokeInlineSkill {
             skill_id,

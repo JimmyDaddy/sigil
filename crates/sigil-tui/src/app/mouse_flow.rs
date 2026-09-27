@@ -29,6 +29,9 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.change_review_modal_open() {
+            return Ok(crate::mouse::AppMouseOutcome::Noop);
+        }
         if self.intent_stack_modal_open() {
             let target = layout.hit_target(input.column, input.row);
             return Ok(match (input.kind, target) {

@@ -366,6 +366,13 @@ pub enum WorkerCommand {
         attachments: Vec<ImageAttachment>,
         reasoning_effort: ReasoningEffort,
     },
+    SubmitReviewedPrompt {
+        prompt: String,
+        attachments: Vec<ImageAttachment>,
+        reasoning_effort: ReasoningEffort,
+        expected_session_id: String,
+        annotations: Vec<sigil_application::ReviewAnnotation>,
+    },
     QueueConversationInput {
         prompt: String,
         kind: ConversationInputKind,
