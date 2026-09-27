@@ -17,3 +17,9 @@
 ## 仅含资源或提示的 stdio MCP
 
 声明 resources/prompts 且未声明 tools 的服务无需实现 `tools/list`。未声明 capability 的旧服务仍尝试工具发现；只有未声明 tools 且明确返回 method-not-found 时，按无工具处理。显式声明 tools 后的协议失败仍报告错误。
+
+## 远程 MCP 工具发现与 Schema
+
+Streamable HTTP 工具支持有界 JSON Schema annotation（包括 `format`）、nullable/type union、`anyOf`/`allOf`/`oneOf` 和 schema-valued `additionalProperties`。类型专属约束按实际值的类型校验；输入和结构化输出都经过约束验证。未知输入字段仍遵循代码规范 §2.7，不因 `additionalProperties: false` 被 host 拒绝。
+
+不合法或尚不支持的工具描述单独隔离并记录有界诊断，其余工具继续发现和调用。外部引用、循环引用、未支持的断言及超出大小、深度或验证工作预算的 schema 不会静默放行。`format` 是 annotation，不代替 URL、网络或权限校验。

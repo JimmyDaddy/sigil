@@ -134,7 +134,7 @@ fn search_binding_required_tasks_and_schema_drift_are_incompatible() {
         McpStableSearchEligibility::Incompatible(McpSearchIncompatibility::RequiredTaskUnsupported)
     );
     let drift = tool(
-        json!({"type":"object","properties":{"query":{"type":"string","format":"uri"}},"required":["query"]}),
+        json!({"type":"object","properties":{"query":{"type":"string","not":{"const":""}}},"required":["query"]}),
     );
     assert_eq!(
         classify_mcp_search_binding("identity", &drift, &[]),

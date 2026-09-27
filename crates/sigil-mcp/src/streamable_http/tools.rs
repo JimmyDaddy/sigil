@@ -7,6 +7,21 @@ use crate::output::{
 use anyhow::Result;
 use sigil_kernel::{McpServerTrustPolicy, SecretRedactor, ToolContext, ToolErrorKind, ToolResult};
 
+/// Safe reason why one advertised tool was excluded from a completed discovery pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpRemoteToolDiagnosticKind {
+    MalformedDescriptor,
+    UnsupportedContract,
+}
+
+/// A discovery diagnostic identifies the descriptor by its zero-based position across pages.
+/// It retains no raw schema, credentials, or server-controlled diagnostic text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRemoteToolDiagnostic {
+    pub tool_index: usize,
+    pub kind: McpRemoteToolDiagnosticKind,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct McpRemoteTool {
     pub name: String,
@@ -70,7 +85,14 @@ impl<'de> Deserialize<'de> for McpRemoteTool {
 
 impl McpRemoteTool {
     pub(super) fn validate(&self) -> Result<(), McpStreamableHttpError> {
-        if self.name.is_empty() || self.name.len() > 256 {
+        if self.name.is_empty()
+            || self.name.len() > 256
+            || !self.input_schema.is_object()
+            || self
+                .output_schema
+                .as_ref()
+                .is_some_and(|schema| !schema.is_object())
+        {
             return Err(McpStreamableHttpError::SchemaDrift);
         }
         if self

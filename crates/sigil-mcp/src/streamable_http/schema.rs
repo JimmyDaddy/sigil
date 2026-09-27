@@ -18,7 +18,42 @@ impl CompiledMcpSchema {
     }
 
     pub fn validate(&self, value: &Value) -> Result<(), McpStreamableHttpError> {
-        validate_schema_value(&self.schema, &self.schema, value, 0, &mut Vec::new())
+        let mut budget = ValidationBudget::new(MAX_SCHEMA_NODES * 16);
+        let result = validate_schema_value(
+            &self.schema,
+            &self.schema,
+            value,
+            0,
+            &mut Vec::new(),
+            &mut budget,
+        );
+        if budget.exhausted {
+            return Err(McpStreamableHttpError::SchemaDrift);
+        }
+        result
+    }
+}
+
+struct ValidationBudget {
+    remaining: usize,
+    exhausted: bool,
+}
+
+impl ValidationBudget {
+    fn new(remaining: usize) -> Self {
+        Self {
+            remaining,
+            exhausted: false,
+        }
+    }
+
+    fn consume(&mut self) -> Result<(), McpStreamableHttpError> {
+        if self.remaining == 0 {
+            self.exhausted = true;
+            return Err(McpStreamableHttpError::SchemaDrift);
+        }
+        self.remaining -= 1;
+        Ok(())
     }
 }
 
@@ -34,7 +69,14 @@ pub(super) fn compile_bounded_schema(
     }
     let mut nodes = 0usize;
     measure_json(schema, 0, max_depth, max_nodes, &mut nodes)?;
-    validate_schema_shape(schema, schema, 0, max_depth, &mut Vec::new())?;
+    validate_schema_shape(
+        schema,
+        schema,
+        0,
+        max_depth,
+        &mut Vec::new(),
+        &mut ValidationBudget::new(max_nodes),
+    )?;
     Ok(CompiledMcpSchema {
         schema: schema.clone(),
     })
@@ -78,17 +120,20 @@ fn validate_schema_shape(
     depth: usize,
     max_depth: usize,
     ref_stack: &mut Vec<String>,
+    budget: &mut ValidationBudget,
 ) -> Result<(), McpStreamableHttpError> {
+    budget.consume()?;
     if depth > max_depth {
         return Err(McpStreamableHttpError::SchemaDrift);
+    }
+    if schema.is_boolean() {
+        return Ok(());
     }
     let object = schema
         .as_object()
         .ok_or(McpStreamableHttpError::SchemaDrift)?;
     for forbidden in [
         "$dynamicRef",
-        "allOf",
-        "anyOf",
         "not",
         "if",
         "then",
@@ -118,10 +163,18 @@ fn validate_schema_shape(
                 | "enum"
                 | "enumNames"
                 | "oneOf"
+                | "anyOf"
+                | "allOf"
                 | "const"
                 | "title"
                 | "description"
                 | "default"
+                | "format"
+                | "$comment"
+                | "examples"
+                | "deprecated"
+                | "readOnly"
+                | "writeOnly"
                 | "pattern"
                 | "minimum"
                 | "maximum"
@@ -157,17 +210,28 @@ fn validate_schema_shape(
             return Err(McpStreamableHttpError::SchemaDrift);
         }
         ref_stack.push(reference.to_owned());
-        let result = validate_schema_shape(root, target, depth + 1, max_depth, ref_stack);
+        let result = validate_schema_shape(root, target, depth + 1, max_depth, ref_stack, budget);
         ref_stack.pop();
         result?;
     }
-    for key in ["title", "description"] {
+    // Format uses JSON Schema's default annotation vocabulary. URL/network authority is
+    // checked at its own execution boundary, never inferred from a schema annotation.
+    for key in ["title", "description", "$comment", "format"] {
         if object
             .get(key)
             .is_some_and(|value| value.as_str().is_none_or(|text| text.len() > 8 * 1024))
         {
             return Err(McpStreamableHttpError::SchemaDrift);
         }
+    }
+    if object
+        .get("examples")
+        .is_some_and(|value| !value.is_array())
+        || ["deprecated", "readOnly", "writeOnly"]
+            .iter()
+            .any(|key| object.get(*key).is_some_and(|value| !value.is_boolean()))
+    {
+        return Err(McpStreamableHttpError::SchemaDrift);
     }
     if let Some(pattern) = object.get("pattern") {
         let pattern = pattern
@@ -178,30 +242,8 @@ fn validate_schema_shape(
         }
         Regex::new(pattern).map_err(|_| McpStreamableHttpError::SchemaDrift)?;
     }
-    if let Some(schema_type) = object.get("type")
-        && !matches!(
-            schema_type.as_str(),
-            Some("object" | "array" | "string" | "number" | "integer" | "boolean" | "null")
-        )
-    {
-        return Err(McpStreamableHttpError::SchemaDrift);
-    }
-    let schema_type = object.get("type").and_then(Value::as_str);
-    if (["properties", "required", "additionalProperties"]
-        .iter()
-        .any(|key| object.contains_key(*key))
-        && schema_type != Some("object"))
-        || (object.contains_key("items") && schema_type != Some("array"))
-        || (["pattern", "minLength", "maxLength"]
-            .iter()
-            .any(|key| object.contains_key(*key))
-            && schema_type != Some("string"))
-        || (["minimum", "maximum"]
-            .iter()
-            .any(|key| object.contains_key(*key))
-            && !matches!(schema_type, Some("number" | "integer")))
-    {
-        return Err(McpStreamableHttpError::SchemaDrift);
+    if let Some(schema_type) = object.get("type") {
+        validate_type_declaration(schema_type)?;
     }
     validate_nonnegative_integer_keywords(object)?;
     for key in ["minimum", "maximum"] {
@@ -231,10 +273,8 @@ fn validate_schema_shape(
             }
         }
     }
-    if let Some(additional) = object.get("additionalProperties")
-        && !additional.is_boolean()
-    {
-        return Err(McpStreamableHttpError::SchemaDrift);
+    if let Some(additional) = object.get("additionalProperties") {
+        validate_schema_shape(root, additional, depth + 1, max_depth, ref_stack, budget)?;
     }
     if let Some(properties) = object.get("properties") {
         let properties = properties
@@ -247,7 +287,7 @@ fn validate_schema_shape(
             if name.is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
                 return Err(McpStreamableHttpError::SchemaDrift);
             }
-            validate_schema_shape(root, child, depth + 1, max_depth, ref_stack)?;
+            validate_schema_shape(root, child, depth + 1, max_depth, ref_stack, budget)?;
         }
     }
     for definitions_key in ["$defs", "definitions"] {
@@ -256,22 +296,25 @@ fn validate_schema_shape(
                 .as_object()
                 .ok_or(McpStreamableHttpError::SchemaDrift)?;
             for child in definitions.values() {
-                validate_schema_shape(root, child, depth + 1, max_depth, ref_stack)?;
+                validate_schema_shape(root, child, depth + 1, max_depth, ref_stack, budget)?;
             }
         }
     }
     if let Some(items) = object.get("items") {
-        validate_schema_shape(root, items, depth + 1, max_depth, ref_stack)?;
+        validate_schema_shape(root, items, depth + 1, max_depth, ref_stack, budget)?;
     }
-    if let Some(one_of) = object.get("oneOf") {
-        let choices = one_of
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        let Some(combination) = object.get(keyword) else {
+            continue;
+        };
+        let choices = combination
             .as_array()
             .ok_or(McpStreamableHttpError::SchemaDrift)?;
         if choices.is_empty() || choices.len() > 64 {
             return Err(McpStreamableHttpError::SchemaDrift);
         }
         for choice in choices {
-            validate_schema_shape(root, choice, depth + 1, max_depth, ref_stack)?;
+            validate_schema_shape(root, choice, depth + 1, max_depth, ref_stack, budget)?;
         }
     }
     if let Some(enum_values) = object.get("enum") {
@@ -322,6 +365,46 @@ fn validate_nonnegative_integer_keywords(
     Ok(())
 }
 
+fn validate_type_declaration(value: &Value) -> Result<(), McpStreamableHttpError> {
+    let valid = |name: &str| {
+        matches!(
+            name,
+            "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+        )
+    };
+    match value {
+        Value::String(name) if valid(name) => Ok(()),
+        Value::Array(names) if !names.is_empty() && names.len() <= 7 => {
+            let mut seen = BTreeSet::new();
+            for name in names {
+                let name = name.as_str().ok_or(McpStreamableHttpError::SchemaDrift)?;
+                if !valid(name) || !seen.insert(name) {
+                    return Err(McpStreamableHttpError::SchemaDrift);
+                }
+            }
+            Ok(())
+        }
+        _ => Err(McpStreamableHttpError::SchemaDrift),
+    }
+}
+
+fn matches_schema_type(name: &str, value: &Value) -> bool {
+    match name {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value.as_f64().is_some_and(|number| number.fract() == 0.0)
+        }
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
 fn resolve_local_ref<'a>(
     root: &'a Value,
     reference: &str,
@@ -337,15 +420,24 @@ fn resolve_local_ref<'a>(
         .ok_or(McpStreamableHttpError::SchemaDrift)
 }
 
-pub(super) fn validate_schema_value(
+fn validate_schema_value(
     root: &Value,
     schema: &Value,
     value: &Value,
     depth: usize,
     ref_stack: &mut Vec<String>,
+    budget: &mut ValidationBudget,
 ) -> Result<(), McpStreamableHttpError> {
+    budget.consume()?;
     if depth > MAX_SCHEMA_DEPTH {
         return Err(McpStreamableHttpError::SchemaDrift);
+    }
+    if let Some(accepts) = schema.as_bool() {
+        return if accepts {
+            Ok(())
+        } else {
+            Err(McpStreamableHttpError::SchemaDrift)
+        };
     }
     let object = schema
         .as_object()
@@ -361,6 +453,7 @@ pub(super) fn validate_schema_value(
             value,
             depth + 1,
             ref_stack,
+            budget,
         );
         ref_stack.pop();
         result?;
@@ -375,23 +468,53 @@ pub(super) fn validate_schema_value(
     {
         return Err(McpStreamableHttpError::SchemaDrift);
     }
-    if let Some(one_of) = object.get("oneOf").and_then(Value::as_array) {
-        let matches = one_of
-            .iter()
-            .filter(|choice| {
-                validate_schema_value(root, choice, value, depth + 1, &mut ref_stack.clone())
-                    .is_ok()
-            })
-            .count();
-        if matches != 1 {
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        let Some(choices) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut matches = 0;
+        for choice in choices {
+            let matched = validate_schema_value(
+                root,
+                choice,
+                value,
+                depth + 1,
+                &mut ref_stack.clone(),
+                budget,
+            )
+            .is_ok();
+            if budget.exhausted {
+                return Err(McpStreamableHttpError::SchemaDrift);
+            }
+            matches += usize::from(matched);
+            if keyword == "anyOf" && matched {
+                break;
+            }
+            if keyword == "allOf" && !matched {
+                return Err(McpStreamableHttpError::SchemaDrift);
+            }
+        }
+        if (keyword == "oneOf" && matches != 1) || (keyword == "anyOf" && matches == 0) {
             return Err(McpStreamableHttpError::SchemaDrift);
         }
     }
-    match object.get("type").and_then(Value::as_str) {
-        Some("object") => {
-            let instance = value
-                .as_object()
-                .ok_or(McpStreamableHttpError::SchemaDrift)?;
+    if let Some(types) = object.get("type") {
+        let matched = match types {
+            Value::String(name) => matches_schema_type(name, value),
+            Value::Array(names) => names.iter().any(|name| {
+                name.as_str()
+                    .is_some_and(|name| matches_schema_type(name, value))
+            }),
+            _ => false,
+        };
+        if !matched {
+            return Err(McpStreamableHttpError::SchemaDrift);
+        }
+    }
+    // JSON Schema type-specific keywords apply to instances of that type, even when no
+    // explicit type is given, or when a union also permits null or another type.
+    match value {
+        Value::Object(instance) => {
             let properties = object
                 .get("properties")
                 .and_then(Value::as_object)
@@ -407,14 +530,31 @@ pub(super) fn validate_schema_value(
             }
             for (name, child) in &properties {
                 if let Some(value) = instance.get(name) {
-                    validate_schema_value(root, child, value, depth + 1, ref_stack)?;
+                    validate_schema_value(root, child, value, depth + 1, ref_stack, budget)?;
+                }
+            }
+            // Unknown fields remain compatible with the host input projection even when a
+            // provider advertises additionalProperties:false. A map schema explicitly consumes
+            // dynamic values, so its value constraints must still be enforced.
+            if let Some(additional) = object
+                .get("additionalProperties")
+                .filter(|schema| schema.is_object())
+            {
+                for (name, value) in instance {
+                    if !properties.contains_key(name) {
+                        validate_schema_value(
+                            root,
+                            additional,
+                            value,
+                            depth + 1,
+                            ref_stack,
+                            budget,
+                        )?;
+                    }
                 }
             }
         }
-        Some("array") => {
-            let values = value
-                .as_array()
-                .ok_or(McpStreamableHttpError::SchemaDrift)?;
+        Value::Array(values) => {
             validate_length(values.len(), object, "minItems", "maxItems")?;
             if object.get("uniqueItems") == Some(&Value::Bool(true)) {
                 let mut seen = BTreeSet::new();
@@ -428,12 +568,11 @@ pub(super) fn validate_schema_value(
             }
             if let Some(items) = object.get("items") {
                 for value in values {
-                    validate_schema_value(root, items, value, depth + 1, ref_stack)?;
+                    validate_schema_value(root, items, value, depth + 1, ref_stack, budget)?;
                 }
             }
         }
-        Some("string") => {
-            let text = value.as_str().ok_or(McpStreamableHttpError::SchemaDrift)?;
+        Value::String(text) => {
             validate_length(text.chars().count(), object, "minLength", "maxLength")?;
             if let Some(pattern) = object.get("pattern").and_then(Value::as_str) {
                 let regex = Regex::new(pattern).map_err(|_| McpStreamableHttpError::SchemaDrift)?;
@@ -442,11 +581,7 @@ pub(super) fn validate_schema_value(
                 }
             }
         }
-        Some("number") if !value.is_number() => return Err(McpStreamableHttpError::SchemaDrift),
-        Some("integer") if value.as_i64().is_none() && value.as_u64().is_none() => {
-            return Err(McpStreamableHttpError::SchemaDrift);
-        }
-        Some("number" | "integer") => {
+        Value::Number(_) => {
             let number = value.as_f64().ok_or(McpStreamableHttpError::SchemaDrift)?;
             if object
                 .get("minimum")
@@ -460,12 +595,7 @@ pub(super) fn validate_schema_value(
                 return Err(McpStreamableHttpError::SchemaDrift);
             }
         }
-        Some("boolean") if !value.is_boolean() => {
-            return Err(McpStreamableHttpError::SchemaDrift);
-        }
-        Some("null") if !value.is_null() => return Err(McpStreamableHttpError::SchemaDrift),
-        Some("boolean" | "null") | None => {}
-        _ => return Err(McpStreamableHttpError::SchemaDrift),
+        Value::Bool(_) | Value::Null => {}
     }
     Ok(())
 }

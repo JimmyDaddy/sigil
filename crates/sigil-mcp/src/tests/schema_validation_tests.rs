@@ -71,11 +71,105 @@ fn schema_validation_rejects_external_cycle_unknown_draft_and_partial_ref_siblin
         json!({"$ref":"https://example.test/schema"}),
         json!({"$defs":{"loop":{"$ref":"#/$defs/loop"}},"$ref":"#/$defs/loop"}),
         json!({"$schema":"https://example.test/unknown-draft","type":"string"}),
-        json!({"type":"string","format":"uri"}),
+        json!({"type":"string","format":42}),
         json!({"$defs":{"value":{"type":"string"}},"$ref":"#/$defs/value","minLength":2}),
     ] {
         assert!(CompiledMcpSchema::compile(&invalid).is_err(), "{invalid}");
     }
+}
+
+#[test]
+fn schema_validation_common_mcp_schemas_keep_constraints() {
+    let schema = json!({
+        "type":"object",
+        "properties":{
+            "url":{"type":"string","format":"uri","minLength":1},
+            "query":{"anyOf":[{"type":"string","minLength":2},{"type":"null"}]},
+            "limit":{"type":["integer","null"],"minimum":1},
+            "labels":{"type":"object","additionalProperties":{"type":"string","minLength":1}}
+        },
+        "required":["url","query","limit","labels"],
+        "additionalProperties":false
+    });
+    let compiled = CompiledMcpSchema::compile(&schema).expect("common MCP schema");
+    for valid in [
+        json!({"url":"https://example.test","query":null,"limit":null,"labels":{}}),
+        json!({"url":"format is an annotation","query":"ok","limit":2.0,"labels":{"team":"tools"},"future":true}),
+    ] {
+        compiled
+            .validate(&valid)
+            .expect("valid union and dynamic map");
+    }
+    for invalid in [
+        json!({"query":null,"limit":null,"labels":{}}),
+        json!({"url":"","query":null,"limit":null,"labels":{}}),
+        json!({"url":"ok","query":"x","limit":null,"labels":{}}),
+        json!({"url":"ok","query":42,"limit":null,"labels":{}}),
+        json!({"url":"ok","query":null,"limit":0,"labels":{}}),
+        json!({"url":"ok","query":null,"limit":1.5,"labels":{}}),
+        json!({"url":"ok","query":null,"limit":null,"labels":{"team":1}}),
+    ] {
+        assert!(compiled.validate(&invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn schema_validation_combination_and_untyped_keywords_follow_value_semantics() {
+    let any = CompiledMcpSchema::compile(&json!({
+        "anyOf":[{"type":"number"},{"type":"integer"}]
+    }))
+    .expect("anyOf");
+    any.validate(&json!(2))
+        .expect("overlapping branches are valid for anyOf");
+    let one = CompiledMcpSchema::compile(&json!({
+        "oneOf":[{"type":"number"},{"type":"integer"}]
+    }))
+    .expect("oneOf");
+    assert!(one.validate(&json!(2)).is_err());
+    let all = CompiledMcpSchema::compile(&json!({
+        "allOf":[{"minimum":2},{"maximum":4}]
+    }))
+    .expect("untyped numeric constraints");
+    all.validate(&json!(3)).expect("both ranges");
+    all.validate(&json!(null))
+        .expect("numeric keywords do not exclude null");
+    assert!(all.validate(&json!(1)).is_err());
+    assert!(all.validate(&json!(5)).is_err());
+    let boolean = CompiledMcpSchema::compile(&json!({"properties":{"forbidden":false}}))
+        .expect("boolean subschema");
+    assert!(boolean.validate(&json!({"forbidden":null})).is_err());
+}
+
+#[test]
+fn schema_validation_rejects_malformed_unions_and_bounds_evaluation() {
+    for invalid in [
+        json!({"type":[]}),
+        json!({"type":["string","string"]}),
+        json!({"type":["string","unknown"]}),
+        json!({"anyOf":[]}),
+        json!({"additionalProperties":7}),
+        json!({"not":{"type":"null"}}),
+    ] {
+        assert!(CompiledMcpSchema::compile(&invalid).is_err(), "{invalid}");
+    }
+    let compiled = CompiledMcpSchema::compile(&json!({"type":"array","items":true}))
+        .expect("bounded array schema");
+    compiled
+        .validate(&json!([true, true]))
+        .expect("small array");
+    assert!(
+        compiled
+            .validate(&json!(vec![true; MAX_SCHEMA_NODES * 16 + 1]))
+            .is_err()
+    );
+    let tool: McpRemoteTool = serde_json::from_value(json!({
+        "name":"invalid-root", "inputSchema":true
+    }))
+    .expect("descriptor structure");
+    assert!(
+        tool.validate().is_err(),
+        "MCP schema roots must remain objects"
+    );
 }
 
 #[test]

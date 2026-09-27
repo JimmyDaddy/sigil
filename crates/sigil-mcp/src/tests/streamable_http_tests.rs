@@ -630,6 +630,113 @@ async fn streamable_http_pagination_is_bounded_and_list_changed_is_coalesced() {
 }
 
 #[tokio::test]
+async fn streamable_http_discovery_isolates_tools_and_preserves_call_validation() {
+    let supported = json!({
+        "name":"lookup",
+        "inputSchema":{
+            "type":"object",
+            "properties":{"query":{"anyOf":[{"type":"string","minLength":2},{"type":"null"}]}},
+            "required":["query"]
+        },
+        "outputSchema":{
+            "type":"object",
+            "additionalProperties":{"type":["integer","null"],"minimum":0}
+        }
+    });
+    let (client, server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false)),
+            FixtureResponse::empty(202),
+            FixtureResponse::json(200, json!({
+                "jsonrpc":"2.0","id":2,"result":{"tools":[
+                    {"name":"unsupported","inputSchema":{"not":{"type":"null"}}},
+                    {"name":"missing-schema"},
+                    supported
+                ]}
+            }).to_string()),
+            FixtureResponse::json(200, json!({
+                "jsonrpc":"2.0","id":3,"result":{"content":[],"structuredContent":{"count":"wrong"}}
+            }).to_string()),
+            FixtureResponse::json(200, json!({
+                "jsonrpc":"2.0","id":4,"result":{"content":[],"structuredContent":{"count":2}}
+            }).to_string()),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    let tools = client
+        .list_tools()
+        .await
+        .expect("supported descriptors survive");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "lookup");
+    assert_eq!(
+        client.tool_discovery_diagnostics().await,
+        vec![
+            McpRemoteToolDiagnostic {
+                tool_index: 0,
+                kind: McpRemoteToolDiagnosticKind::UnsupportedContract
+            },
+            McpRemoteToolDiagnostic {
+                tool_index: 1,
+                kind: McpRemoteToolDiagnosticKind::MalformedDescriptor
+            },
+        ]
+    );
+    assert!(matches!(
+        client
+            .call_tool(&tools[0], json!({"query":"x"}), None, &|| true)
+            .await,
+        Err(McpStreamableHttpError::SchemaDrift)
+    ));
+    let mut unsupported_output = tools[0].clone();
+    unsupported_output.output_schema = Some(json!({"not":{"type":"null"}}));
+    assert!(matches!(
+        client
+            .call_tool(&unsupported_output, json!({"query":null}), None, &|| true)
+            .await,
+        Err(McpStreamableHttpError::SchemaDrift)
+    ));
+    assert_eq!(
+        server.requests().len(),
+        3,
+        "invalid contracts never reach tools/call"
+    );
+    assert!(matches!(
+        client
+            .call_tool(&tools[0], json!({"query":null}), None, &|| true)
+            .await,
+        Err(McpStreamableHttpError::SchemaDrift)
+    ));
+    let result = client
+        .call_tool(&tools[0], json!({"query":"ok"}), None, &|| true)
+        .await
+        .expect("valid call after rejected output");
+    assert_eq!(result.structured_content, Some(json!({"count":2})));
+    assert_eq!(server.requests().len(), 5);
+}
+
+#[tokio::test]
+async fn streamable_http_rejected_descriptors_still_consume_discovery_limits() {
+    let unsupported = json!({"name":"unsupported","inputSchema":{"not":{"type":"null"}}});
+    let (client, _) = connect_fixture(vec![
+        FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false)),
+        FixtureResponse::empty(202),
+        FixtureResponse::json(200, json!({
+            "jsonrpc":"2.0","id":2,"result":{"tools":vec![unsupported; MAX_TOOLS],"nextCursor":"next"}
+        }).to_string()),
+        FixtureResponse::json(200, json!({
+            "jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"valid","inputSchema":{"type":"object"}}]}
+        }).to_string()),
+    ], McpRemoteClientCapabilities::empty()).await;
+    assert!(matches!(
+        client.list_tools().await,
+        Err(McpStreamableHttpError::InvalidPagination)
+    ));
+    assert_eq!(client.tool_discovery_diagnostics().await.len(), MAX_TOOLS);
+}
+
+#[tokio::test]
 async fn streamable_http_pagination_rejects_empty_repeated_page_and_tool_caps() {
     for pages in [
         vec![json!({"tools":[],"nextCursor":""})],

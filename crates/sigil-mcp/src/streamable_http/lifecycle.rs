@@ -41,6 +41,7 @@ struct ClientState {
     list_change_pending: bool,
     last_list_change_accepted: Option<tokio::time::Instant>,
     active_form: bool,
+    tool_discovery_diagnostics: Vec<McpRemoteToolDiagnostic>,
 }
 
 enum StreamedSseMode {
@@ -235,6 +236,7 @@ impl McpStreamableHttpClient {
                 list_change_pending: false,
                 last_list_change_accepted: None,
                 active_form: false,
+                tool_discovery_diagnostics: Vec::new(),
             }),
         });
         instance.initialize().await?;
@@ -381,9 +383,12 @@ impl McpStreamableHttpClient {
 
     pub async fn list_tools(&self) -> Result<Vec<McpRemoteTool>, McpStreamableHttpError> {
         self.ensure_ready_for_new_operation().await?;
+        self.state.lock().await.tool_discovery_diagnostics.clear();
         let mut cursor = None::<String>;
         let mut seen = BTreeSet::new();
         let mut tools = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut observed_tools = 0usize;
         let mut total_bytes = 0usize;
         for _ in 0..MAX_PAGES {
             let params = cursor
@@ -403,16 +408,30 @@ impl McpStreamableHttpClient {
                 )
                 .ok_or(McpStreamableHttpError::InvalidPagination)?;
             if total_bytes > self.limits.max_body_bytes
-                || tools.len().saturating_add(page.len()) > MAX_TOOLS
+                || observed_tools.saturating_add(page.len()) > MAX_TOOLS
             {
                 return Err(McpStreamableHttpError::InvalidPagination);
             }
             for tool in page {
-                let parsed: McpRemoteTool = serde_json::from_value(tool.clone())
-                    .map_err(|_| McpStreamableHttpError::MalformedEnvelope)?;
-                parsed.validate()?;
-                tools.push(parsed);
+                let tool_index = observed_tools;
+                observed_tools += 1;
+                let diagnostic = match serde_json::from_value::<McpRemoteTool>(tool.clone()) {
+                    Ok(parsed) => match parsed.validate() {
+                        Ok(()) => {
+                            tools.push(parsed);
+                            continue;
+                        }
+                        Err(_) => McpRemoteToolDiagnosticKind::UnsupportedContract,
+                    },
+                    Err(_) => McpRemoteToolDiagnosticKind::MalformedDescriptor,
+                };
+                tracing::warn!(tool_index, ?diagnostic, "MCP tool excluded from discovery");
+                diagnostics.push(McpRemoteToolDiagnostic {
+                    tool_index,
+                    kind: diagnostic,
+                });
             }
+            self.state.lock().await.tool_discovery_diagnostics = diagnostics.clone();
             let next = match result.get("nextCursor") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(value)) if value.len() <= 4096 => Some(value.as_str()),
@@ -427,6 +446,12 @@ impl McpStreamableHttpClient {
             }
         }
         Err(McpStreamableHttpError::InvalidPagination)
+    }
+
+    /// Returns bounded diagnostics from the latest discovery pass. Unsupported descriptors are
+    /// isolated, while every returned tool still passes input and output contract validation.
+    pub async fn tool_discovery_diagnostics(&self) -> Vec<McpRemoteToolDiagnostic> {
+        self.state.lock().await.tool_discovery_diagnostics.clone()
     }
 
     pub async fn call_tool(
@@ -455,6 +480,7 @@ impl McpStreamableHttpClient {
         body_observer: Option<Arc<dyn McpRequestBodyObserver>>,
     ) -> Result<McpCallToolResult, McpStreamableHttpError> {
         self.ensure_ready_for_new_operation().await?;
+        tool.validate()?;
         let input = CompiledMcpSchema::compile(&tool.input_schema)?;
         input.validate(&arguments)?;
         let id = self.next_id().await?;
