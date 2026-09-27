@@ -1,5 +1,6 @@
 [[mcp_servers]]
 name = "filesystem"
+description = "Read and inspect files exposed by this configured server."
 transport = "stdio"
 command = "node"
 args = ["/absolute/path/to/server.js"]

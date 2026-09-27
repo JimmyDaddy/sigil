@@ -137,6 +137,7 @@ pub(crate) fn execute_mcp_command(config_path: &Path, command: McpCommand) -> Re
             };
             let server = McpServerConfig {
                 name: name.clone(),
+                description: String::new(),
                 transport,
                 startup_timeout_secs: 10,
                 required,

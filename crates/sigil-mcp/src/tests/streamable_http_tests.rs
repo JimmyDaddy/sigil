@@ -1674,6 +1674,7 @@ while True:
         &mut registry,
         &[McpServerConfig {
             name: "equiv".to_owned(),
+            description: String::new(),
             transport: McpServerTransportConfig::Stdio {
                 command: "python3".to_owned(),
                 args: vec![script.to_string_lossy().into_owned()],

@@ -2167,6 +2167,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) {
+    crate::mcp_catalog::register_mcp_catalog(registry, root_config);
     if !root_config
         .composition
         .allows(sigil_kernel::OptionalCapability::Mcp)
@@ -2300,7 +2301,7 @@ struct McpActivateServerTool {
 fn mcp_activation_tool_spec() -> ToolSpec {
     ToolSpec {
         name: "mcp_activate_server".to_owned(),
-        description: "Activate a configured lazy MCP server so its real tools become available on the next model turn."
+        description: "Activate a configured lazy MCP server so its real tools become available on the next model turn. Use mcp_catalog list_servers if its exact configured name or purpose is unknown; discovery does not start a process or grant approval."
             .to_owned(),
         input_schema: json!({
             "type": "object",

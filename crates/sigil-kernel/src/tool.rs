@@ -48,6 +48,17 @@ pub struct ToolSpec {
     pub preview: ToolPreviewCapability,
 }
 
+/// Read-only description of one currently visible tool registration.
+///
+/// The revision identifies this registration and its exact specification. It is discovery data,
+/// never an invocation grant; callers still execute through the ordinary permission boundary.
+#[derive(Debug, Clone)]
+pub struct ToolCatalogEntry {
+    pub spec: ToolSpec,
+    pub revision: String,
+    pub lifecycle_owner: Option<ToolLifecycleOwner>,
+}
+
 /// Role-specific tool visibility and execution scope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -590,6 +601,7 @@ pub struct ToolContext {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     session_scope_id: Option<String>,
     logical_run_id: Option<String>,
+    invocation_registry: Option<WeakToolRegistry>,
     tool_artifact_store: Option<ToolArtifactStore>,
     tool_artifact_read_budget: Option<ToolArtifactReadBudgetV1>,
     tool_artifact_source_authorizations:
@@ -675,6 +687,7 @@ impl ToolContext {
             user_url_capability_registrar: None,
             session_scope_id: None,
             logical_run_id: None,
+            invocation_registry: None,
             tool_artifact_store: None,
             tool_artifact_read_budget: None,
             tool_artifact_source_authorizations: Arc::new(BTreeMap::new()),
@@ -692,6 +705,23 @@ impl ToolContext {
             cancellation: None,
             agent_invocation_grant: None,
         }
+    }
+
+    /// Reads discovery metadata through the exact registry scope executing this call.
+    ///
+    /// This view cannot register or invoke tools. An unbound context cannot fall back to the
+    /// registry captured when a discovery tool was originally registered.
+    pub fn visible_tool_catalog(&self) -> Result<Vec<ToolCatalogEntry>> {
+        self.invocation_registry
+            .as_ref()
+            .and_then(WeakToolRegistry::upgrade)
+            .ok_or_else(|| anyhow!("tool discovery requires the current invocation registry"))?
+            .catalog_entries()
+    }
+
+    fn with_invocation_registry(mut self, registry: &ToolRegistry) -> Self {
+        self.invocation_registry = Some(registry.downgrade());
+        self
     }
 
     /// Creates the fail-closed execution context for a configured eager network startup.
@@ -2993,6 +3023,7 @@ pub struct ToolRegistry {
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     invocation_gate: Arc<ToolInvocationGate>,
+    catalog_generation: String,
 }
 
 impl RegisteredTool {
@@ -3000,6 +3031,7 @@ impl RegisteredTool {
         Self {
             tool,
             invocation_gate: Arc::new(ToolInvocationGate::default()),
+            catalog_generation: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -3227,7 +3259,9 @@ impl ResolvedToolInvocation {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
-        let ctx = ctx.with_execution_mutation_profile_recorded(call.id.clone());
+        let ctx = ctx
+            .with_execution_mutation_profile_recorded(call.id.clone())
+            .with_invocation_registry(registry);
         let workspace_frontier = registry.validate_agent_invocation_grant(&ctx)?;
         ensure_execution_mutation_profile_recorded(
             &ctx,
@@ -3572,6 +3606,26 @@ impl ToolRegistry {
             .collect()
     }
 
+    fn catalog_entries(&self) -> Result<Vec<ToolCatalogEntry>> {
+        let tools = self
+            .tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tools
+            .iter()
+            .filter(|(name, _)| self.allows(name))
+            .map(|(_, registration)| {
+                let spec = registration.tool.spec();
+                let material = serde_json::to_vec(&(&registration.catalog_generation, &spec))?;
+                Ok(ToolCatalogEntry {
+                    spec,
+                    revision: format!("{:x}", Sha256::digest(material)),
+                    lifecycle_owner: registration.tool.lifecycle_owner(),
+                })
+            })
+            .collect()
+    }
+
     /// Returns the resolved contract and mutation evidence strategy for every visible tool.
     ///
     /// Admission checks use this instead of tool-name allowlists so a same-name replacement with
@@ -3689,6 +3743,7 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
+        let ctx = ctx.with_invocation_registry(self);
         let invocation = self.resolve_invocation(&call.name)?;
         let tool = Arc::clone(&invocation.tool);
         let spec = invocation.contract.spec.clone();

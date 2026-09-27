@@ -2109,3 +2109,79 @@ fn tool_contract_exposes_only_the_single_permission_plan_path() {
         );
     }
 }
+
+struct CatalogReaderFixture;
+
+#[async_trait]
+impl Tool for CatalogReaderFixture {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "catalog_reader".to_owned(),
+            description: "Read the invoking registry scope".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        let names = ctx
+            .visible_tool_catalog()?
+            .into_iter()
+            .map(|entry| entry.spec.name)
+            .collect::<Vec<_>>();
+        Ok(ToolResult::ok(
+            call_id,
+            "catalog_reader",
+            serde_json::to_string(&names)?,
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn resolved_tool_catalog_is_bound_to_current_invocation_scope() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(CatalogReaderFixture));
+    registry.register(Arc::new(NamedRegistryTool("hidden_fixture")));
+    let scoped = registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            ["catalog_reader"],
+            std::iter::empty::<&str>(),
+        ))
+        .into_registry();
+    let resolved = scoped.resolve_invocation("catalog_reader")?;
+    let result = resolved
+        .execute_after_started_audit(
+            &scoped,
+            ToolContext::new(fixture.path(), 5),
+            ToolCall {
+                id: "catalog-read".to_owned(),
+                name: "catalog_reader".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&result.content)?,
+        ["catalog_reader"]
+    );
+    assert!(
+        ToolContext::new(fixture.path(), 5)
+            .visible_tool_catalog()
+            .is_err()
+    );
+    Ok(())
+}

@@ -98,6 +98,7 @@ mod conversation_display_tests;
 #[path = "tests/session_title_tests.rs"]
 mod session_title_tests;
 
+mod mcp_catalog; // bounded, process-free MCP configuration and tool discovery.
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod orchestration_guard; // route-local hard-invariant rollback and durable observation.
 mod orchestration_rollout; // release-qualified new-install orchestration defaults.

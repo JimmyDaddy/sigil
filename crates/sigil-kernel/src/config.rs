@@ -3470,6 +3470,8 @@ impl CompactionThresholdStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     pub name: String,
+    /// Optional user-authored discovery text. This is model-visible data, not execution policy.
+    pub description: String,
     pub transport: McpServerTransportConfig,
     pub startup_timeout_secs: u64,
     pub required: bool,
@@ -3481,6 +3483,7 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            description: String::new(),
             transport: McpServerTransportConfig::Stdio {
                 command: String::new(),
                 args: Vec::new(),
@@ -3572,6 +3575,8 @@ pub enum McpRemoteClientCapability {
 enum McpServerConfigWire {
     Stdio {
         name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        description: String,
         command: String,
         #[serde(default)]
         args: Vec<String>,
@@ -3593,6 +3598,8 @@ enum McpServerConfigWire {
     },
     StreamableHttp {
         name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        description: String,
         url: String,
         #[serde(default)]
         http_headers: BTreeMap<String, String>,
@@ -3628,6 +3635,7 @@ impl Serialize for McpServerConfig {
                 inherit_env,
             } => McpServerConfigWire::Stdio {
                 name: self.name.clone(),
+                description: self.description.clone(),
                 command: command.clone(),
                 args: args.clone(),
                 inherit_env: inherit_env.clone(),
@@ -3639,6 +3647,7 @@ impl Serialize for McpServerConfig {
             McpServerTransportConfig::StreamableHttp(config) => {
                 McpServerConfigWire::StreamableHttp {
                     name: self.name.clone(),
+                    description: self.description.clone(),
                     url: config.url.clone(),
                     http_headers: config.http_headers.clone(),
                     env_http_headers: config.env_http_headers.clone(),
@@ -3664,6 +3673,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
         match McpServerConfigWire::deserialize(deserializer)? {
             McpServerConfigWire::Stdio {
                 name,
+                description,
                 command,
                 args,
                 inherit_env,
@@ -3674,6 +3684,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             } => {
                 let config = Self {
                     name,
+                    description,
                     transport: McpServerTransportConfig::Stdio {
                         command,
                         args,
@@ -3689,6 +3700,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             }
             McpServerConfigWire::StreamableHttp {
                 name,
+                description,
                 url,
                 http_headers,
                 env_http_headers,
@@ -3708,6 +3720,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                 }
                 let config = Self {
                     name,
+                    description,
                     transport: McpServerTransportConfig::StreamableHttp(McpStreamableHttpConfig {
                         url,
                         http_headers,

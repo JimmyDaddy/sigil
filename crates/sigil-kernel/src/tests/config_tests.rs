@@ -3002,3 +3002,25 @@ fn resolve_workspace_root_uses_current_directory_when_config_has_no_parent() {
         Path::new("nested/workspace")
     );
 }
+
+#[test]
+fn mcp_server_description_is_optional_and_roundtrips_without_changing_transport()
+-> anyhow::Result<()> {
+    for transport in [
+        "transport = \"stdio\"\ncommand = \"python3\"",
+        "transport = \"streamable_http\"\nurl = \"https://example.test/mcp\"",
+    ] {
+        let base = format!("name = \"records\"\n{transport}\n");
+        let omitted: crate::McpServerConfig = toml::from_str(&base)?;
+        assert!(omitted.description.is_empty());
+        assert!(!toml::to_string(&omitted)?.contains("description"));
+        let described: crate::McpServerConfig = toml::from_str(&format!(
+            "{base}description = \"Inspect record metadata\"\n"
+        ))?;
+        assert_eq!(described.transport, omitted.transport);
+        assert_eq!(described.description, "Inspect record metadata");
+        let decoded: crate::McpServerConfig = toml::from_str(&toml::to_string(&described)?)?;
+        assert_eq!(decoded, described);
+    }
+    Ok(())
+}

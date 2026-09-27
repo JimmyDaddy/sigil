@@ -294,3 +294,69 @@ credential = { source = "none" }
     )?;
     Ok(())
 }
+
+#[test]
+fn mcp_add_omits_empty_description_and_preserves_existing_purpose_on_update() -> Result<()> {
+    let fixture = tempdir()?;
+    let path = fixture.path().join("sigil.toml");
+    write_config(&path)?;
+    let mut original = fs::read_to_string(&path)?;
+    original.push_str(
+        r#"
+[[mcp_servers]]
+name = "documented"
+description = "Read repository documentation"
+transport = "stdio"
+command = "not-launched-by-config-management"
+startup = "lazy"
+required = false
+"#,
+    );
+    fs::write(&path, original)?;
+
+    execute_mcp_command(
+        &path,
+        McpCommand::Add {
+            name: "new-server".to_owned(),
+            url: None,
+            bearer_token_env_var: None,
+            inherit_env: Vec::new(),
+            required: false,
+            startup: McpStartupArg::Lazy,
+            command: vec!["not-launched-by-config-management".to_owned()],
+        },
+    )?;
+    let saved = fs::read_to_string(&path)?;
+    let document: toml::Value = toml::from_str(&saved)?;
+    let servers = document["mcp_servers"]
+        .as_array()
+        .expect("persisted MCP server array");
+    assert_eq!(
+        servers[0]["description"].as_str(),
+        Some("Read repository documentation")
+    );
+    assert!(
+        servers[1].get("description").is_none(),
+        "the CLI's omitted display field should stay optional in persisted config"
+    );
+    let loaded = RootConfig::load(&path)?;
+    assert_eq!(
+        loaded.mcp_servers[0].description,
+        "Read repository documentation"
+    );
+    assert!(loaded.mcp_servers[1].description.is_empty());
+    let listed = execute_mcp_command(&path, McpCommand::List { json: true })?;
+    let listed: serde_json::Value = serde_json::from_str(&listed)?;
+    assert_eq!(listed.as_array().expect("MCP summary array").len(), 2);
+    execute_mcp_command(
+        &path,
+        McpCommand::Remove {
+            name: "new-server".to_owned(),
+        },
+    )?;
+    assert_eq!(
+        RootConfig::load(&path)?.mcp_servers[0].description,
+        "Read repository documentation"
+    );
+    Ok(())
+}

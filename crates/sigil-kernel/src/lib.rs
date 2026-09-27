@@ -865,16 +865,17 @@ pub use terminal_task::{
 pub use time::saturating_elapsed;
 pub use tool::{
     DeclaredToolPermissionFacts, NetworkEffect, PreparedToolAuditBinding, PreparedToolCall,
-    PreparedToolExecution, ScopedToolRegistry, Tool, ToolAccess, ToolCapability, ToolCategory,
-    ToolConcurrencyClass, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolError,
-    ToolErrorKind, ToolExecutionGuardError, ToolExecutionId, ToolLifecycleOwner,
-    ToolLifecycleRetirement, ToolMutationTracking, ToolPreparation, ToolPreparationBinding,
-    ToolPreparationDraft, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink,
-    ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry,
-    ToolRegistryScope, ToolReplayClassV1, ToolReplayContractV1, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolResultSummary, ToolRuntimeContract, ToolSpec, ToolSubject,
-    ToolSubjectKind, ToolSubjectScope, WeakToolRegistry, declared_tool_permission_plan,
+    PreparedToolExecution, ScopedToolRegistry, Tool, ToolAccess, ToolCapability, ToolCatalogEntry,
+    ToolCategory, ToolConcurrencyClass, ToolContext, ToolDiffBudget, ToolDiffStats,
+    ToolEgressAudit, ToolError, ToolErrorKind, ToolExecutionGuardError, ToolExecutionId,
+    ToolLifecycleOwner, ToolLifecycleRetirement, ToolMutationTracking, ToolPreparation,
+    ToolPreparationBinding, ToolPreparationDraft, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolProgressEvent,
+    ToolProgressSink, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
+    ToolRegistry, ToolRegistryScope, ToolReplayClassV1, ToolReplayContractV1, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolRuntimeContract, ToolSpec,
+    ToolSubject, ToolSubjectKind, ToolSubjectScope, WeakToolRegistry,
+    declared_tool_permission_plan,
 };
 pub use user_input::{
     AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION, AgentUserInputRouteEntryV1,
