@@ -82,6 +82,17 @@ export interface DesktopProviderFixture {
   readonly baseUrl: string;
 }
 
+// The real chat adapter may encode ordinary text using multimodal content parts.
+function fixtureMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((part: unknown) => {
+    if (part === null || typeof part !== "object") return [];
+    const block = part as { type?: unknown; text?: unknown };
+    return block.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n");
+}
+
 export async function startDesktopProviderFixture(): Promise<DesktopProviderFixture> {
   const requestCounts = new Map<string, number>();
   let holdNextDirect = false;
@@ -135,7 +146,10 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
 
       rawBody = await readRequestBody(request);
       const payload = JSON.parse(rawBody) as ChatCompletionRequest;
-      const messages = payload.messages ?? [];
+      const messages = (payload.messages ?? []).map((message) => ({
+        ...message,
+        content: fixtureMessageText(message.content),
+      }));
       const lastMessage = messages.at(-1);
       const requestText = messages
         .map((message) => typeof message.content === "string" ? message.content : "")

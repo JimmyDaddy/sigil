@@ -1989,6 +1989,12 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
 
 /// Sink for run events emitted by the agent loop.
 pub trait EventHandler {
+    /// Returns the current public run label for process-local timing correlation only.
+    /// It does not grant execution, publication, continuation, or cancellation authority.
+    fn diagnostic_run_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Binds subsequent live previews to an already admitted physical provider attempt.
     /// This notification carries no publication, replay, or execution authority.
     fn begin_live_attempt(&mut self, _physical_attempt_id: &str) -> Result<()> {

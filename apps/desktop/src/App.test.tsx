@@ -1,3 +1,4 @@
+import { createHash, webcrypto } from "node:crypto";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +32,7 @@ import type {
 } from "./types";
 import { Icon } from "./ui/icons";
 import { readLastSession, writeLastSession } from "./preferences";
+import { rendererRunTimings } from "./features/support/runTimings";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
@@ -38,6 +40,7 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   if (originalMatchMedia === undefined) delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
   else Object.defineProperty(window, "matchMedia", originalMatchMedia);
 });
@@ -1198,7 +1201,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("Review one setting.")).toBeTruthy();
     expect(screen.getByText("credentials")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Save private report" }));
-    await waitFor(() => expect(exportSupportBundle).toHaveBeenCalledWith(workspace.id));
+    await waitFor(() => expect(exportSupportBundle).toHaveBeenCalledWith(workspace.id, expect.any(Array)));
     expect(await screen.findByText("Support report saved")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back to settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
@@ -5295,9 +5298,11 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     await user.type(composer, "Show immediate feedback");
+    const randomId = vi.spyOn(crypto, "randomUUID").mockImplementation(() => { throw new Error("diagnostic crypto unavailable"); });
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(startRun).toHaveBeenCalledOnce();
+    randomId.mockRestore();
     expect(screen.getByText("Starting task")).toBeTruthy();
     const timeline = screen.getByRole("log", { name: "Conversation timeline" });
     expect(within(timeline).getByText("Show immediate feedback")).toBeTruthy();
@@ -6373,6 +6378,7 @@ describe("desktop workspace and history shell", () => {
   });
 
   it.each(["accepted", "failed"] as const)("restores paused Task controls and shows a pending continuation (%s)", async (outcome) => {
+    vi.stubGlobal("crypto", webcrypto);
     const user = userEvent.setup();
     const request = deferred<Awaited<ReturnType<DesktopBridge["continueTask"]>>>();
     const continueTask = vi.fn<DesktopBridge["continueTask"]>(() => request.promise);
@@ -6456,6 +6462,9 @@ describe("desktop workspace and history shell", () => {
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
     } else {
       await screen.findByRole("button", { name: "Stop run" });
+      const runKey = createHash("sha256").update("run-task-restarted").digest("hex");
+      const timings = (await rendererRunTimings(workspace.id)).filter((entry) => entry.runKey === runKey);
+      expect(timings.map((entry) => entry.phase)).toEqual(expect.arrayContaining(["input_accepted", "admission"]));
     }
   });
 
@@ -7381,4 +7390,46 @@ it("sends image-only input through the conversation panel and retains it after m
   expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
   expect(releaseImages).not.toHaveBeenCalled();
   expect(await screen.findByText("Choose an image-capable model to send these images. Your draft is preserved.")).toBeTruthy();
+});
+
+it.each(["retired", "terminal"] as const)("A1 records only visible accepted content after %s events", async (boundary) => {
+  vi.stubGlobal("crypto", webcrypto);
+  const user = userEvent.setup();
+  const runId = `a1-accepted-content-${boundary}`;
+  let eventListener: ((event: TimelineEvent) => void) | undefined;
+  const bridge = bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    startRun: async (_workspaceId, sessionId) => ({ id: runId, sessionId, status: "running", permissionMode: "manual", streamSequence: 0 }),
+    subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
+  });
+  render(<App bridge={bridge} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await user.type(await readyComposer(), "Observe only actual content");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByRole("button", { name: "Stop run" });
+  await waitFor(() => expect(eventListener).toBeDefined());
+  const emit = (overrides: Partial<TimelineEvent>) => act(() => eventListener?.({
+    workspaceId: workspace.id, sessionId: "http-session-new", runId, sequence: 0,
+    runSequence: "0", kind: "other", replayable: false, ...overrides,
+  }));
+  emit({ kind: "run_started", sequence: 3, runSequence: "3", replayable: true });
+  emit({ kind: "assistant_delta", runSequence: "3", text: "", livePreview: {
+    attemptId: "retired-attempt", slotId: "text", revision: "1", baseSequence: "3", truncated: false,
+  } });
+  emit({ kind: boundary === "terminal" ? "run_cancelled" : "provider_turn_partial_output_discarded", sequence: 4, runSequence: "4", replayable: true });
+  emit({ kind: "assistant_delta", runSequence: "4", text: "late rejected output", livePreview: {
+    attemptId: "retired-attempt", slotId: "text", revision: "2", baseSequence: "4", truncated: false,
+  } });
+  expect(screen.queryByText("late rejected output")).toBeNull();
+  const runKey = createHash("sha256").update(runId).digest("hex");
+  const observations = async () => (await rendererRunTimings(workspace.id)).filter((entry) => entry.runKey === runKey);
+  expect((await observations()).some((entry) => entry.phase === "first_content")).toBe(false);
+  if (boundary === "retired") {
+    emit({ kind: "assistant_delta", runSequence: "4", text: "new accepted output", livePreview: {
+      attemptId: "new-attempt", slotId: "text", revision: "3", baseSequence: "4", truncated: false,
+    } });
+    await screen.findByText("new accepted output");
+    expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
+  }
 });

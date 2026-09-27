@@ -219,6 +219,12 @@ impl ChannelEventHandler {
 }
 
 impl EventHandler for ChannelEventHandler {
+    fn diagnostic_run_id(&self) -> Option<&str> {
+        self.public_run_identity
+            .as_ref()
+            .map(|(_, run_id, _)| run_id.as_str())
+    }
+
     fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
         if let Some(recorder) = &self.recorder {
             recorder

@@ -8,6 +8,7 @@ import { Icon, type IconName } from "../../ui/icons";
 import { Button } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ControlLogRecoveryCard } from "./ControlLogRecoveryCard";
+import { rendererRunTimings } from "./runTimings";
 
 const ISSUE_TRACKER_URL = "https://github.com/JimmyDaddy/sigil/issues";
 
@@ -47,7 +48,7 @@ export function SupportPage({
   const saveReport = async () => {
     setSaving(true);
     try {
-      const result = await bridge.exportSupportBundle(workspaceId);
+      const result = await bridge.exportSupportBundle(workspaceId, await rendererRunTimings(workspaceId));
       if (!result.cancelled) {
         notify({
           tone: "success",
@@ -86,7 +87,7 @@ export function SupportPage({
             type="button"
             variant="primary"
             leadingIcon={<Icon name="download" />}
-            disabled={saving || report === undefined}
+            disabled={saving}
             onClick={() => void saveReport()}
           >
             {saving ? t("savingSupportReport") : t("saveSupportReport")}

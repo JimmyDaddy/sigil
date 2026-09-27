@@ -10,6 +10,7 @@ use crate::slash::ResolvedSlashCommand;
 impl AppState {
     pub(crate) fn begin_run_submission_intent(&mut self) {
         self.runtime.run_submission_intent = std::sync::Arc::new(());
+        self.runtime.submission_timing = Some(super::run_timing::SubmissionTiming::new());
     }
 
     pub(crate) fn restore_unadmitted_run_input(&mut self, action: &AppAction) {

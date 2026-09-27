@@ -2154,3 +2154,75 @@ fn queue_operation_refusals_leave_the_foreground_worker_running() -> Result<()> 
     worker.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn tui_run_preparation_timings_share_the_actual_public_run_identity() -> Result<()> {
+    use sigil_kernel::run_diagnostics::{RunTimingPhase, run_timing_key, run_timing_snapshot};
+    if super::common::run_timing_case_in_own_process(
+        "runner::tests::basic_tests::tui_run_preparation_timings_share_the_actual_public_run_identity",
+    )? {
+        return Ok(());
+    }
+    let before = run_timing_snapshot();
+    assert!(before.available);
+    assert_eq!(before.dropped, 0);
+    assert!(
+        before.observations.is_empty(),
+        "only this run may record in the child"
+    );
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("timed response".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let worker = spawn_test_worker(
+        root_config,
+        workspace_root.join("session-timed.jsonl"),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "diagnostic fixture prompt".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let live_source = recv_live_source_before_started(&worker)?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    assert!(
+        matches!(finished, WorkerMessage::RunFinished { ref result, .. } if result.final_text == "timed response")
+    );
+    worker.shutdown()?;
+    let key = run_timing_key(live_source.run_id());
+    let snapshot = run_timing_snapshot();
+    assert!(snapshot.available);
+    assert_eq!(snapshot.process_instance, before.process_instance);
+    assert_eq!(
+        snapshot.dropped, 0,
+        "the isolated real run must retain its observations"
+    );
+    let phases: Vec<_> = snapshot
+        .observations
+        .iter()
+        .filter(|item| item.run_key == key)
+        .map(|item| item.phase)
+        .collect();
+    for phase in [
+        RunTimingPhase::Preparation,
+        RunTimingPhase::SessionPreparation,
+        RunTimingPhase::RequestContext,
+        RunTimingPhase::ProviderDispatch,
+    ] {
+        assert_eq!(
+            phases.iter().filter(|observed| **observed == phase).count(),
+            1,
+            "{phase:?}: {phases:?}"
+        );
+    }
+    let encoded = serde_json::to_string(&snapshot)?;
+    assert!(!encoded.contains("diagnostic fixture prompt"));
+    assert!(!encoded.contains(live_source.run_id()));
+    println!("A1_TUI_RUN_TIMINGS preparation=1 session=1 context=1 dispatch=1 completed=true");
+    Ok(())
+}

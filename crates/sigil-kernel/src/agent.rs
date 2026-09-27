@@ -2324,6 +2324,10 @@ where
         if root_logical_run_id.trim().is_empty() {
             return Err(anyhow!("user-input root logical run id is empty"));
         }
+        let diagnostic_run_id = handler
+            .diagnostic_run_id()
+            .unwrap_or(&root_logical_run_id)
+            .to_owned();
         if let Some(delegate) = agent_delegate.as_deref_mut() {
             delegate.begin_result_context();
             delegate.set_root_logical_run_id(Some(&logical_run_id));
@@ -2621,6 +2625,7 @@ where
                     handler,
                     cancellation.as_ref(),
                     provider_stream::ProviderTurnDispatchContext {
+                        diagnostic_run_id: &diagnostic_run_id,
                         hosted_processor: current_hosted_processor.as_ref(),
                         hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle.as_ref(),
                         initial_physical_attempt_id: current_provider_physical_attempt_id
@@ -5727,6 +5732,14 @@ fn commit_tool_execution<H, A>(
 where
     H: EventHandler,
 {
+    crate::run_diagnostics::record_run_timing(
+        context
+            .handler
+            .diagnostic_run_id()
+            .unwrap_or(context.root_logical_run_id),
+        crate::run_diagnostics::RunTimingPhase::ToolExecution,
+        execution_started.elapsed(),
+    );
     let settlement = (|| -> Result<()> {
         if let Some(binding) = prepared_audit_binding {
             attach_prepared_tool_audit_binding(&mut result, binding)?;

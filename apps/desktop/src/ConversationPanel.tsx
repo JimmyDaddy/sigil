@@ -17,6 +17,7 @@ import { ConversationRecoveryPanel } from "./ConversationRecoveryPanel";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { IntentStackInspector } from "./IntentStackInspector";
+import { beginSubmissionTiming, bindSubmissionRun, observeFeedbackFrame, observeRunTiming, observeCommittedRunTimings, retireRunTiming } from "./features/support/runTimings";
 import { useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import type { ReadMessageContent } from "./MessageContentPager";
@@ -346,6 +347,12 @@ export function ConversationPanel({
   const catalogChangeReportedRunId = useRef<string | undefined>(undefined);
   const catalogRefreshTimers = useRef<number[]>([]);
   const startRunPendingRef = useRef(false);
+  const submissionTimingRef = useRef<ReturnType<typeof beginSubmissionTiming> | undefined>(undefined);
+  useEffect(() => {
+    if (submitting && submissionTimingRef.current !== undefined) {
+      return observeFeedbackFrame(submissionTimingRef.current);
+    }
+  }, [submitting]);
   const retryableRunStartRef = useRef<RetryableRunStartRequest | undefined>(undefined);
   const markTimelineScrollIntent = useCallback(() => {
     timelineUserScrollIntentUntil.current =
@@ -1373,9 +1380,14 @@ export function ConversationPanel({
       && continuityState.refreshState === "idle"
     ) {
       canonicalSettlementCandidate.current = undefined;
+      retireRunTiming(workspaceId, candidate);
       dispatchLiveEvent({ type: "run_discarded", sessionId: session.id, runId: candidate });
     }
-  }, [continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id]);
+  }, [continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id, workspaceId]);
+
+  useEffect(() => {
+    if (liveEventState.sessionId === session.id) observeCommittedRunTimings(workspaceId, liveEventState);
+  }, [liveEventState, session.id, workspaceId]);
 
   const readMessageContent = useCallback<ReadMessageContent>(
     (request, signal) => bridge.messageContent(workspaceId, session.id, request, signal),
@@ -1646,6 +1658,8 @@ export function ConversationPanel({
       : runContext?.extensionCatalog.skills.find(
         (skill) => skill.binding?.skillId === skillBinding.skillId,
       );
+    const submissionTiming = beginSubmissionTiming(workspaceId);
+    submissionTimingRef.current = submissionTiming;
     setSubmitting(true);
     startRunPendingRef.current = true;
     try {
@@ -1723,6 +1737,7 @@ export function ConversationPanel({
         runRequest.imageHandles,
       );
       activeRunIdRef.current = started.id;
+      bindSubmissionRun(submissionTiming, started.id);
       startedRunProjectionExpected.current = started.id;
       setPendingPrompt((current) => current === undefined ? current : { ...current, runId: started.id });
       setRun(started);
@@ -1762,6 +1777,7 @@ export function ConversationPanel({
 
   const cancel = async () => {
     if (run === undefined || stopControlBlocked || controlBusy) return;
+    observeRunTiming(workspaceId, run.id, "cancellation_requested");
     setControlBusy(true);
     try {
       setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
@@ -1834,6 +1850,8 @@ export function ConversationPanel({
       return false;
     }
     setTaskControlBusy(true);
+    const submissionTiming = beginSubmissionTiming(workspaceId);
+    submissionTimingRef.current = submissionTiming;
     setSubmitting(true);
     startRunPendingRef.current = true;
     try {
@@ -1845,6 +1863,7 @@ export function ConversationPanel({
         guidance,
       );
       activeRunIdRef.current = started.id;
+      bindSubmissionRun(submissionTiming, started.id);
       startedRunProjectionExpected.current = started.id;
       setRun(started);
       setPermissionMode(started.permissionMode);

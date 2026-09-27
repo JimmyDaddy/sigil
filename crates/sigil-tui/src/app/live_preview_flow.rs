@@ -27,6 +27,11 @@ impl AppState {
         if source.session_id() != self.session_id || source.is_terminal() {
             return;
         }
+        if self.runtime.is_busy
+            && let Some(timing) = &mut self.runtime.submission_timing
+        {
+            timing.observe_run(source.run_id());
+        }
         self.live_preview = LivePreviewState {
             session_id: source.session_id().to_owned(),
             run_id: source.run_id().to_owned(),

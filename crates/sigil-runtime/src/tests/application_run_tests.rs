@@ -3319,6 +3319,16 @@ fn public_control_commit_replays_a_failed_delivery_before_a_later_control() -> R
 
 #[test]
 fn public_control_commit_reopens_user_input_projection_without_answer_values() -> Result<()> {
+    check_reopened_user_input_projection(false)
+}
+
+#[test]
+fn deferred_recorder_public_control_commit_reopens_user_input_projection_without_answer_values()
+-> Result<()> {
+    check_reopened_user_input_projection(true)
+}
+
+fn check_reopened_user_input_projection(deferred: bool) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
@@ -3332,13 +3342,6 @@ fn public_control_commit_reopens_user_input_projection_without_answer_values() -
     drop(started);
     let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
     let mut session = Session::load_from_store("custom", "gpt-test", store)?;
-    let mut recorder = RecordingApplicationRunEvents::default();
-    let events = durable_application_event_sequence(
-        session.session_scope_id(),
-        "runtime-user-input-root",
-        &binding.session_log_path,
-    )?;
-    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
     let accepted = UserInputDecisionAcceptedV1::new(
         &requested,
         UserInputCommandId::new("public-control-answer")?,
@@ -3352,15 +3355,15 @@ fn public_control_commit_reopens_user_input_projection_without_answer_values() -
         },
         20,
     )?;
-    EventHandler::commit_controls(
-        &mut bridge,
+    let published = commit_reopened_application_controls(
         &mut session,
+        "runtime-user-input-root",
         vec![UserInputLifecycleEntryV1::DecisionAccepted(Box::new(accepted)).into_control()],
+        deferred,
     )?;
-    drop(bridge);
 
     assert!(matches!(
-        recorder.0.as_slice(),
+        published.as_slice(),
         [PublicRunEvent {
             event: PublicRunEventKind::UserInputChanged {
                 status: UserInputStatusV1::DecisionAccepted,
@@ -3369,22 +3372,22 @@ fn public_control_commit_reopens_user_input_projection_without_answer_values() -
             ..
         }]
     ));
-    assert!(!serde_json::to_string(&recorder.0)?.contains("private answer value"));
+    assert!(!serde_json::to_string(&published)?.contains("private answer value"));
     Ok(())
 }
 
 #[test]
 fn public_control_commit_reopens_integration_context_before_projecting_a_lane() -> Result<()> {
-    #[derive(Default)]
-    struct Recorder(Vec<PublicRunEvent>);
+    check_reopened_integration_projection(false)
+}
 
-    impl ApplicationRunEventHandler for Recorder {
-        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-            self.0.push(event);
-            Ok(())
-        }
-    }
+#[test]
+fn deferred_recorder_public_control_commit_reopens_integration_context_before_projecting_a_lane()
+-> Result<()> {
+    check_reopened_integration_projection(true)
+}
 
+fn check_reopened_integration_projection(deferred: bool) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let mut session =
@@ -3410,16 +3413,9 @@ fn public_control_commit_reopens_integration_context_before_projecting_a_lane() 
             },
         },
     ))?;
-    let mut recorder = Recorder::default();
-    let events = durable_application_event_sequence(
-        session.session_scope_id(),
-        "run-integration-context",
-        &path,
-    )?;
-    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
-    EventHandler::commit_controls(
-        &mut bridge,
+    let published = commit_reopened_application_controls(
         &mut session,
+        "run-integration-context",
         vec![ControlEntry::IntegrationLaneChanged(
             IntegrationLaneChanged {
                 plan_id,
@@ -3435,11 +3431,11 @@ fn public_control_commit_reopens_integration_context_before_projecting_a_lane() 
                 reason: None,
             },
         )],
+        deferred,
     )?;
-    drop(bridge);
 
     assert!(matches!(
-        recorder.0.as_slice(),
+        published.as_slice(),
         [PublicRunEvent {
             event: PublicRunEventKind::IntegrationLaneChanged {
                 task_id,
@@ -3449,7 +3445,164 @@ fn public_control_commit_reopens_integration_context_before_projecting_a_lane() 
             ..
         }] if task_id == "task-integration-context" && status == "ready"
     ));
-    assert!(!serde_json::to_string(&recorder.0)?.contains("refs/private/integration-lane"));
+    assert!(!serde_json::to_string(&published)?.contains("refs/private/integration-lane"));
+    Ok(())
+}
+
+fn commit_reopened_application_controls(
+    session: &mut Session,
+    run_id: &str,
+    controls: Vec<ControlEntry>,
+    deferred: bool,
+) -> Result<Vec<PublicRunEvent>> {
+    let path = session
+        .store_path()
+        .ok_or_else(|| anyhow::anyhow!("missing fixture store"))?
+        .to_path_buf();
+    if deferred {
+        let mut recorder = crate::ApplicationRunEventRecorder::resume(session, run_id)?;
+        let before = recorder.public_sequence()?;
+        EventHandler::commit_controls(&mut recorder, session, controls)?;
+        let records = JsonlSessionStore::read_event_records(&path)?;
+        let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+        let published = projection
+            .events_in_order()
+            .into_iter()
+            .filter(|entry| entry.run_id == run_id && entry.sequence > before)
+            .collect::<Vec<_>>();
+        assert!(!published.is_empty());
+        for entry in &published {
+            assert!(
+                projection
+                    .pending_for_adapter("application")
+                    .iter()
+                    .any(|pending| pending.public_event_id == entry.public_event_id),
+                "a deferred recorder cannot acknowledge application delivery"
+            );
+        }
+        Ok(published
+            .into_iter()
+            .map(|entry| entry.event.clone())
+            .collect())
+    } else {
+        let mut sink = RecordingApplicationRunEvents::default();
+        let events = durable_application_event_sequence(session.session_scope_id(), run_id, &path)?;
+        let mut bridge = PublicApplicationEventBridge::new(events, &mut sink)?;
+        EventHandler::commit_controls(&mut bridge, session, controls)?;
+        drop(bridge);
+        Ok(sink.0)
+    }
+}
+
+#[test]
+fn deferred_recorder_resume_preserves_public_sequence_terminal_and_pending_delivery() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("recorder-resume.jsonl");
+    let mut session = Session::load_from_store("fixture", "model", JsonlSessionStore::new(&path)?)?;
+    let run_id = "recorder-resume-root";
+    let first = crate::ApplicationRunEventRecorder::start(&session, run_id, "inspect")?;
+    assert_eq!(first.public_sequence()?, 1);
+    drop(first);
+    let prefix = std::fs::read(&path)?;
+    let mut resumed = crate::ApplicationRunEventRecorder::resume(&session, run_id)?;
+    assert_eq!(
+        std::fs::read(&path)?,
+        prefix,
+        "resume must not emit or acknowledge events"
+    );
+    assert_eq!(resumed.public_sequence()?, 1);
+    let message = ModelMessage::assistant(Some("current output".to_owned()), Vec::new());
+    EventHandler::commit_session_publications(
+        &mut resumed,
+        &mut session,
+        vec![SessionLogEntry::Assistant(message.clone())],
+        vec![SessionPublicEventProjectionV1::assistant_message(
+            0, message,
+        )],
+    )?;
+    assert_eq!(resumed.public_sequence()?, 2);
+    resumed.finish_blocked(false, "fixture blocked")?;
+    assert_eq!(resumed.public_sequence()?, 3);
+    drop(resumed);
+    let terminal_bytes = std::fs::read(&path)?;
+    let mut terminal = crate::ApplicationRunEventRecorder::resume(&session, run_id)?;
+    assert_eq!(terminal.public_sequence()?, 3);
+    assert!(terminal.live_preview_source().is_terminal());
+    assert!(terminal.begin_live_attempt("late-attempt").is_err());
+    terminal.finish_blocked(false, "must not replace the original terminal")?;
+    assert_eq!(std::fs::read(&path)?, terminal_bytes);
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert_eq!(
+        projection
+            .events_in_order()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(projection.pending_for_adapter("application").len(), 3);
+    assert_eq!(application_conversation_lifecycle(&path)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn deferred_recorder_resume_retains_existing_stream_recovery_boundaries() -> Result<()> {
+    use std::io::Write;
+    for damage in ["partial_tail", "checksum", "missing", "empty"] {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("recorder-recovery.jsonl");
+        let session = Session::load_from_store("fixture", "model", JsonlSessionStore::new(&path)?)?;
+        drop(crate::ApplicationRunEventRecorder::start(
+            &session,
+            "recovery-run",
+            "inspect",
+        )?);
+        let original = std::fs::read(&path)?;
+        match damage {
+            "partial_tail" => std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)?
+                .write_all(b"{\"incomplete\":")?,
+            "checksum" => {
+                let mut lines = String::from_utf8(original.clone())?
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let mut first: serde_json::Value = serde_json::from_str(&lines[0])?;
+                first["record_checksum"] = "0".repeat(64).into();
+                lines[0] = serde_json::to_string(&first)?;
+                std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
+            }
+            "missing" => std::fs::remove_file(&path)?,
+            "empty" => std::fs::write(&path, [])?,
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(&path).ok();
+        let resumed = crate::ApplicationRunEventRecorder::resume(&session, "recovery-run");
+        if damage == "partial_tail" {
+            assert_eq!(resumed?.public_sequence()?, 1);
+            assert!(std::fs::read(&path)?.starts_with(&original));
+            let records = JsonlSessionStore::read_event_records(&path)?;
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.stored_event().event_kind()
+                        == Some(sigil_kernel::DurableEventType::LogTailRecovered))
+            );
+        } else {
+            assert!(
+                resumed.is_err(),
+                "{damage} must not be treated as an empty new stream"
+            );
+            assert_eq!(
+                std::fs::read(&path).ok(),
+                before,
+                "rejected {damage} must remain unchanged"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5337,6 +5490,7 @@ async fn unaudited_application_task_pause_records_interrupted_before_failing() -
         request: pause_request,
         cancellation: ApplicationCancellationTicket {
             request: cancellation_request,
+            started: std::time::Instant::now(),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
             request_recorded: false,
             conversation_start_recorded: false,

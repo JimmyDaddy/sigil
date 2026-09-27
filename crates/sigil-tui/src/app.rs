@@ -33,6 +33,7 @@ mod modal_flow;
 mod mouse_flow;
 mod pending_plan_flow;
 mod plan_revision_editor;
+mod run_timing;
 mod runtime_command_flow;
 mod runtime_status;
 mod runtime_view_flow;
@@ -1292,6 +1293,7 @@ impl AppState {
                 reasoning_effort: initial_reasoning_effort,
                 run_phase: RunPhase::Idle,
                 run_submission_intent: Arc::new(()),
+                submission_timing: None,
                 last_phase_marker: None,
                 balance_snapshot: BalanceSnapshot {
                     status: "pending".to_owned(),
@@ -1455,6 +1457,7 @@ impl AppState {
                 reasoning_effort: ReasoningEffort::Max,
                 run_phase: RunPhase::Idle,
                 run_submission_intent: Arc::new(()),
+                submission_timing: None,
                 last_phase_marker: None,
                 balance_snapshot: BalanceSnapshot {
                     status: "missing auth".to_owned(),

@@ -71,7 +71,7 @@ use crate::{
 
 const DESKTOP_PROTOCOL_VERSION: u16 = 1;
 const MAX_EXTERNAL_URL_BYTES: usize = 2_048;
-const MAX_SUPPORT_BUNDLE_BYTES: usize = 256 * 1024;
+const MAX_SUPPORT_BUNDLE_BYTES: usize = 384 * 1024;
 
 #[tauri::command]
 pub(crate) async fn desktop_recover_control_log(
@@ -260,6 +260,7 @@ pub(crate) async fn desktop_save_provider_default_model(
 pub(crate) async fn desktop_export_support_bundle(
     app: AppHandle,
     workspace_id: String,
+    renderer_timings: Option<Vec<crate::run_timings::RendererRunTiming>>,
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopSupportSaveSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
@@ -267,11 +268,17 @@ pub(crate) async fn desktop_export_support_bundle(
         .manager
         .client(&workspace_id)
         .map_err(project_manager_error)?;
-    let bundle = client
+    let mut bundle = client
         .support_bundle()
         .await
         .map_err(project_client_error)?;
     validate_support_bundle(&bundle.suggested_file_name, &bundle.content)?;
+    if let Some(content) = crate::run_timings::supplement_support_bundle(
+        &bundle.content,
+        renderer_timings.as_deref().unwrap_or_default(),
+    ) {
+        bundle.content = content;
+    }
     let suggested_file_name = bundle.suggested_file_name.clone();
     let (sender, receiver) = oneshot::channel();
     app.dialog()

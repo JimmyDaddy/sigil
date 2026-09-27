@@ -5,6 +5,7 @@ mod image_attachments;
 mod ipc;
 mod recent;
 mod run_streams;
+mod run_timings;
 mod startup;
 mod state;
 mod update;

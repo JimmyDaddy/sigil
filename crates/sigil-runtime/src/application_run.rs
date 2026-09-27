@@ -76,13 +76,12 @@ pub use user_input::{
 // Timing is process-local diagnostics, never execution authority or public conversation content.
 struct PreparationPhaseTimer {
     run_id: String,
-    phase: &'static str,
+    phase: sigil_kernel::run_diagnostics::RunTimingPhase,
     started: Instant,
 }
 
 impl PreparationPhaseTimer {
-    fn new(run_id: &str, phase: &'static str) -> Self {
-        tracing::debug!(target: "sigil_run_latency", run_id, phase, "preparation phase started");
+    fn new(run_id: &str, phase: sigil_kernel::run_diagnostics::RunTimingPhase) -> Self {
         Self {
             run_id: run_id.to_owned(),
             phase,
@@ -93,9 +92,11 @@ impl PreparationPhaseTimer {
 
 impl Drop for PreparationPhaseTimer {
     fn drop(&mut self) {
-        tracing::debug!(target: "sigil_run_latency", run_id = %self.run_id, phase = self.phase,
-            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
-            "preparation phase ended");
+        sigil_kernel::run_diagnostics::record_run_timing(
+            &self.run_id,
+            self.phase,
+            self.started.elapsed(),
+        );
     }
 }
 
@@ -1480,6 +1481,11 @@ impl ApplicationRunControl {
         }
         let requested_timeout = timeout.unwrap_or(DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT);
         let requested_at = Instant::now();
+        sigil_kernel::run_diagnostics::record_run_timing(
+            self.conversation_start.run_id(),
+            sigil_kernel::run_diagnostics::RunTimingPhase::CancellationRequested,
+            Duration::ZERO,
+        );
         let timeout = if requested_at.checked_add(requested_timeout).is_some() {
             requested_timeout
         } else {
@@ -1509,6 +1515,7 @@ impl ApplicationRunControl {
         unblock_approval();
         let ticket = ApplicationCancellationTicket {
             request,
+            started: requested_at,
             deadline,
             request_recorded: append.is_ok(),
             conversation_start_recorded: conversation_start.is_ok(),
@@ -1884,6 +1891,11 @@ impl ApplicationRunControl {
             })
             .context("failed to persist application cancellation terminal")?;
         conversation_start?;
+        sigil_kernel::run_diagnostics::record_run_timing(
+            self.conversation_start.run_id(),
+            sigil_kernel::run_diagnostics::RunTimingPhase::CancellationSettled,
+            ticket.started.elapsed(),
+        );
         Ok(outcome)
     }
 
@@ -1951,6 +1963,7 @@ impl ApplicationRunControl {
 #[derive(Debug)]
 pub struct ApplicationCancellationTicket {
     request: RunCancellationRequestedEntry,
+    started: Instant,
     deadline: Instant,
     request_recorded: bool,
     conversation_start_recorded: bool,
@@ -3874,9 +3887,11 @@ async fn prepare_application_run_internal(
                 .to_owned(),
         });
     }
-    let _preparation_timer = PreparationPhaseTimer::new(&request.run_id, "total");
+    use sigil_kernel::run_diagnostics::RunTimingPhase;
+    let _preparation_timer =
+        PreparationPhaseTimer::new(&request.run_id, RunTimingPhase::Preparation);
     let local_preparation_timer =
-        PreparationPhaseTimer::new(&request.run_id, "session_preparation");
+        PreparationPhaseTimer::new(&request.run_id, RunTimingPhase::SessionPreparation);
     let conversation_start =
         ConversationRunStartedEntryV1::new(request.run_id.clone(), current_unix_time_ms())
             .map_err(|error| ApplicationRunPrepareError::InvalidInvocation {
@@ -3948,7 +3963,7 @@ async fn prepare_application_run_internal(
         &selected_composition,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    let provider_timer = PreparationPhaseTimer::new(&run_id, "provider_construction");
+    let provider_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::ProviderConstruction);
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
@@ -4018,7 +4033,7 @@ async fn prepare_application_run_internal(
         && root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None
         && task_agent_registry.is_some()
         && services.task_role_provider_builder.is_some();
-    let surface_timer = PreparationPhaseTimer::new(&run_id, "tool_surface");
+    let surface_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::ToolSurface);
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -4037,7 +4052,7 @@ async fn prepare_application_run_internal(
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
     drop(surface_timer);
-    let context_timer = PreparationPhaseTimer::new(&run_id, "request_context");
+    let context_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::RequestContext);
     let context_prompt = queued_first_request
         .as_ref()
         .map_or(prompt.as_str(), |(exact_prompt, _)| {
@@ -4715,7 +4730,8 @@ pub fn bind_existing_application_session(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", session_path.display()))
         .map_err(ApplicationRunPrepareError::execution)?;
-    let records = JsonlSessionStore::read_event_records(&canonical_path)
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(&canonical_path)
+        .and_then(|reader| reader.read_event_records())
         .map_err(ApplicationRunPrepareError::execution)?;
     let session_scope_id = records
         .first()
@@ -5213,7 +5229,8 @@ fn application_bound_session_records(
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<Vec<sigil_kernel::SessionStreamRecord>> {
-    let records = JsonlSessionStore::read_event_records(session_path)?;
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_path)?
+        .read_event_records()?;
     validate_application_session_records(&records, expected_session_scope_id)?;
     Ok(records)
 }
@@ -6728,9 +6745,20 @@ impl ApplicationRunEventSequence {
         run_id: String,
         outbox_store: JsonlSessionStore,
     ) -> Result<Self> {
-        let outbox = PublicEventOutboxRecorder::new(outbox_store.clone());
         let records = outbox_store.read_event_records_writer()?;
-        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        Self::with_outbox_records(session_id, run_id, outbox_store, &records)
+    }
+
+    // Used only while constructing a recorder from the same freshly validated durable prefix.
+    // Delayed execution and adapter replay retain their own fresh reads.
+    fn with_outbox_records(
+        session_id: String,
+        run_id: String,
+        outbox_store: JsonlSessionStore,
+        records: &[sigil_kernel::SessionStreamRecord],
+    ) -> Result<Self> {
+        let outbox = PublicEventOutboxRecorder::new(outbox_store.clone());
+        let projection = PublicEventOutboxProjectionV1::from_records(records)?;
         let sequence = projection.durable_sequence(&run_id);
         let conversation_terminals = records
             .iter()
@@ -7676,6 +7704,18 @@ where
     .map(|execution| execution.outcome)
 }
 
+fn task_projector_from_records(
+    records: &[sigil_kernel::SessionStreamRecord],
+) -> Result<PublicTaskEventProjector> {
+    let mut task_events = PublicTaskEventProjector::default();
+    for record in records {
+        if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()? {
+            task_events.project_control(&control)?;
+        }
+    }
+    Ok(task_events)
+}
+
 struct PublicApplicationEventBridge<'a, H> {
     events: ApplicationRunEventSequence,
     task_events: PublicTaskEventProjector,
@@ -7689,12 +7729,8 @@ where
     fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Result<Self> {
         handler.bind_live_preview_source(events.live_preview.clone())?;
         events.replay_pending_before_live(handler)?;
-        let mut task_events = PublicTaskEventProjector::default();
-        for record in events.outbox_store.read_event_records_writer()? {
-            if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()? {
-                task_events.project_control(&control)?;
-            }
-        }
+        let task_events =
+            task_projector_from_records(&events.outbox_store.read_event_records_writer()?)?;
         Ok(Self {
             events,
             task_events,
@@ -7845,6 +7881,10 @@ impl<H> EventHandler for PublicApplicationEventBridge<'_, H>
 where
     H: ApplicationRunEventHandler,
 {
+    fn diagnostic_run_id(&self) -> Option<&str> {
+        Some(&self.events.run_id)
+    }
+
     fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
         self.events.live_preview.begin_attempt(physical_attempt_id)
     }

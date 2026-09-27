@@ -72,6 +72,7 @@ pub mod resource_recovery;
 pub mod resource_recovery_surface;
 pub mod resume;
 pub mod run_capability;
+pub mod run_diagnostics;
 pub mod secret;
 pub mod session;
 pub mod session_export;

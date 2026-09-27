@@ -1,3 +1,5 @@
+use sigil_kernel::run_diagnostics::RunTimingPhase;
+
 use super::super::agent_runtime::{
     PlanReviewExecutionResult, apply_user_input_decision, chat_agent_run_input_with_repo_context,
     effective_orchestration_root_config, optional_agent_tool_runtime, run_automatic_plan_review,
@@ -98,6 +100,17 @@ where
                     continue;
                 }
 
+                let provider_logical_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                let preparation = crate::phase_timing::PhaseTimer::observed(
+                    "run.preparation",
+                    &provider_logical_run_id,
+                    RunTimingPhase::Preparation,
+                );
+                let session_preparation = crate::phase_timing::PhaseTimer::observed(
+                    "run.session_preparation",
+                    &provider_logical_run_id,
+                    RunTimingPhase::SessionPreparation,
+                );
                 if let Some(current) = state.session.current.as_ref() {
                     match sigil_runtime::application_run::application_session_has_unresolved_user_input(
                         &state.session.log_path,
@@ -126,6 +139,7 @@ where
                     ));
                     continue;
                 };
+                drop(session_preparation);
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
 
@@ -199,7 +213,6 @@ where
                 });
                 let task_result_tx = state.run.result_tx.clone();
                 let run_id = state.allocate_run_id();
-                let provider_logical_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
                 let public_run_id = Some(provider_logical_run_id.clone());
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(session_ref) => session_ref,
@@ -298,6 +311,7 @@ where
                         if plan_mode {
                             let plan_registry = plan_tools
                                 .expect("plan mode must construct its scoped review registry");
+                            drop(preparation);
                             let result = run_explicit_plan_review(
                                 &mut run_session,
                                 &prompt,
@@ -352,6 +366,9 @@ where
                                 },
                             }
                         } else {
+                            let request_context = crate::phase_timing::PhaseTimer::observed(
+                                "run.request_context", &provider_logical_run_id, RunTimingPhase::RequestContext,
+                            );
                             let input = chat_agent_run_input_with_repo_context(
                                 &context_resolver,
                                 prompt,
@@ -361,6 +378,7 @@ where
                             .await
                             .with_image_attachments(attachments)
                             .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
+                            drop(request_context);
                             let input = if let Some(conversation_coordinator) = conversation_coordinator.as_ref() {
                                 conversation_coordinator
                                 .enforce_orchestration_route_kill_switch(
@@ -381,6 +399,7 @@ where
                             } else {
                                 Ok(input.with_logical_run_id(provider_logical_run_id.clone()))
                             }.map(|input| input.with_cancellation(cancellation_handle.clone()));
+                            drop(preparation);
                             let output = match input {
                                 Ok(input) => {
                                 run_with_optional_agent_delegate(

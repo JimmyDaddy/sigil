@@ -31,6 +31,39 @@ use super::super::{
     },
 };
 
+/// Runs a timing integration case alone so unrelated tests cannot write or evict its
+/// process-local observations. The child inherits the caller's isolated test environment.
+pub(super) fn run_timing_case_in_own_process(test_name: &str) -> Result<bool> {
+    const CHILD_ENV: &str = "SIGIL_TUI_RUN_TIMING_TEST_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() == Some(test_name) {
+        return Ok(false);
+    }
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            test_name,
+            "--test-threads=1",
+            "--nocapture",
+            "--color=never",
+        ])
+        .env(CHILD_ENV, test_name)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout.lines().any(|line| line == "running 1 test")
+            && stdout
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;"))
+            && stdout.contains(test_name),
+        "isolated timing case must execute exactly one passing test ({test_name})\nstatus: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    print!("{stdout}");
+    Ok(true)
+}
+
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
     RootConfig {
         config_version: 2,

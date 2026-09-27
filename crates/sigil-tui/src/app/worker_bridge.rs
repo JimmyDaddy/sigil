@@ -872,6 +872,9 @@ impl AppState {
                 model_name,
                 entries,
             } => {
+                if let Some(timing) = &mut self.runtime.submission_timing {
+                    timing.cancellation_settled();
+                }
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(
@@ -892,6 +895,9 @@ impl AppState {
                 reason,
                 entries,
             } => {
+                if let Some(timing) = &mut self.runtime.submission_timing {
+                    timing.cancellation_settled();
+                }
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(

@@ -99,7 +99,7 @@ export interface DesktopBridge {
   openExternalUrl(url: string): Promise<void>;
   supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
   recoverControlLog(workspaceId: string, sessionId: string, action: ControlLogRecoveryAction): Promise<ControlLogRecoveryOutcome>;
-  exportSupportBundle(workspaceId: string): Promise<SupportSaveSummary>;
+  exportSupportBundle(workspaceId: string, rendererTimings?: import("./features/support/runTimings").RendererRunTiming[]): Promise<SupportSaveSummary>;
   providerConnections(workspaceId: string): Promise<ProviderConnectionInventory>;
   providerSetupCatalog(
     workspaceId: string,
@@ -352,8 +352,8 @@ export const desktopBridge: DesktopBridge = {
     invoke<SupportDoctorReport>("desktop_support_doctor", { workspaceId }),
   recoverControlLog: (workspaceId, sessionId, action) =>
     invoke<ControlLogRecoveryOutcome>("desktop_recover_control_log", { workspaceId, sessionId, action }),
-  exportSupportBundle: (workspaceId) =>
-    invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId }),
+  exportSupportBundle: (workspaceId, rendererTimings = []) =>
+    invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId, rendererTimings }),
   providerConnections: (workspaceId) =>
     invoke<ProviderConnectionInventory>("desktop_provider_connections", { workspaceId }),
   providerSetupCatalog: (workspaceId, input) =>

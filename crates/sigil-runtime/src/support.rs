@@ -307,15 +307,25 @@ pub struct SupportBundleV1 {
     pub schema_version: u32,
     pub doctor: DoctorSupportReportV1,
     pub session: Option<SupportSessionSummaryV1>,
+    /// Volatile observations are never used to decide whether a run may proceed.
+    pub run_timings: sigil_kernel::run_diagnostics::RunTimingSnapshot,
 }
 
 impl SupportBundleV1 {
     #[must_use]
-    pub fn new(doctor: DoctorSupportReportV1, session: Option<SupportSessionSummaryV1>) -> Self {
+    pub fn new(
+        mut doctor: DoctorSupportReportV1,
+        session: Option<SupportSessionSummaryV1>,
+    ) -> Self {
+        doctor
+            .privacy
+            .included
+            .push("bounded_process_run_timings".to_owned());
         Self {
             schema_version: SUPPORT_BUNDLE_SCHEMA_VERSION,
             doctor,
             session,
+            run_timings: sigil_kernel::run_diagnostics::run_timing_snapshot(),
         }
     }
 

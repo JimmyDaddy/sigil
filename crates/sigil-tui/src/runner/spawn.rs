@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use sigil_kernel::run_diagnostics::RunTimingPhase;
 use sigil_kernel::{
     EgressAuditRecorder, EgressDisclosurePresenter, ExtensionProcessNetworkAdmission,
     InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder, Provider,
@@ -133,6 +134,18 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
+    // Worker startup precedes any public run; its diagnostic label is deliberately separate.
+    let startup_diagnostic_id = uuid::Uuid::new_v4().to_string();
+    let startup_preparation = crate::phase_timing::PhaseTimer::observed(
+        "startup.preparation",
+        &startup_diagnostic_id,
+        RunTimingPhase::Preparation,
+    );
+    let session_preparation = crate::phase_timing::PhaseTimer::observed(
+        "startup.session_preparation",
+        &startup_diagnostic_id,
+        RunTimingPhase::SessionPreparation,
+    );
     let root_config = root_config.with_effective_composition()?;
     let effective_session_log_path = session_log_path.clone();
     // Production launch must receive the current-schema composition from the boot owner. The
@@ -211,6 +224,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             attachment_lease.as_ref(),
         )?
     };
+    drop(session_preparation);
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
@@ -235,7 +249,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
 
             send_startup_notice(&message_tx, "loading provider credentials");
             let provider_result = {
-                let _phase = crate::phase_timing::PhaseTimer::new("startup.provider_build");
+                let _phase = crate::phase_timing::PhaseTimer::observed("startup.provider_build", &startup_diagnostic_id, RunTimingPhase::ProviderConstruction);
                 runtime.block_on(sigil_runtime::build_provider_for_model_ref_async(
                     &root_config,
                     &route.model_ref,
@@ -476,7 +490,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     )
                 };
             let surface_result = {
-                let _phase = crate::phase_timing::PhaseTimer::new("startup.tool_surface");
+                let _phase = crate::phase_timing::PhaseTimer::observed("startup.tool_surface", &startup_diagnostic_id, RunTimingPhase::ToolSurface);
                 sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
                     &root_config,
                     &provider_capabilities,
@@ -632,6 +646,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let mut terminal_runtime =
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, terminal_control);
             terminal_runtime = terminal_runtime.with_scratch_control(scratch_control).with_stop_control(stop_control);
+            drop(startup_preparation);
             run_worker_loop(
                 runtime,
                 agent,

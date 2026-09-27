@@ -28,6 +28,19 @@ const preview: ControlLogRecoveryPreview = {
 afterEach(cleanup);
 
 describe("command history recovery", () => {
+  it("exports support even when the separate diagnostic preview is unavailable", async () => {
+    const exportSupportBundle = vi.fn().mockResolvedValue({ cancelled: false, fileName: "sigil-support.json" });
+    const bridge = {
+      supportDoctor: vi.fn().mockRejectedValue(new Error("preview unavailable")),
+      exportSupportBundle,
+    } as unknown as DesktopBridge;
+    render(<NotificationProvider><SupportPage bridge={bridge} workspaceId="export-workspace" onBack={() => undefined} /></NotificationProvider>);
+    await screen.findByRole("heading", { name: "Diagnostics are unavailable" });
+    const save = screen.getByRole("button", { name: "Save private report" });
+    expect(save.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(exportSupportBundle).toHaveBeenCalledWith("export-workspace", []));
+  });
   it("remains available when diagnostics fail and retries the exact preview after confirmation failure", async () => {
     const recoverControlLog = vi.fn()
       .mockResolvedValueOnce({ Preview: preview })

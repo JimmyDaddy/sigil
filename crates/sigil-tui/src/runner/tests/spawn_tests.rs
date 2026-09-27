@@ -647,3 +647,86 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
     let _ = command_tx.send(WorkerCommand::Shutdown);
     Ok(())
 }
+
+#[test]
+fn tui_startup_preparation_timings_are_buffered_without_opt_in_logging() -> Result<()> {
+    use sigil_kernel::run_diagnostics::{RunTimingPhase, run_timing_snapshot};
+    if super::common::run_timing_case_in_own_process(
+        "runner::tests::spawn_tests::tui_startup_preparation_timings_are_buffered_without_opt_in_logging",
+    )? {
+        return Ok(());
+    }
+    let _environment_lock = crate::test_env::lock();
+    let _legacy_timing = crate::test_env::EnvScope::unset("SIGIL_TUI_PHASE_TIMINGS");
+    let temp = tempdir()?;
+    let root_config = v2_loopback_root_config(temp.path())?;
+    let before = run_timing_snapshot();
+    assert!(before.available);
+    assert_eq!(before.dropped, 0);
+    assert!(
+        before.observations.is_empty(),
+        "only this startup may record in the child"
+    );
+    let worker = super::super::spawn::spawn_agent_worker_with_route_directive(
+        root_config,
+        temp.path().join("sigil.toml"),
+        temp.path().join("startup-timings.jsonl"),
+        temp.path().to_path_buf(),
+        sigil_kernel::InteractionMode::Interactive,
+        Default::default(),
+    )?;
+    let ready = recv_worker_ready(&worker.message_rx);
+    worker.command_tx.send(WorkerCommand::Shutdown)?;
+    worker
+        .join_handle
+        .join()
+        .expect("startup timing worker should join");
+    ready?;
+    let snapshot = run_timing_snapshot();
+    assert!(snapshot.available);
+    assert_eq!(snapshot.process_instance, before.process_instance);
+    assert_eq!(
+        snapshot.dropped, 0,
+        "the isolated real startup must retain its observations"
+    );
+    let keys: std::collections::BTreeSet<_> = snapshot
+        .observations
+        .iter()
+        .map(|item| &item.run_key)
+        .collect();
+    assert_eq!(
+        keys.len(),
+        1,
+        "one owned startup must have exactly one diagnostic identity"
+    );
+    let startup_key = keys
+        .into_iter()
+        .next()
+        .expect("one actual startup identity");
+    let phases: Vec<_> = snapshot
+        .observations
+        .iter()
+        .filter(|item| &item.run_key == startup_key)
+        .map(|item| item.phase)
+        .collect();
+    for phase in [
+        RunTimingPhase::Preparation,
+        RunTimingPhase::SessionPreparation,
+        RunTimingPhase::ProviderConstruction,
+        RunTimingPhase::ToolSurface,
+    ] {
+        assert_eq!(
+            phases.iter().filter(|observed| **observed == phase).count(),
+            1,
+            "{phase:?}: {phases:?}"
+        );
+    }
+    assert!(
+        !phases.contains(&RunTimingPhase::ProviderDispatch),
+        "startup must not pretend to be a user run"
+    );
+    println!(
+        "A1_TUI_STARTUP_TIMINGS preparation=1 session=1 provider=1 tools=1 separate_from_run=true"
+    );
+    Ok(())
+}

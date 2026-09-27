@@ -42,17 +42,20 @@ impl ApplicationRunEventRecorder {
                 .store_path()
                 .context("application recorder requires a durable session")?,
         )?;
-        let mut events = ApplicationRunEventSequence::with_outbox(
+        let records = store.read_event_records_writer()?;
+        let mut events = ApplicationRunEventSequence::with_outbox_records(
             session.session_scope_id().to_owned(),
             run_id.to_owned(),
             store,
+            &records,
         )?;
+        let task_events = task_projector_from_records(&records)?;
         events.delivery_deferred = true;
-        let mut sink = DeferredApplicationDelivery;
-        let bridge = PublicApplicationEventBridge::new(events.clone(), &mut sink)?;
+        // No adapter callback or delivery receipt intervenes in deferred initialization.
+        events.mark_live_delivery_prepared()?;
         Ok(Self {
             events,
-            task_events: bridge.task_events,
+            task_events,
             lifecycle: session.conversation_run_lifecycle_recorder()?,
             publication_uncertain: false,
         })

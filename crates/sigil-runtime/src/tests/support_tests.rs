@@ -471,6 +471,15 @@ fn support_bundle_schema_and_writer_are_private_bounded_and_non_overwriting() ->
     assert_eq!(value["schema_version"], SUPPORT_BUNDLE_SCHEMA_VERSION);
     assert_eq!(value["session"]["run_phase"], "idle");
     assert_eq!(value["session"]["durable_entry_count"], 7);
+    assert!(value["run_timings"]["observations"].is_array());
+    assert!(
+        bundle
+            .doctor
+            .privacy
+            .included
+            .iter()
+            .any(|item| item == "bounded_process_run_timings")
+    );
     let round_trip: SupportBundleV1 = serde_json::from_value(value.clone())?;
     assert_eq!(round_trip, bundle);
     let mut with_unknown = value;

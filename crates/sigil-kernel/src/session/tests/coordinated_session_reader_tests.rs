@@ -42,6 +42,15 @@ fn coordinated_session_reader_waits_for_owned_writer_without_changing_bytes() ->
             )
         });
         entered_rx.recv_timeout(Duration::from_secs(5))?;
+        // Ablation control: this is the path-only reader previously used by the product.
+        // The real conditional writer owns both the coordinator and file lock here.
+        let error = JsonlSessionStore::read_event_records(store.path())
+            .expect_err("standalone reader races the in-progress writer");
+        let busy = error
+            .downcast_ref::<SessionIoBusyError>()
+            .expect("typed reader contention");
+        assert_eq!(busy.kind, SessionIoBusyKind::Reader);
+        assert_eq!(busy.path, store.path());
         let writer_attempts = store.active_projection_metrics().writer_lock_attempt_total;
         let (read_tx, read_rx) = mpsc::channel();
         let read_handle = store.read_handle();

@@ -1327,6 +1327,11 @@ fn render_timed_frame<B: Backend>(
     presentation
         .finish_draw(generation, attempt, area, surface, layout)
         .map_err(|error| anyhow::anyhow!(error))?;
+    if app.runtime.is_busy
+        && let Some(timing) = &mut app.runtime.submission_timing
+    {
+        timing.feedback_presented();
+    }
     Ok(())
 }
 
@@ -1621,6 +1626,9 @@ where
         AppAction::RecoverControlLog(action) => control_log_recovery::start(app, worker, action)?,
         AppAction::CancelRun => {
             if let Some(runtime) = worker.as_ref() {
+                if let Some(timing) = &mut app.runtime.submission_timing {
+                    timing.cancellation_requested();
+                }
                 runtime.worker_tx.reserve_stop(false);
                 runtime
                     .worker_tx

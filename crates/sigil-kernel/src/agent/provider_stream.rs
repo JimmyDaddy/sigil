@@ -72,6 +72,7 @@ pub(super) struct ProviderTurnOutput {
 }
 
 pub(super) struct ProviderTurnDispatchContext<'a> {
+    pub(super) diagnostic_run_id: &'a str,
     pub(super) hosted_processor: Option<&'a std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
     pub(super) hosted_dispatch_lifecycle:
         Option<&'a std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
@@ -147,6 +148,7 @@ where
     H: EventHandler + Send,
 {
     let ProviderTurnDispatchContext {
+        diagnostic_run_id,
         hosted_processor,
         hosted_dispatch_lifecycle,
         initial_physical_attempt_id,
@@ -255,7 +257,7 @@ where
         let mut partial_output = ProviderTurnPartialOutput::default();
         let result = collect_provider_turn_after_send_barrier(
             provider,
-            logical_run_id,
+            diagnostic_run_id,
             session,
             request,
             previous_response_handle,
@@ -836,7 +838,7 @@ fn finish_failed_hosted_attempt(
 #[allow(clippy::too_many_arguments)]
 async fn collect_provider_turn_after_send_barrier<H>(
     provider: &dyn Provider,
-    logical_run_id: &str,
+    diagnostic_run_id: &str,
     session: &mut Session,
     request: CompletionRequest,
     previous_response_handle: &mut Option<ResponseHandle>,
@@ -854,9 +856,14 @@ async fn collect_provider_turn_after_send_barrier<H>(
 where
     H: EventHandler + Send,
 {
-    let run_id = logical_run_id.to_owned();
+    let run_id = diagnostic_run_id.to_owned();
     let response_started = Instant::now();
-    tracing::debug!(target: "sigil_run_latency", run_id = %run_id, phase = "provider_dispatch", "provider response wait started");
+    use crate::run_diagnostics::{RunTimingPhase, record_run_timing};
+    record_run_timing(
+        &run_id,
+        RunTimingPhase::ProviderDispatch,
+        std::time::Duration::ZERO,
+    );
     let pricing_snapshot = provider.usage_pricing_snapshot(&request.model_name);
     let stream_result = match cancellation {
         Some(cancellation) => tokio::select! {
@@ -875,9 +882,11 @@ where
         }
         Err(error) => return Err(error),
     };
-    tracing::debug!(target: "sigil_run_latency", run_id = %run_id, phase = "provider_stream_ready",
-        elapsed_ms = response_started.elapsed().as_secs_f64() * 1000.0,
-        "provider response stream ready");
+    record_run_timing(
+        &run_id,
+        RunTimingPhase::ProviderStreamReady,
+        response_started.elapsed(),
+    );
     let mut first_chunk = true;
     let mut first_content = true;
     // Observe arrival only. Hosted content still crosses the existing safety finalizer before
@@ -885,15 +894,11 @@ where
     let mut stream = stream.inspect(move |chunk| {
         if first_chunk {
             first_chunk = false;
-            tracing::debug!(target: "sigil_run_latency", run_id = %run_id, phase = "provider_first_chunk",
-                elapsed_ms = response_started.elapsed().as_secs_f64() * 1000.0,
-                "provider first stream item received");
+            record_run_timing(&run_id, RunTimingPhase::ProviderFirstChunk, response_started.elapsed());
         }
         if first_content && matches!(chunk, Ok(ProviderChunk::TextDelta(text) | ProviderChunk::ReasoningDelta(text) | ProviderChunk::ReasoningSummaryDelta(text)) if !text.is_empty()) {
             first_content = false;
-            tracing::debug!(target: "sigil_run_latency", run_id = %run_id, phase = "provider_first_content",
-                elapsed_ms = response_started.elapsed().as_secs_f64() * 1000.0,
-                "provider first content received");
+            record_run_timing(&run_id, RunTimingPhase::ProviderFirstContent, response_started.elapsed());
         }
     }).boxed();
     if hosted_enabled {

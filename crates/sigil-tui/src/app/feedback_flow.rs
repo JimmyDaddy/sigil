@@ -57,7 +57,7 @@ impl FeedbackModalState {
 
         let mut lines = vec![
             "Review before sharing. Nothing has been written or uploaded.".to_owned(),
-            "Included: build, OS/architecture, doctor status and redacted checks.".to_owned(),
+            "Included: build, OS/architecture, doctor status, redacted checks and bounded run timings.".to_owned(),
             format!(
                 "Doctor: {} · {} checks · {} bytes",
                 doctor_status_label(self.bundle.doctor.summary.overall_status),
