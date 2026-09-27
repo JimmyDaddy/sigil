@@ -457,9 +457,23 @@ impl McpClient {
     }
 
     pub(super) async fn list_tools(self: &Arc<Self>) -> Result<Vec<McpToolDescriptor>> {
-        let result = self
-            .send_request("tools/list", json!({}), self.startup_deadline)
+        let capabilities = self.server_capabilities();
+        if !capabilities.get("tools").is_some_and(Value::is_object)
+            && (self.supports_resources() || self.supports_prompts())
+        {
+            return Ok(Vec::new());
+        }
+        // Older stdio servers omitted their capabilities entirely. Preserve their existing
+        // tools discovery, but do not require resources/prompts-only servers to implement it.
+        let response = self
+            .send_request_response("tools/list", json!({}), self.startup_deadline)
             .await?;
+        if !capabilities.get("tools").is_some_and(Value::is_object)
+            && response.pointer("/error/code").and_then(Value::as_i64) == Some(-32601)
+        {
+            return Ok(Vec::new());
+        }
+        let result = self.request_result("tools/list", response)?;
         let tools = result
             .get("tools")
             .and_then(Value::as_array)
@@ -536,6 +550,10 @@ impl McpClient {
         deadline: McpOperationDeadline,
     ) -> Result<Value> {
         let response = self.send_request_response(method, params, deadline).await?;
+        self.request_result(method, response)
+    }
+
+    fn request_result(&self, method: &str, response: Value) -> Result<Value> {
         if let Some(error) = response.get("error") {
             let projection = bounded_mcp_protocol_error(
                 &self.secret_redactor,

@@ -1861,7 +1861,51 @@ while True:
 }
 
 #[tokio::test]
-async fn mcp_resources_register_and_execute_when_server_declares_capability() -> Result<()> {
+async fn mcp_legacy_missing_tools_and_declared_tools_failures_stay_distinct() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("capability_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        capabilities = {"tools":{},"resources":{}} if sys.argv[1] == "declared" else {}
+        result = {"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":capabilities}}
+    elif method == "tools/list":
+        result = {"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"not supported"}}
+    else:
+        continue
+    print(json.dumps(result), flush=True)
+"#,
+    )?;
+    for (mode, expected) in [
+        ("legacy", "registered no callable surfaces"),
+        ("declared", "tools/list failed"),
+    ] {
+        let mut registry = ToolRegistry::new();
+        let error = register_mcp_tools(
+            &mut registry,
+            &[mcp_server_config! {
+                name: "capability".to_owned(),
+                command: "python3".to_owned(),
+                args: vec![script.to_string_lossy().to_string(), mode.to_owned()],
+                startup_timeout_secs: 5,
+                ..McpServerConfig::default()
+            }],
+        )
+        .await
+        .expect_err("required server without its declared surface must report failure");
+        assert!(error.to_string().contains(expected), "{mode}: {error:#}");
+        assert!(registry.specs().is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_resource_only_server_does_not_require_tools_capability() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("resource_mcp_server.py");
     write_fake_server_script(
@@ -1890,7 +1934,7 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"tools are not supported"}})
     elif method == "resources/list":
         cursor = (message.get("params") or {}).get("cursor")
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"resources":[{"uri":"file:///workspace/notes.md","name":"notes","description":"Project notes","mimeType":"text/markdown"}],"nextCursor":"page-2","cursorSeen":cursor}})
@@ -2238,7 +2282,7 @@ while True:
 }
 
 #[tokio::test]
-async fn registers_and_calls_mcp_prompt_surface_tools() -> Result<()> {
+async fn mcp_prompt_only_server_does_not_require_tools_capability() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("prompt_mcp_server.py");
     write_fake_server_script(
@@ -2267,7 +2311,7 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32601,"message":"tools are not supported"}})
     elif method == "prompts/list":
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"prompts":[{"name":"story_seed","description":"Seed prompt","arguments":[{"name":"genre","required":False}]}]}})
     elif method == "prompts/get":
@@ -2894,7 +2938,7 @@ while True:
         break
     method = message.get("method")
     if method == "initialize":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"prompts":{}}}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"tools":{},"prompts":{"listChanged":True}}}})
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
