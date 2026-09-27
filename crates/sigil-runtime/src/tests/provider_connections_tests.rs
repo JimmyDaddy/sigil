@@ -854,6 +854,69 @@ async fn synchronous_v2_builder_rejects_async_runtime_without_blocking() {
 }
 
 #[tokio::test]
+async fn provider_builders_isolate_unselected_connection_errors() {
+    let mut root = local_catalog_root("http://127.0.0.1:11434/v1".to_owned(), "local-model");
+    root.connections.insert(
+        "broken".to_owned(),
+        serde_json::json!({
+            "label": "Broken",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "not-a-url",
+            "credential": { "source": "none" }
+        }),
+    );
+    let store = FakeCredentialStore::default();
+    let environment = MapEnvironment::default();
+    let provider = crate::build_provider_with_credentials(&root, &store, &environment)
+        .await
+        .expect("unused invalid connections must not block the selected provider");
+    assert_eq!(provider.name(), "openai_compat");
+    for role in [
+        sigil_kernel::AgentRole::Executor,
+        sigil_kernel::AgentRole::SubagentRead,
+        sigil_kernel::AgentRole::SubagentWrite,
+    ] {
+        let provider =
+            crate::build_role_provider_with_credentials(&root, role, &store, &environment)
+                .await
+                .expect("role provider must validate only its selected connection");
+        assert_eq!(provider.name(), "openai_compat");
+    }
+
+    root.connections
+        .get_mut("local")
+        .expect("selected connection")["base_url"] = serde_json::json!("https://example.test/v1");
+    root.connections
+        .get_mut("local")
+        .expect("selected connection")["credential"] =
+        serde_json::json!({ "source": "environment", "name": "OPENAI_API_KEY" });
+    let error = crate::build_role_provider_with_credentials(
+        &root,
+        sigil_kernel::AgentRole::SubagentRead,
+        &store,
+        &environment,
+    )
+    .await
+    .err()
+    .expect("the selected connection still requires its real credential");
+    assert_eq!(
+        error
+            .downcast_ref::<ProviderCredentialError>()
+            .expect("credential error")
+            .code,
+        "credential_missing"
+    );
+    root.agent.connection = Some(ConnectionId::new("broken").expect("connection id"));
+    assert!(
+        crate::build_provider_with_credentials(&root, &store, &environment)
+            .await
+            .is_err(),
+        "an invalid selected connection must remain unavailable"
+    );
+}
+
+#[tokio::test]
 async fn exact_v2_provider_and_role_builders_remain_async_inside_runtime() {
     let root = local_catalog_root("http://127.0.0.1:11434/v1".to_owned(), "local-model");
     let alternate = ModelRef::new(

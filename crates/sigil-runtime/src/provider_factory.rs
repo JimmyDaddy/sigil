@@ -30,7 +30,7 @@ pub async fn build_provider_with_credentials(
     environment: &dyn crate::provider_connections::CredentialEnvironment,
 ) -> Result<Box<dyn Provider>> {
     let loaded = crate::provider_connections::load_provider_connections(root_config);
-    if loaded.mode != crate::provider_connections::ConfigMode::V2 || !loaded.issues.is_empty() {
+    if loaded.mode != crate::provider_connections::ConfigMode::V2 {
         anyhow::bail!(
             "connection_config_invalid: {}",
             loaded

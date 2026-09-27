@@ -23,3 +23,7 @@
 Streamable HTTP 工具支持有界 JSON Schema annotation（包括 `format`）、nullable/type union、`anyOf`/`allOf`/`oneOf` 和 schema-valued `additionalProperties`。类型专属约束按实际值的类型校验；输入和结构化输出都经过约束验证。未知输入字段仍遵循代码规范 §2.7，不因 `additionalProperties: false` 被 host 拒绝。
 
 不合法或尚不支持的工具描述单独隔离并记录有界诊断，其余工具继续发现和调用。外部引用、循环引用、未支持的断言及超出大小、深度或验证工作预算的 schema 不会静默放行。`format` 是 annotation，不代替 URL、网络或权限校验。
+
+## Provider 连接与角色装配
+
+主对话和子代理都按实际选中的 connection/model 验证配置与凭证。未使用连接的配置错误保留为诊断，不阻断另一条正常连接上的执行。全局配置版本错误、所选连接不存在或非法，以及该连接缺少运行凭证仍拒绝执行。
