@@ -500,6 +500,11 @@ fn render_phase_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Ve
         .map(|(kind, detail)| (kind, Some(detail)))
         .unwrap_or((entry.text.as_str(), None));
     let (label, accent, summary) = match kind {
+        "preparing" => (
+            "preparing",
+            palette.status_pending,
+            "waiting for the first model event".to_owned(),
+        ),
         "thinking" => (
             "thinking",
             palette.status_thinking,

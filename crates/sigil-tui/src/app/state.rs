@@ -153,6 +153,8 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) stats: SessionStats,
     pub(crate) session_delta_stats: SessionStats,
     pub(crate) is_busy: bool,
+    /// Identifies one local submission independently of its prompt text or durable receipt.
+    pub(crate) run_submission_intent: std::sync::Arc<()>,
     /// Allows a durable running projection to restore a run after startup, but is cleared by
     /// the local worker's terminal transition so a stale in-flight projection cannot resurrect it.
     pub(crate) allow_projection_run_recovery: bool,

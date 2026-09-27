@@ -999,8 +999,8 @@ fn live_panel_view_model_projects_activity_and_transcript_rows() -> anyhow::Resu
     assert_eq!(
         view_model.progress,
         Some(LiveProgressViewModel {
-            title: "Thinking".to_owned(),
-            detail: "reasoning with deepseek-v4-flash".to_owned(),
+            title: "Preparing".to_owned(),
+            detail: "waiting for response from deepseek-v4-flash".to_owned(),
         })
     );
     assert!(view_model.transcript_lines.len() <= 2);
@@ -1403,17 +1403,17 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
 
     let view_model = UiViewModel::from_app(&app);
 
-    assert_eq!(view_model.footer.phase, RunPhase::Thinking);
+    assert_eq!(view_model.footer.phase, RunPhase::Preparing);
     assert!(view_model.footer.is_busy);
     assert_eq!(
         view_model.footer.run_label,
-        "thinking · reasoning with deepseek-v4-flash"
+        "preparing · waiting for response from deepseek-v4-flash"
     );
     assert_eq!(
         view_model.footer.hints,
         "agent: main · Enter add follow-up · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
     );
-    assert_eq!(view_model.composer.phase, RunPhase::Thinking);
+    assert_eq!(view_model.composer.phase, RunPhase::Preparing);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");
     Ok(())
 }

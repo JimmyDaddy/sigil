@@ -29,7 +29,10 @@ use sigil_tui_app::TuiApplicationAdapter;
 
 use crate::{
     app::{AppAction, ConfigurationSaveRequest},
-    runner::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerCommandSender},
+    runner::{
+        WorkerApplicationDispatchOutcome, WorkerApprovalCommand, WorkerCommand,
+        WorkerCommandEnvelope, WorkerCommandSender, WorkerRunAdmission,
+    },
 };
 
 /// Host-owned route transition implementation. Only its Activated session record can settle
@@ -69,6 +72,39 @@ struct TuiWorkerEndpointState {
     worker: Option<WorkerCommandSender>,
     generation: u64,
     route_operation: Option<Arc<dyn TuiRouteOperation>>,
+    run_admissions: BTreeMap<String, TuiRunAdmission>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TuiRunAdmission {
+    generation: u64,
+    worker: WorkerRunAdmission,
+}
+
+impl TuiRunAdmission {
+    #[cfg(test)]
+    pub(crate) fn bind_test_owner(&self, owner: &sigil_kernel::RunCancellationOwner) {
+        self.worker.bind_test_owner(owner);
+    }
+    pub(crate) fn run_observed(&self) -> bool {
+        self.worker.run_observed()
+    }
+}
+
+struct TuiRunAdmissionScope<'a> {
+    endpoint: &'a TuiWorkerEndpoint,
+    command_id: String,
+}
+
+impl Drop for TuiRunAdmissionScope<'_> {
+    fn drop(&mut self) {
+        self.endpoint
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .run_admissions
+            .remove(&self.command_id);
+    }
 }
 
 impl TuiWorkerEndpoint {
@@ -78,6 +114,7 @@ impl TuiWorkerEndpoint {
                 worker: Some(worker),
                 generation: 1,
                 route_operation: None,
+                run_admissions: BTreeMap::new(),
             }),
         })
     }
@@ -249,14 +286,23 @@ impl TuiWorkerEndpoint {
         &self,
         request: &ApplicationCommandRequest,
         command: WorkerCommand,
-    ) -> Result<(), ApplicationError> {
-        let worker = self
+    ) -> Result<WorkerApplicationDispatchOutcome, ApplicationError> {
+        let state = self
             .state
             .lock()
-            .map_err(|_| ApplicationError::Unavailable)?
-            .worker
-            .clone()
-            .ok_or(ApplicationError::Unavailable)?;
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let run_admission = state
+            .run_admissions
+            .get(request.envelope.command_id.as_str())
+            .cloned();
+        if run_admission
+            .as_ref()
+            .is_some_and(|admission| admission.generation != state.generation)
+        {
+            return Ok(WorkerApplicationDispatchOutcome::CancelledBeforeDispatch);
+        }
+        let worker = state.worker.clone().ok_or(ApplicationError::Unavailable)?;
+        drop(state);
         let binding =
             sigil_runtime::application_operation_owner::application_operation_binding(request)?
                 .map(Box::new);
@@ -264,6 +310,7 @@ impl TuiWorkerEndpoint {
         worker
             .send(WorkerCommand::ApplicationDispatch {
                 binding,
+                run_admission: run_admission.map(|admission| admission.worker),
                 command: Box::new(command),
                 reply,
             })
@@ -545,6 +592,40 @@ impl TuiApplicationSession {
         self.application.execute_prepared(request).await
     }
 
+    pub(crate) fn reserve_run_admission(
+        &self,
+        worker: &WorkerCommandSender,
+    ) -> Result<TuiRunAdmission, ApplicationError> {
+        Ok(TuiRunAdmission {
+            generation: self.endpoint.generation()?,
+            worker: worker.reserve_run_admission(),
+        })
+    }
+
+    pub(crate) async fn execute_prepared_run(
+        &self,
+        request: ApplicationCommandRequest,
+        admission: TuiRunAdmission,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let command_id = request.envelope.command_id.as_str().to_owned();
+        {
+            let mut state = self
+                .endpoint
+                .state
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            if state.run_admissions.contains_key(&command_id) {
+                return Err(ApplicationError::Unavailable);
+            }
+            state.run_admissions.insert(command_id.clone(), admission);
+        }
+        let _scope = TuiRunAdmissionScope {
+            endpoint: &self.endpoint,
+            command_id,
+        };
+        self.execute_prepared(request).await
+    }
+
     pub(crate) async fn resume_session_runtime_transition(
         &self,
         request: ApplicationCommandRequest,
@@ -568,13 +649,8 @@ impl TuiApplicationSession {
             .transpose()
     }
 
-    pub(crate) fn prepare_action(
-        &self,
-        action: &AppAction,
-        queue_target: Option<&sigil_kernel::ConversationInputTarget>,
-        attachment_recovery_binding: Option<&str>,
-    ) -> Result<Option<ApplicationCommandRequest>, ApplicationError> {
-        if !matches!(
+    pub(crate) fn supports_action(action: &AppAction) -> bool {
+        matches!(
             action,
             AppAction::SubmitPrompt(_)
                 | AppAction::SubmitPromptWithAttachments { .. }
@@ -644,7 +720,16 @@ impl TuiApplicationSession {
                 | AppAction::ApplySessionRetention { .. }
                 | AppAction::PreviewSessionRetention { .. }
                 | AppAction::PersistConfiguration { .. }
-        ) {
+        )
+    }
+
+    pub(crate) fn prepare_action(
+        &self,
+        action: &AppAction,
+        queue_target: Option<&sigil_kernel::ConversationInputTarget>,
+        attachment_recovery_binding: Option<&str>,
+    ) -> Result<Option<ApplicationCommandRequest>, ApplicationError> {
+        if !Self::supports_action(action) {
             return Ok(None);
         }
         // A native action can arrive before the owner loop's first asynchronous application
@@ -2544,7 +2629,34 @@ impl TuiWorkerCommandExecutor {
                 ));
             }
         };
-        self.endpoint.send(request, command)?;
+        if self.endpoint.send(request, command)?
+            == WorkerApplicationDispatchOutcome::CancelledBeforeDispatch
+        {
+            let reason = "run preparation was stopped before dispatch or its worker was replaced";
+            // The endpoint or actual worker returned before domain dispatch, so this exact
+            // request has not crossed its first effect boundary. Persist that proof through the
+            // application service; a bare rejection would correctly remain uncertain.
+            return Ok(
+                sigil_runtime::RuntimeApplicationDispatch::ConfirmedNoEffect {
+                    rejection: sigil_application::CommandRejection {
+                        kind: "run_preparation_cancelled".to_owned(),
+                        reason: reason.to_owned(),
+                    },
+                    proof: sigil_application::CommandNoEffectProof {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        reservation_fingerprint: command_fingerprint(request)?,
+                        source: CommandRecoveryBinding {
+                            key: request
+                                .admission
+                                .reservation_key(&request.envelope.command_id),
+                            phase: CommandLifecyclePhase::EffectStarted,
+                        },
+                        reason: reason.to_owned(),
+                    },
+                },
+            );
+        }
         // The worker acknowledged its actual dispatcher, so the application's forward guard
         // covers the owner boundary. Durable operations are reconciled after this method;
         // an external execution gap remains uncertain until its owner supplies real proof.

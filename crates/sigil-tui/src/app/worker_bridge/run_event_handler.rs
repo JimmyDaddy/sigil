@@ -223,8 +223,8 @@ impl EventHandler for AppState {
                 if let Some(Some(profile_id)) = approved_agent_profile {
                     self.set_agent_wait_phase(&profile_id);
                 } else {
-                    self.runtime.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
+                    self.runtime.run_phase = RunPhase::Preparing;
+                    self.push_phase_marker(format!("preparing|{}", self.runtime.model_name));
                 }
                 self.push_event(
                     "approval:resolved",
@@ -323,8 +323,8 @@ impl EventHandler for AppState {
                 }
                 self.finish_streaming_reasoning_entry();
                 if is_agent_tool {
-                    self.runtime.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
+                    self.runtime.run_phase = RunPhase::Preparing;
+                    self.push_phase_marker(format!("preparing|{}", self.runtime.model_name));
                 } else {
                     self.push_phase_marker(format!("tool|{}", result.tool_name));
                 }

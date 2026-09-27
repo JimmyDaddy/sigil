@@ -97,6 +97,7 @@ impl ThemePalette {
     pub(crate) fn phase_accent(&self, phase: &RunPhase) -> Color {
         match phase {
             RunPhase::Idle => self.status_idle,
+            RunPhase::Preparing => self.status_pending,
             RunPhase::Thinking => self.status_thinking,
             RunPhase::Agent(_) => self.accent_info,
             RunPhase::Tool(_) => self.status_tool,

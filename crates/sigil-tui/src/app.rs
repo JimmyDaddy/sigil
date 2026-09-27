@@ -7,7 +7,6 @@ use std::{
     time::SystemTime,
 };
 
-#[cfg(not(test))]
 use std::sync::Mutex;
 
 mod agent_flow;
@@ -604,6 +603,8 @@ pub struct AppState {
     pub session_id: String,
     pub(crate) runtime_transition: Option<crate::launcher::RuntimeTransitionOwner>,
     pub(crate) runtime_maintenance: Option<crate::launcher::RuntimeMaintenanceOwner>,
+    pub(crate) deferred_application_actions: std::collections::VecDeque<AppAction>,
+    pub(crate) retained_application_admissions: Vec<crate::launcher::PendingApplicationAdmission>,
     pending_worker_session_attachment: std::cell::RefCell<
         Option<(
             PathBuf,
@@ -968,11 +969,9 @@ pub struct ConfigurationSaveRequest {
     pub(crate) config_path: PathBuf,
     pub(crate) follow_up: ConfigurationSaveFollowUp,
     pub(crate) root_only: bool,
-    #[cfg(not(test))]
+    pub(crate) draft_binding: Option<crate::config_panel::ConfigDraftBinding>,
     pub(crate) draft: Mutex<Option<sigil_runtime::provider_connections::ConnectionSaveDraft>>,
-    #[cfg(not(test))]
     pub(crate) published_root_config: Mutex<Option<RootConfig>>,
-    #[cfg(not(test))]
     pub(crate) close_after_save: bool,
 }
 
@@ -1263,6 +1262,8 @@ impl AppState {
             session_id,
             runtime_transition: None,
             runtime_maintenance: None,
+            deferred_application_actions: std::collections::VecDeque::new(),
+            retained_application_admissions: Vec::new(),
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
@@ -1289,6 +1290,7 @@ impl AppState {
                 mcp_progress: None,
                 reasoning_effort: initial_reasoning_effort,
                 run_phase: RunPhase::Idle,
+                run_submission_intent: Arc::new(()),
                 last_phase_marker: None,
                 balance_snapshot: BalanceSnapshot {
                     status: "pending".to_owned(),
@@ -1423,6 +1425,8 @@ impl AppState {
             session_id,
             runtime_transition: None,
             runtime_maintenance: None,
+            deferred_application_actions: std::collections::VecDeque::new(),
+            retained_application_admissions: Vec::new(),
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
@@ -1449,6 +1453,7 @@ impl AppState {
                 mcp_progress: None,
                 reasoning_effort: ReasoningEffort::Max,
                 run_phase: RunPhase::Idle,
+                run_submission_intent: Arc::new(()),
                 last_phase_marker: None,
                 balance_snapshot: BalanceSnapshot {
                     status: "missing auth".to_owned(),

@@ -1545,6 +1545,7 @@ impl AppState {
         self.config_state = None;
         self.last_notice = Some(format!("using {item_kind} {skill_id}"));
         self.push_event("skill", format!("use {skill_id}"));
+        self.begin_run_submission_intent();
         Ok(Some(AppAction::SubmitPrompt(prompt)))
     }
 
@@ -2035,6 +2036,7 @@ impl AppState {
                 config_path: self.config_path.clone(),
                 follow_up: super::ConfigurationSaveFollowUp::RebootRuntime,
                 root_only: false,
+                draft_binding: Some(config_state.save_binding()),
                 draft: std::sync::Mutex::new(Some(connection_save)),
                 published_root_config: std::sync::Mutex::new(None),
                 close_after_save,
@@ -2202,7 +2204,6 @@ impl AppState {
         Ok(action)
     }
 
-    #[cfg(not(test))]
     pub(crate) fn close_config_panel_after_save(&mut self) {
         self.config_state = None;
         self.last_notice = Some("saved config and closed".to_owned());
@@ -2288,6 +2289,32 @@ impl AppState {
         self.last_notice = Some(format!("refreshing MCP {server_name}"));
         self.push_event("mcp", format!("refresh {server_name}"));
         Ok(Some(AppAction::RefreshMcpServer { server_name }))
+    }
+
+    pub(crate) fn config_draft_binding(&self) -> Option<crate::config_panel::ConfigDraftBinding> {
+        self.config_state.as_ref().map(ConfigState::save_binding)
+    }
+
+    pub(crate) fn accept_config_draft_publication(
+        &mut self,
+        binding: Option<crate::config_panel::ConfigDraftBinding>,
+        root_config: &RootConfig,
+    ) -> bool {
+        let Some(binding) = binding else {
+            return false;
+        };
+        if self.config_draft_binding() == Some(binding) && !self.config_is_editing() {
+            self.mark_config_draft_saved(root_config);
+            return true;
+        }
+        if let Some(state) = self.config_state.as_mut()
+            && state.save_binding().same_panel(binding)
+        {
+            // The user continued this submitted draft. Advance only its committed base so the
+            // next save compares against our publication while preserving every newer field.
+            state.draft.base_root_config = root_config.clone();
+        }
+        false
     }
 
     pub(crate) fn mark_config_draft_saved(&mut self, root_config: &RootConfig) {

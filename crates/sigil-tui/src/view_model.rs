@@ -1222,6 +1222,7 @@ pub(crate) struct LiveProgressViewModel {
 impl LiveProgressViewModel {
     fn from_parts(label: &str, detail: &str) -> Self {
         let title = match label {
+            "preparing" => "Preparing".to_owned(),
             "thinking" => "Thinking".to_owned(),
             "tool" => tool_progress_title(detail),
             "command" => "Command".to_owned(),

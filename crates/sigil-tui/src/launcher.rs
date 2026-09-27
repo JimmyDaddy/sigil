@@ -634,11 +634,12 @@ async fn run_app(
             drain_worker_messages_with_attention(app, worker, &mut attention)?;
         dirty |= worker_dirty;
         projection_refresh_requested |= worker_projection_refresh;
+        dirty |= app.poll_background_tasks();
+        let admission_changed = poll_application_admission(app, worker)?;
         if restart_worker_after_session_transition(app, worker, spawn_worker)? {
             dirty = true;
         }
-        dirty |= app.poll_background_tasks();
-        let admission_changed = poll_application_admission(app, worker)?;
+        dirty |= flush_deferred_application_action(app, worker)?;
         dirty |= control_log_recovery::poll(app)?;
         dirty |= admission_changed;
         projection_refresh_requested |= admission_changed;
@@ -912,11 +913,11 @@ async fn run_app(
                                 runtime
                                     .pending_admission
                                     .as_ref()
-                                    .is_some_and(|pending| pending.receiver.is_some())
+                                    .is_some_and(PendingApplicationAdmission::needs_polling)
                                     || runtime
                                         .pending_interactions
                                         .iter()
-                                        .any(|pending| pending.receiver.is_some())
+                                        .any(PendingApplicationAdmission::needs_polling)
                             })
                             .map(|_| BACKGROUND_TASK_WAKE_INTERVAL)
                     }),
@@ -927,7 +928,7 @@ async fn run_app(
                     .then(|| projection_ack_retry.remaining(now))
                     .flatten(),
             );
-            let worker_message = next_worker_message(worker);
+            let worker_message = next_worker_message(worker, app.runtime.worker_rebind_required);
             let projection_wake = async {
                 if let Some(task) = projection_refresh_task.as_mut() {
                     (&mut task.handle)
@@ -1613,6 +1614,9 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
     H: HostEffects,
 {
+    if queue_background_application_action(app, worker, &action)? {
+        return Ok(());
+    }
     match action {
         AppAction::RecoverControlLog(action) => control_log_recovery::start(app, worker, action)?,
         AppAction::CancelRun => {
@@ -1775,62 +1779,14 @@ where
                     | sigil_application::ApplicationCommandReceipt::Replayed(_)
             );
             report_application_receipt(app, &receipt)?;
-            if settled {
-                #[cfg(not(test))]
-                let published_root_config = request
-                    .published_root_config
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("published config result lock poisoned"))?
-                    .take()
-                    .unwrap_or_else(|| request.next_base.clone());
-                #[cfg(test)]
-                let published_root_config = request.next_base.clone();
-                app.mark_config_draft_saved(&published_root_config);
-                app.apply_persisted_config_snapshot(&published_root_config);
-                if !request.root_only
-                    && let Err(error) = app.apply_saved_provider_route_to_current_session(
-                        &request.expected,
-                        &published_root_config,
-                    )
-                {
-                    report_worker_unavailable(
-                        app,
-                        &format!(
-                            "configuration was published but the selected session route could not be applied: {error:#}"
-                        ),
-                    )?;
-                    return Ok(());
-                }
-                #[cfg(not(test))]
-                if request.close_after_save {
-                    app.close_config_panel_after_save();
-                }
-                match request.follow_up {
-                    crate::app::ConfigurationSaveFollowUp::RebootRuntime => {
-                        return process_app_action_with_spawner_and_host(
-                            app,
-                            worker,
-                            AppAction::ConfigSaved {
-                                root_config: Box::new(published_root_config),
-                            },
-                            spawn_worker_fn,
-                            host_effects,
-                        );
-                    }
-                    crate::app::ConfigurationSaveFollowUp::ApplyActiveRunPermissionMode(mode) => {
-                        return process_app_action_with_spawner_and_host(
-                            app,
-                            worker,
-                            AppAction::UpdateActiveRunPermissionMode { mode },
-                            spawn_worker_fn,
-                            host_effects,
-                        );
-                    }
-                    crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel => {
-                        app.apply_saved_default_model(published_root_config);
-                        return Ok(());
-                    }
-                }
+            if settled && let Some(action) = apply_configuration_publication(app, &request)? {
+                return process_app_action_with_spawner_and_host(
+                    app,
+                    worker,
+                    action,
+                    spawn_worker_fn,
+                    host_effects,
+                );
             }
         }
         AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
@@ -1922,6 +1878,7 @@ where
                     config_path: app.config_path.clone(),
                     follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
                     root_only: true,
+                    draft_binding: None,
                     draft: std::sync::Mutex::new(None),
                     published_root_config: std::sync::Mutex::new(None),
                     close_after_save: false,
@@ -2256,6 +2213,9 @@ where
             app.start_update_apply(channel);
         }
         action => {
+            if queue_run_admission(app, worker, &action)? {
+                return Ok(());
+            }
             if queue_plan_revision(app, worker, &action)? {
                 return Ok(());
             }
@@ -2286,10 +2246,61 @@ where
     Ok(())
 }
 
-struct PendingApplicationAdmission {
+fn apply_configuration_publication(
+    app: &mut AppState,
+    request: &Arc<crate::app::ConfigurationSaveRequest>,
+) -> Result<Option<AppAction>> {
+    let published_root_config = request
+        .published_root_config
+        .lock()
+        .map_err(|_| anyhow::anyhow!("published config result lock poisoned"))?
+        .take()
+        .unwrap_or_else(|| request.next_base.clone());
+    let owns_draft =
+        app.accept_config_draft_publication(request.draft_binding, &published_root_config);
+    app.apply_persisted_config_snapshot(&published_root_config);
+    if !request.root_only
+        && let Err(error) = app.apply_saved_provider_route_to_current_session(
+            &request.expected,
+            &published_root_config,
+        )
+    {
+        report_worker_unavailable(
+            app,
+            &format!(
+                "configuration was published but the selected session route could not be applied: {error:#}"
+            ),
+        )?;
+        return Ok(None);
+    }
+    if request.close_after_save && owns_draft {
+        app.close_config_panel_after_save();
+    }
+    Ok(match request.follow_up {
+        crate::app::ConfigurationSaveFollowUp::RebootRuntime => Some(AppAction::ConfigSaved {
+            root_config: Box::new(published_root_config),
+        }),
+        crate::app::ConfigurationSaveFollowUp::ApplyActiveRunPermissionMode(mode) => {
+            Some(AppAction::UpdateActiveRunPermissionMode { mode })
+        }
+        crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel => {
+            app.apply_saved_default_model(published_root_config);
+            None
+        }
+    })
+}
+
+pub(crate) struct PendingApplicationAdmission {
     application: Arc<application_bridge::TuiApplicationSession>,
     request: Arc<std::sync::Mutex<Option<sigil_application::ApplicationCommandRequest>>>,
     action: AppAction,
+    run_admission: Option<application_bridge::TuiRunAdmission>,
+    run_submission_intent: Option<Arc<()>>,
+    queue_target: Option<sigil_kernel::ConversationInputTarget>,
+    attachment_recovery_binding: Option<String>,
+    retain_for_recovery: bool,
+    settled: bool,
+    refresh_before_prepare: bool,
     receiver: Option<
         std::sync::mpsc::Receiver<
             Result<
@@ -2304,7 +2315,36 @@ struct PendingApplicationAdmission {
     reconcile_requested: bool,
 }
 
+impl std::fmt::Debug for PendingApplicationAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingApplicationAdmission")
+            .field("receipt_resolved", &self.receipt_resolved)
+            .field(
+                "running",
+                &self
+                    .handle
+                    .as_ref()
+                    .is_some_and(|handle| !handle.is_finished()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl PendingApplicationAdmission {
+    fn needs_polling(&self) -> bool {
+        self.receiver.is_some() || self.reconcile_requested || self.handle.is_some()
+    }
+    fn run_observed(&self) -> bool {
+        self.run_admission
+            .as_ref()
+            .is_some_and(|admission| admission.run_observed())
+    }
+    fn owns_current_run_submission(&self, app: &AppState) -> bool {
+        self.run_submission_intent
+            .as_ref()
+            .is_none_or(|intent| Arc::ptr_eq(intent, &app.runtime.run_submission_intent))
+    }
     fn receipt_resolved_and_finished(&self) -> bool {
         self.receipt_resolved
             && self
@@ -2331,6 +2371,10 @@ impl PendingApplicationAdmission {
         let application = Arc::clone(&self.application);
         let request = Arc::clone(&self.request);
         let action = self.action.clone();
+        let run_admission = self.run_admission.clone();
+        let queue_target = self.queue_target.clone();
+        let attachment_recovery_binding = self.attachment_recovery_binding.clone();
+        let refresh_before_prepare = self.refresh_before_prepare;
         self.handle = Some(
             std::thread::Builder::new()
                 .name("sigil-tui-admission".to_owned())
@@ -2345,13 +2389,22 @@ impl PendingApplicationAdmission {
                                 tracing::error!(%error, "failed to build TUI admission runtime");
                                 sigil_application::ApplicationError::Unavailable
                             })?;
+                        let _entered = runtime.enter();
                         let mut frozen = request
                             .lock()
                             .map_err(|_| sigil_application::ApplicationError::Unavailable)?;
                         if frozen.is_none() {
+                            if refresh_before_prepare || application.current_projection()?.is_none()
+                            {
+                                runtime.block_on(application.refresh())?;
+                            }
                             *frozen = Some(
                                 application
-                                    .prepare_action(&action, None, None)?
+                                    .prepare_action(
+                                        &action,
+                                        queue_target.as_ref(),
+                                        attachment_recovery_binding.as_deref(),
+                                    )?
                                     .ok_or(sigil_application::ApplicationError::Unavailable)?,
                             );
                         }
@@ -2360,7 +2413,11 @@ impl PendingApplicationAdmission {
                             .ok_or(sigil_application::ApplicationError::Unavailable)?
                             .clone();
                         drop(frozen);
-                        runtime.block_on(application.execute_prepared(request))
+                        if let Some(admission) = run_admission {
+                            runtime.block_on(application.execute_prepared_run(request, admission))
+                        } else {
+                            runtime.block_on(application.execute_prepared(request))
+                        }
                     })();
                     let _ = sender.send(result);
                 })
@@ -2369,6 +2426,273 @@ impl PendingApplicationAdmission {
         self.receiver = Some(receiver);
         Ok(())
     }
+}
+
+fn is_run_admission_action(action: &AppAction) -> bool {
+    matches!(
+        action,
+        AppAction::SubmitPrompt(_)
+            | AppAction::SubmitPromptWithAttachments { .. }
+            | AppAction::SubmitPlanPrompt(_)
+            | AppAction::SubmitTask(_)
+            | AppAction::ContinueTask { .. }
+            | AppAction::InvokeInlineSkill { .. }
+            | AppAction::InvokeChildSessionSkill { .. }
+            | AppAction::InvokeAgentProfile { .. }
+    )
+}
+
+fn has_owned_interaction_admission(action: &AppAction) -> bool {
+    matches!(
+        action,
+        AppAction::QueueConversationInput { .. }
+            | AppAction::CancelQueuedConversationInput { .. }
+            | AppAction::EditQueuedConversationInput { .. }
+            | AppAction::MoveQueuedConversationInput { .. }
+            | AppAction::PromoteQueuedConversationInput { .. }
+            | AppAction::SendQueuedConversationInputNow { .. }
+            | AppAction::SetConversationQueuePaused { .. }
+            | AppAction::SavePlan { .. }
+            | AppAction::RejectPlan { .. }
+            | AppAction::CreateTaskFromPlan { .. }
+            | AppAction::SubmitUserInputDecision { .. }
+            | AppAction::ResumeCommittedUserInput { .. }
+            | AppAction::RevisePlan { .. }
+    )
+}
+
+fn queue_background_application_action(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<bool> {
+    let mapped_action = application_bridge::TuiApplicationSession::supports_action(action)
+        || matches!(action, AppAction::SetDefaultModel { .. });
+    if mapped_action
+        && !is_run_admission_action(action)
+        && !has_owned_interaction_admission(action)
+        && !matches!(
+            action,
+            AppAction::CancelRun | AppAction::SessionRuntimeRouteUpdated { .. }
+        )
+        && (!app.deferred_application_actions.is_empty()
+            || background_action_must_wait(app, worker, action))
+    {
+        app.deferred_application_actions.push_back(action.clone());
+        app.handle_worker_message(WorkerMessage::Notice(
+            "operation queued; waiting for the preceding operation".to_owned(),
+        ))?;
+        return Ok(true);
+    }
+    let default_save;
+    let action = if let AppAction::SetDefaultModel {
+        root_config,
+        expected_root_config,
+    } = action
+    {
+        default_save = AppAction::PersistConfiguration {
+            request: Arc::new(crate::app::ConfigurationSaveRequest {
+                expected: *expected_root_config.clone(),
+                next_base: *root_config.clone(),
+                config_path: app.config_path.clone(),
+                follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
+                root_only: true,
+                draft_binding: None,
+                draft: std::sync::Mutex::new(None),
+                published_root_config: std::sync::Mutex::new(None),
+                close_after_save: false,
+            }),
+        };
+        &default_save
+    } else {
+        action
+    };
+    if !application_bridge::TuiApplicationSession::supports_action(action)
+        || is_run_admission_action(action)
+        || has_owned_interaction_admission(action)
+        || matches!(
+            action,
+            AppAction::CancelRun | AppAction::SessionRuntimeRouteUpdated { .. }
+        )
+    {
+        return Ok(false);
+    }
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let Some(application) = runtime.application.as_ref() else {
+        return Ok(false);
+    };
+    if runtime.pending_interactions.iter().any(|pending| {
+        !pending.receipt_resolved && same_application_interaction(&pending.action, action)
+    }) {
+        return Ok(true);
+    }
+    if runtime.pending_interactions.len() >= MAX_PENDING_APPLICATION_INTERACTIONS {
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!("too many application operations are awaiting a result"),
+        )?;
+        return Ok(true);
+    }
+    let attachment_recovery_binding = if let AppAction::SwitchSession { session_log_path } = action
+    {
+        app.pending_session_attachment_recovery_binding_for(session_log_path)
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    let mut pending = PendingApplicationAdmission {
+        application: Arc::clone(application),
+        request: Arc::new(std::sync::Mutex::new(None)),
+        action: action.clone(),
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: app.active_conversation_queue_target(),
+        attachment_recovery_binding,
+        retain_for_recovery: false,
+        settled: false,
+        refresh_before_prepare: false,
+        receiver: None,
+        handle: None,
+        retryable: true,
+        receipt_resolved: false,
+        reconcile_requested: false,
+    };
+    if let Err(error) = pending.start() {
+        report_application_admission_error(app, action, &error)?;
+        return Ok(true);
+    }
+    runtime.pending_interactions.push(pending);
+    app.handle_worker_message(WorkerMessage::Notice("submitting operation".to_owned()))?;
+    Ok(true)
+}
+
+fn is_application_lifecycle_action(action: &AppAction) -> bool {
+    matches!(
+        action,
+        AppAction::StartNewSession { .. }
+            | AppAction::SwitchSession { .. }
+            | AppAction::PersistConfiguration { .. }
+            | AppAction::SetDefaultModel { .. }
+    )
+}
+
+fn background_action_must_wait(
+    app: &AppState,
+    worker: &Option<WorkerRuntime>,
+    action: &AppAction,
+) -> bool {
+    app.runtime.worker_rebind_required
+        || app
+            .runtime_transition
+            .as_ref()
+            .is_some_and(|owner| owner.is_running())
+        || app
+            .runtime_maintenance
+            .as_ref()
+            .is_some_and(|owner| owner.is_running())
+        || worker.as_ref().is_some_and(|runtime| {
+            !runtime.ready
+                || runtime.pending_interactions.iter().any(|pending| {
+                    is_application_lifecycle_action(&pending.action)
+                        || (is_application_lifecycle_action(action)
+                            && (pending.receiver.is_some() || pending.handle.is_some()))
+                })
+                || (is_application_lifecycle_action(action)
+                    && runtime.pending_admission.as_ref().is_some_and(|pending| {
+                        pending.receiver.is_some() || pending.handle.is_some()
+                    }))
+        })
+}
+
+fn flush_deferred_application_action(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> Result<bool> {
+    let Some(action) = app.deferred_application_actions.front() else {
+        return Ok(false);
+    };
+    // These are UI intents, not frozen application requests. Prepare them only against the
+    // replacement worker's application identity after its Ready handoff.
+    if worker
+        .as_ref()
+        .is_none_or(|runtime| !runtime.ready || runtime.application.is_none())
+        || background_action_must_wait(app, worker, action)
+    {
+        return Ok(false);
+    }
+    let action = app
+        .deferred_application_actions
+        .pop_front()
+        .expect("front checked");
+    let remaining = std::mem::take(&mut app.deferred_application_actions);
+    let result = queue_background_application_action(app, worker, &action);
+    app.deferred_application_actions.extend(remaining);
+    anyhow::ensure!(result?, "deferred application action lost its dispatcher");
+    Ok(true)
+}
+
+fn queue_run_admission(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<bool> {
+    if !is_run_admission_action(action) {
+        return Ok(false);
+    }
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let Some(application) = runtime.application.as_ref() else {
+        return Ok(false);
+    };
+    if let Some(pending) = runtime.pending_interactions.iter_mut().find(|pending| {
+        !pending.receipt_resolved
+            && !pending.run_observed()
+            && pending.owns_current_run_submission(app)
+            && same_application_interaction(&pending.action, action)
+    }) {
+        if let Err(error) = pending.start() {
+            report_application_admission_error(app, action, &error)?;
+        }
+        return Ok(true);
+    }
+    if runtime.pending_interactions.len() >= MAX_PENDING_APPLICATION_INTERACTIONS {
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!("too many application operations are awaiting a result"),
+        )?;
+        return Ok(true);
+    }
+    // Freeze cancellation and attachment identity before yielding to admission. Projection
+    // refresh, validation and durable reservation belong to the owned thread, not the UI frame.
+    let admission = application.reserve_run_admission(&runtime.worker_tx)?;
+    let mut pending = PendingApplicationAdmission {
+        application: Arc::clone(application),
+        request: Arc::new(std::sync::Mutex::new(None)),
+        action: action.clone(),
+        run_admission: Some(admission),
+        run_submission_intent: Some(Arc::clone(&app.runtime.run_submission_intent)),
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: false,
+        receiver: None,
+        handle: None,
+        retryable: true,
+        receipt_resolved: false,
+        reconcile_requested: false,
+    };
+    if let Err(error) = pending.start() {
+        report_application_admission_error(app, action, &error)?;
+        return Ok(true);
+    }
+    runtime.pending_interactions.push(pending);
+    Ok(true)
 }
 
 fn queue_plan_revision(
@@ -2446,6 +2770,13 @@ fn queue_plan_revision(
         application: Arc::clone(application),
         request: Arc::new(std::sync::Mutex::new(Some(request))),
         action: action.clone(),
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: false,
         receiver: None,
         handle: None,
         retryable: true,
@@ -2506,10 +2837,14 @@ fn queue_application_interaction(
         }
         return Ok(resume);
     };
+    let waiting_for_run = matches!(action, AppAction::QueueConversationInput { .. })
+        && runtime.pending_interactions.iter().any(|pending| {
+            pending.run_admission.is_some() && !pending.run_observed() && pending.receiver.is_some()
+        });
     if let Some(pending) = runtime.pending_interactions.iter_mut().find(|pending| {
         !pending.receipt_resolved && same_application_interaction(&pending.action, action)
     }) {
-        if let Err(error) = pending.start() {
+        if !waiting_for_run && let Err(error) = pending.start() {
             report_application_admission_error(app, action, &error)?;
         }
         return Ok(true);
@@ -2524,7 +2859,7 @@ fn queue_application_interaction(
     }
     // These actions prepare against the cached projection. Durable admission and dispatch run
     // on the owned thread so pending feedback and urgent cancellation stay responsive.
-    let request = if resume {
+    let request = if resume || waiting_for_run || application.current_projection()?.is_none() {
         None
     } else {
         match application.prepare_action(
@@ -2544,13 +2879,22 @@ fn queue_application_interaction(
         application: Arc::clone(application),
         request: Arc::new(std::sync::Mutex::new(request)),
         action: action.clone(),
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: app.active_conversation_queue_target(),
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: waiting_for_run,
         receiver: None,
         handle: None,
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
     };
-    if let Err(error) = pending.start() {
+    if waiting_for_run {
+        pending.reconcile_requested = true;
+    } else if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
         return Ok(true);
     }
@@ -2563,6 +2907,81 @@ fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
         return AppState::queue_operation_for_action(right).as_ref() == Some(&operation);
     }
     match (left, right) {
+        (
+            AppAction::StartNewSession {
+                session_log_path: a,
+            },
+            AppAction::StartNewSession {
+                session_log_path: b,
+            },
+        )
+        | (
+            AppAction::SwitchSession {
+                session_log_path: a,
+            },
+            AppAction::SwitchSession {
+                session_log_path: b,
+            },
+        ) => a == b,
+        (
+            AppAction::PersistConfiguration { request: a },
+            AppAction::PersistConfiguration { request: b },
+        ) => Arc::ptr_eq(a, b),
+        (AppAction::SubmitPrompt(a), AppAction::SubmitPrompt(b))
+        | (AppAction::SubmitPlanPrompt(a), AppAction::SubmitPlanPrompt(b))
+        | (AppAction::SubmitTask(a), AppAction::SubmitTask(b)) => a == b,
+        (
+            AppAction::SubmitPromptWithAttachments {
+                prompt: a,
+                attachments: b,
+            },
+            AppAction::SubmitPromptWithAttachments {
+                prompt: c,
+                attachments: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::ContinueTask {
+                task_id: a,
+                guidance: b,
+            },
+            AppAction::ContinueTask {
+                task_id: c,
+                guidance: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::InvokeInlineSkill {
+                skill_id: a,
+                arguments: b,
+            },
+            AppAction::InvokeInlineSkill {
+                skill_id: c,
+                arguments: d,
+            },
+        )
+        | (
+            AppAction::InvokeChildSessionSkill {
+                skill_id: a,
+                arguments: b,
+            },
+            AppAction::InvokeChildSessionSkill {
+                skill_id: c,
+                arguments: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::InvokeAgentProfile {
+                profile_id: a,
+                prompt: b,
+                parent_prompt: e,
+            },
+            AppAction::InvokeAgentProfile {
+                profile_id: c,
+                prompt: d,
+                parent_prompt: f,
+            },
+        ) => a == c && b == d && e == f,
         (
             AppAction::SavePlan {
                 plan_id: left_id,
@@ -2657,6 +3076,35 @@ fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerM
         return AppState::queue_operation_for_action(action).as_ref() == Some(operation);
     }
     match (action, message) {
+        (AppAction::SubmitPrompt(a), WorkerMessage::RunStarted { prompt: b })
+        | (
+            AppAction::SubmitPromptWithAttachments { prompt: a, .. },
+            WorkerMessage::RunStarted { prompt: b },
+        )
+        | (AppAction::SubmitPlanPrompt(a), WorkerMessage::PlanRunStarted { prompt: b })
+        | (AppAction::SubmitTask(a), WorkerMessage::TaskRunStarted { objective: b, .. }) => a == b,
+        (
+            AppAction::InvokeInlineSkill { skill_id: a, .. }
+            | AppAction::InvokeChildSessionSkill { skill_id: a, .. },
+            WorkerMessage::SkillRunStarted { skill_id: b, .. },
+        ) => a == b,
+        (
+            AppAction::InvokeAgentProfile {
+                profile_id: a,
+                prompt: b,
+                ..
+            },
+            WorkerMessage::AgentRunStarted {
+                profile_id: c,
+                prompt: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::ContinueTask { task_id, .. },
+            WorkerMessage::TaskRunStarted {
+                task_id: started, ..
+            },
+        ) => task_id.as_ref().is_none_or(|expected| expected == started),
         (
             AppAction::RevisePlan {
                 plan_id,
@@ -2790,10 +3238,11 @@ fn poll_application_admission(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
 ) -> Result<bool> {
-    let Some(runtime) = worker.as_mut() else {
-        return Ok(false);
-    };
     let mut changed = false;
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(changed);
+    };
+    let mut configuration_publications = Vec::new();
     if let Some(pending) = runtime.pending_admission.as_mut() {
         changed |= poll_pending_application_admission(app, pending)?;
         if pending.receipt_resolved_and_finished() {
@@ -2804,14 +3253,43 @@ fn poll_application_admission(
     }
     let mut index = 0;
     while index < runtime.pending_interactions.len() {
+        let waiting_for_run = runtime.pending_interactions.iter().any(|pending| {
+            pending.run_admission.is_some() && !pending.run_observed() && pending.receiver.is_some()
+        });
         let pending = &mut runtime.pending_interactions[index];
+        if waiting_for_run
+            && matches!(pending.action, AppAction::QueueConversationInput { .. })
+            && pending.receiver.is_none()
+        {
+            index += 1;
+            continue;
+        }
         changed |= poll_pending_application_admission(app, pending)?;
         if pending.receipt_resolved_and_finished() {
             wait_for_worker_thread(pending.handle.take(), Instant::now())?;
+            if pending.settled
+                && let AppAction::PersistConfiguration { request } = &pending.action
+            {
+                configuration_publications.push(Arc::clone(request));
+            }
             runtime.pending_interactions.remove(index);
             changed = true;
         } else {
             index += 1;
+        }
+    }
+    for request in configuration_publications {
+        if let Some(action) = apply_configuration_publication(app, &request)? {
+            #[cfg(not(test))]
+            process_app_action_with_spawner_and_host(
+                app,
+                worker,
+                action,
+                spawn_worker,
+                &mut SystemHostEffects,
+            )?;
+            #[cfg(test)]
+            process_app_action(app, worker, action)?;
         }
     }
     Ok(changed)
@@ -2821,10 +3299,22 @@ fn poll_pending_application_admission(
     app: &mut AppState,
     pending: &mut PendingApplicationAdmission,
 ) -> Result<bool> {
+    let joined = pending
+        .handle
+        .as_ref()
+        .is_some_and(|handle| handle.is_finished());
+    if joined {
+        wait_for_worker_thread(pending.handle.take(), Instant::now())?;
+    }
     if pending.receipt_resolved {
-        return Ok(false);
+        return Ok(joined);
     }
     if pending.receiver.is_none() && pending.reconcile_requested {
+        if matches!(pending.action, AppAction::QueueConversationInput { .. }) {
+            // A deferred follow-up keeps its explicit target in the action. Revalidate against
+            // the now-active target; never silently retarget it after the preceding admission.
+            pending.queue_target = app.active_conversation_queue_target();
+        }
         pending.retryable = true;
         pending.start()?;
         if pending.receiver.is_some() {
@@ -2832,11 +3322,11 @@ fn poll_pending_application_admission(
         }
     }
     let Some(receiver) = pending.receiver.as_ref() else {
-        return Ok(false);
+        return Ok(joined);
     };
     let result = match receiver.try_recv() {
         Ok(result) => result,
-        Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(false),
+        Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(joined),
         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
             Err(sigil_application::ApplicationError::Unavailable)
         }
@@ -2845,6 +3335,11 @@ fn poll_pending_application_admission(
     match result {
         Ok(receipt) => {
             pending.retryable = false;
+            pending.settled = matches!(
+                receipt,
+                sigil_application::ApplicationCommandReceipt::Settled(_)
+                    | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            );
             let resolved = matches!(
                 receipt,
                 sigil_application::ApplicationCommandReceipt::Settled(_)
@@ -2853,14 +3348,29 @@ fn poll_pending_application_admission(
                     | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
                     | sigil_application::ApplicationCommandReceipt::PayloadConflict(_)
             );
-            report_application_action_receipt(app, &pending.action, &receipt)?;
-            if resolved {
+            if pending.run_observed() || !pending.owns_current_run_submission(app) {
+                report_application_receipt(app, &receipt)?;
+            } else {
+                report_application_action_receipt(app, &pending.action, &receipt)?;
+            }
+            if resolved || !pending.retain_for_recovery {
                 pending.receipt_resolved = true;
             }
         }
         Err(error) => {
             pending.retryable = true;
-            report_application_admission_error(app, &pending.action, &anyhow::Error::new(error))?;
+            pending.receipt_resolved = !pending.retain_for_recovery;
+            if pending.run_observed() || !pending.owns_current_run_submission(app) {
+                app.handle_worker_message(WorkerMessage::Notice(format!(
+                    "run admission receipt is delayed: {error}"
+                )))?;
+            } else {
+                report_application_admission_error(
+                    app,
+                    &pending.action,
+                    &anyhow::Error::new(error),
+                )?;
+            }
         }
     }
     Ok(true)
@@ -3090,6 +3600,9 @@ fn report_application_action_receipt(
 }
 
 fn fail_pending_application_action(app: &mut AppState, action: &AppAction, message: &str) {
+    if is_run_admission_action(action) && app.approval.pending.is_none() {
+        app.restore_unadmitted_run_input(action);
+    }
     let message = sigil_kernel::safe_persistence_text(message);
     if app.fail_queue_action(action, message.clone())
         || app.fail_plan_action(action, message.clone())
@@ -3341,10 +3854,28 @@ fn try_recv_worker_message(runtime: &mut WorkerRuntime) -> Option<WorkerMessage>
 }
 
 #[cfg(not(test))]
-async fn next_worker_message(worker: &mut Option<WorkerRuntime>) -> Option<WorkerMessage> {
+async fn next_worker_message(
+    worker: &mut Option<WorkerRuntime>,
+    session_rebind_pending: bool,
+) -> Option<WorkerMessage> {
     match worker.as_mut() {
-        Some(runtime) => runtime.worker_rx.recv().await,
+        Some(runtime) => {
+            wait_for_worker_event(session_rebind_pending, runtime.worker_rx.recv()).await
+        }
         None => std::future::pending().await,
+    }
+}
+
+async fn wait_for_worker_event<T>(
+    session_rebind_pending: bool,
+    receive: impl std::future::Future<Output = Option<T>>,
+) -> Option<T> {
+    if session_rebind_pending {
+        // SessionSwitched is the final event of the retiring worker. Its closed channel is
+        // expected; keep the admission owner alive until its receipt has been consumed.
+        std::future::pending().await
+    } else {
+        receive.await
     }
 }
 
@@ -3422,9 +3953,21 @@ where
     let mut spawn_worker_fn = spawn_worker_fn;
     #[cfg(not(test))]
     let _ = spawn_worker_fn;
-    if !app.take_worker_rebind_required() {
+    // Consume the transition's receipt and its UI completion before shutdown takes the owner.
+    if worker.as_ref().is_some_and(|runtime| {
+        runtime
+            .pending_admission
+            .as_ref()
+            .is_some_and(|pending| pending.receiver.is_some() || pending.handle.is_some())
+            || runtime
+                .pending_interactions
+                .iter()
+                .any(|pending| pending.receiver.is_some() || pending.handle.is_some())
+    }) || !app.take_worker_rebind_required()
+    {
         return Ok(false);
     }
+    retain_idle_application_admissions(app, worker)?;
     #[cfg(not(test))]
     {
         let config = app.session_runtime_config_snapshot().cloned();
@@ -3451,6 +3994,52 @@ where
         }
         Ok(true)
     }
+}
+
+fn retain_idle_application_admissions(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> Result<()> {
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(());
+    };
+    for pending in runtime
+        .pending_interactions
+        .iter_mut()
+        .chain(runtime.pending_admission.iter_mut())
+    {
+        if pending.receiver.is_none()
+            && pending
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.is_finished())
+        {
+            wait_for_worker_thread(pending.handle.take(), Instant::now())?;
+        }
+    }
+    let mut index = 0;
+    while index < runtime.pending_interactions.len() {
+        let pending = &runtime.pending_interactions[index];
+        if pending.receiver.is_none() && pending.handle.is_none() {
+            let mut pending = runtime.pending_interactions.remove(index);
+            // Keep exact recovery material, never redispatch an old intent into a new scope.
+            // Recovery remains an explicit durable recovery operation.
+            pending.reconcile_requested = false;
+            app.retained_application_admissions.push(pending);
+        } else {
+            index += 1;
+        }
+    }
+    if runtime
+        .pending_admission
+        .as_ref()
+        .is_some_and(|pending| pending.receiver.is_none() && pending.handle.is_none())
+        && let Some(mut pending) = runtime.pending_admission.take()
+    {
+        pending.reconcile_requested = false;
+        app.retained_application_admissions.push(pending);
+    }
+    Ok(())
 }
 
 fn flush_pending_worker_commands(
@@ -3587,7 +4176,7 @@ fn report_application_admission_error(
     // Admission can reject an action while the worker is still waiting for its exact approval.
     // Keep that pending request and its owner intact so the user can retry the action. Prompt-like
     // actions have no durable worker event until admission returns a receipt, so every admission
-    // error must release their optimistic local Thinking state; otherwise a startup race or a
+    // error must release their optimistic local Preparing state; otherwise a startup race or a
     // failed application port leaves a permanent spinner with no provider request in flight.
     if matches!(
         action,

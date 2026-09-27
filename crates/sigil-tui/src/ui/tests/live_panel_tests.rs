@@ -237,21 +237,31 @@ fn render_live_progress_lines_shows_current_phase() -> anyhow::Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Char('好'), KeyModifiers::NONE))?;
     let _ = app.submit_input()?;
 
-    let view_model = LivePanelViewModel::from_app(&app, 4);
-    let lines = render_live_progress_lines(
-        view_model
-            .progress
-            .as_ref()
-            .expect("busy run should expose live progress"),
-        phase_accent(&view_model.phase),
-        80,
-    );
-    let plain = lines
+    let render_progress = |view_model: &LivePanelViewModel| {
+        render_live_progress_lines(
+            view_model
+                .progress
+                .as_ref()
+                .expect("busy run should expose live progress"),
+            phase_accent(&view_model.phase),
+            80,
+        )
         .iter()
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
-        .collect::<String>();
+        .collect::<String>()
+    };
+    let plain = render_progress(&LivePanelViewModel::from_app(&app, 4));
+    assert!(plain.contains("Preparing..."));
+    assert!(plain.contains("waiting for response from"));
+    assert!(!plain.contains("Thinking"));
+    assert!(!plain.contains("reasoning with"));
 
+    sigil_kernel::EventHandler::handle(
+        &mut app,
+        sigil_kernel::RunEvent::ReasoningDelta("actual provider reasoning".to_owned()),
+    )?;
+    let plain = render_progress(&LivePanelViewModel::from_app(&app, 4));
     assert!(plain.contains("Thinking..."));
     assert!(!plain.contains("(Thinking)"));
     assert!(plain.contains("reasoning with"));

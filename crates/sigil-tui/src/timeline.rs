@@ -172,6 +172,7 @@ fn agent_status_label(detail: &str) -> Option<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunPhase {
     Idle,
+    Preparing,
     Thinking,
     Agent(String),
     Tool(String),

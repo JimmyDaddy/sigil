@@ -132,8 +132,21 @@ impl fmt::Debug for ConfigDraft {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfigDraftBinding {
+    panel_id: uuid::Uuid,
+    edit_revision: u64,
+}
+
+impl ConfigDraftBinding {
+    pub(crate) fn same_panel(self, other: Self) -> bool {
+        self.panel_id == other.panel_id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigState {
+    save_binding: ConfigDraftBinding,
     pub(crate) selected_section: ConfigSection,
     pub(crate) show_advanced: bool,
     pub(crate) selected_field: Option<ConfigField>,
@@ -166,6 +179,10 @@ impl ConfigState {
         let draft = ConfigDraft::from_root_config(root_config);
         let current_session_route = Some(draft.default_model.clone());
         Self {
+            save_binding: ConfigDraftBinding {
+                panel_id: uuid::Uuid::new_v4(),
+                edit_revision: 0,
+            },
             selected_section,
             show_advanced: false,
             selected_field: ConfigField::fields_for_section(selected_section)
@@ -196,18 +213,23 @@ impl ConfigState {
     }
 
     pub(crate) fn mark_dirty(&mut self) {
-        self.dirty = true;
-        self.save_error = None;
+        self.mark_edited();
         self.draft_revision = self.draft_revision.saturating_add(1);
     }
 
     pub(crate) fn mark_edited(&mut self) {
         self.dirty = true;
         self.save_error = None;
+        self.save_binding.edit_revision = self.save_binding.edit_revision.saturating_add(1);
     }
 
     pub(crate) fn bump_draft_revision(&mut self) {
         self.draft_revision = self.draft_revision.saturating_add(1);
+        self.save_binding.edit_revision = self.save_binding.edit_revision.saturating_add(1);
+    }
+
+    pub(crate) fn save_binding(&self) -> ConfigDraftBinding {
+        self.save_binding
     }
 
     pub(crate) fn set_section(&mut self, section: ConfigSection) {

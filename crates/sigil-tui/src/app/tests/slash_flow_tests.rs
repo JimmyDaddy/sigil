@@ -629,7 +629,7 @@ fn plain_prompt_remains_chat_when_session_has_unfinished_task() -> Result<()> {
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "优先看 runtime 状态同步"
     }));
-    assert_eq!(app.last_notice(), Some("thinking"));
+    assert_eq!(app.last_notice(), Some("preparing request"));
     Ok(())
 }
 

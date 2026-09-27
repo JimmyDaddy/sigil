@@ -8,11 +8,33 @@ use std::sync::{
 };
 
 struct SlowAdmissionPort {
+    settle: bool,
     snapshot: Arc<Mutex<ProjectionSnapshot>>,
     release: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     started: mpsc::Sender<()>,
     calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<ApplicationCommandRequest>>>,
+}
+
+// Declare after the worker owner: unwinding must release this one fixture gate before joining
+// the admission thread. Taking the sender on explicit release prevents a second signal on Drop.
+struct AdmissionGateRelease(Option<mpsc::Sender<()>>);
+
+impl AdmissionGateRelease {
+    fn release(&mut self) -> Result<()> {
+        if let Some(sender) = self.0.take() {
+            sender.send(())?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AdmissionGateRelease {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 impl ApplicationPort for SlowAdmissionPort {
@@ -67,6 +89,8 @@ impl ApplicationPort for SlowAdmissionPort {
         let requests = Arc::clone(&self.requests);
         let release = Arc::clone(&self.release);
         let started = self.started.clone();
+        let settle = self.settle;
+        let snapshot = Arc::clone(&self.snapshot);
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             requests.lock().expect("request log").push(request.clone());
@@ -78,7 +102,29 @@ impl ApplicationPort for SlowAdmissionPort {
                 })
                 .await
                 .expect("join slow reservation");
-                return Err(ApplicationError::Unavailable);
+                if !settle {
+                    return Err(ApplicationError::Unavailable);
+                }
+            }
+            if settle {
+                let mut frontier = snapshot.lock().expect("snapshot").envelope.cut.clone();
+                frontier.through_sequence = frontier.through_sequence.max(1);
+                return Ok(ApplicationCommandReceipt::Settled(
+                    ApplicationDomainReceipt {
+                        command_id: request.envelope.command_id.clone(),
+                        command_kind: request.envelope.command.kind().to_owned(),
+                        frontier,
+                        settlement: request.envelope.command.policy().settlement,
+                        summary: "fixture publication committed".to_owned(),
+                        domain_commit: ApplicationDomainCommitRef {
+                            source_session_scope_id: None,
+                            source_event_id: "fixture-config-commit".to_owned(),
+                            source_sequence: 1,
+                            source_digest: "a".repeat(64),
+                        },
+                        outcome: None,
+                    },
+                ));
             }
             Ok(ApplicationCommandReceipt::Uncertain(
                 UncertainCommandReceipt {
@@ -111,6 +157,7 @@ fn control_log_recovery_keeps_input_responsive_without_projection_and_joins_on_e
     let (started_tx, started_rx) = mpsc::channel();
     let calls = Arc::new(AtomicUsize::new(0));
     let port = Arc::new(SlowAdmissionPort {
+        settle: false,
         snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
             scope.clone(),
         ))),
@@ -220,6 +267,7 @@ fn revise_admission_is_nonblocking_deduplicated_and_retries_the_original_envelop
     let calls = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let port = Arc::new(SlowAdmissionPort {
+        settle: false,
         snapshot: Arc::clone(&snapshot),
         release: Arc::new(Mutex::new(Some(release_rx))),
         started: started_tx,
@@ -420,6 +468,13 @@ fn bounded_non_exit_shutdown_restores_terminal_and_retains_a_pending_worker() ->
 #[test]
 fn queue_enqueue_and_save_admission_remain_responsive_and_retry_the_frozen_request() -> Result<()> {
     for action in [
+        AppAction::SubmitPrompt("hello".to_owned()),
+        AppAction::SubmitPlanPrompt("review the code".to_owned()),
+        AppAction::SubmitTask("implement the change".to_owned()),
+        AppAction::ContinueTask {
+            task_id: None,
+            guidance: Some("continue carefully".to_owned()),
+        },
         AppAction::QueueConversationInput {
             prompt: "continue after this run".to_owned(),
             kind: sigil_kernel::ConversationInputKind::Chat,
@@ -452,6 +507,7 @@ fn queue_enqueue_and_save_admission_remain_responsive_and_retry_the_frozen_reque
         let calls = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let port = Arc::new(SlowAdmissionPort {
+            settle: false,
             snapshot: Arc::clone(&snapshot),
             release: Arc::new(Mutex::new(Some(release_rx))),
             started: started_tx,
@@ -494,7 +550,7 @@ fn queue_enqueue_and_save_admission_remain_responsive_and_retry_the_frozen_reque
         ));
         release_tx.send(())?;
         wait_interaction_admission(&mut app, &mut worker)?;
-        assert!(app.runtime.is_busy);
+        assert_eq!(app.runtime.is_busy, !is_run_admission_action(&action));
         {
             let mut changed = snapshot.lock().expect("snapshot");
             changed.envelope.cut.through_sequence += 1;
@@ -520,6 +576,452 @@ fn queue_enqueue_and_save_admission_remain_responsive_and_retry_the_frozen_reque
     Ok(())
 }
 
+#[test]
+fn prompt_admission_renders_and_accepts_input_and_stop_before_slow_receipt() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("prompt-first-frame")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let (release_tx, release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Arc::new(SlowAdmissionPort {
+        settle: false,
+        snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+            scope.clone(),
+        ))),
+        release: Arc::new(Mutex::new(Some(release_rx))),
+        started: started_tx,
+        calls: Arc::clone(&calls),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let application = Arc::new(crate::application_bridge::tests::session(port, scope)?);
+    assert!(
+        application.current_projection()?.is_none(),
+        "exercise initial resume frontier refresh too"
+    );
+    let mut config = crate::app::tests::common::test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    let (worker_tx, commands) = runner::WorkerCommandSender::test_channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        worker_rx: mpsc::channel().1,
+        join_handle: None,
+        ready: true,
+    });
+    let mut release_admission = AdmissionGateRelease(Some(release_tx));
+    app.composer.input = "visible before admission".to_owned();
+    let action = app.submit_input()?.expect("prompt action");
+    let start = Instant::now();
+    process_app_action(&mut app, &mut worker, action.clone())?;
+    assert!(start.elapsed() < Duration::from_millis(100));
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))?;
+    terminal.draw(|frame| crate::ui::render(frame, &app))?;
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("visible before admission"));
+    assert!(rendered.contains("Preparing"));
+    assert!(!rendered.contains("reasoning with"));
+    process_app_action(&mut app, &mut worker, action)?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "duplicate UI dispatch retains the same owned admission"
+    );
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::QueueConversationInput {
+            prompt: "follow up after the original prompt".to_owned(),
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        },
+    )?;
+    poll_application_admission(&mut app, &mut worker)?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "follow-up cannot overtake original prompt admission"
+    );
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('x'),
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
+    process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
+    assert!(matches!(
+        commands.recv_timeout(Duration::from_millis(100))?,
+        WorkerCommand::CancelRun
+    ));
+    release_admission.release()?;
+    wait_interaction_admission(&mut app, &mut worker)?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "follow-up is released once the original admission has an outcome"
+    );
+    assert_eq!(
+        app.composer.input, "x",
+        "late admission failure must preserve newer input"
+    );
+    assert!(!app.runtime.is_busy);
+    app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
+    shutdown_and_join_worker(&mut worker)?;
+    Ok(())
+}
+
+#[test]
+fn identical_prompt_after_run_finish_gets_a_new_admission_despite_a_late_old_receipt() -> Result<()>
+{
+    let fixture = tempfile::tempdir()?;
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("repeated-prompt")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let (release_tx, release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let application = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: false,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                scope.clone(),
+            ))),
+            release: Arc::new(Mutex::new(Some(release_rx))),
+            started: started_tx,
+            calls: Arc::clone(&calls),
+            requests: Arc::clone(&requests),
+        }),
+        scope,
+    )?);
+    let mut config = crate::app::tests::common::test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    let (worker_tx, _commands) = runner::WorkerCommandSender::test_channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        worker_rx: mpsc::channel().1,
+        join_handle: None,
+        ready: true,
+    });
+    app.composer.input = "same prompt".to_owned();
+    let action = app.submit_input()?.expect("first prompt");
+    process_app_action(&mut app, &mut worker, action)?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    let started = WorkerMessage::RunStarted {
+        prompt: "same prompt".to_owned(),
+    };
+    apply_worker_message_state(worker.as_mut().expect("worker"), None, &started);
+    let run_owner = sigil_kernel::RunCancellationOwner::new();
+    worker.as_ref().expect("worker").pending_interactions[0]
+        .run_admission
+        .as_ref()
+        .expect("exact admission")
+        .bind_test_owner(&run_owner);
+    run_owner.request_cancel();
+    app.handle_worker_message(started)?;
+    app.handle_worker_message(WorkerMessage::RunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "first response".to_owned(),
+            tool_calls: 0,
+            final_message_id: None,
+        },
+        entries: Vec::new(),
+    })?;
+    app.composer.input = "same prompt".to_owned();
+    let action = app.submit_input()?.expect("second intent");
+    process_app_action(&mut app, &mut worker, action)?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let logged = requests.lock().expect("requests");
+    assert_ne!(logged[0].envelope.command_id, logged[1].envelope.command_id);
+    drop(logged);
+    release_tx.send(())?;
+    let old = &mut worker.as_mut().expect("worker").pending_interactions[0];
+    wait_for_owned_thread(&mut old.handle, Instant::now() + Duration::from_secs(2))?;
+    let _old_result = old
+        .receiver
+        .take()
+        .expect("old receipt")
+        .recv_timeout(Duration::from_secs(1))?;
+    // A late terminal receipt belongs to the old request even when the new prompt text matches.
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Ok(ApplicationCommandReceipt::Rejected(CommandRejection {
+        kind: "late-old-rejection".to_owned(),
+        reason: "late old receipt".to_owned(),
+    })))?;
+    old.receiver = Some(receiver);
+    poll_application_admission(&mut app, &mut worker)?;
+    assert!(app.runtime.is_busy);
+    assert_eq!(app.run_phase(), crate::timeline::RunPhase::Preparing);
+    assert!(app.composer.input.is_empty());
+    app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
+    shutdown_and_join_worker(&mut worker)?;
+    Ok(())
+}
+
+#[test]
+fn session_dispatch_and_configuration_admission_do_not_block_the_ui_or_apply_early() -> Result<()> {
+    for operation in [
+        "session-create",
+        "session-switch",
+        "approval",
+        "mcp",
+        "diagnostics",
+        "config-failure",
+        "config-success",
+        "config-edited",
+        "config-reopened",
+    ] {
+        let fixture = tempfile::tempdir()?;
+        let scope = ApplicationScope {
+            application_instance: ApplicationInstanceId::new(format!("slow-{operation}"))?,
+            authenticated_subject: AuthenticatedSubject::new("local")?,
+            workspace: Some(WorkspaceScopeId::new("workspace")?),
+            session: Some(SessionScopeId::new("session")?),
+        };
+        let mut snapshot = crate::application_bridge::tests::snapshot(scope.clone());
+        snapshot.envelope.projection.approval.binding = Some("run:call:approval".to_owned());
+        snapshot.envelope.projection.approval.pending = true;
+        let (release_tx, release_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let application = Arc::new(crate::application_bridge::tests::session(
+            Arc::new(SlowAdmissionPort {
+                settle: matches!(
+                    operation,
+                    "config-success" | "config-edited" | "config-reopened"
+                ),
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+                started: started_tx,
+                calls: Arc::clone(&calls),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }),
+            scope,
+        )?);
+        let mut config = crate::app::tests::common::test_config();
+        config.workspace.root = fixture.path().display().to_string();
+        let config_path = fixture.path().join("sigil.toml");
+        let mut app = AppState::from_root_config(&config_path, &config);
+        let (worker_tx, commands) = runner::WorkerCommandSender::test_channel();
+        let mut worker = Some(WorkerRuntime {
+            worker_tx,
+            application: Some(application),
+            pending_admission: None,
+            pending_interactions: Vec::new(),
+            worker_rx: mpsc::channel().1,
+            join_handle: None,
+            ready: true,
+        });
+        let mut next = config.clone();
+        next.agent.model = "unpublished-model".to_owned();
+        if matches!(operation, "config-edited" | "config-reopened") {
+            app.composer.input = "/config".to_owned();
+            app.submit_input()?;
+            assert!(app.is_config_mode());
+        }
+        let save = Arc::new(crate::app::ConfigurationSaveRequest {
+            expected: config.clone(),
+            next_base: next,
+            config_path,
+            follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
+            root_only: true,
+            draft_binding: app.config_draft_binding(),
+            draft: Mutex::new(None),
+            published_root_config: Mutex::new(None),
+            close_after_save: true,
+        });
+        let target = fixture.path().join("other-session.jsonl");
+        let action = match operation {
+            "session-create" => AppAction::StartNewSession {
+                session_log_path: target,
+            },
+            "session-switch" => AppAction::SwitchSession {
+                session_log_path: target,
+            },
+            "approval" => AppAction::ApprovalDecision {
+                call_id: "call".to_owned(),
+                approval_request_id: "approval".to_owned(),
+                approved: true,
+            },
+            "mcp" => AppAction::RefreshMcpServer {
+                server_name: "fixture-server".to_owned(),
+            },
+            "diagnostics" => AppAction::CheckChangedFilesDiagnostics,
+            _ => AppAction::PersistConfiguration {
+                request: Arc::clone(&save),
+            },
+        };
+        let start = Instant::now();
+        process_app_action(&mut app, &mut worker, action)?;
+        assert!(start.elapsed() < Duration::from_millis(100), "{operation}");
+        started_rx.recv_timeout(Duration::from_secs(2))?;
+        assert_eq!(
+            app.persisted_config_snapshot()
+                .expect("configuration")
+                .agent
+                .model,
+            config.agent.model,
+            "configuration cannot apply before publication receipt"
+        );
+        if operation == "config-edited" {
+            app.select_config_section_for_test(crate::config_panel::ConfigSection::Appearance);
+            app.handle_key_event(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ))?;
+            assert!(app.config_is_dirty());
+        } else if operation == "config-reopened" {
+            app.handle_key_event(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ))?;
+            assert!(!app.is_config_mode());
+            app.composer.input = "/config".to_owned();
+            app.submit_input()?;
+            assert!(app.is_config_mode());
+        } else {
+            app.handle_key_event(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            ))?;
+        }
+        let current_draft = app.config_draft_binding();
+        let current_appearance = app.config_preview_appearance();
+        process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_millis(100))?,
+            WorkerCommand::CancelRun
+        ));
+        let mut published = config.clone();
+        published.agent.model = "published-model".to_owned();
+        *save
+            .published_root_config
+            .lock()
+            .expect("publication result") = Some(published);
+        release_tx.send(())?;
+        wait_interaction_admission(&mut app, &mut worker)?;
+        assert_eq!(
+            app.persisted_config_snapshot()
+                .expect("configuration")
+                .agent
+                .model,
+            if matches!(
+                operation,
+                "config-success" | "config-edited" | "config-reopened"
+            ) {
+                "published-model"
+            } else {
+                &config.agent.model
+            }
+        );
+        if matches!(operation, "config-edited" | "config-reopened") {
+            assert!(
+                app.is_config_mode(),
+                "old save must not close a changed/reopened panel"
+            );
+            assert_eq!(app.config_draft_binding(), current_draft);
+            assert_eq!(app.config_preview_appearance(), current_appearance);
+            assert_eq!(app.config_is_dirty(), operation == "config-edited");
+        }
+        assert!(
+            worker
+                .as_ref()
+                .expect("worker")
+                .pending_interactions
+                .is_empty(),
+            "one-shot dispatch owner is joined after its receipt"
+        );
+        app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
+        shutdown_and_join_worker(&mut worker)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_receipt_keeps_idle_wakes_until_the_owner_thread_is_joined() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("receipt-before-thread-exit")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let application = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: false,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                scope.clone(),
+            ))),
+            release: Arc::new(Mutex::new(None)),
+            started: mpsc::channel().0,
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }),
+        scope,
+    )?);
+    let (release, wait) = mpsc::channel();
+    let (published, received) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        published.send(()).expect("receipt published");
+        wait.recv().expect("finish owner cleanup");
+    });
+    received.recv_timeout(Duration::from_secs(1))?;
+    let mut pending = PendingApplicationAdmission {
+        application,
+        request: Arc::new(Mutex::new(None)),
+        action: AppAction::CheckChangedFilesDiagnostics,
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: false,
+        settled: true,
+        refresh_before_prepare: false,
+        receiver: None,
+        handle: Some(handle),
+        retryable: false,
+        receipt_resolved: true,
+        reconcile_requested: false,
+    };
+    assert!(
+        pending.needs_polling(),
+        "consumed receipt must not disable the cleanup wake"
+    );
+    assert!(!pending.receipt_resolved_and_finished());
+    release.send(())?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pending.receipt_resolved_and_finished() {
+        anyhow::ensure!(Instant::now() < deadline, "owner did not exit");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        pending.needs_polling(),
+        "a finished owner still needs one poll to apply completion and join"
+    );
+    wait_for_owned_thread(&mut pending.handle, deadline)?;
+    assert!(!pending.needs_polling());
+    Ok(())
+}
+
 fn wait_interaction_admission(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
@@ -528,13 +1030,10 @@ fn wait_interaction_admission(
     loop {
         poll_application_admission(app, worker)?;
         if worker.as_ref().is_some_and(|runtime| {
-            runtime.pending_interactions.iter().all(|pending| {
-                pending.receiver.is_none()
-                    && pending
-                        .handle
-                        .as_ref()
-                        .is_none_or(|handle| handle.is_finished())
-            })
+            runtime
+                .pending_interactions
+                .iter()
+                .all(|pending| pending.receiver.is_none() && pending.handle.is_none())
         }) {
             return Ok(());
         }
@@ -679,7 +1178,7 @@ fn production_dispatch_keeps_input_p95_below_100ms_during_live_and_worker_flood(
         for index in 0..DELTAS {
             recorder.handle(sigil_kernel::RunEvent::TextDelta("x".to_owned()))?;
             if index.is_multiple_of(512) {
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
         Ok(())
@@ -793,6 +1292,7 @@ async fn retiring_a_scope_waits_for_its_actual_blocking_ack_after_the_future_is_
     assert!(!event_ids.is_empty());
     let (started, _) = mpsc::channel();
     let port: Arc<dyn ApplicationPort> = Arc::new(SlowAdmissionPort {
+        settle: false,
         snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
             scope.clone(),
         ))),
@@ -877,6 +1377,7 @@ fn disconnected_worker_shutdown_accounts_for_blocked_interaction_admission() -> 
     let (release_tx, release_rx) = mpsc::channel();
     let (started_tx, started_rx) = mpsc::channel();
     let port = Arc::new(SlowAdmissionPort {
+        settle: false,
         snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
             scope.clone(),
         ))),
@@ -895,6 +1396,13 @@ fn disconnected_worker_shutdown_accounts_for_blocked_interaction_admission() -> 
         .prepare_action(&action, None, None)?
         .expect("save plan has an application command");
     let mut pending = PendingApplicationAdmission {
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: false,
         application: Arc::clone(&application),
         request: Arc::new(std::sync::Mutex::new(Some(request))),
         action,
@@ -1019,5 +1527,395 @@ fn shutdown_preserves_the_primary_failure_and_all_cleanup_failures() -> Result<(
         .expect_err("clean loop does not erase a failed cleanup");
     assert_eq!(error.to_string(), "worker cleanup failed");
     finish_tui_shutdown(Ok(()), [Ok(()), Ok(())])?;
+    Ok(())
+}
+
+fn assert_new_submission_survives_an_unobserved_old_admission(
+    stop_old_submission: bool,
+    next_prompt: &str,
+    rejected_receipt: bool,
+) -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("unobserved-old-admission")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let (release_tx, release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let application = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: false,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                scope.clone(),
+            ))),
+            release: Arc::new(Mutex::new(Some(release_rx))),
+            started: started_tx,
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::clone(&requests),
+        }),
+        scope,
+    )?);
+    let mut config = crate::app::tests::common::test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    let (worker_tx, commands) = runner::WorkerCommandSender::test_channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        worker_rx: mpsc::channel().1,
+        join_handle: None,
+        ready: true,
+    });
+    app.composer.input = "same prompt".to_owned();
+    let action = app.submit_input()?.expect("first submission");
+    process_app_action(&mut app, &mut worker, action)?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    if stop_old_submission {
+        process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
+        assert!(matches!(
+            commands.recv_timeout(Duration::from_secs(1))?,
+            WorkerCommand::CancelRun
+        ));
+    }
+    // The actual worker can publish failure before its application receipt returns, either
+    // because Stop found no bound owner yet or because preparation failed before owner binding.
+    let failure = WorkerMessage::RunFailed(if stop_old_submission {
+        "no active run to cancel".to_owned()
+    } else {
+        "preparation failed before run owner binding".to_owned()
+    });
+    apply_worker_message_state(worker.as_mut().expect("worker"), None, &failure);
+    app.handle_worker_message(failure)?;
+    assert!(!app.runtime.is_busy);
+    assert!(!worker.as_ref().expect("worker").pending_interactions[0].run_observed());
+
+    app.composer.input = next_prompt.to_owned();
+    let action = app.submit_input()?.expect("new user submission");
+    process_app_action(&mut app, &mut worker, action)?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    let recorded = requests.lock().expect("request log");
+    assert_eq!(recorded.len(), 2, "same text still represents a new intent");
+    assert_ne!(
+        recorded[0].envelope.command_id,
+        recorded[1].envelope.command_id
+    );
+    drop(recorded);
+
+    release_tx.send(())?;
+    let old = &mut worker.as_mut().expect("worker").pending_interactions[0];
+    wait_for_owned_thread(&mut old.handle, Instant::now() + Duration::from_secs(2))?;
+    if rejected_receipt {
+        let _actual_error = old
+            .receiver
+            .take()
+            .expect("old receipt")
+            .recv_timeout(Duration::from_secs(1))?;
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(ApplicationCommandReceipt::Rejected(CommandRejection {
+            kind: "old-preparation-rejected".to_owned(),
+            reason: "old preparation did not start a run".to_owned(),
+        })))?;
+        old.receiver = Some(receiver);
+    }
+    poll_pending_application_admission(&mut app, old)?;
+    assert!(
+        app.runtime.is_busy,
+        "old admission cannot clear the new run"
+    );
+    assert_eq!(app.run_phase(), crate::timeline::RunPhase::Preparing);
+    assert!(
+        app.composer.input.is_empty(),
+        "old admission cannot restore its prompt over a newer submission"
+    );
+    app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
+    shutdown_and_join_worker(&mut worker)?;
+    Ok(())
+}
+
+#[test]
+fn stop_before_owner_binding_preserves_new_submission_identity_and_state() -> Result<()> {
+    for next_prompt in ["same prompt", "different prompt"] {
+        for rejected_receipt in [false, true] {
+            assert_new_submission_survives_an_unobserved_old_admission(
+                true,
+                next_prompt,
+                rejected_receipt,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn prebind_failure_without_stop_preserves_new_submission_identity_and_state() -> Result<()> {
+    for next_prompt in ["same prompt", "different prompt"] {
+        for rejected_receipt in [false, true] {
+            assert_new_submission_survives_an_unobserved_old_admission(
+                false,
+                next_prompt,
+                rejected_receipt,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn configuration_completion_precedes_session_switches_and_preserves_the_next_target() -> Result<()>
+{
+    for uncertain in [false, true] {
+        configuration_completion_and_session_switch_case(uncertain)?;
+    }
+    Ok(())
+}
+
+fn configuration_completion_and_session_switch_case(uncertain: bool) -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let make_scope = |session: &str| -> Result<ApplicationScope> {
+        Ok(ApplicationScope {
+            application_instance: ApplicationInstanceId::new(format!("lifecycle-{session}"))?,
+            authenticated_subject: AuthenticatedSubject::new("local")?,
+            workspace: Some(WorkspaceScopeId::new("workspace")?),
+            session: Some(SessionScopeId::new(session)?),
+        })
+    };
+    let (release_tx, release_rx) = mpsc::channel();
+    let release = Arc::new(Mutex::new(Some(release_rx)));
+    let (started_tx, started_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let scope = make_scope("original")?;
+    let application = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: true,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                scope.clone(),
+            ))),
+            release: Arc::clone(&release),
+            started: started_tx,
+            calls: Arc::clone(&calls),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }),
+        scope,
+    )?);
+    let make_worker = |application| {
+        let (worker_tx, commands) = runner::WorkerCommandSender::test_channel();
+        (
+            WorkerRuntime {
+                worker_tx,
+                application: Some(application),
+                pending_admission: None,
+                pending_interactions: Vec::new(),
+                worker_rx: mpsc::channel().1,
+                join_handle: None,
+                ready: true,
+            },
+            commands,
+        )
+    };
+    let mut config = crate::app::tests::common::test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let config_path = fixture.path().join("sigil.toml");
+    let mut app = AppState::from_root_config(&config_path, &config);
+    let (runtime, _original_commands) = make_worker(application);
+    let mut worker = Some(runtime);
+    // An old command's completed admission thread must not become a permanent lifecycle gate.
+    app.composer.input = "old admission".to_owned();
+    let old_action = app.submit_input()?.expect("old prompt");
+    process_app_action(&mut app, &mut worker, old_action)?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    release_tx.send(())?;
+    let old = &mut worker.as_mut().expect("worker").pending_interactions[0];
+    wait_for_owned_thread(&mut old.handle, Instant::now() + Duration::from_secs(2))?;
+    old.receiver
+        .take()
+        .expect("old result")
+        .recv_timeout(Duration::from_secs(1))??;
+    let old_request = old
+        .request
+        .lock()
+        .expect("old request")
+        .clone()
+        .expect("frozen request");
+    let (old_result, old_receiver) = mpsc::channel();
+    let delayed = if uncertain {
+        Ok(ApplicationCommandReceipt::Uncertain(
+            UncertainCommandReceipt {
+                command_id: old_request.envelope.command_id.clone(),
+                command_kind: old_request.envelope.command.kind().to_owned(),
+                reservation_fingerprint: command_fingerprint(&old_request)?,
+                recovery: CommandRecoveryBinding {
+                    key: old_request
+                        .admission
+                        .reservation_key(&old_request.envelope.command_id),
+                    phase: CommandLifecyclePhase::EffectStarted,
+                },
+                owner_recovery_binding: Some("fixture-owner".to_owned()),
+            },
+        ))
+    } else {
+        Err(ApplicationError::Unavailable)
+    };
+    old_result.send(delayed)?;
+    old.receiver = Some(old_receiver);
+    poll_application_admission(&mut app, &mut worker)?;
+    assert!(
+        worker.as_ref().expect("worker").pending_interactions[0]
+            .handle
+            .is_none()
+    );
+    app.handle_worker_message(WorkerMessage::RunFailed(
+        "old admission remains recoverable".to_owned(),
+    ))?;
+    let calls_before_config = calls.load(Ordering::SeqCst);
+    let (release_tx, release_rx) = mpsc::channel();
+    *release.lock().expect("config gate") = Some(release_rx);
+    let mut published = config.clone();
+    published.agent.model = "published-before-switch".to_owned();
+    let save = Arc::new(crate::app::ConfigurationSaveRequest {
+        expected: config,
+        next_base: published.clone(),
+        config_path,
+        follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
+        root_only: true,
+        draft_binding: None,
+        draft: Mutex::new(None),
+        published_root_config: Mutex::new(Some(published)),
+        close_after_save: false,
+    });
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::PersistConfiguration { request: save },
+    )?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    let path_a = fixture.path().join("session-a.jsonl");
+    let path_b = fixture.path().join("session-b.jsonl");
+    for path in [&path_a, &path_b] {
+        process_app_action(
+            &mut app,
+            &mut worker,
+            AppAction::SwitchSession {
+                session_log_path: path.clone(),
+            },
+        )?;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), calls_before_config + 1);
+    assert_eq!(app.deferred_application_actions.len(), 2);
+    assert!(!flush_deferred_application_action(&mut app, &mut worker)?);
+    release_tx.send(())?;
+    wait_interaction_admission(&mut app, &mut worker)?;
+    assert_eq!(
+        app.persisted_config_snapshot()
+            .expect("published configuration")
+            .agent
+            .model,
+        "published-before-switch"
+    );
+
+    let (release_switch, wait_switch) = mpsc::channel();
+    *release.lock().expect("switch gate") = Some(wait_switch);
+    assert!(flush_deferred_application_action(&mut app, &mut worker)?);
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: "session-a".to_owned(),
+        session_log_path: path_a.clone(),
+        provider_name: "deepseek".to_owned(),
+        model_name: "published-before-switch".to_owned(),
+        entries: Vec::new(),
+    })?;
+    let (event_sender, mut event_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
+    drop(event_sender);
+    let mut closed_worker_event = Box::pin(wait_for_worker_event(
+        app.runtime.worker_rebind_required,
+        event_receiver.recv(),
+    ));
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        std::future::Future::poll(closed_worker_event.as_mut(), &mut context).is_pending(),
+        "normal session worker closure must not discard the pending completion or spin the event loop"
+    );
+    drop(closed_worker_event);
+    assert!(!restart_worker_after_session_transition(
+        &mut app,
+        &mut worker,
+        |_, _| { anyhow::bail!("must consume the old session receipt before replacing its owner") }
+    )?);
+    assert_eq!(app.deferred_application_actions.len(), 1);
+    release_switch.send(())?;
+    wait_interaction_admission(&mut app, &mut worker)?;
+
+    let new_scope = make_scope("session-a")?;
+    let new_requests = Arc::new(Mutex::new(Vec::new()));
+    let (new_started, new_started_rx) = mpsc::channel();
+    let replacement = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: true,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                new_scope.clone(),
+            ))),
+            release: Arc::new(Mutex::new(None)),
+            started: new_started,
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::clone(&new_requests),
+        }),
+        new_scope.clone(),
+    )?);
+    let mut replacement_commands = None;
+    assert!(restart_worker_after_session_transition(
+        &mut app,
+        &mut worker,
+        |_, _| {
+            let (runtime, commands) = make_worker(Arc::clone(&replacement));
+            replacement_commands = Some(commands);
+            Ok(runtime)
+        }
+    )?);
+    assert_eq!(app.retained_application_admissions.len(), 1);
+    assert_eq!(
+        app.retained_application_admissions[0]
+            .request
+            .lock()
+            .expect("retained request")
+            .as_ref()
+            .expect("frozen original"),
+        &old_request
+    );
+    assert!(!app.retained_application_admissions[0].reconcile_requested);
+    assert!(app.retained_application_admissions[0].handle.is_none());
+    let old_dispatch_count = calls.load(Ordering::SeqCst);
+    assert!(flush_deferred_application_action(&mut app, &mut worker)?);
+    new_started_rx.recv_timeout(Duration::from_secs(2))?;
+    wait_interaction_admission(&mut app, &mut worker)?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        old_dispatch_count,
+        "retired request must not automatically execute against a replacement scope"
+    );
+    let requests = new_requests.lock().expect("new scope request log");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].admission.scope, new_scope);
+    assert!(matches!(
+        requests[0].envelope.command,
+        ApplicationCommand::Session(SessionCommand::Switch { .. })
+    ));
+    drop(requests);
+    assert!(app.deferred_application_actions.is_empty());
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: "session-b".to_owned(),
+        session_log_path: path_b.clone(),
+        provider_name: "deepseek".to_owned(),
+        model_name: "published-before-switch".to_owned(),
+        entries: Vec::new(),
+    })?;
+    assert_eq!(app.session_log_path, path_b);
+    app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
+    shutdown_and_join_worker(&mut worker)?;
+    drop(replacement_commands);
     Ok(())
 }

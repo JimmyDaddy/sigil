@@ -906,7 +906,7 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
             action,
             Some(AppAction::SubmitPrompt(prompt)) if prompt == "new question"
         ));
-        assert_eq!(app.last_notice(), Some("thinking"));
+        assert_eq!(app.last_notice(), Some("preparing request"));
     }
     Ok(())
 }
@@ -1574,7 +1574,7 @@ fn plain_prompt_with_unfinished_task_starts_new_chat() -> Result<()> {
             action,
             Some(AppAction::SubmitPrompt(prompt)) if prompt == "continue with the review"
         ));
-        assert_eq!(app.last_notice(), Some("thinking"));
+        assert_eq!(app.last_notice(), Some("preparing request"));
     }
     Ok(())
 }

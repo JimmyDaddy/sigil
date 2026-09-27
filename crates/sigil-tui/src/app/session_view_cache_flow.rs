@@ -17,6 +17,7 @@ impl AppState {
     pub(crate) fn run_phase_label(&self) -> String {
         match &self.runtime.run_phase {
             RunPhase::Idle => "ready".to_owned(),
+            RunPhase::Preparing => "preparing".to_owned(),
             RunPhase::Thinking => "thinking".to_owned(),
             RunPhase::Agent(profile_id) => format!("agent @{profile_id}"),
             RunPhase::Tool(name) => format!("tool {name}"),

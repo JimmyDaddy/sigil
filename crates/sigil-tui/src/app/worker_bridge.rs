@@ -355,15 +355,15 @@ impl AppState {
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
-                    "thinking",
-                    format!("thinking|{}", self.runtime.model_name),
+                    RunPhase::Preparing,
+                    "preparing request",
+                    format!("preparing|{}", self.runtime.model_name),
                 );
                 self.push_event("run:start", sigil_kernel::safe_persistence_text(&prompt));
             }
             WorkerMessage::SkillRunStarted { skill_id, prompt } => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     format!("skill {skill_id} running"),
                     format!("skill|{skill_id}"),
                 );
@@ -372,7 +372,7 @@ impl AppState {
             }
             WorkerMessage::PlanRunStarted { prompt } => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     "Plan Review · preparing a draft for your approval",
                     format!("plan|{}", self.runtime.model_name),
                 );
@@ -388,7 +388,7 @@ impl AppState {
             }
             WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     "agent result ready; resuming main",
                     format!("agent-result|{}", self.runtime.model_name),
                 );
@@ -442,7 +442,7 @@ impl AppState {
             }
             WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     "running follow-up",
                     format!("follow-up|{}", self.runtime.model_name),
                 );
@@ -499,7 +499,7 @@ impl AppState {
                 self.runtime.task_provider_route_diagnostics =
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     "Task · creating a durable execution plan",
                     format!("task|{}", self.runtime.model_name),
                 );

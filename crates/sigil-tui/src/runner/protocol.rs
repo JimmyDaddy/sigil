@@ -353,8 +353,9 @@ pub enum WorkerCommand {
     },
     ApplicationDispatch {
         binding: Option<Box<sigil_kernel::ApplicationOperationBindingV1>>,
+        run_admission: Option<WorkerRunAdmission>,
         command: Box<WorkerCommand>,
-        reply: mpsc::Sender<Result<(), String>>,
+        reply: mpsc::Sender<Result<WorkerApplicationDispatchOutcome, String>>,
     },
     SubmitPrompt {
         prompt: String,
@@ -704,6 +705,9 @@ struct ObservedRunStop {
 #[derive(Default)]
 struct WorkerStopState {
     closing: bool,
+    stop_generation: u64,
+    dispatch_generation: Option<u64>,
+    dispatch_run_observed: Option<Arc<std::sync::atomic::AtomicBool>>,
     active: Option<ObservedRunStop>,
     retired: Vec<ObservedRunStop>,
     started: Option<std::time::Instant>,
@@ -721,7 +725,11 @@ impl WorkerStopControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let capability = owner.stop_capability();
-        if state.closing {
+        if state.closing
+            || state
+                .dispatch_generation
+                .is_some_and(|generation| generation != state.stop_generation)
+        {
             capability.reserve();
         }
         // A later admission cannot erase an earlier owner's incomplete cleanup evidence.
@@ -737,6 +745,9 @@ impl WorkerStopControl {
             capability,
             handle: owner.handle(),
         });
+        if let Some(observed) = &state.dispatch_run_observed {
+            observed.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     pub(in crate::runner) fn reserve(&self, closing: bool) {
@@ -744,10 +755,11 @@ impl WorkerStopControl {
             self.begin_shutdown();
             return;
         }
-        let state = self
+        let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.stop_generation = state.stop_generation.saturating_add(1);
         if let Some(run) = &state.active {
             run.capability.reserve();
         }
@@ -902,6 +914,78 @@ impl WorkerStopControl {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerApplicationDispatchOutcome {
+    Dispatched,
+    CancelledBeforeDispatch,
+}
+
+/// Freezes the stop frontier before asynchronous admission. It grants no execution authority;
+/// the application still admits the command and the worker binds the actual run owner.
+#[derive(Clone)]
+pub struct WorkerRunAdmission {
+    control: WorkerStopControl,
+    generation: u64,
+    run_observed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl fmt::Debug for WorkerRunAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerRunAdmission")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkerRunAdmission {
+    #[cfg(test)]
+    pub(crate) fn bind_test_owner(&self, owner: &sigil_kernel::RunCancellationOwner) {
+        let _dispatch = self.enter().expect("fixture admission must be current");
+        self.control.bind(owner);
+    }
+    pub(crate) fn run_observed(&self) -> bool {
+        self.run_observed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(in crate::runner) fn enter(&self) -> Option<WorkerRunAdmissionDispatch> {
+        let mut state = self
+            .control
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closing || state.stop_generation != self.generation {
+            return None;
+        }
+        let previous = state.dispatch_generation.replace(self.generation);
+        let previous_observed = state
+            .dispatch_run_observed
+            .replace(Arc::clone(&self.run_observed));
+        Some(WorkerRunAdmissionDispatch {
+            control: self.control.clone(),
+            previous,
+            previous_observed,
+        })
+    }
+}
+
+pub(in crate::runner) struct WorkerRunAdmissionDispatch {
+    control: WorkerStopControl,
+    previous: Option<u64>,
+    previous_observed: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Drop for WorkerRunAdmissionDispatch {
+    fn drop(&mut self) {
+        let mut state = self
+            .control
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.dispatch_generation = self.previous;
+        state.dispatch_run_observed = self.previous_observed.take();
+    }
+}
+
 /// Cloneable public command handle backed by the worker's unified event inbox.
 #[derive(Clone)]
 pub struct WorkerCommandSender {
@@ -923,6 +1007,19 @@ enum WorkerCommandSink {
 }
 
 impl WorkerCommandSender {
+    pub(crate) fn reserve_run_admission(&self) -> WorkerRunAdmission {
+        let state = self
+            .inner
+            .stop_control
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        WorkerRunAdmission {
+            control: self.inner.stop_control.clone(),
+            generation: state.stop_generation,
+            run_observed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
     pub(in crate::runner) fn new(
         event_tx: mpsc::Sender<WorkerEvent>,
         urgent_tx: mpsc::Sender<WorkerCommand>,

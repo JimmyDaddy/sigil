@@ -27,7 +27,8 @@ pub(crate) use protocol::{
     McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, QueueOperation,
     QueueOperationFailure, TerminalTaskControlIdentity, ToolArtifactDisplayReadFailure,
     V2CompactionAdmission, V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview,
-    WorkerCommand, WorkerCommandSender, WorkerMessage, WorkerRouteRecoverySessionTarget,
+    WorkerApplicationDispatchOutcome, WorkerCommand, WorkerCommandSender, WorkerMessage,
+    WorkerRouteRecoverySessionTarget, WorkerRunAdmission,
 };
 pub(crate) use route_recovery::worker_session_route_recovery_message;
 pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;

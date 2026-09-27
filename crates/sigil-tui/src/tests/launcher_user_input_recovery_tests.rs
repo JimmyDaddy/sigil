@@ -138,6 +138,13 @@ fn assert_launcher_recovery_uses_new_key_bound_to_committed_decision(
     drop(runtime);
     assert!(tokio::runtime::Handle::try_current().is_err());
     let mut pending = super::PendingApplicationAdmission {
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: false,
         application: Arc::clone(&application),
         request: Arc::new(std::sync::Mutex::new(Some(original_request.clone()))),
         action,

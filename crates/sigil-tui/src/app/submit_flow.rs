@@ -8,6 +8,33 @@ use super::{AgentView, AppAction, AppState, ComposerMode, PaneFocus, RunPhase, T
 use crate::slash::ResolvedSlashCommand;
 
 impl AppState {
+    pub(crate) fn begin_run_submission_intent(&mut self) {
+        self.runtime.run_submission_intent = std::sync::Arc::new(());
+    }
+
+    pub(crate) fn restore_unadmitted_run_input(&mut self, action: &AppAction) {
+        if self.composer.input.is_empty() && self.composer.image_attachments.is_empty() {
+            match action {
+                AppAction::SubmitPrompt(prompt) => self.set_input_and_cursor(prompt.clone()),
+                AppAction::SubmitPromptWithAttachments {
+                    prompt,
+                    attachments,
+                } => {
+                    self.set_input_and_cursor(prompt.clone());
+                    self.composer.image_attachments = attachments.clone();
+                }
+                AppAction::SubmitPlanPrompt(prompt) => {
+                    self.set_input_and_cursor(format!("/plan {prompt}"))
+                }
+                AppAction::SubmitTask(prompt) => {
+                    self.set_input_and_cursor(format!("/task {prompt}"))
+                }
+                _ => {}
+            }
+        }
+        self.clear_worker_run_state();
+    }
+
     pub fn submit_input(&mut self) -> Result<Option<AppAction>> {
         let prompt = self.composer.input.trim().to_owned();
         let has_attachments = !self.composer.image_attachments.is_empty();
@@ -138,9 +165,10 @@ impl AppState {
             self.push_event("input", format!("submitted plan prompt {safe_prompt}"));
             self.active_pane = PaneFocus::Composer;
             self.push_event("focus", current_focus_label(self));
+            self.begin_run_submission_intent();
             self.runtime.is_busy = true;
             self.runtime.allow_projection_run_recovery = true;
-            self.runtime.run_phase = RunPhase::Thinking;
+            self.runtime.run_phase = RunPhase::Preparing;
             self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
             self.runtime.last_phase_marker = None;
             self.push_phase_marker(format!(
@@ -177,12 +205,13 @@ impl AppState {
         }
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
+        self.begin_run_submission_intent();
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
-        self.runtime.run_phase = RunPhase::Thinking;
-        self.last_notice = Some("thinking".to_owned());
+        self.runtime.run_phase = RunPhase::Preparing;
+        self.last_notice = Some("preparing request".to_owned());
         self.runtime.last_phase_marker = None;
-        self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
+        self.push_phase_marker(format!("preparing|{}", self.runtime.model_name));
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
@@ -326,9 +355,10 @@ impl AppState {
         self.push_event("input", format!("submitted plan prompt {safe_plan_prompt}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
+        self.begin_run_submission_intent();
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
-        self.runtime.run_phase = RunPhase::Thinking;
+        self.runtime.run_phase = RunPhase::Preparing;
         self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
         self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!(
@@ -358,9 +388,10 @@ impl AppState {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+            self.begin_run_submission_intent();
             self.runtime.is_busy = true;
             self.runtime.allow_projection_run_recovery = true;
-            self.runtime.run_phase = RunPhase::Thinking;
+            self.runtime.run_phase = RunPhase::Preparing;
             self.last_notice = Some("continuing task".to_owned());
             self.runtime.last_phase_marker = None;
             self.push_phase_marker(format!("task|{}", self.runtime.model_name));
@@ -381,9 +412,10 @@ impl AppState {
         self.push_event("input", format!("submitted task {safe_objective}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
+        self.begin_run_submission_intent();
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
-        self.runtime.run_phase = RunPhase::Thinking;
+        self.runtime.run_phase = RunPhase::Preparing;
         self.last_notice = Some("planning task".to_owned());
         self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!("task|{}", self.runtime.model_name));
@@ -460,6 +492,7 @@ impl AppState {
         self.push_event("input", format!("invoked agent {profile_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
+        self.begin_run_submission_intent();
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Agent(profile_id.clone());
@@ -527,9 +560,10 @@ impl AppState {
         self.push_event("input", format!("invoked {item_kind} {skill_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
+        self.begin_run_submission_intent();
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
-        self.runtime.run_phase = RunPhase::Thinking;
+        self.runtime.run_phase = RunPhase::Preparing;
         self.runtime.last_phase_marker = None;
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
@@ -539,7 +573,7 @@ impl AppState {
         match skill.run_as {
             SkillRunMode::Inline => {
                 self.last_notice = Some(format!("using {item_kind} {skill_id}"));
-                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
+                self.push_phase_marker(format!("preparing|{}", self.runtime.model_name));
                 Ok(Some(AppAction::InvokeInlineSkill {
                     skill_id: skill_id.to_owned(),
                     arguments,

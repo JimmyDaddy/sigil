@@ -1022,9 +1022,20 @@ where
         }
         WorkerCommand::ApplicationDispatch {
             binding,
+            run_admission,
             command,
             reply,
         } => {
+            let _admission = match run_admission.as_ref().map(|admission| admission.enter()) {
+                Some(Some(guard)) => Some(guard),
+                Some(None) => {
+                    let _ = reply.send(Ok(
+                        crate::runner::WorkerApplicationDispatchOutcome::CancelledBeforeDispatch,
+                    ));
+                    return WorkerCommandDispatchControl::Continue;
+                }
+                None => None,
+            };
             let detached = context.state.session.current.is_none();
             let mut initial_entry_count = 0;
             if let Some(binding) = binding {
@@ -1095,7 +1106,9 @@ where
             }
             // This acknowledges actual owner dispatch. The application still requires a causal
             // durable receipt before reporting a committed command.
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(
+                crate::runner::WorkerApplicationDispatchOutcome::Dispatched,
+            ));
             return control;
         }
         command => command,

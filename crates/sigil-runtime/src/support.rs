@@ -200,6 +200,7 @@ impl DoctorSupportReportV1 {
 #[serde(rename_all = "snake_case")]
 pub enum SupportRunPhase {
     Idle,
+    Preparing,
     Thinking,
     Agent,
     Tool,

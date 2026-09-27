@@ -77,7 +77,7 @@ pub(crate) fn acknowledged_test_channel(
                 }
                 WorkerCommand::ApplicationDispatch { command, reply, .. } => {
                     let _ = observed.send(*command);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(WorkerApplicationDispatchOutcome::Dispatched));
                 }
                 command => {
                     let _ = observed.send(command);

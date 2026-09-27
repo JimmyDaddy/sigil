@@ -10,6 +10,17 @@ use tempfile::tempdir;
 
 use super::*;
 
+#[test]
+fn support_preparing_phase_round_trips_without_claiming_reasoning() -> Result<()> {
+    let value = serde_json::to_value(SupportRunPhase::Preparing)?;
+    assert_eq!(value, serde_json::json!("preparing"));
+    assert_eq!(
+        serde_json::from_value::<SupportRunPhase>(value)?,
+        SupportRunPhase::Preparing
+    );
+    Ok(())
+}
+
 fn build_info() -> SupportBuildInfo {
     SupportBuildInfo::new("0.0.1-alpha.3", "abc123", "aarch64-apple-darwin", "release")
 }

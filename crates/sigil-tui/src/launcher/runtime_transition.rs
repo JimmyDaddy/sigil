@@ -510,6 +510,7 @@ pub(super) fn start(
     worker: &mut Option<WorkerRuntime>,
     route: sigil_kernel::ResolvedModelRoute,
 ) -> Result<()> {
+    retain_idle_application_admissions(app, worker)?;
     if app
         .runtime_maintenance
         .as_ref()

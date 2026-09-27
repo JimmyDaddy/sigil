@@ -797,7 +797,8 @@ fn render_main_screen_does_not_advertise_escape_as_run_cancellation() -> anyhow:
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(!rendered.contains("Esc interrupt"));
-    assert!(rendered.contains("reasoning with deepseek-v4-flash"));
+    assert!(rendered.contains("waiting for response from deepseek-v4-flash"));
+    assert!(!rendered.contains("reasoning with"));
     Ok(())
 }
 

@@ -95,6 +95,7 @@ pub(in crate::launcher) fn maintain(
     worker: &mut Option<WorkerRuntime>,
     config: Option<RootConfig>,
 ) -> Result<()> {
+    retain_idle_application_admissions(app, worker)?;
     if app
         .runtime_transition
         .as_ref()

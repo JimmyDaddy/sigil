@@ -100,11 +100,41 @@ fn normal_input_creates_user_and_running_state() -> Result<()> {
     );
     assert!(
         app.events.iter().any(|event| {
-            event.label == "phase" && event.detail == "thinking|deepseek-v4-flash"
+            event.label == "phase" && event.detail == "preparing|deepseek-v4-flash"
         })
     );
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
+    assert_eq!(app.last_notice(), Some("preparing request"));
+    Ok(())
+}
+
+#[test]
+fn preparation_does_not_claim_reasoning_until_a_real_model_delta() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.composer.input = "hello".to_owned();
+    app.submit_input()?;
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
+    assert_eq!(
+        app.live_activity_summary()
+            .expect("visible pending activity")
+            .label,
+        "preparing"
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| matches!(entry.role, TimelineRole::Thinking | TimelineRole::Assistant))
+    );
+    app.handle_worker_message(WorkerMessage::RunStarted {
+        prompt: "hello".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
+    app.handle(RunEvent::ReasoningDelta(
+        "real provider reasoning".to_owned(),
+    ))?;
     assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("thinking"));
+    app.handle(RunEvent::TextDelta("real response".to_owned()))?;
+    assert_eq!(app.run_phase(), RunPhase::Streaming);
     Ok(())
 }
 
@@ -1259,8 +1289,8 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
     app.handle_worker_message(WorkerMessage::RunStarted {
         prompt: "draft plan".to_owned(),
     })?;
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("thinking"));
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
+    assert_eq!(app.last_notice(), Some("preparing request"));
     assert!(
         app.events
             .iter()
@@ -1270,7 +1300,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         skill_id: "repo-review".to_owned(),
         prompt: "load and apply skill".to_owned(),
     })?;
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(app.last_notice(), Some("skill repo-review running"));
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice && entry.text == "skill repo-review started"
@@ -1283,7 +1313,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
     app.handle_worker_message(WorkerMessage::PlanRunStarted {
         prompt: "inspect before editing".to_owned(),
     })?;
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(
         app.last_notice(),
         Some("Plan Review · preparing a draft for your approval")
@@ -1318,7 +1348,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         thread_ids: vec![sigil_kernel::AgentThreadId::new("agent_chat_done")?],
     })?;
     assert!(app.runtime.is_busy);
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(app.last_notice(), Some("agent result ready; resuming main"));
     assert!(!app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice
@@ -1416,7 +1446,7 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
         objective: "ship task".to_owned(),
     })?;
 
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(
         app.last_notice(),
         Some("Task · creating a durable execution plan")
@@ -1748,7 +1778,7 @@ fn local_operation_outcome_does_not_clear_an_active_foreground_run() -> Result<(
     ))?;
 
     assert!(app.runtime.is_busy);
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(
         app.last_notice(),
         Some("cannot refresh MCP while the agent is running")
@@ -1822,7 +1852,7 @@ fn exact_resolution_clears_an_accepted_approval_tombstone_idempotently() -> Resu
 
     app.handle(resolved)?;
     assert!(app.approval.pending.is_none());
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     Ok(())
 }
 
@@ -3196,7 +3226,7 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
         "{}".to_owned(),
         sigil_kernel::ToolResultMeta::default(),
     )))?;
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     Ok(())
 }
 
@@ -3709,7 +3739,7 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
         prompt: "follow up after current run".to_owned(),
     })?;
     assert!(app.runtime.is_busy);
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.run_phase(), RunPhase::Preparing);
     assert_eq!(app.last_notice(), Some("running follow-up"));
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "follow up after current run"

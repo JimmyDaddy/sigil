@@ -74,6 +74,7 @@ impl AppState {
                 config_path: self.config_path.clone(),
                 follow_up,
                 root_only: true,
+                draft_binding: None,
                 draft: std::sync::Mutex::new(None),
                 published_root_config: std::sync::Mutex::new(None),
                 close_after_save: false,

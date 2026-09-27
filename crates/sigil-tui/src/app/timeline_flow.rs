@@ -1649,6 +1649,10 @@ impl AppState {
         }
         let (label, detail) = match &self.runtime.run_phase {
             RunPhase::Idle => ("working", "waiting for next event".to_owned()),
+            RunPhase::Preparing => (
+                "preparing",
+                format!("waiting for response from {}", self.runtime.model_name),
+            ),
             RunPhase::Thinking => (
                 "thinking",
                 format!("reasoning with {}", self.runtime.model_name),

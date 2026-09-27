@@ -372,6 +372,7 @@ fn feedback_review_page_lines(terminal_height: u16) -> usize {
 fn support_run_phase(phase: &RunPhase) -> SupportRunPhase {
     match phase {
         RunPhase::Idle => SupportRunPhase::Idle,
+        RunPhase::Preparing => SupportRunPhase::Preparing,
         RunPhase::Thinking => SupportRunPhase::Thinking,
         RunPhase::Agent(_) => SupportRunPhase::Agent,
         RunPhase::Tool(_) => SupportRunPhase::Tool,
@@ -390,6 +391,7 @@ fn doctor_status_label(status: SupportDoctorStatus) -> &'static str {
 fn run_phase_label(phase: SupportRunPhase) -> &'static str {
     match phase {
         SupportRunPhase::Idle => "idle",
+        SupportRunPhase::Preparing => "preparing",
         SupportRunPhase::Thinking => "thinking",
         SupportRunPhase::Agent => "agent",
         SupportRunPhase::Tool => "tool",

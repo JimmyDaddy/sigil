@@ -88,7 +88,7 @@ impl AppState {
         match card.action? {
             VerificationCardAction::AcceptIntegration(request) => {
                 self.start_worker_run_phase(
-                    RunPhase::Thinking,
+                    RunPhase::Preparing,
                     format!("accepting integration plan v{}", request.plan_version),
                     format!("integration-accept|{}", request.preview_digest),
                 );
