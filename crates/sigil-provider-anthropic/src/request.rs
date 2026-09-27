@@ -65,9 +65,25 @@ pub(crate) fn build_messages_request_with_continuations(
     continuation_store: &AnthropicHostedContinuationStore,
     cache_policy: AnthropicCachePolicy,
 ) -> Result<PreparedAnthropicMessagesRequest> {
+    build_messages_request_with_continuations_at_endpoint(
+        request,
+        default_max_tokens,
+        continuation_store,
+        cache_policy,
+        "https://api.anthropic.com",
+    )
+}
+
+pub(crate) fn build_messages_request_with_continuations_at_endpoint(
+    request: &CompletionRequest,
+    default_max_tokens: u32,
+    continuation_store: &AnthropicHostedContinuationStore,
+    cache_policy: AnthropicCachePolicy,
+    base_url: &str,
+) -> Result<PreparedAnthropicMessagesRequest> {
     validate_request_image_attachments(request)?;
     validate_image_input_capability(
-        anthropic_image_input_capability(&request.model_name),
+        anthropic_image_input_capability(&request.model_name, base_url),
         request,
     )?;
     let mut system_parts = Vec::new();
@@ -287,7 +303,15 @@ fn user_message_to_json(message: &ModelMessage) -> Result<Value> {
     Ok(json!({"role": "user", "content": content}))
 }
 
-pub(crate) fn anthropic_image_input_capability(model_name: &str) -> ImageInputCapability {
+pub(crate) fn anthropic_image_input_capability(
+    model_name: &str,
+    base_url: &str,
+) -> ImageInputCapability {
+    if base_url.trim_end_matches('/') == "https://api.deepseek.com/anthropic"
+        && model_name == "deepseek-flash"
+    {
+        return ImageInputCapability::Supported;
+    }
     const ALIASES: &[&str] = &[
         "claude-opus-4-8",
         "claude-opus-4-7",

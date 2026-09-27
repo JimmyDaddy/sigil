@@ -370,7 +370,7 @@ impl Provider for OpenAiResponsesProvider {
     }
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
-        openai_responses_image_input_capability(model_name)
+        openai_responses_image_input_capability(model_name, &self.config.base_url)
     }
 
     fn observe_failure(
@@ -531,6 +531,7 @@ impl Provider for OpenAiResponsesProvider {
         let (body, _) = build_responses_request_with_cache_routing(
             &request,
             self.uses_official_openai_endpoint(),
+            &self.config.base_url,
         )?;
         let url = self.responses_url();
         let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)

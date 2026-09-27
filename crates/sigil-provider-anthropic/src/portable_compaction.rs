@@ -14,7 +14,7 @@ use crate::{
     AnthropicProvider,
     hosted_search::AnthropicHostedContinuationStore,
     provider::provider_timeout_error,
-    request::{AnthropicCachePolicy, build_messages_request_with_continuations},
+    request::{AnthropicCachePolicy, build_messages_request_with_continuations_at_endpoint},
 };
 
 /// Model key measured on the official endpoint for every frozen request; not an immutable snapshot.
@@ -62,11 +62,12 @@ impl AnthropicProvider {
                         && state.state_kind == crate::thinking_replay::STATE_KIND),
             "Messages token proof does not admit another provider continuation or hosted tools"
         );
-        let mut body = build_messages_request_with_continuations(
+        let mut body = build_messages_request_with_continuations_at_endpoint(
             request,
             self.config.max_tokens,
             &AnthropicHostedContinuationStore::default(),
             AnthropicCachePolicy::Disabled,
+            &self.config.base_url,
         )?
         .body;
         crate::thinking_replay::apply(&mut body, request)?;

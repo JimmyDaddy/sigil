@@ -224,6 +224,43 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
 }
 
 #[test]
+fn official_deepseek_messages_provider_reports_image_only_for_flash() -> anyhow::Result<()> {
+    let _guard = crate::test_env::lock();
+    for (base_url, expected) in [
+        (
+            "https://api.deepseek.com/anthropic",
+            ImageInputCapability::Supported,
+        ),
+        (
+            "https://api.deepseek.com/anthropic/",
+            ImageInputCapability::Supported,
+        ),
+        (
+            "https://api.deepseek.com",
+            ImageInputCapability::Unsupported,
+        ),
+        (
+            "https://api.deepseek.com.example/anthropic",
+            ImageInputCapability::Unsupported,
+        ),
+    ] {
+        let provider = AnthropicProvider::new_exact(
+            AnthropicProviderConfig {
+                base_url: base_url.to_owned(),
+                ..AnthropicProviderConfig::default()
+            },
+            ModelRequestTimeouts::default(),
+        )?;
+        assert_eq!(provider.image_input_capability("deepseek-flash"), expected);
+        assert_eq!(
+            provider.image_input_capability("deepseek-v4-pro"),
+            ImageInputCapability::Unsupported
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn constructor_uses_common_http_client_ca_validation() -> anyhow::Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();

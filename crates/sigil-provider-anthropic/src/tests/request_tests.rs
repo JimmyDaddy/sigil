@@ -345,17 +345,91 @@ fn build_messages_request_maps_resolved_image_before_text() -> anyhow::Result<()
 }
 
 #[test]
+fn official_deepseek_messages_maps_image_and_rejects_other_routes_and_models() -> anyhow::Result<()>
+{
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let mut request = completion_request(vec![user]);
+    request.model_name = "deepseek-flash".to_owned();
+
+    for base_url in [
+        "https://api.deepseek.com/anthropic",
+        "https://api.deepseek.com/anthropic/",
+    ] {
+        let body = build_messages_request_with_continuations_at_endpoint(
+            &request,
+            1024,
+            &crate::hosted_search::AnthropicHostedContinuationStore::default(),
+            AnthropicCachePolicy::Disabled,
+            base_url,
+        )?
+        .body;
+        assert_eq!(body.messages[0]["content"][0]["type"], "image");
+        assert_eq!(
+            body.messages[0]["content"][0]["source"],
+            json!({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "AQID",
+            })
+        );
+        assert_eq!(body.messages[0]["content"][1]["text"], "inspect");
+    }
+    for base_url in [
+        "https://api.deepseek.com",
+        "http://api.deepseek.com/anthropic",
+        "https://api.deepseek.com/anthropic/v1",
+        "https://api.deepseek.com.example/anthropic",
+        "https://api.anthropic.com",
+    ] {
+        assert_eq!(
+            anthropic_image_input_capability("deepseek-flash", base_url),
+            ImageInputCapability::Unsupported,
+            "unexpected image capability for {base_url}"
+        );
+        let error = build_messages_request_with_continuations_at_endpoint(
+            &request,
+            1024,
+            &crate::hosted_search::AnthropicHostedContinuationStore::default(),
+            AnthropicCachePolicy::Disabled,
+            base_url,
+        )
+        .err()
+        .expect("unknown endpoint must reject image before transport");
+        assert!(error.to_string().contains("does not support image input"));
+    }
+    request.model_name = "deepseek-v4-pro".to_owned();
+    let error = build_messages_request_with_continuations_at_endpoint(
+        &request,
+        1024,
+        &crate::hosted_search::AnthropicHostedContinuationStore::default(),
+        AnthropicCachePolicy::Disabled,
+        "https://api.deepseek.com/anthropic",
+    )
+    .err()
+    .expect("non-vision model must reject image");
+    assert!(error.to_string().contains("does not support image input"));
+    Ok(())
+}
+
+#[test]
 fn anthropic_image_capability_is_allowlisted_and_unknown_models_fail_closed() {
     assert_eq!(
-        anthropic_image_input_capability("claude-opus-4-6"),
+        anthropic_image_input_capability("claude-opus-4-6", "https://api.anthropic.com"),
         ImageInputCapability::Supported
     );
     assert_eq!(
-        anthropic_image_input_capability("claude-opus-4-6-20260204"),
+        anthropic_image_input_capability("claude-opus-4-6-20260204", "https://api.anthropic.com"),
         ImageInputCapability::Supported
     );
     assert_eq!(
-        anthropic_image_input_capability("claude-test"),
+        anthropic_image_input_capability("claude-test", "https://api.anthropic.com"),
         ImageInputCapability::Unsupported
     );
 }

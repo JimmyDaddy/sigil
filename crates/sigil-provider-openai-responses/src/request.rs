@@ -27,7 +27,7 @@ const PROMPT_CACHE_LAYOUT_VERSION: &str = "cache_aware_v3";
 const PROMPT_CACHE_SHARD_COUNT: u8 = 16;
 
 pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResponsesRequest> {
-    Ok(build_responses_request_with_cache_routing(request, false)?.0)
+    Ok(build_responses_request_with_cache_routing(request, false, "https://api.openai.com/v1")?.0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,10 +40,11 @@ pub(crate) struct OpenAiLogicalCachePlan {
 pub(crate) fn build_responses_request_with_cache_routing(
     request: &CompletionRequest,
     enabled: bool,
+    base_url: &str,
 ) -> Result<(OpenAiResponsesRequest, Option<OpenAiLogicalCachePlan>)> {
     validate_request_image_attachments(request)?;
     validate_image_input_capability(
-        openai_responses_image_input_capability(&request.model_name),
+        openai_responses_image_input_capability(&request.model_name, base_url),
         request,
     )?;
     if request.background {
@@ -69,6 +70,15 @@ pub(crate) fn build_responses_request_with_cache_routing(
         .rposition(|message| message.role == MessageRole::User);
     let mut a0_input_end = None;
     let mut a2_input_end = None;
+    // DeepSeek Responses treats developer messages as user messages. Preserve kernel System
+    // priority only for its documented model on its official Responses route.
+    let system_role = if base_url.trim_end_matches('/') == "https://api.deepseek.com"
+        && request.model_name == "deepseek-flash"
+    {
+        "system"
+    } else {
+        "developer"
+    };
     for (message_index, message) in request.messages.iter().enumerate() {
         if active_turn_start == Some(message_index) && !input.is_empty() {
             a2_input_end = Some(input.len());
@@ -79,7 +89,7 @@ pub(crate) fn build_responses_request_with_cache_routing(
             }
             input.extend(output_items.iter().cloned());
         } else {
-            input.extend(model_message_to_input_items(message)?);
+            input.extend(model_message_to_input_items(message, system_role)?);
         }
         if leading_system_count == message_index + 1 {
             a0_input_end = Some(input.len());
@@ -270,10 +280,10 @@ fn decode_output_items_state(value: &Value) -> Result<Vec<Value>> {
         .context("OpenAI Responses output-item state is missing its output item array")
 }
 
-fn model_message_to_input_items(message: &ModelMessage) -> Result<Vec<Value>> {
+fn model_message_to_input_items(message: &ModelMessage, system_role: &str) -> Result<Vec<Value>> {
     match message.role {
         MessageRole::System => Ok(vec![role_text_item(
-            "developer",
+            system_role,
             message.content.as_deref(),
         )]),
         MessageRole::User => Ok(vec![user_input_item(message)?]),
@@ -341,7 +351,15 @@ fn user_input_item(message: &ModelMessage) -> Result<Value> {
     Ok(json!({"role": "user", "content": content}))
 }
 
-pub(crate) fn openai_responses_image_input_capability(model_name: &str) -> ImageInputCapability {
+pub(crate) fn openai_responses_image_input_capability(
+    model_name: &str,
+    base_url: &str,
+) -> ImageInputCapability {
+    if base_url.trim_end_matches('/') == "https://api.deepseek.com"
+        && model_name == "deepseek-flash"
+    {
+        return ImageInputCapability::Supported;
+    }
     const ALIASES: &[&str] = &[
         "gpt-5.6",
         "gpt-5.6-sol",

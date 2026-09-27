@@ -64,6 +64,37 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
 }
 
 #[test]
+fn official_deepseek_responses_provider_reports_image_only_for_flash() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    for (base_url, expected) in [
+        ("https://api.deepseek.com", ImageInputCapability::Supported),
+        ("https://api.deepseek.com/", ImageInputCapability::Supported),
+        (
+            "https://api.deepseek.com/v1",
+            ImageInputCapability::Unsupported,
+        ),
+        (
+            "https://api.deepseek.com.example",
+            ImageInputCapability::Unsupported,
+        ),
+    ] {
+        let provider = OpenAiResponsesProvider::new_exact(
+            OpenAiResponsesProviderConfig {
+                base_url: base_url.to_owned(),
+                ..OpenAiResponsesProviderConfig::default()
+            },
+            ModelRequestTimeouts::default(),
+        )?;
+        assert_eq!(provider.image_input_capability("deepseek-flash"), expected);
+        assert_eq!(
+            provider.image_input_capability("deepseek-v4-pro"),
+            ImageInputCapability::Unsupported
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");

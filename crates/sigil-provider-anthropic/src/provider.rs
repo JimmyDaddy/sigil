@@ -30,7 +30,7 @@ use crate::{
     },
     request::{
         AnthropicCachePolicy, anthropic_image_input_capability,
-        build_messages_request_with_continuations,
+        build_messages_request_with_continuations_at_endpoint,
     },
     stream::{AnthropicSseDecoder, AnthropicSseFrame},
 };
@@ -130,7 +130,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
-        anthropic_image_input_capability(model_name)
+        anthropic_image_input_capability(model_name, &self.config.base_url)
     }
 
     async fn materialize_native_compaction_carrier(
@@ -242,7 +242,7 @@ impl Provider for AnthropicProvider {
                 .into());
             }
         }
-        let prepared = build_messages_request_with_continuations(
+        let prepared = build_messages_request_with_continuations_at_endpoint(
             &request,
             self.config.max_tokens,
             &self.hosted_continuations,
@@ -251,6 +251,7 @@ impl Provider for AnthropicProvider {
             } else {
                 AnthropicCachePolicy::Disabled
             },
+            &self.config.base_url,
         )?;
         let hosted_context = hosted_search.map(|hosted_search| AnthropicHostedStreamContext {
             authorization_id: hosted_search.authorization_id.clone(),

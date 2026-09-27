@@ -76,6 +76,51 @@ fn responses_request_maps_messages_tools_and_reasoning() -> Result<()> {
 }
 
 #[test]
+fn official_deepseek_responses_preserves_system_priority_only_for_deepseek_flash() -> Result<()> {
+    let mut request = simple_request(vec![
+        ModelMessage::system("follow the system policy"),
+        ModelMessage::user("complete the task"),
+    ]);
+    request.model_name = "deepseek-flash".to_owned();
+
+    for (base_url, expected_role) in [
+        ("https://api.deepseek.com", "system"),
+        ("https://api.deepseek.com/", "system"),
+        ("https://api.deepseek.com/v1", "developer"),
+        ("http://api.deepseek.com", "developer"),
+        ("https://api.deepseek.com.example", "developer"),
+        ("https://api.openai.com/v1", "developer"),
+    ] {
+        let (body, plan) = build_responses_request_with_cache_routing(&request, false, base_url)?;
+        assert!(plan.is_none());
+        let wire = serde_json::to_value(body)?;
+        assert_eq!(
+            wire["input"],
+            serde_json::json!([
+                {
+                    "role": expected_role,
+                    "content": [{"type": "input_text", "text": "follow the system policy"}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "complete the task"}]
+                }
+            ]),
+            "unexpected system message wire role for {base_url}"
+        );
+    }
+
+    request.model_name = "deepseek-chat".to_owned();
+    let (other_model, _) =
+        build_responses_request_with_cache_routing(&request, false, "https://api.deepseek.com")?;
+    assert_eq!(
+        serde_json::to_value(other_model)?["input"][0]["role"],
+        "developer"
+    );
+    Ok(())
+}
+
+#[test]
 fn official_cache_wire_uses_stable_hmac_key_and_a0_a2_logical_boundaries() -> Result<()> {
     let mut system = ModelMessage::system("stable system");
     system.id = "system-opaque".to_owned();
@@ -88,7 +133,8 @@ fn official_cache_wire_uses_stable_hmac_key_and_a0_a2_logical_boundaries() -> Re
     let mut request = simple_request(vec![system, first_user, assistant, active]);
     request.traffic_partition_key = Some("tenant/path/that-must-not-leak".to_owned());
 
-    let (body, plan) = build_responses_request_with_cache_routing(&request, true)?;
+    let (body, plan) =
+        build_responses_request_with_cache_routing(&request, true, "https://api.openai.com/v1")?;
     let plan = plan.expect("official cache plan");
     let wire = serde_json::to_value(&body)?;
 
@@ -114,7 +160,8 @@ fn official_cache_wire_uses_stable_hmac_key_and_a0_a2_logical_boundaries() -> Re
 
     request.messages.last_mut().expect("active message").content =
         Some("changed active turn".to_owned());
-    let (_, changed_plan) = build_responses_request_with_cache_routing(&request, true)?;
+    let (_, changed_plan) =
+        build_responses_request_with_cache_routing(&request, true, "https://api.openai.com/v1")?;
     assert_eq!(
         changed_plan.expect("changed cache plan").prompt_cache_key,
         plan.prompt_cache_key,
@@ -128,7 +175,8 @@ fn cache_routing_is_omitted_without_route_conformance_or_partition_evidence() ->
     let mut request = simple_request(vec![ModelMessage::user("hello")]);
     request.traffic_partition_key = Some("tenant".to_owned());
 
-    let (custom_route, plan) = build_responses_request_with_cache_routing(&request, false)?;
+    let (custom_route, plan) =
+        build_responses_request_with_cache_routing(&request, false, "https://custom.example/v1")?;
     assert!(plan.is_none());
     assert!(
         serde_json::to_value(custom_route)?
@@ -137,7 +185,8 @@ fn cache_routing_is_omitted_without_route_conformance_or_partition_evidence() ->
     );
 
     request.traffic_partition_key = None;
-    let (missing_partition, plan) = build_responses_request_with_cache_routing(&request, true)?;
+    let (missing_partition, plan) =
+        build_responses_request_with_cache_routing(&request, true, "https://api.openai.com/v1")?;
     assert!(plan.is_none());
     assert!(
         serde_json::to_value(missing_partition)?
@@ -324,13 +373,59 @@ fn responses_request_maps_resolved_image_and_compaction_strips_image_block() -> 
 }
 
 #[test]
+fn official_deepseek_responses_maps_image_and_rejects_other_routes_and_models() -> Result<()> {
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Webp,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let mut request = simple_request(vec![user]);
+    request.model_name = "deepseek-flash".to_owned();
+
+    for base_url in ["https://api.deepseek.com", "https://api.deepseek.com/"] {
+        let (body, _) = build_responses_request_with_cache_routing(&request, false, base_url)?;
+        let wire = serde_json::to_value(body)?;
+        assert_eq!(wire["input"][0]["content"][0]["text"], "inspect");
+        assert_eq!(wire["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            wire["input"][0]["content"][1]["image_url"],
+            "data:image/webp;base64,AQID"
+        );
+    }
+    for base_url in [
+        "https://api.deepseek.com/v1",
+        "http://api.deepseek.com",
+        "https://api.deepseek.com.example",
+        "https://api.openai.com/v1",
+    ] {
+        assert_eq!(
+            openai_responses_image_input_capability("deepseek-flash", base_url),
+            ImageInputCapability::Unsupported,
+            "unexpected image capability for {base_url}"
+        );
+        let error = build_responses_request_with_cache_routing(&request, false, base_url)
+            .expect_err("unknown endpoint must reject image before transport");
+        assert!(error.to_string().contains("does not support image input"));
+    }
+    request.model_name = "deepseek-v4-pro".to_owned();
+    let error =
+        build_responses_request_with_cache_routing(&request, false, "https://api.deepseek.com")
+            .expect_err("non-vision model must reject image");
+    assert!(error.to_string().contains("does not support image input"));
+    Ok(())
+}
+
+#[test]
 fn responses_image_capability_is_allowlisted_and_mapper_requires_resolved_bytes() -> Result<()> {
     assert_eq!(
-        openai_responses_image_input_capability("gpt-5.4-2026-03-05"),
+        openai_responses_image_input_capability("gpt-5.4-2026-03-05", "https://api.openai.com/v1"),
         ImageInputCapability::Supported
     );
     assert_eq!(
-        openai_responses_image_input_capability("gpt-4.1-unknown"),
+        openai_responses_image_input_capability("gpt-4.1-unknown", "https://api.openai.com/v1"),
         ImageInputCapability::Unsupported
     );
     let mut user = ModelMessage::user("inspect");

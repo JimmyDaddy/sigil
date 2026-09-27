@@ -48,7 +48,7 @@ In Desktop, use **Attach image** to select a local PNG, JPEG, or WebP, or paste 
 
 In TUI, from an idle composer, paste a local PNG, JPEG, or WebP path, or press `Ctrl-V` when the clipboard contains an image. Review the metadata chip before sending; select a chip with `Up`, move with `Left/Right`, and remove it with `Backspace` or `Delete`.
 
-Each turn accepts up to 4 images, 8 MiB per image, 24 MiB total, and bounded dimensions. Direct messages and inline skills can carry images. Follow-up queues, native commands, plans, tasks, and agent sessions do not yet carry attachments; their drafts are kept instead of silently dropping images. Only recognized image-capable models accept them, including OpenAI Responses, Anthropic, Gemini, and recognized DeepSeek image-capable model aliases. If a saved session refers to a missing local image, paste the original again or continue from a conversation that does not need it.
+Each turn accepts up to 4 images, 8 MiB per image, 24 MiB total, and bounded dimensions. Direct messages and inline skills can carry images. Follow-up queues, native commands, plans, tasks, and agent sessions do not yet carry attachments; their drafts are kept instead of silently dropping images. Only recognized image-capable models accept them, including OpenAI Responses, Anthropic, Gemini, and recognized DeepSeek image-capable model aliases. DeepSeek `deepseek-flash` also accepts images through its official Responses and Anthropic-compatible endpoints; a custom endpoint does not inherit this capability. If a saved session refers to a missing local image, paste the original again or continue from a conversation that does not need it.
 
 ## Slash Commands
 
