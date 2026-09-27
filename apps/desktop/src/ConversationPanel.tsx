@@ -1431,6 +1431,9 @@ export function ConversationPanel({
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
   const submissionBlocked = continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
+  const stopControlBlocked = !active
+    || run.sessionId !== session.id
+    || run.id !== activeRunIdRef.current;
   const composerActivityState = resolveComposerActivityState({
     active,
     submitting,
@@ -1746,7 +1749,7 @@ export function ConversationPanel({
   };
 
   const cancel = async () => {
-    if (run === undefined || !active || submissionBlocked || controlBusy) return;
+    if (run === undefined || stopControlBlocked || controlBusy) return;
     setControlBusy(true);
     try {
       setRun(await bridge.cancelRun(workspaceId, session.id, run.id));
@@ -1785,8 +1788,7 @@ export function ConversationPanel({
   const pauseTask = async (taskId: string, execution: TaskProductProjection["execution"]) => {
     if (
       run === undefined
-      || !active
-      || submissionBlocked
+      || stopControlBlocked
       || controlBusy
       || taskControlBusy
       || taskIntegrationBusy
@@ -2409,7 +2411,7 @@ export function ConversationPanel({
           busy={taskControlBusy || taskIntegrationBusy}
           reviewReady={taskIntegrationReview !== undefined}
           reviewBusy={taskIntegrationLoading}
-          pauseDisabled={submissionBlocked || controlBusy || taskIntegrationBusy}
+          pauseDisabled={stopControlBlocked || controlBusy || taskIntegrationBusy}
           pauseBusy={taskControlBusy}
           reviewButtonRef={taskIntegrationTriggerRef}
           onPause={() => {
@@ -2786,6 +2788,7 @@ export function ConversationPanel({
         draftKey={draftStorageKey(workspaceId, session.id)}
         active={active}
         submissionBlocked={submissionBlocked}
+        stopControlBlocked={stopControlBlocked}
         queueSubmissionBlocked={active && conversationQueue === undefined}
         draftEditingBlocked={!continuityState.transcriptLoaded}
         submitting={submitting}

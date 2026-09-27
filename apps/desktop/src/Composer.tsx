@@ -37,6 +37,7 @@ export function Composer({
   draftKey,
   active,
   submissionBlocked,
+  stopControlBlocked = false,
   queueSubmissionBlocked = false,
   draftEditingBlocked = false,
   submitting,
@@ -74,6 +75,7 @@ export function Composer({
   draftKey: string;
   active: boolean;
   submissionBlocked: boolean;
+  stopControlBlocked?: boolean;
   queueSubmissionBlocked?: boolean;
   draftEditingBlocked?: boolean;
   submitting: boolean;
@@ -598,13 +600,13 @@ export function Composer({
             </Popover>
           {active ? (
             <>
-              <Tooltip label={submissionBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
+              <Tooltip label={stopControlBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
                 <IconButton
                   className="composer-submit composer-stop"
                   type="button"
                   aria-label={t("stopRun")}
                   icon={<Icon name="stop" />}
-                  disabled={controlBusy || submissionBlocked}
+                  disabled={controlBusy || stopControlBlocked}
                   onClick={onCancel}
                 />
               </Tooltip>

@@ -1888,6 +1888,35 @@ describe("desktop workspace and history shell", () => {
     },
   );
 
+  it.each(["session", "run"] as const)("does not stop a recovery snapshot with a mismatched %s identity", async (mismatch) => {
+    const user = userEvent.setup();
+    writeLastSession(workspace.id, {
+      sessionRef: "live-session.jsonl",
+      sessionId: "durable-live-session",
+      label: "Identity mismatch",
+    });
+    const cancelRun = vi.fn();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      openSession: async () => ({ id: "http-live-session", label: "Identity mismatch", runCount: 1 }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 1 },
+        foregroundOwner: { runId: "live-run", ownerRevision: `sha256:${"a".repeat(64)}` },
+        retainedTerminalRuns: [], recoveryActions: [],
+      }),
+      attachRun: async () => ({
+        run: { id: mismatch === "run" ? "different-run" : "live-run", sessionId: mismatch === "session" ? "different-session" : "http-live-session", status: "running", permissionMode: "manual", streamSequence: 1 },
+        events: [], streamState: "error", hasGap: false,
+      }),
+      cancelRun,
+    })} />);
+    await screen.findByText("Live controls need attention");
+    const stop = screen.getByRole("button", { name: "Stop run" });
+    expect(stop.hasAttribute("disabled")).toBe(true);
+    await user.click(stop);
+    expect(cancelRun).not.toHaveBeenCalled();
+  });
+
   it("reports incomplete native cleanup without treating it as a completed exit", async () => {
     let cleanupFailed: (() => void) | undefined;
     const unsubscribe = vi.fn();
@@ -3077,8 +3106,6 @@ describe("desktop workspace and history shell", () => {
 
     act(() => eventListener?.(activeEvent));
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Stop run" }));
-    expect(cancelledRun).toBe("run-active");
 
     act(() => statusListener?.({
       workspaceId: workspace.id,
@@ -3103,6 +3130,10 @@ describe("desktop workspace and history shell", () => {
         },
       },
     ));
+    const stop = screen.getByRole("button", { name: "Stop run" });
+    expect(stop.hasAttribute("disabled")).toBe(false);
+    await user.click(stop);
+    expect(cancelledRun).toBe("run-active");
   });
 
   it.each(["event", "status"] as const)(
@@ -6234,9 +6265,10 @@ describe("desktop workspace and history shell", () => {
     ));
   });
 
-  it("pauses the exact active Task without using ordinary run cancellation", async () => {
+  it.each([false, true])("pauses the exact active Task without using ordinary run cancellation (stream recovery=%s)", async (recovering) => {
     const user = userEvent.setup();
     let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let statusListener: ((status: RunStreamStatus) => void) | undefined;
     const pauseTask = vi.fn(async (
       _workspaceId: string,
       sessionId: string,
@@ -6257,6 +6289,10 @@ describe("desktop workspace and history shell", () => {
       }),
       subscribeRunEvents: async (listener) => {
         eventListener = listener;
+        return () => undefined;
+      },
+      subscribeRunStreamStatus: async (listener) => {
+        statusListener = listener;
         return () => undefined;
       },
       pauseTask,
@@ -6317,6 +6353,16 @@ describe("desktop workspace and history shell", () => {
       });
     });
 
+    if (recovering) {
+      act(() => statusListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        state: "error",
+        message: "Live progress is recovering.",
+      }));
+      expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+    }
     const pause = await screen.findByRole("button", { name: "Pause Task" });
     expect(pause.hasAttribute("disabled")).toBe(false);
     await user.click(pause);
