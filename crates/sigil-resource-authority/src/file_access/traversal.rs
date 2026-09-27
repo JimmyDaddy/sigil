@@ -15,6 +15,7 @@ pub(super) fn plan_snapshot(
     root: &Path,
     logical: &str,
     root_handle: &std::fs::File,
+    capture_content: bool,
 ) -> Result<
     (
         Option<sigil_kernel::resource::CanonicalHash>,
@@ -43,7 +44,7 @@ pub(super) fn plan_snapshot(
         &path,
         &file.metadata().map_err(relative_io_error)?,
     );
-    let digest = if identity.is_regular_file {
+    let digest = if capture_content && identity.is_regular_file {
         Some(super::hash_file(file, None)?)
     } else {
         None

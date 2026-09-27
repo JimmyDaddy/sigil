@@ -266,7 +266,9 @@ impl AuthorityManagedFileAccessServiceV1 {
         plan: &PlannedFileAccessV1,
         context: Option<&ManagedFileExecutionContextV1>,
     ) -> Result<Option<CanonicalHash>, ManagedFileAccessErrorV1> {
-        if plan.expected_physical_identity.is_none() {
+        if plan.expected_physical_identity.is_none()
+            || !operation_requires_content_snapshot(plan.operation)
+        {
             return Ok(None);
         }
         let (file, _ancestors) = open_plan_file(plan)?;
@@ -362,6 +364,16 @@ fn hash_file(
     Ok(CanonicalHash::from_bytes(hasher.finalize().into()))
 }
 
+fn operation_requires_content_snapshot(operation: ManagedFileOperationV1) -> bool {
+    matches!(
+        operation,
+        ManagedFileOperationV1::Write
+            | ManagedFileOperationV1::Edit
+            | ManagedFileOperationV1::Delete
+            | ManagedFileOperationV1::Rename
+    )
+}
+
 fn mutation_error(
     error: impl std::fmt::Display,
     plan: &PlannedFileAccessV1,
@@ -396,8 +408,12 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         #[cfg(any(unix, windows))]
         let root_handle = Self::open_workspace_root(&root)?;
         #[cfg(any(unix, windows))]
-        let (expected_physical_identity, expected_content_digest) =
-            traversal::plan_snapshot(&root, &logical_path, &root_handle)?;
+        let (expected_physical_identity, expected_content_digest) = traversal::plan_snapshot(
+            &root,
+            &logical_path,
+            &root_handle,
+            operation_requires_content_snapshot(request.operation),
+        )?;
         #[cfg(not(any(unix, windows)))]
         let (expected_physical_identity, expected_content_digest): (
             Option<CanonicalHash>,

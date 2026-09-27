@@ -1225,33 +1225,47 @@ fn cancelled_and_expired_execution_do_not_consume_admission_or_mutate() {
 }
 
 #[test]
-fn content_snapshot_is_part_of_the_cached_plan_identity() {
-    let input = ManagedFileExecutionInputV1::Read {
-        offset: 0,
-        limit: 1,
-        max_bytes: 128,
+fn mutation_content_snapshot_is_part_of_the_cached_plan_identity() {
+    let input = ManagedFileExecutionInputV1::Write {
+        content: "replacement".to_owned(),
     };
-    let (workspace, service, original) = registered_read_plan(Some("before"), &input);
+    let (workspace, service, original) = registered_plan_for_input(Some("before"), &input);
     std::fs::write(workspace.path().join("notes.txt"), "after!")
         .expect("same-length content change");
     let updated = service
         .plan(ManagedFileAccessPlanRequestV1 {
             logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical path"),
-            operation: ManagedFileOperationV1::Read,
+            operation: ManagedFileOperationV1::Write,
             operation_scope: input.operation_scope(),
         })
         .expect("updated snapshot");
     assert_ne!(original.plan_hash, updated.plan_hash);
-    let (request, token) = execution_request_for_plan(&original, input.clone());
+    let (request, token) = execution_request_for_plan(&original, input);
     assert!(matches!(
         service.execute(request, token),
         Err(ManagedFileAccessErrorV1::PlanStale)
     ));
-    let (request, token) = execution_request_for_plan(&updated, input);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("notes.txt")).expect("unchanged file"),
+        "after!"
+    );
+}
+
+#[test]
+fn read_observes_current_content_without_a_mutation_snapshot() {
+    let input = ManagedFileExecutionInputV1::Read {
+        offset: 0,
+        limit: 1,
+        max_bytes: 128,
+    };
+    let (workspace, service, plan) = registered_read_plan(Some("before"), &input);
+    std::fs::write(workspace.path().join("notes.txt"), "after!")
+        .expect("same-length content change");
+    let (request, token) = execution_request_for_plan(&plan, input);
     assert_eq!(
         service
             .execute(request, token)
-            .expect("new snapshot")
+            .expect("read current content")
             .payload,
         "after!"
     );
@@ -1334,11 +1348,9 @@ fn repeated_grep_traversals_have_independent_cursors_and_skip_aliases() {
 }
 
 #[test]
-fn planning_refuses_an_oversized_sparse_file_before_issuing_a_snapshot() {
-    let input = ManagedFileExecutionInputV1::Read {
-        offset: 1,
-        limit: 1,
-        max_bytes: 128,
+fn mutation_planning_refuses_an_oversized_sparse_content_snapshot() {
+    let input = ManagedFileExecutionInputV1::Write {
+        content: "replacement".to_owned(),
     };
     let (workspace, service, _) = registered_plan_for_input(Some("small"), &input);
     let file = std::fs::OpenOptions::new()
@@ -1350,7 +1362,7 @@ fn planning_refuses_an_oversized_sparse_file_before_issuing_a_snapshot() {
     assert!(matches!(
         service.plan(ManagedFileAccessPlanRequestV1 {
             logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical path"),
-            operation: ManagedFileOperationV1::Read,
+            operation: ManagedFileOperationV1::Write,
             operation_scope: input.operation_scope(),
         }),
         Err(ManagedFileAccessErrorV1::ResourceLimit(_))
@@ -1360,8 +1372,37 @@ fn planning_refuses_an_oversized_sparse_file_before_issuing_a_snapshot() {
     service
         .plan(ManagedFileAccessPlanRequestV1 {
             logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical path"),
-            operation: ManagedFileOperationV1::Read,
+            operation: ManagedFileOperationV1::Write,
             operation_scope: input.operation_scope(),
         })
         .expect("restoring a bounded file repairs planning");
+}
+
+#[test]
+fn read_can_project_a_bounded_page_from_an_oversized_sparse_file() {
+    let input = ManagedFileExecutionInputV1::Read {
+        offset: 0,
+        limit: 1,
+        max_bytes: 128,
+    };
+    let (workspace, service, _) = registered_plan_for_input(Some("first\n"), &input);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(workspace.path().join("notes.txt"))
+        .expect("open sparse fixture");
+    file.set_len(MAX_READ_SCAN_BYTES + 1)
+        .expect("grow sparse fixture");
+    let plan = service
+        .plan(ManagedFileAccessPlanRequestV1 {
+            logical_path: ManagedFileLogicalPathV1::new("notes.txt").expect("logical path"),
+            operation: ManagedFileOperationV1::Read,
+            operation_scope: input.operation_scope(),
+        })
+        .expect("bounded reads do not hash the whole source");
+    let (request, token) = execution_request_for_plan(&plan, input);
+    let outcome = service.execute(request, token).expect("bounded page");
+    assert_eq!(outcome.payload, "first");
+    assert_eq!(outcome.returned_lines, 1);
+    assert_eq!(outcome.observed_bytes, MAX_READ_SCAN_BYTES + 1);
+    assert!(outcome.truncated);
 }
