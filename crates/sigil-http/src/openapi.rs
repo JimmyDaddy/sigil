@@ -3010,6 +3010,7 @@ pub fn http_openapi_document() -> Value {
                     "type": "object",
                     "required": ["source_turn_index", "source_turn_digest", "source_boundary_stream_sequence", "source_finalized_stream_sequence"],
                     "properties": {
+                        "prompt_preview": { "type": ["string", "null"], "maxLength": 360 },
                         "source_turn_index": { "type": "integer", "format": "uint64", "minimum": 1 },
                         "source_turn_digest": { "type": "string", "minLength": 1, "maxLength": 512 },
                         "source_boundary_stream_sequence": { "type": "integer", "format": "uint64", "minimum": 1 },

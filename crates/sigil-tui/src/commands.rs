@@ -24,6 +24,7 @@ pub(crate) enum UiCommand {
     CheckChangedFilesDiagnostics,
     FocusVerificationCard,
     OpenCheckpointRestore,
+    OpenConversationFork,
     OpenChangeReview,
     OpenIntentStack,
     FocusLatestToolCard,
@@ -129,6 +130,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: None,
         label: "Review changes",
         help: "Select recorded diff lines and send a batch of review comments through the conversation.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::OpenConversationFork,
+        keys: &[KeyBinding { label: "Alt-B" }],
+        slash: None,
+        label: "Branch conversation",
+        help: "Choose a completed turn, open a branch, and edit a draft without sending it. Alt-B keeps word navigation while editing.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -362,6 +371,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::OpenCheckpointRestore)
         }
+        KeyCode::Char('b') | KeyCode::Char('B') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::OpenConversationFork)
+        }
         KeyCode::Char('s') | KeyCode::Char('S') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::OpenIntentStack)
         }
@@ -408,6 +420,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             String::new()
         },
         control_hint(UiCommand::OpenCheckpointRestore).expect("checkpoint metadata exists"),
+        control_hint(UiCommand::OpenConversationFork).expect("conversation fork metadata exists"),
         control_hint(UiCommand::OpenChangeReview).expect("change review metadata exists"),
         control_hint(UiCommand::OpenIntentStack).expect("Intent Stack metadata exists"),
     ];

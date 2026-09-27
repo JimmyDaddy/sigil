@@ -342,6 +342,7 @@ export interface CheckpointView {
 }
 
 export interface ConversationForkPointView {
+  promptPreview?: string;
   sourceTurnIndex: number;
   sourceTurnDigest: string;
   sourceBoundaryStreamSequence: number;

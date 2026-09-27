@@ -274,6 +274,24 @@ impl AppState {
                 request_id,
                 request,
             },
+            AppAction::LoadConversationForkPoints {
+                request_id,
+                source_session_id,
+            } => WorkerCommand::LoadConversationForkPoints {
+                request_id,
+                source_session_id,
+            },
+            AppAction::ForkConversation {
+                request_id,
+                source_session_id,
+                source_turn_digest,
+                target_model_ref,
+            } => WorkerCommand::ForkConversation {
+                request_id,
+                source_session_id,
+                source_turn_digest,
+                target_model_ref,
+            },
             AppAction::InspectLocalSession {
                 request_id,
                 source_path,

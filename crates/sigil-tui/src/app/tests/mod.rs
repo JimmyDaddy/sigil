@@ -10,6 +10,8 @@ pub(crate) mod common;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod config_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod conversation_fork_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod formatting_tests;
 mod input_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]

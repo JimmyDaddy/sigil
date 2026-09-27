@@ -70,6 +70,10 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
     match control {
+        ControlEntry::ConversationForkCommittedV1(entry) => format!(
+            "[ctl] conversation fork {} -> {} at {}",
+            entry.source_session_id, entry.destination_session_id, entry.source_turn_digest
+        ),
         ControlEntry::ProviderDiagnostic(diagnostic) => {
             format!("[ctl] provider diagnostic {diagnostic:?}")
         }

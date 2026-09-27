@@ -290,6 +290,7 @@ pub(super) enum ModalState {
     McpOAuth(super::mcp_oauth_flow::McpOAuthModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     IntentStack(Box<super::intent_stack_flow::IntentStackModalState>),
+    ConversationFork(Box<super::conversation_fork_flow::ConversationForkModalState>),
     ChangeReview(Box<super::change_review_flow::ChangeReviewModalState>),
     V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
     SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
@@ -346,6 +347,7 @@ impl AppState {
             ModalState::McpOAuth(_) => Some("MCP Authentication"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
             ModalState::IntentStack(_) => Some("Intent Stack"),
+            ModalState::ConversationFork(_) => Some("Branch Conversation"),
             ModalState::ChangeReview(_) => Some("Review Recorded Changes"),
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::SessionActions(_) => Some("Session Actions"),
@@ -465,6 +467,7 @@ impl AppState {
             Some(ModalState::McpOAuth(state)) => super::mcp_oauth_flow::modal_lines(state),
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
             Some(ModalState::IntentStack(_)) => Vec::new(),
+            Some(ModalState::ConversationFork(state)) => state.lines(),
             Some(ModalState::ChangeReview(state)) => state.lines(),
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
@@ -528,7 +531,7 @@ impl AppState {
             ModalState::ConnectionPicker(_) | ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
             ModalState::IntentStack(_) => None,
-            ModalState::ChangeReview(_) => None,
+            ModalState::ConversationFork(_) | ModalState::ChangeReview(_) => None,
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::Feedback(_) => None,
@@ -1427,7 +1430,7 @@ impl AppState {
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
-            ModalState::ChangeReview(_) => ModalOutcome::None,
+            ModalState::ConversationFork(_) | ModalState::ChangeReview(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => match key.code {
                 KeyCode::Esc => {
                     let request_id = state.request_id();
@@ -1521,6 +1524,7 @@ impl AppState {
             | ModalState::ModelPicker(_)
             | ModalState::CheckpointRestore(_)
             | ModalState::IntentStack(_)
+            | ModalState::ConversationFork(_)
             | ModalState::ChangeReview(_)
             | ModalState::V2CompactionPreview(_)
             | ModalState::SessionActions(_)
@@ -1581,7 +1585,7 @@ impl AppState {
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
-            ModalState::ChangeReview(_) => ModalOutcome::None,
+            ModalState::ConversationFork(_) | ModalState::ChangeReview(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => {
                 if state.is_admitted() || state.is_locally_prepared() {
                     let request_id = state.request_id();

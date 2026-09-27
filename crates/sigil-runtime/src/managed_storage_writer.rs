@@ -990,8 +990,12 @@ impl ManagedStorageWriterAdapterV1 {
         &self,
         key: &str,
     ) -> Result<ManagedExistingSessionLogMutationLeaseV1, ManagedStorageWriterErrorV1> {
+        let (_, _, leaf) = StorageWriterChannelV1::SessionLog.mapping();
         Ok(ManagedExistingSessionLogMutationLeaseV1 {
-            admission: self.admit_existing_session_log(key)?,
+            admission: self.admit_existing_session_log_namespace_with_pending_bundle(
+                stable_namespace_hash(leaf, key),
+                true,
+            )?,
         })
     }
 
@@ -1011,6 +1015,14 @@ impl ManagedStorageWriterAdapterV1 {
         &self,
         namespace_hash: CanonicalHash,
     ) -> Result<ManagedExistingSessionLogAdmissionV1, ManagedStorageWriterErrorV1> {
+        self.admit_existing_session_log_namespace_with_pending_bundle(namespace_hash, false)
+    }
+
+    fn admit_existing_session_log_namespace_with_pending_bundle(
+        &self,
+        namespace_hash: CanonicalHash,
+        allow_pending_initial_bundle: bool,
+    ) -> Result<ManagedExistingSessionLogAdmissionV1, ManagedStorageWriterErrorV1> {
         let channel = StorageWriterChannelV1::SessionLog;
         let (semantic_owner, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?.join(namespace_hash.to_hex());
@@ -1019,7 +1031,13 @@ impl ManagedStorageWriterAdapterV1 {
         ensure_existing_private_recovery_file(&path.join(".authority-storage.lock"), "lock")?;
         let original = self.existing_session_log_marker_binding(&path)?;
         let record_file = path.join("records.jsonl");
-        ensure_existing_nonempty_session_log(&record_file)?;
+        if allow_pending_initial_bundle {
+            // The require-existing kernel writer validates/replays its own durable intent and
+            // still rejects an empty resulting stream. Admission cannot create or seed a log.
+            ensure_existing_private_recovery_file(&record_file, "record")?;
+        } else {
+            ensure_existing_nonempty_session_log(&record_file)?;
+        }
         ensure_existing_private_recovery_file(
             &existing_session_writer_lock_path(&record_file)?,
             "session writer lock",
@@ -1463,7 +1481,7 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedExistingSessionLogMutationLeaseV1,
     ) -> Result<sigil_kernel::JsonlSessionStore, ManagedStorageWriterErrorV1> {
         ensure_existing_private_recovery_directory(&lease.admission.path)?;
-        ensure_existing_nonempty_session_log(&lease.admission.session_log_path())?;
+        ensure_existing_private_recovery_file(&lease.admission.session_log_path(), "record")?;
         ensure_existing_private_recovery_file(
             &existing_session_writer_lock_path(&lease.admission.session_log_path())?,
             "session writer lock",
@@ -1518,6 +1536,34 @@ impl ManagedStorageWriterAdapterV1 {
             .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
     }
 
+    /// Settles a fork namespace or releases its original live holder if incomplete JSONL
+    /// prevents a physical-frontier receipt. Durable charges and the original error remain.
+    pub(crate) fn finalize_fork_session_log(
+        &self,
+        lease: ManagedStorageWriterLeaseV1,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
+        let (byte_length, record_count, content_hash) = match self.physical_frontier(&lease) {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                return match self.detach(lease) {
+                    Ok(()) => Err(error),
+                    Err(detach) => Err(ManagedStorageWriterErrorV1::FinalizeFailed(format!(
+                        "{error}; original fork holder release failed: {detach}"
+                    ))),
+                };
+            }
+        };
+        self.service
+            .finalize_namespace_with_physical_frontier(
+                lease.handle,
+                byte_length,
+                record_count,
+                content_hash,
+                "writer-fork-session-log-complete".to_owned(),
+            )
+            .map_err(|error| ManagedStorageWriterErrorV1::FinalizeFailed(error.to_string()))
+    }
+
     /// Settles an existing-only SessionLog recovery admission without creating or repairing its
     /// lock or record object.
     pub(crate) fn finalize_existing_session_log_recovery(
@@ -1547,7 +1593,17 @@ impl ManagedStorageWriterAdapterV1 {
         completion_reason: &str,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageWriterErrorV1> {
         let (byte_length, record_count, content_hash) =
-            self.existing_session_log_recovery_frontier(&admission)?;
+            match self.existing_session_log_recovery_frontier(&admission) {
+                Ok(frontier) => frontier,
+                Err(error) => {
+                    return match self.service.detach_namespace(admission.handle) {
+                        Ok(()) => Err(error),
+                        Err(detach) => Err(ManagedStorageWriterErrorV1::FinalizeFailed(format!(
+                            "{error}; original recovery holder release failed: {detach}"
+                        ))),
+                    };
+                }
+            };
         self.service
             .finalize_namespace_with_physical_frontier(
                 admission.handle,

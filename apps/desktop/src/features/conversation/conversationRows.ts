@@ -16,6 +16,7 @@ interface TimelineRowBase {
   status?: string;
   contentTruncated?: boolean;
   images?: MessageView["images"];
+  sourceStreamSequence?: string;
 }
 
 export type ConversationTimelineRow =
@@ -40,7 +41,10 @@ export function projectConversationRows(
   toolSnapshots: readonly LiveConversationDisplayItem[] = [],
 ): ConversationTimelineRow[] {
   const projectEntry = (entry: ConversationTimelineItem): ConversationTimelineRow[] => {
-    const rows = projectDisplayItem(entry.identity, entry.item, t);
+    const rows = projectDisplayItem(entry.identity, entry.item, t).map((row) => ({
+      ...row,
+      sourceStreamSequence: entry.source === "durable" ? entry.item.displayOrder.sessionStreamSequence : undefined,
+    }));
     const identities = entry.source === "durable" ? entry.item.reconciles ?? [] : [entry.identity];
     const snapshot = toolSnapshots.find((candidate) => candidate.runId === entry.item.runId
       && candidate.content.type === "tool" && identities.includes(candidate.provisionalId));

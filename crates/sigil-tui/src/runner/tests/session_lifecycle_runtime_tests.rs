@@ -1,6 +1,6 @@
 use std::{fs, path::Path, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use sigil_kernel::{
     Agent, AssistantMessageKind, CONFIG_VERSION_V2, ConnectionId, ControlEntry, DurableEventType,
@@ -16,7 +16,10 @@ use tempfile::tempdir;
 
 use super::{
     super::{WorkerCommand, WorkerMessage, worker_loop::fork_local_session},
-    common::{PlannedProvider, spawn_test_worker, test_root_config},
+    common::{
+        PlannedProvider, spawn_test_worker, spawn_test_worker_with_existing_authority_composition,
+        test_authority_composition, test_root_config,
+    },
 };
 
 fn write_finalized_session(
@@ -413,5 +416,271 @@ fn active_session_fork_uses_the_owned_writer_instead_of_catalog_scanning() -> Re
     )?;
     assert!(output.output.destination_path.is_file());
     assert_eq!(output.output.copied_message_count, 2);
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_selected_turn_uses_shared_lifecycle_without_checkpoint_or_model_call()
+-> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let path = sessions.join("source.jsonl");
+    let mut config = test_root_config(&workspace, "deepseek", "deepseek-v4-flash");
+    let (authority_composition, authority_root) = test_authority_composition(&workspace)?;
+    config.config_version = CONFIG_VERSION_V2;
+    config.agent.runtime_provider.clear();
+    config.agent.connection = Some(ConnectionId::new("selected-route")?);
+    config.connections.insert("selected-route".to_owned(), json!({
+        "label":"Selected", "provider":"deepseek", "protocol":"deepseek",
+        "base_url":"https://api.deepseek.com", "credential":{"source":"environment","name":"SIGIL_API_KEY"}
+    }));
+    config.session.log_dir = Some(sessions.display().to_string());
+    config.storage.state_root =
+        StorageRoot::Path(authority_root.path().join("state").display().to_string());
+    config.storage.cache_root = StorageRoot::Path(temp.path().join("cache").display().to_string());
+    write_finalized_session(&path, "first completed turn", &config)?;
+    {
+        let store = JsonlSessionStore::new(&path)?;
+        let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+        session.append_user_message(ModelMessage::user("second completed turn"))?;
+        let answer = ModelMessage::assistant_with_kind(
+            Some("second answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        );
+        session.append_assistant_message(answer.clone())?;
+        session.append_durable_event(DurableEventType::RunFinalized, EventClass::Critical, json!({
+            "run_status":"completed", "terminal_reason":"final_answer", "final_message_id":answer.id,
+            "tool_calls":0, "error":null
+        }))?;
+    }
+    let source_id = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&path)?,
+    )?
+    .session_scope_id()
+    .to_owned();
+    let target_model_ref =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?
+            .1
+            .model_ref;
+    let (provider, calls) = PlannedProvider::new_with_stream_start_signal(Vec::new());
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        config.clone(),
+        path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority_composition),
+    )?;
+    worker.send(WorkerCommand::LoadConversationForkPoints {
+        request_id: 401,
+        source_session_id: source_id.clone(),
+    })?;
+    let points = match worker
+        .recv_until_with_timeout(Duration::from_secs(30), |message| {
+            matches!(
+                message,
+                WorkerMessage::ConversationForkPointsLoaded {
+                    request_id: 401,
+                    ..
+                } | WorkerMessage::LocalSessionLifecycleFailed {
+                    request_id: 401,
+                    ..
+                }
+            )
+        })
+        .context("loading source conversation fork points")?
+    {
+        WorkerMessage::ConversationForkPointsLoaded { points, .. } => points,
+        WorkerMessage::LocalSessionLifecycleFailed { error, .. } => {
+            anyhow::bail!("loading source conversation fork points failed: {error}")
+        }
+        other => panic!("unexpected source response: {other:?}"),
+    };
+    assert_eq!(points.len(), 2);
+    assert_eq!(
+        points[0].prompt_preview.as_deref(),
+        Some("first completed turn")
+    );
+    // Unrelated workspace changes cannot act as a conversation-fork permission gate.
+    fs::write(
+        workspace.join("unrelated.txt"),
+        "different workspace observation",
+    )?;
+    let source_bytes = fs::read(&path)?;
+    for (request_id, expected_source, digest) in [
+        (
+            402,
+            "wrong-session".to_owned(),
+            points[0].source_turn_digest.clone(),
+        ),
+        (403, source_id.clone(), "sha256:stale-turn".to_owned()),
+    ] {
+        worker.send(WorkerCommand::ForkConversation {
+            request_id,
+            source_session_id: expected_source,
+            source_turn_digest: digest,
+            target_model_ref: target_model_ref.clone(),
+        })?;
+        assert!(matches!(worker.recv_until_with_timeout(Duration::from_secs(30), |message|
+            matches!(message, WorkerMessage::LocalSessionLifecycleFailed { request_id: id, .. } if *id == request_id))?,
+            WorkerMessage::LocalSessionLifecycleFailed { .. }));
+    }
+    dispatch_bound_fork(
+        &worker,
+        &source_id,
+        &points[0].source_turn_digest,
+        &target_model_ref,
+        "a",
+    )?;
+    let branch = match worker
+        .recv_until_with_timeout(Duration::from_secs(30), |message| {
+            matches!(
+                message,
+                WorkerMessage::LocalSessionForked {
+                    request_id: 404,
+                    ..
+                } | WorkerMessage::LocalSessionLifecycleFailed {
+                    request_id: 404,
+                    ..
+                }
+            )
+        })
+        .context("forking first selected conversation turn")?
+    {
+        WorkerMessage::LocalSessionForked {
+            session_log_path,
+            copied_message_count,
+            ..
+        } => {
+            assert_eq!(copied_message_count, 2);
+            session_log_path
+        }
+        WorkerMessage::LocalSessionLifecycleFailed { error, .. } => {
+            anyhow::bail!("forking first selected conversation turn failed: {error}")
+        }
+        other => panic!("unexpected branch response: {other:?}"),
+    };
+    assert!(
+        fs::read(&path)?.starts_with(&source_bytes),
+        "source history must remain an unchanged prefix"
+    );
+    assert!(
+        JsonlSessionStore::read_entries(&path)?
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::ConversationForkCommittedV1(_)
+                )
+            )),
+        "the completed copy must have a source-side audit"
+    );
+    let entries = JsonlSessionStore::read_entries(&branch)?;
+    assert!(entries.iter().any(
+        |entry| matches!(entry, sigil_kernel::SessionLogEntry::User(message)
+        if message.content.as_deref() == Some("first completed turn"))
+    ));
+    assert!(!entries.iter().any(
+        |entry| matches!(entry, sigil_kernel::SessionLogEntry::User(message)
+        if message.content.as_deref() == Some("second completed turn"))
+    ));
+    assert!(
+        calls.try_recv().is_err(),
+        "branching must not dispatch a model call"
+    );
+    drop(worker);
+    // A new process/worker can reuse the UI counter; the distinct durable intent must not
+    // reopen the previous branch, even when the source turn is identical.
+    let (provider, second_calls) = PlannedProvider::new_with_stream_start_signal(Vec::new());
+    let restarted = spawn_test_worker_with_existing_authority_composition(
+        config,
+        path,
+        Agent::new(provider, ToolRegistry::new()),
+        workspace,
+        authority_composition,
+    )?;
+    dispatch_bound_fork(
+        &restarted,
+        &source_id,
+        &points[0].source_turn_digest,
+        &target_model_ref,
+        "b",
+    )?;
+    let next = restarted
+        .recv_until_with_timeout(Duration::from_secs(30), |message| {
+            matches!(
+                message,
+                WorkerMessage::LocalSessionForked {
+                    request_id: 404,
+                    ..
+                } | WorkerMessage::LocalSessionLifecycleFailed {
+                    request_id: 404,
+                    ..
+                }
+            )
+        })
+        .context("forking selected turn after worker restart")?;
+    if let WorkerMessage::LocalSessionLifecycleFailed { error, .. } = &next {
+        anyhow::bail!("forking selected turn after worker restart failed: {error}");
+    }
+    let WorkerMessage::LocalSessionForked {
+        session_log_path, ..
+    } = next
+    else {
+        unreachable!()
+    };
+    assert_ne!(
+        session_log_path, branch,
+        "new K/F must produce a new branch despite the same UI request id"
+    );
+    assert!(second_calls.try_recv().is_err());
+    Ok(())
+}
+
+fn dispatch_bound_fork(
+    worker: &super::common::TestWorker,
+    scope: &str,
+    digest: &str,
+    model: &ModelRef,
+    key_digit: &str,
+) -> Result<()> {
+    let binding = sigil_kernel::ApplicationOperationBindingV1::new(
+        scope.to_owned(),
+        key_digit.repeat(64),
+        "f".repeat(64),
+        sigil_kernel::ApplicationOperationTargetV1::ForkConversation {
+            source_turn_digest: digest.to_owned(),
+            connection_id: model.connection_id.as_str().to_owned(),
+            model_id: model.model_id.clone(),
+        },
+    )?;
+    let (reply, receipt) = std::sync::mpsc::channel();
+    worker.send(WorkerCommand::PrepareApplicationOperation {
+        binding: Box::new(binding.clone()),
+        reply,
+    })?;
+    receipt
+        .recv_timeout(Duration::from_secs(30))?
+        .map_err(anyhow::Error::msg)?;
+    let (reply, receipt) = std::sync::mpsc::channel();
+    worker.send(WorkerCommand::ApplicationDispatch {
+        binding: Some(Box::new(binding)),
+        run_admission: None,
+        command: Box::new(WorkerCommand::ForkConversation {
+            request_id: 404,
+            source_session_id: scope.to_owned(),
+            source_turn_digest: digest.to_owned(),
+            target_model_ref: model.clone(),
+        }),
+        reply,
+    })?;
+    receipt
+        .recv_timeout(Duration::from_secs(30))?
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }

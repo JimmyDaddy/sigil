@@ -533,3 +533,272 @@ fn storage_workspace_policy_warm_cap_change_rejects_without_disturbing_active_le
         0
     );
 }
+
+#[test]
+fn session_finalize_observation_failure_releases_only_consumed_holder_and_preserves_charge() {
+    for failure in ["missing_lock", "incomplete_record", "frontier_mismatch"] {
+        let root = tempfile::tempdir().expect("isolated authority root");
+        let service = AuthorityManagedStorageServiceV1::new_with_state_root(
+            table_with_session_grant(),
+            authority(),
+            root.path(),
+        )
+        .expect("authority");
+        let namespace = CanonicalHash::from_bytes([0x81; 32]);
+        let other_namespace = CanonicalHash::from_bytes([0x82; 32]);
+        let handle = service
+            .admit_namespace(
+                request(namespace),
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect("session holder");
+        let other = service
+            .admit_namespace(
+                request(other_namespace),
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect("unrelated holder");
+        service
+            .reconcile_namespace_quota(&handle, 64, 1)
+            .expect("pending physical write charge");
+        service
+            .reconcile_namespace_quota(&other, 16, 1)
+            .expect("unrelated charge");
+        fs::create_dir_all(root.path().join("managed").join("session-log"))
+            .expect("existing owner directory for no-follow physical resolution");
+        let directory = service
+            .physical_namespace_directory_for(ManagedStorageSemanticOwnerV1::SessionLog, namespace)
+            .expect("admitted physical namespace");
+        fs::create_dir_all(&directory).expect("fixture physical namespace");
+        let complete = b"{\"published\":true}\n";
+        let bytes: &[u8] = if failure == "incomplete_record" {
+            b"{\"published\":"
+        } else {
+            complete
+        };
+        fs::write(directory.join("records.jsonl"), bytes).expect("actual pending record bytes");
+        if failure != "missing_lock" {
+            fs::write(directory.join(".authority-storage.lock"), b"").expect("namespace lock");
+        }
+        let before = fs::read(quota_journal_path(root.path())).expect("charged quota snapshot");
+        let result = service.finalize_namespace_with_physical_frontier(
+            handle,
+            complete.len() as u64,
+            1,
+            if failure == "frontier_mismatch" {
+                CanonicalHash::from_bytes([0x83; 32])
+            } else {
+                hash_bytes(complete)
+            },
+            "failed physical settlement".to_owned(),
+        );
+        assert!(
+            matches!(result, Err(ManagedStorageErrorV1::AuthorityUnavailable)),
+            "{failure}"
+        );
+        assert_eq!(
+            fs::read(directory.join("records.jsonl")).expect("preserved recovery bytes"),
+            bytes
+        );
+        assert_eq!(
+            fs::read(quota_journal_path(root.path())).expect("pending quota snapshot"),
+            before
+        );
+        assert_eq!(
+            service.quota.lock().expect("quota").workspace_used_bytes(),
+            80
+        );
+        service
+            .validate_namespace_write(&other)
+            .expect("unrelated holder remains live");
+
+        let retry_authority = AuthorityManagedStorageServiceV1::new_with_state_root(
+            table_with_session_grant(),
+            authority(),
+            root.path(),
+        )
+        .expect("another authority view of the same current resources");
+        assert!(
+            matches!(
+                retry_authority.admit_namespace(
+                    request(other_namespace),
+                    ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+                ),
+                Err(ManagedStorageErrorV1::DuplicateClaim)
+            ),
+            "unrelated live ownership cannot be stolen"
+        );
+        let retry = retry_authority
+            .admit_namespace(
+                request(namespace),
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect("consumed failed holder permits explicit recovery with the same charge");
+        assert_eq!(
+            fs::read(quota_journal_path(root.path())).expect("reused charge"),
+            before
+        );
+        fs::write(directory.join(".authority-storage.lock"), b"").expect("restore physical lock");
+        fs::write(directory.join("records.jsonl"), complete)
+            .expect("fixture completes the physical write");
+        let receipt = retry_authority
+            .finalize_namespace_with_physical_frontier(
+                retry,
+                complete.len() as u64,
+                1,
+                hash_bytes(complete),
+                "explicit recovered settlement".to_owned(),
+            )
+            .expect("only the recovered exact frontier can settle");
+        assert_eq!(receipt.committed_entry_count, Some(1));
+        assert!(receipt.physical_frontier_hash.is_some());
+        assert_eq!(
+            service.quota.lock().expect("quota").workspace_used_bytes(),
+            16
+        );
+        service
+            .finalize_namespace(other, "unrelated owner settled".to_owned())
+            .expect("unrelated settlement");
+    }
+}
+
+#[test]
+fn session_finalize_quota_failure_releases_holder_but_keeps_uncertain_book_rejected() {
+    for physical in [false, true] {
+        let root = tempfile::tempdir().expect("isolated authority root");
+        let service = AuthorityManagedStorageServiceV1::new_with_state_root(
+            table_with_session_grant(),
+            authority(),
+            root.path(),
+        )
+        .expect("authority");
+        let namespace = CanonicalHash::from_bytes([0x84; 32]);
+        let handle = service
+            .admit_namespace(
+                request(namespace),
+                ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+            )
+            .expect("session holder");
+        let handle_id = handle.handle_id.as_str().to_owned();
+        service
+            .reconcile_namespace_quota(&handle, 64, 1)
+            .expect("pending charge");
+        fs::create_dir_all(root.path().join("managed").join("session-log"))
+            .expect("existing owner directory for no-follow physical resolution");
+        let directory = service
+            .physical_namespace_directory_for(ManagedStorageSemanticOwnerV1::SessionLog, namespace)
+            .expect("physical namespace");
+        fs::create_dir_all(&directory).expect("physical namespace fixture");
+        let bytes = b"{}\n";
+        fs::write(directory.join("records.jsonl"), bytes).expect("actual complete record");
+        fs::write(directory.join(".authority-storage.lock"), b"").expect("physical lock");
+        service
+            .quota
+            .lock()
+            .expect("quota")
+            .inject_next_directory_sync_failure();
+        let result = if physical {
+            service.finalize_namespace_with_physical_frontier(
+                handle,
+                bytes.len() as u64,
+                1,
+                hash_bytes(bytes),
+                "quota reconciliation fault".to_owned(),
+            )
+        } else {
+            service.finalize_namespace(handle, "quota release fault".to_owned())
+        };
+        assert!(matches!(
+            result,
+            Err(ManagedStorageErrorV1::AuthorityUnavailable)
+        ));
+        assert!(
+            !service
+                .table
+                .admitted_namespaces
+                .lock()
+                .expect("admissions")
+                .contains_key(&handle_id)
+        );
+        let owner_key = storage_quota_owner_key(grant().grant_hash, namespace);
+        assert!(
+            !service
+                .active_owners
+                .lock()
+                .expect("active holders")
+                .contains(&owner_key)
+        );
+        let quota = service.quota.lock().expect("quota");
+        assert_eq!(
+            quota.workspace_used_bytes(),
+            64,
+            "failed persistence retains the previous in-memory charge"
+        );
+        assert!(
+            quota.ensure_healthy().is_err(),
+            "releasing the holder must not heal uncertain persistence"
+        );
+        drop(quota);
+        let uncertain =
+            fs::read(quota_journal_path(root.path())).expect("uncertain installed snapshot");
+        assert!(
+            matches!(
+                service.admit_namespace(
+                    request(namespace),
+                    ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+                ),
+                Err(ManagedStorageErrorV1::AuthorityUnavailable)
+            ),
+            "actual quota uncertainty, not a leaked DuplicateClaim, rejects reuse"
+        );
+        assert_eq!(
+            fs::read(quota_journal_path(root.path())).expect("unchanged uncertainty"),
+            uncertain
+        );
+        assert_eq!(
+            fs::read(directory.join("records.jsonl")).expect("recovery bytes"),
+            bytes
+        );
+    }
+}
+
+#[test]
+fn session_finalize_rejected_handle_does_not_release_the_actual_owner() {
+    let service = AuthorityManagedStorageServiceV1::new(table_with_session_grant(), authority());
+    let namespace = CanonicalHash::from_bytes([0x85; 32]);
+    let handle = service
+        .admit_namespace(
+            request(namespace),
+            ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+        )
+        .expect("real holder");
+    let mismatched = ManagedStorageNamespaceHandleV1::new(
+        OpaqueKernelCapabilityHandleId::new(handle.handle_id.as_str().to_owned()),
+        CanonicalHash::from_bytes([0x86; 32]),
+        handle.capability_family,
+        OpaqueKernelCapabilityAuthenticatorV1::new("mismatched fixture handle".to_owned()),
+    );
+    assert!(matches!(
+        service.finalize_namespace_with_physical_frontier(
+            mismatched,
+            0,
+            0,
+            hash_bytes(b""),
+            "invalid handle".to_owned(),
+        ),
+        Err(ManagedStorageErrorV1::CapabilityMismatch)
+    ));
+    service
+        .validate_namespace_write(&handle)
+        .expect("invalid request cannot detach the real holder");
+    assert!(matches!(
+        service.admit_namespace(
+            request(namespace),
+            ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+        ),
+        Err(ManagedStorageErrorV1::DuplicateClaim)
+    ));
+    service
+        .finalize_namespace(handle, "actual holder".to_owned())
+        .expect("real owner still settles");
+}

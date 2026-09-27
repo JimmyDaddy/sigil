@@ -522,10 +522,16 @@ where
     let managed_storage_writer = Arc::clone(&authority_composition.storage_writer);
     let retained_managed_storage_writer = Arc::clone(&managed_storage_writer);
     let retained_authority_composition = Arc::clone(&authority_composition);
+    let normalized_session_path = sigil_kernel::JsonlSessionStore::new(&session_log_path)?
+        .path()
+        .to_path_buf();
     let managed_artifact_store = super::super::ManagedTuiArtifactStoreLease::acquire(
         Arc::clone(&managed_storage_writer),
-        &session_log_path,
-        &sigil_kernel::stable_event_uuid("sigil-session-path", &session_log_path.to_string_lossy()),
+        &normalized_session_path,
+        &sigil_kernel::stable_event_uuid(
+            "sigil-session-path",
+            &normalized_session_path.to_string_lossy(),
+        ),
     )?;
     let handle = thread::Builder::new()
         .name("sigil-test-agent-worker".to_owned())

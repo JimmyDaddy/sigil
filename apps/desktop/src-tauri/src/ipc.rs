@@ -1193,6 +1193,7 @@ pub(crate) struct DesktopCheckpointFileView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopConversationForkPointView {
+    pub(crate) prompt_preview: Option<String>,
     pub(crate) source_turn_index: usize,
     pub(crate) source_turn_digest: String,
     pub(crate) source_boundary_stream_sequence: u64,
@@ -2737,6 +2738,7 @@ impl From<NativeConversationRecoveryView> for DesktopConversationRecoveryView {
                 .fork_points
                 .into_iter()
                 .map(|point| DesktopConversationForkPointView {
+                    prompt_preview: point.prompt_preview,
                     source_turn_index: point.source_turn_index,
                     source_turn_digest: point.source_turn_digest,
                     source_boundary_stream_sequence: point.source_boundary_stream_sequence,

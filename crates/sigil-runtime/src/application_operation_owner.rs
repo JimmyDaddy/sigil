@@ -10,12 +10,31 @@ use sigil_kernel::{
     ConversationInputTarget, SessionRecordReadHandle,
 };
 
+/// A domain append was attempted and its durable effect must be reconciled by the same owner.
+/// Validation failures before this boundary remain distinguishable from uncertain publication.
+#[derive(Debug, thiserror::Error)]
+#[error("application domain publication requires reconciliation: {0}")]
+pub struct ApplicationPublicationError(#[source] pub anyhow::Error);
+
 pub fn application_operation_binding(
     request: &ApplicationCommandRequest,
 ) -> Result<Option<ApplicationOperationBindingV1>, ApplicationError> {
     use ApplicationOperationTargetV1 as Target;
     request.validate()?;
     let target = match &request.envelope.command {
+        ApplicationCommand::Conversation(sigil_application::ConversationCommand::Recovery {
+            action:
+                sigil_application::ApplicationRecoveryAction::ForkConversation {
+                    source_turn_digest,
+                    connection_id,
+                    model_id,
+                    ..
+                },
+        }) => Target::ForkConversation {
+            source_turn_digest: source_turn_digest.as_str().to_owned(),
+            connection_id: connection_id.as_str().to_owned(),
+            model_id: model_id.as_str().to_owned(),
+        },
         ApplicationCommand::Conversation(sigil_application::ConversationCommand::Queue {
             action,
             ..
@@ -293,7 +312,11 @@ pub fn application_operation_receipt_from_proof(
             source_sequence: proof.stream_sequence(),
             source_digest: sigil_kernel::sha256_hex(proof.record_checksum().as_bytes()),
         },
-        outcome: None,
+        outcome: recovery_outcome_from_proof(proof)?.map(|outcome| {
+            Box::new(sigil_application::ApplicationCommandOutcome::Recovery(
+                outcome,
+            ))
+        }),
     };
     receipt.validate_for(
         &request
@@ -301,4 +324,30 @@ pub fn application_operation_receipt_from_proof(
             .reservation_key(&request.envelope.command_id),
     )?;
     Ok(crate::RuntimeApplicationDispatch::Settled(receipt))
+}
+
+fn recovery_outcome_from_proof(
+    proof: &sigil_kernel::session::ApplicationOperationCommitProofV1,
+) -> Result<Option<sigil_application::ApplicationRecoveryOutcome>, ApplicationError> {
+    use sigil_application::{ApplicationRecoveryOutcome as Outcome, SafeText};
+    let count = |value: usize| {
+        u64::try_from(value).map_err(|_| {
+            ApplicationError::CorruptProjection("recovery count exceeds u64".to_owned())
+        })
+    };
+    Ok(match proof.matched_control() {
+        sigil_kernel::ControlEntry::ConversationForkCommittedV1(entry) => Some(Outcome::Fork {
+            session_ref: SafeText::new(
+                entry
+                    .destination_session_ref
+                    .as_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            )?,
+            session_id: SafeText::new(entry.destination_session_id.clone())?,
+            copied_message_count: count(entry.copied_message_count)?,
+            copied_external_provenance_count: count(entry.copied_external_provenance_count)?,
+        }),
+        _ => None,
+    })
 }

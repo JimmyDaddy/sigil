@@ -232,9 +232,9 @@ pub use context_engine::{
     validate_context_render_snippet, write_context_quality_evidence_artifacts,
 };
 pub use conversation_fork::{
-    ConversationForkOutput, ConversationForkPoint, ConversationForkProjection,
-    ConversationForkRequest, ConversationForked, ConversationTurnForkRequest,
-    fork_conversation_at_checkpoint, fork_conversation_at_turn,
+    ConversationForkCommittedV1, ConversationForkOutput, ConversationForkPoint,
+    ConversationForkProjection, ConversationForkRequest, ConversationForked,
+    ConversationTurnForkRequest, fork_conversation_at_checkpoint, fork_conversation_at_turn,
 };
 pub use conversation_queue::{
     CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX,

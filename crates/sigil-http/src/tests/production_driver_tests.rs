@@ -31,6 +31,9 @@ use sigil_kernel::{
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
+
+#[path = "production_fork_recovery_tests.rs"]
+mod fork_recovery;
 use crate::{
     HttpCommandEnvelope, HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
     HttpConversationQueueCommandRequest, HttpConversationQueueDriverCommand,

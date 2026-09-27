@@ -886,3 +886,184 @@ fn conversation_turn_fork_rejects_stale_digest_before_creating_destination() -> 
     assert!(!destination_path.exists());
     Ok(())
 }
+
+#[test]
+fn conversation_fork_recovers_the_complete_copy_after_partial_bundle_writes() -> Result<()> {
+    use crate::session::SessionWriterFault;
+    for fault in [
+        SessionWriterFault::PartialFirstRecord,
+        SessionWriterFault::PartialSecondRecord,
+        SessionWriterFault::BeforeSync,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let source_path = temp.path().join("source.jsonl");
+        let (_source, source_store) = finalized_composition_source(
+            &source_path,
+            Some(SessionCompositionSnapshotV1::new(BTreeSet::new())),
+        )?;
+        let records = source_store.read_event_records_coordinated()?;
+        let point = ConversationForkProjection::from_records(&records)?
+            .latest()
+            .context("finalized turn")?
+            .clone();
+        let destination_path = temp.path().join("fork.jsonl");
+        let destination_store = JsonlSessionStore::new(&destination_path)?;
+        destination_store.inject_writer_fault(fault)?;
+        let unconfirmed = fork_conversation_at_turn(
+            &source_store,
+            &records,
+            &ConversationTurnForkRequest {
+                source_turn_digest: point.source_turn_digest,
+                source_session_ref: SessionRef::new_relative("source.jsonl")?,
+                destination_path: destination_path.clone(),
+                provider_name: "fixture".to_owned(),
+                model_name: "model".to_owned(),
+                resolved_model_route: None,
+            },
+        );
+        assert!(
+            unconfirmed.is_err(),
+            "{fault:?} must exercise an actual writer error"
+        );
+        let recovered = Session::load_from_store_for_control(destination_store.clone())?;
+        let destination_records = destination_store.read_event_records_coordinated()?;
+        let receipts = destination_records
+            .iter()
+            .filter_map(|record| {
+                let event = record.stored_event();
+                (event.event_kind() == Some(DurableEventType::ConversationForked))
+                    .then(|| serde_json::from_value::<ConversationForked>(event.payload.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(receipts.len(), 1, "{fault:?}");
+        validate_conversation_fork_copy(&records, &destination_records, &receipts[0])?;
+        assert_eq!(
+            recovered
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    SessionLogEntry::User(_) | SessionLogEntry::Assistant(_)
+                ))
+                .count(),
+            2
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_recovery_rejects_partial_and_same_count_altered_prefixes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source.jsonl");
+    let (_source, source_store) = finalized_composition_source(
+        &source_path,
+        Some(SessionCompositionSnapshotV1::new(BTreeSet::new())),
+    )?;
+    let records = source_store.read_event_records_coordinated()?;
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .context("turn")?
+        .clone();
+    let output = fork_conversation_at_turn(
+        &source_store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest,
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: temp.path().join("fork.jsonl"),
+            provider_name: "fixture".to_owned(),
+            model_name: "model".to_owned(),
+            resolved_model_route: None,
+        },
+    )?;
+    let forked: ConversationForked = serde_json::from_value(output.fork_event.payload)?;
+    let mut destination = JsonlSessionStore::read_event_records(&output.destination_path)?;
+    validate_conversation_fork_copy(&records, &destination, &forked)?;
+    let last = destination.pop().context("copied assistant")?;
+    assert!(
+        validate_conversation_fork_copy(&records, &destination, &forked)
+            .expect_err("partial copy")
+            .to_string()
+            .contains("incomplete copied prefix")
+    );
+    destination.push(last);
+    let altered = destination
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.session_log_entry().ok().flatten(),
+                Some(SessionLogEntry::Assistant(_))
+            )
+        })
+        .context("assistant")?;
+    let SessionStreamRecord::Stored(event) = altered;
+    let mut entry: SessionLogEntry =
+        serde_json::from_value(event.payload["session_log_entry"].clone())?;
+    if let SessionLogEntry::Assistant(message) = &mut entry {
+        message.content = Some("different copied answer".to_owned());
+    }
+    event.payload["session_log_entry"] = serde_json::to_value(entry)?;
+    assert!(
+        validate_conversation_fork_copy(&records, &destination, &forked)
+            .expect_err("same count is not content proof")
+            .to_string()
+            .contains("differs from the source prefix")
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_admitted_writer_preserves_logical_refs_across_physical_namespaces()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source-namespace/records.jsonl");
+    let (_source, store) = finalized_composition_source(&source_path, None)?;
+    let records = store.read_event_records_coordinated()?;
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .context("finalized point")?
+        .clone();
+    let source_before = fs::read(&source_path)?;
+    let destination_path = temp.path().join("target-namespace/records.jsonl");
+    let mut destination =
+        Session::new("test", "model").with_store(JsonlSessionStore::new(&destination_path)?);
+    let source_ref = SessionRef::new_relative("source-catalog-key.jsonl")?;
+    let destination_ref = SessionRef::new_relative("target-catalog-key.jsonl")?;
+    let output = crate::conversation_fork::fork_conversation_at_turn_into(
+        &records,
+        source_ref.clone(),
+        &point.source_turn_digest,
+        &mut destination,
+        destination_ref.clone(),
+        None,
+    )?;
+    assert_eq!(output.destination_session_ref, destination_ref);
+    assert_eq!(
+        output.destination_path,
+        fs::canonicalize(&destination_path)?
+    );
+    let forked: ConversationForked = serde_json::from_value(output.fork_event.payload)?;
+    assert_eq!(forked.parent_session_ref, source_ref);
+    validate_conversation_fork_copy(
+        &records,
+        &JsonlSessionStore::read_event_records(&destination_path)?,
+        &forked,
+    )?;
+    assert_eq!(fs::read(&source_path)?, source_before);
+    let copied_before = fs::read(&destination_path)?;
+    assert!(
+        crate::conversation_fork::fork_conversation_at_turn_into(
+            &records,
+            source_ref,
+            &point.source_turn_digest,
+            &mut destination,
+            destination_ref,
+            None,
+        )
+        .is_err(),
+        "host-admitted entry still refuses to append a second initial bundle"
+    );
+    assert_eq!(fs::read(&destination_path)?, copied_before);
+    Ok(())
+}

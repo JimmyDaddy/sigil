@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 use super::*;
 
 pub(super) fn dispatch_session_command<P>(
@@ -29,6 +31,166 @@ where
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
+            SessionCommand::LoadConversationForkPoints {
+                request_id,
+                source_session_id,
+            } => {
+                let result = state
+                    .session
+                    .current
+                    .as_ref()
+                    .filter(|session| session.session_scope_id() == source_session_id)
+                    .ok_or_else(|| anyhow::anyhow!("conversation source session changed"))
+                    .and_then(|_| {
+                        sigil_runtime::application_recovery::application_conversation_recovery_view(
+                            &state.session.log_path,
+                            &source_session_id,
+                        )
+                    });
+                match result {
+                    Ok(view) => {
+                        let _ = message_tx.send(WorkerMessage::ConversationForkPointsLoaded {
+                            request_id,
+                            source_session_id,
+                            points: view.fork_points,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                            request_id,
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
+            SessionCommand::ForkConversation {
+                request_id,
+                source_session_id,
+                source_turn_digest,
+                target_model_ref,
+            } => {
+                let result = (|| -> anyhow::Result<_> {
+                    ensure_session_transition_allowed(SessionTransitionKind::LocalFork, state)
+                        .map_err(anyhow::Error::msg)?;
+                    anyhow::ensure!(
+                        state
+                            .session
+                            .current
+                            .as_ref()
+                            .is_some_and(|session| session.session_scope_id() == source_session_id),
+                        "conversation source session changed"
+                    );
+                    state
+                        .session
+                        .current
+                        .as_ref()
+                        .context("source session writer unavailable")?
+                        .ensure_application_operation_binding_target(
+                            &sigil_kernel::ApplicationOperationTargetV1::ForkConversation {
+                                source_turn_digest: source_turn_digest.clone(),
+                                connection_id: target_model_ref.connection_id.as_str().to_owned(),
+                                model_id: target_model_ref.model_id.clone(),
+                            },
+                        )?;
+                    let service = local_session_lifecycle_service_for_source_for_worker(
+                        root_config,
+                        workspace_root,
+                        &state.session.log_path,
+                        state.managed_storage_writer.as_ref(),
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("session lifecycle authority is unavailable"))?;
+                    let source_path = std::fs::canonicalize(&state.session.log_path)?;
+                    let source_ref = service
+                        .catalog()?
+                        .entries
+                        .into_iter()
+                        .find(|entry| {
+                            entry.session_id.as_deref() == Some(source_session_id.as_str())
+                                && std::fs::canonicalize(&entry.path)
+                                    .is_ok_and(|path| path == source_path)
+                        })
+                        .map(|entry| entry.session_ref)
+                        .ok_or_else(|| anyhow::anyhow!("source session catalog binding changed"))?;
+                    let destination_key = state
+                        .session
+                        .current
+                        .as_ref()
+                        .and_then(Session::application_operation_id)
+                        .map(str::to_owned)
+                        // Direct internal commands have no durable retry identity. Product
+                        // commands always carry the existing prepared application operation.
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    let output = service.fork_session_at_turn_with_artifacts(
+                        &source_ref,
+                        &source_session_id,
+                        &source_turn_digest,
+                        &destination_key,
+                        root_config,
+                        &target_model_ref,
+                        state
+                            .session
+                            .current
+                            .as_ref()
+                            .and_then(Session::tool_artifact_store),
+                    )?;
+                    state
+                        .session
+                        .current
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("source session writer unavailable"))?
+                        .append_control(ControlEntry::ConversationForkCommittedV1(
+                            sigil_kernel::ConversationForkCommittedV1::from_output(
+                                &source_session_id,
+                                &source_turn_digest,
+                                &target_model_ref,
+                                &output,
+                            )?,
+                        ))?;
+                    let attachment = Arc::new(
+                        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                            &output.destination_path,
+                        ).map_err(anyhow::Error::new)?,
+                    );
+                    let transition = transition_session_with_attachment(
+                        SessionTransitionKind::LocalFork,
+                        output.destination_path,
+                        attachment,
+                        runtime,
+                        root_config,
+                        provider_capabilities,
+                        workspace_root,
+                        agent,
+                        state,
+                        message_tx,
+                    )
+                    .context("conversation fork created but session switch failed")?;
+                    Ok((transition, output.copied_message_count))
+                })();
+                match result {
+                    Ok((transition, copied_message_count)) => {
+                        let _ = message_tx.send(WorkerMessage::SessionAttachmentTransferred {
+                            session_log_path: transition.session_log_path.clone(),
+                            attachment: Arc::clone(&transition.session_attachment),
+                        });
+                        let _ = message_tx.send(WorkerMessage::LocalSessionForked {
+                            session_id: transition.session_id,
+                            request_id,
+                            session_log_path: transition.session_log_path,
+                            provider_name: transition.provider_name,
+                            model_name: transition.model_name,
+                            copied_message_count,
+                            entries: transition.entries,
+                        });
+                        return WorkerCommandDispatchControl::Break;
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                            request_id,
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
             SessionCommand::ReadToolArtifactPage {
                 request_id,
                 artifact_ref,

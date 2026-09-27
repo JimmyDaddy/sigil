@@ -135,6 +135,10 @@ fn recovery_view_rejects_scope_drift_and_projects_exact_fork_binding() -> Result
     assert!(view.checkpoints.is_empty());
     assert_eq!(view.fork_points.len(), 1);
     assert_eq!(view.fork_points[0].source_turn_digest, digest);
+    assert_eq!(
+        view.fork_points[0].prompt_preview.as_deref(),
+        Some("inspect the parser")
+    );
     assert!(view.through_stream_sequence > 0);
     assert!(application_conversation_recovery_view(&path, "other-scope").is_err());
     Ok(())
@@ -305,6 +309,372 @@ fn lifecycle_fork_rejects_unbound_and_different_compositions_without_creating_a_
                     .starts_with("session-fork-")
             })
         }));
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_projection_reads_live_writer_without_a_second_writer_gate() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("source.jsonl");
+    let (session_id, digest) = finalized_session(&path)?;
+    let before = fs::read(&path)?;
+    let writer = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&path)?,
+    )?;
+    // Keep the real owner alive while the product projection attaches its observer.
+    // Contention is exercised deterministically by the kernel's conditional-writer barrier
+    // test; merely holding a Session does not mean its file I/O lock is held.
+    let view = application_conversation_recovery_view(&path, &session_id)?;
+    assert!(view.checkpoints.is_empty());
+    assert_eq!(view.fork_points[0].source_turn_digest, digest);
+    assert_eq!(
+        view.fork_points[0].prompt_preview.as_deref(),
+        Some("inspect the parser")
+    );
+    assert!(application_conversation_recovery_view(&path, "foreign-scope").is_err());
+    assert_eq!(fs::read(&path)?, before);
+    drop(writer);
+    Ok(())
+}
+
+#[test]
+fn lifecycle_fork_retry_checks_creation_route_and_rejects_a_partial_copy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions)?;
+    let config = deepseek_root_config(temp.path())?;
+    let source = sessions.join("source.jsonl");
+    let (scope, digest) = finalized_session_with_route(&source, None, Some(&config))?;
+    let source_ref = SessionRef::new_relative("source.jsonl")?;
+    let (_, route) = crate::provider_connections::resolve_default_model_route(&config)?;
+    let service =
+        LocalSessionLifecycleService::new("workspace", &sessions, temp.path().join("exports"));
+    let first = service.fork_session_at_turn(
+        &source_ref,
+        &scope,
+        &digest,
+        "operation-a",
+        &config,
+        &route.model_ref,
+    )?;
+    let replay = service.fork_session_at_turn(
+        &source_ref,
+        &scope,
+        &digest,
+        "operation-a",
+        &config,
+        &route.model_ref,
+    )?;
+    assert_eq!(first.destination_path, replay.destination_path);
+    let different_model =
+        sigil_kernel::ModelRef::new(route.model_ref.connection_id.clone(), "deepseek-v4-pro")?;
+    let mismatch = service
+        .fork_session_at_turn(
+            &source_ref,
+            &scope,
+            &digest,
+            "operation-a",
+            &config,
+            &different_model,
+        )
+        .expect_err("same destination cannot claim a new model");
+    assert!(
+        mismatch.to_string().contains("different creation route"),
+        "{mismatch:#}"
+    );
+    let new_intent = service.fork_session_at_turn(
+        &source_ref,
+        &scope,
+        &digest,
+        "operation-b",
+        &config,
+        &different_model,
+    )?;
+    assert_ne!(first.destination_path, new_intent.destination_path);
+    // A syntactically valid durable prefix models a pre-bundle version's interrupted copy.
+    let bytes = fs::read_to_string(&first.destination_path)?;
+    let mut lines = bytes.lines().collect::<Vec<_>>();
+    lines.pop();
+    fs::write(&first.destination_path, format!("{}\n", lines.join("\n")))?;
+    let partial = service
+        .fork_session_at_turn(
+            &source_ref,
+            &scope,
+            &digest,
+            "operation-a",
+            &config,
+            &route.model_ref,
+        )
+        .expect_err("a marker alone cannot prove complete copy");
+    assert!(
+        partial.to_string().contains("incomplete copied prefix"),
+        "{partial:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn managed_lifecycle_fork_uses_admitted_namespaces_and_preserves_owned_artifact_copy() -> Result<()>
+{
+    use crate::managed_artifact_store::ManagedArtifactStoreLeaseV1;
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, grant_for_channel_with_context,
+    };
+    use anyhow::Context as _;
+    use sigil_kernel::managed_storage::ManagedStorageServiceV1;
+    use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash};
+    use sigil_kernel::{
+        SessionLogEntry, ToolArtifactSensitivity, ToolCall, ToolResult, ToolResultMeta,
+        ToolResultRecordedV3,
+    };
+    use sigil_resource_authority::storage::{
+        AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
+    };
+    use std::sync::Arc;
+
+    for with_artifact in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let config = deepseek_root_config(temp.path())?;
+        let (_, route) = crate::provider_connections::resolve_default_model_route(&config)?;
+        let state = temp.path().join("state");
+        fs::create_dir(&state)?;
+        let state = fs::canonicalize(state)?;
+        let generation = AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x71; 32]),
+        };
+        let manifest_hash = CanonicalHash::from_bytes([0x72; 32]);
+        let mut table = AuthorityStorageGrantTableV1::new();
+        let mut channels = vec![
+            StorageWriterChannelV1::SessionLog,
+            StorageWriterChannelV1::SessionLifecycleLog,
+        ];
+        if with_artifact {
+            channels.extend([
+                StorageWriterChannelV1::ArtifactStaging,
+                StorageWriterChannelV1::ArtifactStore,
+            ]);
+        }
+        for channel in channels {
+            table.register(grant_for_channel_with_context(
+                channel,
+                0x73,
+                generation,
+                manifest_hash,
+            ))?;
+        }
+        let authority: Arc<dyn ManagedStorageServiceV1> = Arc::new(
+            AuthorityManagedStorageServiceV1::new_with_state_root(table, generation, &state)?,
+        );
+        let writer = Arc::new(ManagedStorageWriterAdapterV1::new(
+            authority,
+            state.clone(),
+            manifest_hash,
+        ));
+        let source_log_lease = writer.acquire_session_log_key("fork-source")?;
+        let source_path = source_log_lease.path().join("records.jsonl");
+        let source_key = source_log_lease
+            .path()
+            .file_name()
+            .and_then(|key| key.to_str())
+            .context("source namespace")?
+            .to_owned();
+        let source_ref = SessionRef::new_relative(format!("{source_key}.jsonl"))?;
+        let mut source = Session::new_with_route("deepseek", route.clone())
+            .with_store(JsonlSessionStore::new(&source_path)?);
+        source.append_control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: route.model_ref.model_id.clone(),
+            resolved_model_route: Some(route.clone()),
+        })?;
+        crate::bind_session_composition(&mut source, &config)?;
+        let source_scope = source.session_scope_id().to_owned();
+        let mut source_artifact_lease = None;
+        let mut source_descriptor = None;
+        source.append_user_message(ModelMessage::user("inspect the source evidence"))?;
+        if with_artifact {
+            let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                Arc::clone(&writer),
+                &source_key,
+                &source_scope,
+                source_path.clone(),
+            )?;
+            source.attach_tool_artifact_store_override(lease.store());
+            source_artifact_lease = Some(lease);
+            source.append_assistant_message(ModelMessage::assistant(
+                None,
+                vec![ToolCall {
+                    id: "fork-tool".to_owned(),
+                    name: "shell".to_owned(),
+                    args_json: "{}".to_owned(),
+                }],
+            ))?;
+            let (recorded, _) = ToolResultRecordedV3::capture(
+                &ToolResult::ok(
+                    "fork-tool",
+                    "shell",
+                    "complete managed evidence",
+                    ToolResultMeta::default(),
+                ),
+                source.tool_artifact_store().as_ref(),
+                ToolArtifactSensitivity::Ordinary,
+            )?;
+            source_descriptor = recorded.artifact.descriptor().cloned();
+            source.append_session_entries(vec![SessionLogEntry::ToolResultV3(recorded)])?;
+        }
+        let assistant = ModelMessage::assistant(Some("source conclusion".to_owned()), Vec::new());
+        source.append_assistant_message(assistant.clone())?;
+        source.append_durable_event(DurableEventType::RunFinalized, EventClass::Critical, json!({"run_status":"completed", "terminal_reason":"final_answer", "final_message_id":assistant.id, "tool_calls":usize::from(with_artifact), "error":null}))?;
+        let source_records =
+            sigil_kernel::SessionRecordReadHandle::open_existing_observer(&source_path)?
+                .read_event_records()?;
+        let digest = sigil_kernel::ConversationForkProjection::from_records(&source_records)?
+            .latest()
+            .context("completed source turn")?
+            .source_turn_digest
+            .clone();
+        let source_before = fs::read(&source_path)?;
+        let service = LocalSessionLifecycleService::new(
+            "managed-fork",
+            temp.path().join("legacy-sessions"),
+            temp.path().join("exports"),
+        )
+        .with_managed_writer(Arc::clone(&writer), "managed-fork")?
+        .with_managed_session_log_root(state.join("managed/session-log"))?;
+        if with_artifact {
+            assert!(
+                service
+                    .fork_session_at_turn(
+                        &source_ref,
+                        &source_scope,
+                        &digest,
+                        "same-intent",
+                        &config,
+                        &route.model_ref
+                    )
+                    .is_err(),
+                "a second source artifact claim must not bypass the current owner"
+            );
+        }
+        let fork = service.fork_session_at_turn_with_artifacts(
+            &source_ref,
+            &source_scope,
+            &digest,
+            "same-intent",
+            &config,
+            &route.model_ref,
+            source.tool_artifact_store(),
+        )?;
+        assert_eq!(
+            fork.destination_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("records.jsonl")
+        );
+        let destination_key = fork
+            .destination_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .context("destination namespace")?;
+        assert_eq!(
+            fork.destination_session_ref,
+            SessionRef::new_relative(format!("{destination_key}.jsonl"))?
+        );
+        assert_ne!(fork.destination_session_ref, source_ref);
+        assert!(
+            fork.destination_path
+                .parent()
+                .context("namespace")?
+                .join("authority-admission.json")
+                .is_file()
+        );
+        let reopened = service.resolve_session_for_reopen(
+            &fork.destination_session_ref,
+            &fork.destination_session_id,
+        )?;
+        assert_eq!(reopened.session_log_path, fork.destination_path);
+        let replay = service.fork_session_at_turn_with_artifacts(
+            &source_ref,
+            &source_scope,
+            &digest,
+            "same-intent",
+            &config,
+            &route.model_ref,
+            source.tool_artifact_store(),
+        )?;
+        assert_eq!(replay.destination_path, fork.destination_path);
+        assert_eq!(replay.fork_event.event_id, fork.fork_event.event_id);
+        let distinct = service.fork_session_at_turn_with_artifacts(
+            &source_ref,
+            &source_scope,
+            &digest,
+            "new-intent",
+            &config,
+            &route.model_ref,
+            source.tool_artifact_store(),
+        )?;
+        assert_ne!(distinct.destination_path, fork.destination_path);
+        assert_eq!(
+            fs::read(&source_path)?,
+            source_before,
+            "copy never mutates the source transcript"
+        );
+        let target_records = JsonlSessionStore::read_event_records(&fork.destination_path)?;
+        let lineage: sigil_kernel::ConversationForked =
+            serde_json::from_value(fork.fork_event.payload)?;
+        assert_eq!(lineage.parent_session_ref, source_ref);
+        sigil_kernel::conversation_fork::validate_conversation_fork_copy(
+            &source_records,
+            &target_records,
+            &lineage,
+        )?;
+        if let Some(original) = source_descriptor {
+            let copied = target_records
+                .iter()
+                .filter_map(|record| record.session_log_entry().ok().flatten())
+                .find_map(|entry| match entry {
+                    SessionLogEntry::ToolResultV3(result) => result.artifact.descriptor().cloned(),
+                    _ => None,
+                })
+                .context("copied descriptor")?;
+            assert_ne!(copied.artifact_ref, original.artifact_ref);
+            assert_ne!(copied.session_scope_id_hash, original.session_scope_id_hash);
+            assert_eq!(copied.content_sha256, original.content_sha256);
+            let target_lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                Arc::clone(&writer),
+                destination_key,
+                &fork.destination_session_id,
+                fork.destination_path.clone(),
+            )?;
+            assert_eq!(
+                target_lease.store().read_all(&copied)?,
+                b"complete managed evidence"
+            );
+            assert!(
+                target_lease
+                    .store()
+                    .resolve(&original.artifact_ref)
+                    .is_err(),
+                "source artifact refs remain session-bound"
+            );
+            target_lease.finalize()?;
+        } else {
+            assert!(
+                !state.join("managed/artifact-store").exists(),
+                "plain text fork requires no artifact grant or namespace"
+            );
+        }
+        assert!(!source_log_lease.path().join("artifacts").exists());
+        assert!(!temp.path().join("legacy-sessions").exists());
+        drop(source);
+        if let Some(lease) = source_artifact_lease {
+            lease.finalize()?;
+        }
+        writer.finalize(source_log_lease)?;
     }
     Ok(())
 }

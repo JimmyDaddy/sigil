@@ -550,6 +550,26 @@ impl AuthorityManagedStorageServiceV1 {
         })
     }
 
+    fn finish_session_settlement_attempt(
+        &self,
+        record: &StorageAdmissionRecordV1,
+        result: Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1>,
+    ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
+        if result.is_err()
+            && record.grant.semantic_owner == ManagedStorageSemanticOwnerV1::SessionLog
+        {
+            // Finalization consumes the non-clone handle even when physical observation or
+            // quota settlement fails. Release only that authenticated live holder so the
+            // existing namespace can be recovered; keep its charge/poison and original error.
+            self.table
+                .admitted_namespaces
+                .lock()
+                .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
+                .remove(&record.handle_id);
+        }
+        result
+    }
+
     fn finalize_record(
         &self,
         handle: ManagedStorageNamespaceHandleV1,
@@ -740,15 +760,19 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
         let record = self.record_for_handle(&handle)?;
-        if record.grant.semantic_owner == ManagedStorageSemanticOwnerV1::ApplicationControlRecovery
-            && self.state_root.is_some()
-        {
-            let directory = self.physical_namespace_directory(&record)?;
-            let _lock = open_physical_namespace_lock(&directory)?;
-            let frontier = self.read_physical_frontier(&record, &directory)?;
-            return self.finalize_record(handle, record, reason, Some(frontier));
-        }
-        self.finalize_record(handle, record, reason, None)
+        let result = (|| {
+            if record.grant.semantic_owner
+                == ManagedStorageSemanticOwnerV1::ApplicationControlRecovery
+                && self.state_root.is_some()
+            {
+                let directory = self.physical_namespace_directory(&record)?;
+                let _lock = open_physical_namespace_lock(&directory)?;
+                let frontier = self.read_physical_frontier(&record, &directory)?;
+                return self.finalize_record(handle, record.clone(), reason, Some(frontier));
+            }
+            self.finalize_record(handle, record.clone(), reason, None)
+        })();
+        self.finish_session_settlement_attempt(&record, result)
     }
 
     fn finalize_namespace_with_physical_frontier(
@@ -760,24 +784,27 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
         let record = self.record_for_handle(&handle)?;
-        if self.state_root.is_some() {
-            let directory = self.physical_namespace_directory(&record)?;
-            let _lock = open_physical_namespace_lock(&directory)?;
-            let observed = self.read_physical_frontier(&record, &directory)?;
-            if observed.byte_length != byte_length
-                || observed.record_count != record_count
-                || observed.content_hash != content_hash
-            {
-                return Err(ManagedStorageErrorV1::AuthorityUnavailable);
+        let result = (|| {
+            if self.state_root.is_some() {
+                let directory = self.physical_namespace_directory(&record)?;
+                let _lock = open_physical_namespace_lock(&directory)?;
+                let observed = self.read_physical_frontier(&record, &directory)?;
+                if observed.byte_length != byte_length
+                    || observed.record_count != record_count
+                    || observed.content_hash != content_hash
+                {
+                    return Err(ManagedStorageErrorV1::AuthorityUnavailable);
+                }
+                return self.finalize_record(handle, record.clone(), reason, Some(observed));
             }
-            return self.finalize_record(handle, record, reason, Some(observed));
-        }
-        let frontier = PhysicalStorageFrontierV1 {
-            byte_length,
-            record_count,
-            content_hash,
-        };
-        self.finalize_record(handle, record, reason, Some(frontier))
+            let frontier = PhysicalStorageFrontierV1 {
+                byte_length,
+                record_count,
+                content_hash,
+            };
+            self.finalize_record(handle, record.clone(), reason, Some(frontier))
+        })();
+        self.finish_session_settlement_attempt(&record, result)
     }
 }
 

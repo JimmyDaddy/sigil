@@ -552,6 +552,16 @@ pub enum WorkerCommand {
         request_id: u64,
         request: IntentDropRequestV1,
     },
+    LoadConversationForkPoints {
+        request_id: u64,
+        source_session_id: String,
+    },
+    ForkConversation {
+        request_id: u64,
+        source_session_id: String,
+        source_turn_digest: String,
+        target_model_ref: sigil_kernel::ModelRef,
+    },
     InspectLocalSession {
         request_id: u64,
         source_path: PathBuf,
@@ -1451,6 +1461,11 @@ pub enum WorkerMessage {
         model_name: String,
         copied_message_count: usize,
         entries: Vec<SessionLogEntry>,
+    },
+    ConversationForkPointsLoaded {
+        request_id: u64,
+        source_session_id: String,
+        points: Vec<sigil_runtime::application_recovery::ApplicationConversationForkPointView>,
     },
     LocalSessionInspected {
         request_id: u64,

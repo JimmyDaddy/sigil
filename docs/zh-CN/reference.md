@@ -30,6 +30,7 @@
 | 在当前聚焦的已保存工具输出中搜索有限长度的字面文本 | `Alt-F` |
 | 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |
 | 在安全边界暂停当前精确任务 | `Alt-P`；之后用 `/task continue` 恢复 |
+| 从已完成的对话回合建立分支 | `Alt-B`；`Up/Down` 选择，`Enter` 建立分支，`Esc` 关闭。编辑输入时 `Alt-B` 保持按词移动。 |
 | 评论已记录的变更 | `Alt-R`；选择检查点、文件和行范围，`Enter` 添加评论，`Ctrl-S` 发送或排队整批评论 |
 | 打开最近一次检查点恢复 | `Ctrl-R`；`Enter` 恢复，`F` 分叉会话，`Esc` 关闭 |
 | 打开 Intent Stack 检查 | `Alt-S`；`Up/Down` 选择，`D` 预览 Drop，`Enter` 确认 |

@@ -230,6 +230,7 @@ pub enum ControlEntry {
     MemorySnapshotCaptured(MemorySnapshot),
     ContextAssemblySkipped(ContextAssemblySkippedEntry),
     ExternalProvenance(ExternalProvenanceEntry),
+    ConversationForkCommittedV1(crate::ConversationForkCommittedV1),
     WebUrlCapabilityDescriptor(crate::WebUrlCapabilityDescriptor),
     UsageSnapshot(UsageStats),
     /// Usage emitted by the internal semantic-compaction model request.
@@ -399,6 +400,7 @@ impl ControlEntry {
             Self::TaskDirectExecutionAdmittedV1(entry) => entry.validate(),
             Self::TaskDirectExecutionAttemptV1(entry) => entry.validate(),
             Self::TaskVerificationFeedbackV1(entry) => entry.validate(),
+            Self::ConversationForkCommittedV1(entry) => entry.validate(),
             Self::TaskDirectRequirementsBoundV1(entry) => entry.validate(),
             Self::TaskChecklistUpdatedV1(entry) => entry.validate(),
             Self::TaskStepContractBoundV2(entry) => entry.validate(),

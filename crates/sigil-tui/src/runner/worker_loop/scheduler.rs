@@ -704,6 +704,8 @@ fn command_conflicts_with_artifact_gc(command: &WorkerCommand) -> bool {
         WorkerCommand::ReadToolArtifactPage { .. }
             | WorkerCommand::InspectLocalSession { .. }
             | WorkerCommand::ForkLocalSession { .. }
+            | WorkerCommand::ForkConversation { .. }
+            | WorkerCommand::LoadConversationForkPoints { .. }
             | WorkerCommand::ForkConversationAtCheckpoint { .. }
             | WorkerCommand::ExportLocalSession { .. }
             | WorkerCommand::SetLocalSessionPin { .. }

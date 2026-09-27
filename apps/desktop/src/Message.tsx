@@ -29,12 +29,14 @@ export function Message({
   onOpenExternalUrl,
   onReadContent,
   onReadImage,
+  onFork,
 }: {
   readonly message: MessageView;
   readonly displayId?: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
   readonly onReadContent?: ReadMessageContent;
   readonly onReadImage?: (displayId: string, attachmentId: string) => Promise<string>;
+  readonly onFork?: () => void;
 }) {
   const { t } = useLocale();
   const streaming = message.status === "streaming";
@@ -77,7 +79,9 @@ export function Message({
       className={`message message-${message.kind}${message.status ? ` message-status-${message.status}` : ""}`}
       data-display-id={displayId}
     >
-      <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}</header>
+      <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}
+        {onFork === undefined ? null : <Button type="button" variant="quiet" onClick={onFork}>{t("forkFromMessage")}</Button>}
+      </header>
       {message.skill !== undefined ? (
         <div
           className="message-context"

@@ -1849,13 +1849,16 @@ pub(super) struct LinearSessionWriter {
     parent_sync_count: u64,
     #[cfg(test)]
     data_sync_count: u64,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     next_fault: Option<SessionWriterFault>,
+    #[cfg(any(test, feature = "test-support"))]
+    last_triggered_fault: Option<SessionWriterFault>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionWriterFault {
+/// Deterministic next-append storage failures, available only to qualification fixtures.
+pub enum SessionWriterFault {
     ParentDirectorySync,
     BeforeWrite,
     PartialFirstRecord,
@@ -2003,8 +2006,10 @@ impl LinearSessionWriter {
             parent_sync_count: 0,
             #[cfg(test)]
             data_sync_count: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             next_fault: None,
+            #[cfg(any(test, feature = "test-support"))]
+            last_triggered_fault: None,
         }
     }
 
@@ -2094,9 +2099,10 @@ impl LinearSessionWriter {
                 // directory. The original files were already published before admission.
                 self.parent_dir_synced = true;
             } else {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if self.next_fault == Some(SessionWriterFault::ParentDirectorySync) {
                     self.next_fault = None;
+                    self.last_triggered_fault = Some(SessionWriterFault::ParentDirectorySync);
                     bail!("injected session parent directory sync failure");
                 }
                 sync_parent_dir(&self.path)?;
@@ -2405,7 +2411,7 @@ impl LinearSessionWriter {
         }
         let mut offsets = Vec::with_capacity(lines.len());
         let prefix_hasher_before_write = prefix_hasher.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let injected_fault = self.next_fault.take();
         let mut storage_retry = false;
         let write_result = loop {
@@ -2419,21 +2425,23 @@ impl LinearSessionWriter {
             file.seek(SeekFrom::Start(start_offset))
                 .context("failed to seek session log for append attempt")?;
             let attempt = (|| -> Result<u64> {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeWrite) {
+                    self.last_triggered_fault = injected_fault;
                     bail!("injected stored event pre-write failure");
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry
                     && injected_fault == Some(SessionWriterFault::DiskSpaceExhaustedBeforeWrite)
                 {
+                    self.last_triggered_fault = injected_fault;
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::StorageFull,
                         "injected session storage exhaustion",
                     ))
                     .context("failed to append stored event batch");
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry && injected_fault == Some(SessionWriterFault::PartialFirstRecord)
                 {
                     let line = &lines[0];
@@ -2442,12 +2450,13 @@ impl LinearSessionWriter {
                         .context("failed to inject partial stored event write")?;
                     file.flush()
                         .context("failed to flush injected partial stored event write")?;
+                    self.last_triggered_fault = injected_fault;
                     bail!("injected partial stored event write failure");
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let mut line_index = 0_usize;
                 for line in &lines {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if !storage_retry
                         && injected_fault == Some(SessionWriterFault::PartialSecondRecord)
                         && line_index == 1
@@ -2457,6 +2466,7 @@ impl LinearSessionWriter {
                             .context("failed to inject partial second stored event write")?;
                         file.flush()
                             .context("failed to flush injected partial stored event write")?;
+                        self.last_triggered_fault = injected_fault;
                         bail!("injected partial second stored event write failure");
                     }
                     file.write_all(line)
@@ -2467,14 +2477,15 @@ impl LinearSessionWriter {
                         .context("session durable offset overflow")?;
                     offsets.push((cursor, end));
                     cursor = end;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     {
                         line_index = line_index.saturating_add(1);
                     }
                 }
                 file.flush().context("failed to flush stored event batch")?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeSync) {
+                    self.last_triggered_fault = injected_fault;
                     bail!("injected stored event sync failure");
                 }
                 if any_recovery_critical {
@@ -2882,9 +2893,15 @@ impl LinearSessionWriter {
         self.data_sync_count
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn inject_fault(&mut self, fault: SessionWriterFault) {
         self.next_fault = Some(fault);
+        self.last_triggered_fault = None;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn last_triggered_fault(&self) -> Option<SessionWriterFault> {
+        self.last_triggered_fault
     }
 }
 

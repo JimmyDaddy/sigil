@@ -193,6 +193,7 @@ pub struct HttpApplicationOperationResolution {
 /// Idempotent identity and exact payload for one durable conversation recovery command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConversationRecoveryDriverCommand {
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     pub command_id: String,
     pub client_id: String,
     pub action: HttpConversationRecoveryCommandAction,

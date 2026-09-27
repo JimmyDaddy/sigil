@@ -123,7 +123,14 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_source_for_worker(
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
     match managed_writer {
         Some(writer) => service
-            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
+            .with_managed_session_log_root(paths.state_root.join("managed/session-log"))
+            .and_then(|service| {
+                service.with_managed_artifact_roots(
+                    paths.state_root.join("managed/artifact-store"),
+                    paths.state_root.join("managed/artifact-staging"),
+                )
+            })
+            .and_then(|service| service.with_managed_writer(Arc::clone(writer), paths.workspace_id))
             .ok(),
         None => Some(service),
     }

@@ -152,6 +152,8 @@ Open `/resume` and select a row. `Enter` resumes it. `Ctrl-O` or right-click ope
 
 ### Controlled checkpoints and conversation forks
 
+Press `Alt-B` with an empty composer or activity focus to choose any completed turn in the current conversation. The selector shows the source session and a bounded prompt preview. `Up/Down` chooses a turn; `Enter` creates a branch through that turn and returns to an editable composer without sending anything. An existing draft stays intact. The original conversation and shared workspace files are unchanged; no checkpoint or file restore preview is required. While editing in the composer, `Alt-B` retains word navigation.
+
 When the latest completed turn contains supported file edits, press `Ctrl-R` to review the reverse diff. `Enter` restores the reviewed files; `F` forks the conversation without changing files. A stale or changed file blocks the restore. Shell commands, remote services, directories, renames, symlinks, and other outside effects are not undone. Rerun verification after a successful restore.
 
 Press `Alt-R` to review recorded changes and add comments. Choose a turn, then a file and old/new lines; Shift-Up/Down selects a range and Tab switches sides. Enter adds a comment to the batch, and `Ctrl-S` sends it through the current conversation or queues it while a run is active. The original draft stays intact. Changed or unavailable current files remain reviewable; comments do not grant write permission or restore files.

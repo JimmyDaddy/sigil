@@ -198,7 +198,8 @@ export function ConversationRecoveryPanel({
               <li key={point.sourceTurnDigest}>
                 <div>
                   <strong>{t("forkAfterTurn", { count: point.sourceTurnIndex })}</strong>
-                  <p>{t("forkKeepsOriginal")}</p>
+                  <p>{point.promptPreview || t("forkPromptUnavailable")}</p>
+                  <small>{t("forkKeepsOriginal")}</small>
                 </div>
                 <Button type="button" variant="quiet" busy={busy} onClick={() => void onFork(point.sourceTurnDigest)}>
                   {t("forkConversation")}

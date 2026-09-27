@@ -10,7 +10,8 @@ pub(in crate::runner) fn preview_current_checkpoint_restore(
     let recorder = session
         .mutation_event_recorder()
         .ok_or_else(|| "checkpoint restore requires a durable session".to_owned())?;
-    let records = JsonlSessionStore::read_event_records(session_log_path)
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_log_path)
+        .and_then(|reader| reader.read_event_records())
         .map_err(|error| format!("failed to read checkpoint stream: {error:#}"))?;
     sigil_kernel::preview_controlled_checkpoint_restore(
         &recorder,
@@ -31,7 +32,8 @@ pub(in crate::runner) fn execute_current_checkpoint_restore(
     let recorder = session
         .mutation_event_recorder()
         .ok_or_else(|| "checkpoint restore requires a durable session".to_owned())?;
-    let records = JsonlSessionStore::read_event_records(session_log_path)
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_log_path)
+        .and_then(|reader| reader.read_event_records())
         .map_err(|error| format!("failed to read checkpoint stream: {error:#}"))?;
     sigil_kernel::execute_controlled_checkpoint_restore(
         &recorder,
@@ -51,7 +53,8 @@ pub(in crate::runner) fn fork_current_conversation(
     let session = current_session.ok_or_else(|| "session state is unavailable".to_owned())?;
     let store = JsonlSessionStore::new(session_log_path)
         .map_err(|error| format!("failed to open source session store: {error:#}"))?;
-    let records = JsonlSessionStore::read_event_records(session_log_path)
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_log_path)
+        .and_then(|reader| reader.read_event_records())
         .map_err(|error| format!("failed to read conversation fork stream: {error:#}"))?;
     sigil_runtime::session_lifecycle::validate_conversation_fork_source_composition(
         &records,

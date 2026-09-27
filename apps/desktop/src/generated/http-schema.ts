@@ -3430,6 +3430,7 @@ export interface components {
         /** @enum {string} */
         ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "paused" | "blocked" | "awaiting_user_input";
         ConversationForkPointView: {
+            prompt_preview?: string | null;
             /** Format: uint64 */
             source_boundary_stream_sequence: number;
             /** Format: uint64 */

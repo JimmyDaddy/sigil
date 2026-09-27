@@ -417,8 +417,8 @@ pub use tool_output_projection::{
     ToolOutputArtifactRefV1, ToolOutputProjection, ToolOutputProjectionPolicy,
     ToolOutputProjectionShrink, ToolOutputProjectionSourceRef, ToolOutputShrinkReasonV1,
 };
-#[cfg(test)]
-pub(crate) use writer::SessionWriterFault;
+#[cfg(any(test, feature = "test-support"))]
+pub use writer::SessionWriterFault;
 pub use writer::{
     DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
     DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableAuditBatch,

@@ -1017,3 +1017,237 @@ fn change_review_shared_submit_preserves_typed_references_to_existing_worker_loo
         if prompt == "Clarify this change" && expected_session_id == "review-source" && annotations == vec![annotation]));
     Ok(())
 }
+
+#[test]
+fn conversation_fork_application_action_dispatches_exact_turn_and_route() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("fork-bridge")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("fork-source")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let app = session(port, scope)?;
+    let target_model_ref = sigil_kernel::ModelRef::new(
+        sigil_kernel::ConnectionId::new("exact-connection")?,
+        "exact-model",
+    )?;
+    let request = app
+        .prepare_action(
+            &AppAction::ForkConversation {
+                request_id: 410,
+                source_session_id: "fork-source".to_owned(),
+                source_turn_digest: "sha256:exact-turn".to_owned(),
+                target_model_ref: target_model_ref.clone(),
+            },
+            None,
+            None,
+        )?
+        .expect("fork must use the shared application action");
+    assert!(matches!(&request.envelope.command,
+        ApplicationCommand::Conversation(ConversationCommand::Recovery {
+            action: ApplicationRecoveryAction::ForkConversation { source_turn_digest, .. }
+        }) if source_turn_digest.as_str() == "sha256:exact-turn"));
+    assert!(
+        app.prepare_action(
+            &AppAction::ForkConversation {
+                request_id: 411,
+                source_session_id: "different-session".to_owned(),
+                source_turn_digest: "sha256:exact-turn".to_owned(),
+                target_model_ref,
+            },
+            None,
+            None
+        )
+        .is_err()
+    );
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
+    let executor = TuiWorkerCommandExecutor {
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: "fork-source".to_owned(),
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    let dispatch = executor.dispatch_sync(&request)?;
+    assert!(
+        !matches!(
+            dispatch,
+            sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
+        ),
+        "a real conversation fork must not remain unsupported in TUI"
+    );
+    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
+        WorkerCommand::ForkConversation { request_id: 410, source_session_id, source_turn_digest, target_model_ref }
+        if source_session_id == "fork-source" && source_turn_digest == "sha256:exact-turn"
+            && target_model_ref.connection_id.as_str() == "exact-connection"
+            && target_model_ref.model_id == "exact-model"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn conversation_fork_causal_receipt_survives_closed_worker_and_source_restart() -> Result<()>
+{
+    use anyhow::Context as _;
+    use sigil_kernel::{ControlEntry, JsonlSessionStore, ModelMessage, Session};
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("source.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut source = Session::new("test", "model").with_store(store.clone());
+    source.append_control(ControlEntry::SessionIdentity {
+        provider_name: "test".to_owned(),
+        model_name: "model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    source.append_user_message(ModelMessage::user("Explore an alternative"))?;
+    let answer = ModelMessage::assistant_with_kind(
+        Some("The source conclusion".to_owned()),
+        Vec::new(),
+        sigil_kernel::AssistantMessageKind::FinalAnswer,
+    );
+    source.append_assistant_message(answer.clone())?;
+    source.append_durable_event(
+        sigil_kernel::DurableEventType::RunFinalized,
+        sigil_kernel::EventClass::Critical,
+        serde_json::json!({"run_status":"completed", "terminal_reason":"final_answer",
+            "final_message_id":answer.id, "tool_calls":0, "error":null}),
+    )?;
+    let records = store.read_event_records_writer()?;
+    let point = sigil_kernel::ConversationForkProjection::from_records(&records)?
+        .latest()
+        .context("completed source turn")?
+        .clone();
+    let source_id = source.session_scope_id().to_owned();
+    let target_model = sigil_kernel::ModelRef::new(
+        sigil_kernel::ConnectionId::new("chosen-connection")?,
+        "model",
+    )?;
+    let output = sigil_kernel::fork_conversation_at_turn(
+        &store,
+        &records,
+        &sigil_kernel::ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest.clone(),
+            source_session_ref: sigil_kernel::SessionRef::new_relative("source.jsonl")?,
+            destination_path: temp.path().join("branch.jsonl"),
+            provider_name: "test".to_owned(),
+            model_name: "model".to_owned(),
+            resolved_model_route: None,
+        },
+    )?;
+    let audit = ControlEntry::ConversationForkCommittedV1(
+        sigil_kernel::ConversationForkCommittedV1::from_output(
+            &source_id,
+            &point.source_turn_digest,
+            &target_model,
+            &output,
+        )?,
+    );
+    // An identical historical audit does not establish this user command's effect.
+    source.append_control(audit.clone())?;
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("fork-reconcile")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new(&source_id)?),
+    };
+    let application = session(
+        Arc::new(sigil_application::FakeApplication::new(
+            snapshot(scope.clone()).envelope,
+        )?),
+        scope.clone(),
+    )?;
+    let action = AppAction::ForkConversation {
+        request_id: 902,
+        source_session_id: source_id.clone(),
+        source_turn_digest: point.source_turn_digest,
+        target_model_ref: target_model,
+    };
+    let request = application
+        .prepare_action(&action, None, None)?
+        .context("fork command")?;
+    let binding =
+        sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+            .context("fork domain binding")?;
+    let owner = source.application_operation_owner()?;
+    owner.prepare(&binding)?;
+    assert!(
+        sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &binding)?
+            .is_none()
+    );
+    source.bind_application_operation(binding.clone())?;
+    source.append_control(audit)?;
+    let branch_before = std::fs::read(&output.destination_path)?;
+    let source_before = std::fs::read(&path)?;
+    drop(owner);
+    drop(source);
+    drop(store);
+
+    {
+        // Reopen the actual source after its writer is gone. The old worker receiver is closed,
+        // so recovery must use the durable source audit rather than the branch's live endpoint.
+        let restored_store = JsonlSessionStore::new(&path)?;
+        let restored = Session::load_from_store_for_control(restored_store.clone())?;
+        assert_eq!(restored.session_scope_id(), source_id);
+        let projection = Arc::new(
+            sigil_runtime::RuntimeSessionProjectionBinding::new(
+                temp.path().join("unused-config.toml"),
+                temp.path().to_owned(),
+                path.clone(),
+                source_id.clone(),
+                scope.application_instance.clone(),
+                scope.authenticated_subject.clone(),
+                scope.workspace.clone(),
+                1,
+                1,
+                1,
+                1,
+            )?
+            .with_owner(sigil_runtime::RuntimeSessionProjectionOwner::from_store(
+                &restored_store,
+            )),
+        );
+        let (sender, receiver) = WorkerCommandSender::test_channel();
+        drop(receiver);
+        let settled = reconcile_worker_operation(
+            Some(projection),
+            TuiWorkerEndpoint::new(sender),
+            request.clone(),
+        )
+        .await?
+        .context("the source proof must settle without querying the retired worker")?;
+        let sigil_runtime::RuntimeApplicationDispatch::Settled(receipt) = settled else {
+            anyhow::bail!("fork must settle from its real source audit");
+        };
+        assert_eq!(
+            receipt.domain_commit.source_session_scope_id.as_deref(),
+            Some(source_id.as_str())
+        );
+        assert!(matches!(receipt.outcome.as_deref(),
+            Some(sigil_application::ApplicationCommandOutcome::Recovery(sigil_application::ApplicationRecoveryOutcome::Fork { session_id, session_ref, copied_message_count: 2, .. }))
+            if session_id.as_str() == output.destination_session_id && session_ref.as_str() == "branch.jsonl"));
+        let other_key = sigil_kernel::ApplicationOperationBindingV1::new(
+            source_id.clone(),
+            sigil_kernel::sha256_hex(b"different explicit command"),
+            binding.fingerprint.clone(),
+            binding.target.clone(),
+        )?;
+        assert!(
+            sigil_kernel::session::reconcile_application_operation(
+                &restored_store.read_handle(),
+                &other_key
+            )?
+            .is_none(),
+            "same historical branch is not evidence for a different K/F"
+        );
+        assert_eq!(std::fs::read(&path)?, source_before);
+        assert_eq!(std::fs::read(&output.destination_path)?, branch_before);
+    }
+    Ok(())
+}

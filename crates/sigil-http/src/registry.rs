@@ -1550,6 +1550,7 @@ impl HttpSessionRunRegistry {
                 &command.client_id,
                 &command.payload,
                 command.correlation_id.as_deref(),
+                None,
             );
             completion.complete(HttpCommandCompletion::Recovery(Box::new(result.clone())))?;
             result
@@ -1563,6 +1564,7 @@ impl HttpSessionRunRegistry {
         client_id: &str,
         action: HttpConversationRecoveryCommandAction,
         correlation_id: Option<String>,
+        application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
         validate_conversation_recovery_command(&action)?;
         self.command_conversation_recovery_effect(
@@ -1571,6 +1573,7 @@ impl HttpSessionRunRegistry {
             client_id,
             &action,
             correlation_id.as_deref(),
+            application_operation,
         )
     }
 
@@ -1581,10 +1584,12 @@ impl HttpSessionRunRegistry {
         client_id: &str,
         action: &HttpConversationRecoveryCommandAction,
         correlation_id: Option<&str>,
+        application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
         let session = self.get_session(session_id)?;
         let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
         let driver_command = HttpConversationRecoveryDriverCommand {
+            application_operation,
             command_id: command_id.to_owned(),
             client_id: client_id.to_owned(),
             action: action.clone(),

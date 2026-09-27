@@ -42,6 +42,7 @@ import type {
   CheckpointView,
   ConversationPlanReview,
   ConversationRecoveryView,
+  ConversationForkPointView,
   ConversationTaskControl,
   PermissionMode,
   PlanDecisionAction,
@@ -84,6 +85,7 @@ import {
 import { resolveComposerActivityState } from "./features/conversation/composerActivity";
 import { projectConversationRows } from "./features/conversation/conversationRows";
 import {
+  compareRunSequence,
   createLiveEventState,
   liveEventReducer,
   selectDeltaBuffers,
@@ -319,6 +321,9 @@ export function ConversationPanel({
   const changeReviewOwnerRef = useRef(changeReviewOwner);
   changeReviewOwnerRef.current = changeReviewOwner;
   useEffect(() => () => { changeReviewEpoch.current += 1; }, [workspaceId, session.id]);
+  const [messageFork, setMessageFork] = useState<{ sequence: string; point?: ConversationForkPointView; loading: boolean; error?: boolean }>();
+  const messageForkEpoch = useRef(0);
+  useEffect(() => () => { messageForkEpoch.current += 1; }, [workspaceId, session.id]);
   const timelineRef = useRef<HTMLDivElement>(null);
   const transcriptStartRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
@@ -572,6 +577,8 @@ export function ConversationPanel({
     setChangeReviewOpen(false);
     setChangeReviewDraft(emptyChangeReviewDraft());
     changeReviewEpoch.current += 1;
+    setMessageFork(undefined);
+    messageForkEpoch.current += 1;
     conversationQueueEpoch.current += 1;
     queuedSuccessorExpected.current = false;
     startedRunProjectionExpected.current = undefined;
@@ -2298,12 +2305,31 @@ export function ConversationPanel({
     }
   };
 
+  const previewMessageFork = async (sequence: string) => {
+    const epoch = ++messageForkEpoch.current;
+    setMessageFork({ sequence, loading: true });
+    setConversationRecoveryError(false);
+    try {
+      const recovery = await bridge.conversationRecovery(workspaceId, session.id);
+      if (messageForkEpoch.current !== epoch) return;
+      setConversationRecovery(recovery);
+      const point = recovery.forkPoints.find((candidate) =>
+        compareRunSequence(sequence, String(candidate.sourceBoundaryStreamSequence)) >= 0
+        && compareRunSequence(sequence, String(candidate.sourceFinalizedStreamSequence)) <= 0);
+      setMessageFork({ sequence, point, loading: false });
+    } catch {
+      if (messageForkEpoch.current === epoch) setMessageFork({ sequence, loading: false, error: true });
+    }
+  };
+
   const forkConversation = async (sourceTurnDigest: string) => {
     if (conversationRecoveryBusy) return undefined;
     if (runContext === undefined) {
       setConversationRecoveryError(true);
       return undefined;
     }
+    const epoch = messageForkEpoch.current;
+    const owner = changeReviewOwner;
     setConversationRecoveryBusy(true);
     try {
       const receipt = await bridge.commandConversationRecovery(workspaceId, {
@@ -2314,6 +2340,7 @@ export function ConversationPanel({
           modelRef: runContext.modelRef,
         },
       });
+      if (messageForkEpoch.current !== epoch || changeReviewOwnerRef.current !== owner) return receipt.fork;
       setConversationRecovery(receipt.recovery);
       if (receipt.fork !== undefined) {
         notify({ message: t("forkCreated"), tone: "success" });
@@ -2321,10 +2348,10 @@ export function ConversationPanel({
       }
       return receipt.fork;
     } catch {
-      setConversationRecoveryError(true);
+      if (messageForkEpoch.current === epoch && changeReviewOwnerRef.current === owner) setConversationRecoveryError(true);
       return undefined;
     } finally {
-      setConversationRecoveryBusy(false);
+      if (changeReviewOwnerRef.current === owner) setConversationRecoveryBusy(false);
     }
   };
 
@@ -2829,7 +2856,9 @@ export function ConversationPanel({
             )
             : <Message key={row.key} displayId={row.key} message={row}
               onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent}
-              onReadImage={(displayId, attachmentId) => bridge.messageImage(workspaceId, session.id, displayId, attachmentId)} />)
+              onReadImage={(displayId, attachmentId) => bridge.messageImage(workspaceId, session.id, displayId, attachmentId)}
+              onFork={(row.kind === "user" || row.kind === "assistant") && row.sourceStreamSequence !== undefined
+                ? () => void previewMessageFork(row.sourceStreamSequence!) : undefined} />)
         ) : null}
         {terminalTasks.filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
           <TerminalTaskCard
@@ -2975,6 +3004,26 @@ export function ConversationPanel({
           onRefresh={() => setIntentStackReload((value) => value + 1)}
         />
       </Drawer>
+      <Drawer
+        open={messageFork !== undefined}
+        title={t("forkFromMessage")}
+        description={t("forkPreviewDetail")}
+        onOpenChange={(open) => { if (!open) { messageForkEpoch.current += 1; setMessageFork(undefined); } }}
+      >
+        <p>{t("forkSource", { name: session.label ?? session.id })}</p>
+        {messageFork?.loading ? <LoadingState label={t("loading")} /> : messageFork?.point === undefined ? (
+          <div role="status">
+            <p>{t(messageFork?.error ? "conversationRecoveryUnavailable" : "forkPointUnavailable")}</p>
+            <Button type="button" onClick={() => { if (messageFork) void previewMessageFork(messageFork.sequence); }}>{t("retry")}</Button>
+          </div>
+        ) : <>
+          <h3>{t("forkAfterTurn", { count: messageFork.point.sourceTurnIndex })}</h3>
+          <blockquote>{messageFork.point.promptPreview || t("forkPromptUnavailable")}</blockquote>
+          {conversationRecoveryError ? <p role="alert">{t("conversationRecoveryChanged")}</p> : null}
+          <Button type="button" busy={conversationRecoveryBusy} onClick={() => void forkConversation(messageFork.point!.sourceTurnDigest)}>{t("forkConversation")}</Button>
+        </>}
+      </Drawer>
+
       <Drawer id="change-review-inspector" open={changeReviewOpen} title={t("reviewChanges")}
         description={t("changeReviewDetail")} returnFocusRef={recoveryTriggerRef} onOpenChange={setChangeReviewOpen}>
         {changeReview?.loading ? <p role="status">{t("loading")}</p> : changeReview?.review === undefined ? <>

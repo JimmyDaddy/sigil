@@ -1349,14 +1349,32 @@ impl JsonlSessionStore {
         Ok(writer.full_scan_count())
     }
 
-    #[cfg(test)]
-    pub(crate) fn inject_writer_fault(&self, fault: SessionWriterFault) -> Result<()> {
+    /// Injects one deterministic storage fault for cross-crate recovery qualification.
+    /// This test-support-only hook affects the existing coordinator's next append.
+    ///
+    /// # Errors
+    /// Returns an error if the coordinator lock was poisoned.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_writer_fault(&self, fault: SessionWriterFault) -> Result<()> {
         let mut writer = self
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         writer.inject_fault(fault);
         Ok(())
+    }
+
+    /// Observes the last injected failure actually reached by this store's append writer.
+    ///
+    /// # Errors
+    /// Returns an error if the test coordinator lock was poisoned.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observed_writer_fault(&self) -> Result<Option<SessionWriterFault>> {
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        Ok(writer.last_triggered_fault())
     }
 
     #[cfg(test)]

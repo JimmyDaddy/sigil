@@ -2829,6 +2829,9 @@ pub struct HttpCheckpointView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpConversationForkPointView {
+    /// Bounded prompt shown when selecting a finalized source turn.
+    #[serde(default)]
+    pub prompt_preview: Option<String>,
     pub source_turn_index: usize,
     pub source_turn_digest: String,
     pub source_boundary_stream_sequence: u64,
@@ -2993,6 +2996,7 @@ impl From<ApplicationConversationRecoveryView> for HttpConversationRecoveryView 
                 .fork_points
                 .into_iter()
                 .map(|point| HttpConversationForkPointView {
+                    prompt_preview: point.prompt_preview,
                     source_turn_index: point.source_turn_index,
                     source_turn_digest: point.source_turn_digest,
                     source_boundary_stream_sequence: point.source_boundary_stream_sequence,

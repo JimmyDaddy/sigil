@@ -7467,3 +7467,97 @@ it("reviews outdated recorded lines through the normal run and preserves comment
   expect(await within(drawer).findByRole("alert")).toBeTruthy();
   expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
 });
+
+it("branches beside a finalized message without checkpoints, keeps failed selection, and isolates the new draft", async () => {
+  const user = userEvent.setup();
+  const point = { sourceTurnIndex: 1, sourceTurnDigest: "exact-finalized-turn", sourceBoundaryStreamSequence: 3, sourceFinalizedStreamSequence: 7, promptPreview: "Inspect the parser" };
+  const recovery = { checkpoints: [], forkPoints: [point], throughStreamSequence: 7 };
+  const admission = deferred<Awaited<ReturnType<DesktopBridge["conversationRecovery"]>>>();
+  const conversationRecovery = vi.fn<DesktopBridge["conversationRecovery"]>(() => admission.promise);
+  const commandConversationRecovery = vi.fn<DesktopBridge["commandConversationRecovery"]>()
+    .mockRejectedValueOnce(new Error("source temporarily unavailable"))
+    .mockImplementation(async (_workspace, input) => ({
+      commandId: "fork-command", clientId: "desktop", sessionId: input.sessionId,
+      action: "fork_conversation", recovery, replayed: false,
+      fork: { sessionRef: "branch.jsonl", sessionId: "branch-durable", copiedMessageCount: 2, copiedExternalProvenanceCount: 0 },
+    }));
+  const openSession = vi.fn<DesktopBridge["openSession"]>(async () => ({ id: "branch-http", label: "Parser branch", runCount: 0 }));
+  const startRun = vi.fn<DesktopBridge["startRun"]>();
+  const page: ConversationDisplayPage = {
+    schemaVersion: 1, requestScope: "fork-source", throughSessionStreamSequence: "7", totalItems: "1", hasMore: false, gapFacts: [],
+    items: [{ schemaVersion: 1, displayId: "source-user", displayOrder: { sessionStreamSequence: "3", subindex: 0 }, sourceEventId: "source-event", kind: "user_message", source: "durable_transcript", status: "succeeded", content: { type: "message", role: "user", text: "Inspect the parser", imageAttachmentCount: 0, truncated: false, originalContentBytes: 18 } }],
+  };
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    display: async (_workspace, sessionId) => sessionId === "branch-http" ? { ...page, requestScope: "fork-branch", items: [], totalItems: "0" } : page,
+    conversationRecovery, commandConversationRecovery, openSession, startRun,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await user.type(await readyComposer(), "Keep this parent draft");
+  await user.click(await screen.findByRole("button", { name: "Branch from here" }));
+  const preview = screen.getByRole("dialog", { name: "Branch from here" });
+  expect(within(preview).getByText("Source conversation: New conversation")).toBeTruthy();
+  expect(within(preview).getByText("Loading…")).toBeTruthy();
+  expect(commandConversationRecovery).not.toHaveBeenCalled();
+  await act(async () => admission.resolve(recovery));
+  expect(within(preview).getByText("Inspect the parser")).toBeTruthy();
+  await user.click(within(preview).getByRole("button", { name: "Fork conversation" }));
+  expect(await within(preview).findByRole("alert")).toBeTruthy();
+  expect(within(preview).getByText("Inspect the parser")).toBeTruthy();
+  await user.click(within(preview).getByRole("button", { name: "Fork conversation" }));
+  await waitFor(() => expect(openSession).toHaveBeenCalledWith(workspace.id, expect.objectContaining({ sessionRef: "branch.jsonl", sessionId: "branch-durable" })));
+  await screen.findByRole("heading", { name: "Parser branch" });
+  const draft = await readyComposer();
+  expect(draft.value).toBe("");
+  await user.type(draft, "Try a different parser");
+  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Keep this parent draft");
+  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:branch-http`)).toBe("Try a different parser");
+  expect(commandConversationRecovery.mock.calls[1][1].action).toEqual({ kind: "fork_conversation", sourceTurnDigest: "exact-finalized-turn", modelRef: defaultRunContext.modelRef });
+  expect(startRun).not.toHaveBeenCalled();
+});
+
+it("does not navigate a late message fork over a newly selected conversation", async () => {
+  const user = userEvent.setup();
+  const recovery = {
+    checkpoints: [], throughStreamSequence: 7,
+    forkPoints: [{ sourceTurnIndex: 1, sourceTurnDigest: "exact-finalized-turn", sourceBoundaryStreamSequence: 3, sourceFinalizedStreamSequence: 7, promptPreview: "Inspect the parser" }],
+  };
+  const result = deferred<Awaited<ReturnType<DesktopBridge["commandConversationRecovery"]>>>();
+  const commandConversationRecovery = vi.fn<DesktopBridge["commandConversationRecovery"]>(() => result.promise);
+  const entries = ["Parent", "Other"].map((title) => ({
+    sessionRef: `${title}.jsonl`, sessionId: title, title, sourceState: "ready" as const,
+    sourceBytes: 512, sourceModifiedAtUnixMs: 1_784_419_200_000,
+    userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false,
+  }));
+  const openSession = vi.fn<DesktopBridge["openSession"]>(async (_workspace, input) => ({
+    id: input.sessionId!, label: input.sessionId!, runCount: 1,
+  }));
+  const page: ConversationDisplayPage = {
+    schemaVersion: 1, requestScope: "Parent", throughSessionStreamSequence: "7", totalItems: "1", hasMore: false, gapFacts: [],
+    items: [{ schemaVersion: 1, displayId: "source-user", displayOrder: { sessionStreamSequence: "3", subindex: 0 }, sourceEventId: "source-event", kind: "user_message", source: "durable_transcript", status: "succeeded", content: { type: "message", role: "user", text: "Inspect the parser", imageAttachmentCount: 0, truncated: false, originalContentBytes: 18 } }],
+  };
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    catalog: async () => ({ ...emptyCatalog, entries }),
+    display: async (_workspace, id) => id === "Parent" ? page : { ...page, requestScope: id, items: [], totalItems: "0" },
+    conversationRecovery: async () => recovery, commandConversationRecovery, openSession,
+  })} />);
+  await user.click(await screen.findByRole("button", { name: /^Parent/ }));
+  await readyComposer();
+  await user.click(await screen.findByRole("button", { name: "Branch from here" }));
+  const preview = screen.getByRole("dialog", { name: "Branch from here" });
+  await user.click(await within(preview).findByRole("button", { name: "Fork conversation" }));
+  await waitFor(() => expect(commandConversationRecovery).toHaveBeenCalledOnce());
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: /^Other/ }));
+  await screen.findByRole("heading", { name: "Other" });
+  await user.type(await readyComposer(), "Keep working here");
+  await act(async () => result.resolve({
+    commandId: "fork-command", clientId: "desktop", sessionId: "Parent", action: "fork_conversation", recovery, replayed: false,
+    fork: { sessionRef: "child.jsonl", sessionId: "child", copiedMessageCount: 2, copiedExternalProvenanceCount: 0 },
+  }));
+  expect(openSession).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("heading", { name: "Other" })).toBeTruthy();
+  expect((await readyComposer()).value).toBe("Keep working here");
+});

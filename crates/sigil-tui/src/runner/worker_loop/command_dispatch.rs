@@ -173,6 +173,16 @@ pub(in crate::runner) enum RunPlanCommand {
 
 #[derive(Debug)]
 pub(in crate::runner) enum SessionCommand {
+    LoadConversationForkPoints {
+        request_id: u64,
+        source_session_id: String,
+    },
+    ForkConversation {
+        request_id: u64,
+        source_session_id: String,
+        source_turn_digest: String,
+        target_model_ref: sigil_kernel::ModelRef,
+    },
     InspectLocalSession {
         request_id: u64,
         source_path: PathBuf,
@@ -526,6 +536,24 @@ pub(in crate::runner) fn classify_worker_command(
             request_id,
             generation,
             expected_request_hash,
+        }),
+        WorkerCommand::LoadConversationForkPoints {
+            request_id,
+            source_session_id,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::LoadConversationForkPoints {
+            request_id,
+            source_session_id,
+        }),
+        WorkerCommand::ForkConversation {
+            request_id,
+            source_session_id,
+            source_turn_digest,
+            target_model_ref,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::ForkConversation {
+            request_id,
+            source_session_id,
+            source_turn_digest,
+            target_model_ref,
         }),
         WorkerCommand::InspectLocalSession {
             request_id,

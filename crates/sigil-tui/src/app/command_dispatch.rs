@@ -174,6 +174,7 @@ impl AppState {
             UiCommand::OpenCheckpointRestore
                 | UiCommand::OpenIntentStack
                 | UiCommand::OpenChangeReview
+                | UiCommand::OpenConversationFork
         ) {
             return false;
         }
@@ -235,7 +236,8 @@ impl AppState {
             UiCommand::FocusVerificationCard
             | UiCommand::OpenCheckpointRestore
             | UiCommand::OpenIntentStack
-            | UiCommand::OpenChangeReview => false,
+            | UiCommand::OpenChangeReview
+            | UiCommand::OpenConversationFork => false,
         }
     }
 }

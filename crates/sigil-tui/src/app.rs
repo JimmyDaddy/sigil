@@ -17,6 +17,7 @@ mod command_dispatch;
 mod command_elapsed;
 mod compaction_flow;
 pub(crate) mod config_flow;
+mod conversation_fork_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
 mod egress_disclosure_flow;
@@ -887,6 +888,16 @@ pub enum AppAction {
         request_id: u64,
         request: sigil_kernel::IntentDropRequestV1,
     },
+    LoadConversationForkPoints {
+        request_id: u64,
+        source_session_id: String,
+    },
+    ForkConversation {
+        request_id: u64,
+        source_session_id: String,
+        source_turn_digest: String,
+        target_model_ref: sigil_kernel::ModelRef,
+    },
     InspectLocalSession {
         request_id: u64,
         source_path: PathBuf,
@@ -1732,7 +1743,10 @@ impl AppState {
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.checkpoint_mutation_pending() || self.intent_drop_applying() {
+            if self.checkpoint_mutation_pending()
+                || self.intent_drop_applying()
+                || self.conversation_fork_applying()
+            {
                 self.last_notice = Some(
                     "a reviewed workspace operation is applying; wait for completion before quitting"
                         .to_owned(),
@@ -1757,6 +1771,9 @@ impl AppState {
         if self.change_review_modal_open() {
             self.handle_change_review_key(key);
             return Ok(None);
+        }
+        if self.conversation_fork_modal_open() {
+            return Ok(self.handle_conversation_fork_modal_key_event(key));
         }
         if self.intent_stack_modal_open() {
             return Ok(self.handle_intent_stack_modal_key_event(key));
@@ -1884,8 +1901,10 @@ impl AppState {
         }
 
         if let Some(command) = command_for_key_event(key) {
-            let composer_owns_shortcut = command == UiCommand::SearchToolArtifact
-                && self.active_pane == PaneFocus::Composer
+            let composer_owns_shortcut = matches!(
+                command,
+                UiCommand::SearchToolArtifact | UiCommand::OpenConversationFork
+            ) && self.active_pane == PaneFocus::Composer
                 && !self.composer.input.is_empty();
             // Alt-F remains readline-compatible while the user is editing.
             // Artifact search is available when activity focus owns the
@@ -1894,6 +1913,9 @@ impl AppState {
                 if command == UiCommand::OpenChangeReview {
                     self.open_change_review();
                     return Ok(None);
+                }
+                if command == UiCommand::OpenConversationFork {
+                    return Ok(self.open_conversation_fork_modal());
                 }
                 if command == UiCommand::OpenCheckpointRestore {
                     return Ok(self.open_checkpoint_restore_modal());

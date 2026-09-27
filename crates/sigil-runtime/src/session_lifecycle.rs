@@ -821,22 +821,79 @@ impl LocalSessionLifecycleService {
         root_config: &RootConfig,
         target_model_ref: &sigil_kernel::ModelRef,
     ) -> Result<ConversationForkOutput> {
+        self.fork_session_at_turn_with_artifacts(
+            session_ref,
+            expected_session_id,
+            source_turn_digest,
+            destination_key,
+            root_config,
+            target_model_ref,
+            None,
+        )
+    }
+
+    /// Forks a turn while reusing the current source owner's exact artifact capability.
+    /// The optional facade grants no path access; an idle source uses the existing managed
+    /// artifact lease route only when the selected prefix actually contains published output.
+    ///
+    /// # Errors
+    /// Returns the same binding/publication errors as `fork_session_at_turn`, and rejects a
+    /// source artifact capability belonging to another session or physical stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fork_session_at_turn_with_artifacts(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        source_turn_digest: &str,
+        destination_key: &str,
+        root_config: &RootConfig,
+        target_model_ref: &sigil_kernel::ModelRef,
+        source_artifacts: Option<ToolArtifactStore>,
+    ) -> Result<ConversationForkOutput> {
         if source_turn_digest.trim().is_empty() || destination_key.trim().is_empty() {
             bail!("conversation fork turn digest and destination key must not be empty");
         }
         let binding = self
             .resolve_session_for_reopen(session_ref, expected_session_id)
             .map_err(|error| anyhow!(error))?;
-        let records = JsonlSessionStore::read_event_records(&binding.session_log_path)
-            .with_context(|| format!("failed to read {}", binding.session_log_path.display()))?;
+        let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(
+            &binding.session_log_path,
+        )
+        .and_then(|reader| reader.read_event_records())
+        .with_context(|| format!("failed to read {}", binding.session_log_path.display()))?;
         let root_config = root_config.with_effective_composition()?;
         validate_conversation_fork_source_composition(&records, &root_config)?;
-        let projection = project_records(&records)?;
-        let _ = projection.resolved_model_route.as_ref();
+        if let Some(artifacts) = &source_artifacts {
+            anyhow::ensure!(
+                artifacts.session_scope_id() == expected_session_id
+                    && fs::canonicalize(artifacts.session_log_path())? == binding.session_log_path,
+                "conversation fork source artifact capability belongs to another session"
+            );
+        }
         let (provider_name, resolved_model_route) =
             crate::provider_connections::resolve_model_route(&root_config, target_model_ref)
                 .map_err(anyhow::Error::new)?;
         let model_name = resolved_model_route.model_ref.model_id.clone();
+        if let Some(writer) = &self.managed_writer {
+            return self
+                .fork_managed_session_at_turn(
+                    writer,
+                    &binding,
+                    &records,
+                    source_turn_digest,
+                    destination_key,
+                    &root_config,
+                    &provider_name,
+                    resolved_model_route,
+                    source_artifacts,
+                )
+                .map_err(crate::application_operation_owner::ApplicationPublicationError)
+                .map_err(anyhow::Error::new);
+        }
+        anyhow::ensure!(
+            !self.session_source_is_managed(session_ref),
+            "managed conversation fork requires a session-log authority"
+        );
         let parent = binding
             .session_log_path
             .parent()
@@ -847,32 +904,261 @@ impl LocalSessionLifecycleService {
             source_turn_digest,
             destination_key,
         );
-        let _destination_attachment =
+        let publish = || -> Result<ConversationForkOutput> {
+            let _destination_attachment =
+                crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                    &destination_path,
+                )
+                .map_err(anyhow::Error::new)?;
+            if destination_path.exists() {
+                return recover_conversation_fork_output(
+                    &destination_path,
+                    &SessionRef::new_relative(
+                        destination_path
+                            .file_name()
+                            .context("fork destination name")?,
+                    )?,
+                    &binding.session_ref,
+                    expected_session_id,
+                    source_turn_digest,
+                    &root_config,
+                    target_model_ref,
+                    &records,
+                );
+            }
+            let store = JsonlSessionStore::new(&binding.session_log_path)?;
+            fork_conversation_at_turn(
+                &store,
+                &records,
+                &ConversationTurnForkRequest {
+                    source_turn_digest: source_turn_digest.to_owned(),
+                    source_session_ref: binding.session_ref,
+                    destination_path,
+                    provider_name,
+                    model_name,
+                    resolved_model_route: Some(resolved_model_route),
+                },
+            )
+        };
+        publish()
+            .map_err(crate::application_operation_owner::ApplicationPublicationError)
+            .map_err(anyhow::Error::new)
+    }
+
+    /// Recovers only an already-published destination of one exact fork operation.
+    ///
+    /// A missing destination returns `None`. This path never allocates a child or copies new
+    /// artifacts; it only completes the original writer intent and verifies its immutable copy.
+    /// The caller must first validate the original prepared application binding.
+    ///
+    /// # Errors
+    /// Rejects changed source/route/copy identity, missing existing authority, busy ownership,
+    /// or an incomplete recovery/settlement. Such errors do not prove that no child was written.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_existing_fork_session_at_turn(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        source_turn_digest: &str,
+        destination_key: &str,
+        root_config: &RootConfig,
+        target_model_ref: &sigil_kernel::ModelRef,
+    ) -> Result<Option<ConversationForkOutput>> {
+        anyhow::ensure!(
+            !source_turn_digest.trim().is_empty() && !destination_key.trim().is_empty(),
+            "conversation fork turn digest and destination key must not be empty"
+        );
+        let source = self
+            .resolve_session_for_reopen(session_ref, expected_session_id)
+            .map_err(anyhow::Error::new)?;
+        let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(
+            &source.session_log_path,
+        )?
+        .read_event_records()?;
+        validate_conversation_fork_source_composition(&records, root_config)?;
+        let key = conversation_fork_key(expected_session_id, source_turn_digest, destination_key);
+        let destination_path = if let Some(writer) = &self.managed_writer {
+            writer.session_log_path_for_key(&key)?.join("records.jsonl")
+        } else {
+            anyhow::ensure!(
+                !self.session_source_is_managed(session_ref),
+                "managed conversation fork recovery requires a session-log authority"
+            );
+            conversation_fork_path(
+                source.session_log_path.parent().context("source parent")?,
+                expected_session_id,
+                source_turn_digest,
+                destination_key,
+            )
+        };
+        match fs::symlink_metadata(&destination_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "existing conversation fork destination is not a regular file"
+            ),
+        }
+        let _attachment =
             crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
                 &destination_path,
             )
             .map_err(anyhow::Error::new)?;
-        if destination_path.exists() {
-            return recover_conversation_fork_output(
-                &destination_path,
-                expected_session_id,
-                source_turn_digest,
-                &root_config,
-            );
+        if let Some(writer) = &self.managed_writer {
+            let lease = writer.acquire_existing_session_log_for_mutation(&key)?;
+            let result = writer.with_existing_session_log_mutation(&lease, |store| -> Result<_> {
+                let physical_key = store
+                    .path()
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .context("fork physical namespace")?;
+                recover_conversation_fork_output(
+                    store.path(),
+                    &SessionRef::new_relative(format!("{physical_key}.jsonl"))?,
+                    &source.session_ref,
+                    expected_session_id,
+                    source_turn_digest,
+                    root_config,
+                    target_model_ref,
+                    &records,
+                )
+            });
+            let settlement = writer.finalize_existing_session_log_mutation(lease);
+            return match (result, settlement) {
+                (Ok(output), Ok(_)) => Ok(Some(output)),
+                (Err(error), Ok(_)) => Err(error),
+                (Ok(_), Err(error)) => Err(error.into()),
+                (Err(error), Err(settlement)) => Err(error.context(format!(
+                    "conversation fork recovery settlement failed: {settlement}"
+                ))),
+            };
         }
-        let store = JsonlSessionStore::new(&binding.session_log_path)?;
-        fork_conversation_at_turn(
-            &store,
+        recover_conversation_fork_output(
+            &destination_path,
+            &SessionRef::new_relative(destination_path.file_name().context("fork name")?)?,
+            &source.session_ref,
+            expected_session_id,
+            source_turn_digest,
+            root_config,
+            target_model_ref,
             &records,
-            &ConversationTurnForkRequest {
-                source_turn_digest: source_turn_digest.to_owned(),
-                source_session_ref: binding.session_ref,
-                destination_path,
-                provider_name,
-                model_name,
-                resolved_model_route: Some(resolved_model_route),
-            },
         )
+        .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fork_managed_session_at_turn(
+        &self,
+        writer: &Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        source: &LocalSessionReopenBinding,
+        records: &[SessionStreamRecord],
+        source_turn_digest: &str,
+        destination_key: &str,
+        root_config: &RootConfig,
+        provider_name: &str,
+        route: sigil_kernel::ResolvedModelRoute,
+        source_artifacts: Option<ToolArtifactStore>,
+    ) -> Result<ConversationForkOutput> {
+        let key = conversation_fork_key(&source.session_id, source_turn_digest, destination_key);
+        let lease = writer.acquire_session_log_key(&key)?;
+        let mut source_artifact_lease = None;
+        let mut destination_artifact_lease = None;
+        let result = (|| -> Result<_> {
+            let destination_path = lease.path().join("records.jsonl");
+            let managed_root = self
+                .managed_session_log_root
+                .as_ref()
+                .context("managed conversation fork catalog root is unavailable")?;
+            anyhow::ensure!(
+                lease.path().parent() == Some(fs::canonicalize(managed_root)?.as_path()),
+                "managed conversation fork destination is outside the catalog root"
+            );
+            let physical_key = lease
+                .path()
+                .file_name()
+                .and_then(|key| key.to_str())
+                .context("managed conversation fork namespace key is unavailable")?;
+            let destination_ref = SessionRef::new_relative(format!("{physical_key}.jsonl"))?;
+            let _attachment =
+                crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                    &destination_path,
+                )
+                .map_err(anyhow::Error::new)?;
+            if destination_path.exists() {
+                return recover_conversation_fork_output(
+                    &destination_path,
+                    &destination_ref,
+                    &source.session_ref,
+                    &source.session_id,
+                    source_turn_digest,
+                    root_config,
+                    &route.model_ref,
+                    records,
+                );
+            }
+            let point = ConversationForkProjection::from_records(records)?
+                .point(source_turn_digest)
+                .cloned()
+                .context("conversation fork turn is unavailable")?;
+            let needs_artifacts = records.iter()
+                .take_while(|record| record.stream_sequence() <= point.source_finalized_stream_sequence)
+                .map(SessionStreamRecord::session_log_entry)
+                .collect::<Result<Vec<_>>>()?.iter().any(|entry| matches!(entry,
+                    Some(SessionLogEntry::ToolResultV3(result)) if matches!(result.artifact, ToolArtifactBindingV1::Published { .. })));
+            let mut destination = Session::new_with_route(provider_name, route.clone())
+                .with_store(JsonlSessionStore::new(&destination_path)?);
+            let mut source_artifacts = source_artifacts;
+            if needs_artifacts {
+                if source_artifacts.is_none() {
+                    let (store, lease) = self.artifact_store_for_source_path(
+                        &source.session_log_path,
+                        &source.session_id,
+                        self.session_source_is_managed(&source.session_ref),
+                    )?;
+                    source_artifacts = Some(store);
+                    source_artifact_lease = lease;
+                }
+                let lease = crate::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+                    Arc::clone(writer), physical_key, destination.session_scope_id(), destination_path.clone())?;
+                destination.attach_tool_artifact_store_override(lease.store());
+                destination_artifact_lease = Some(lease);
+            }
+            sigil_kernel::conversation_fork::fork_conversation_at_turn_into(
+                records,
+                source.session_ref.clone(),
+                source_turn_digest,
+                &mut destination,
+                destination_ref,
+                source_artifacts.as_ref(),
+            )
+        })();
+        // Every admitted namespace remains owned through copy/recovery and is explicitly settled
+        // on both success and failure; no detached guard or untracked sibling path is introduced.
+        let mut settlement_errors = Vec::new();
+        for artifact in [destination_artifact_lease, source_artifact_lease]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(error) = artifact.finalize() {
+                settlement_errors.push(format!("artifact namespace: {error:#}"));
+            }
+        }
+        if let Err(error) = writer.finalize_fork_session_log(lease) {
+            settlement_errors.push(format!("session-log namespace: {error}"));
+        }
+        if settlement_errors.is_empty() {
+            result
+        } else {
+            let context = format!(
+                "conversation fork resource settlement failed: {}",
+                settlement_errors.join("; ")
+            );
+            match result {
+                Ok(_) => Err(anyhow!(context)),
+                Err(error) => Err(error.context(context)),
+            }
+        }
     }
 
     /// Writes a content-bound safe transcript artifact without overwriting an existing path.
@@ -916,7 +1202,8 @@ impl LocalSessionLifecycleService {
     ) -> Result<SessionExportOutput> {
         let source = self.resolve_ready_source(source_path)?;
         let before_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
-        let records = JsonlSessionStore::read_event_records(&source.path)?;
+        let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(&source.path)
+            .and_then(|reader| reader.read_event_records())?;
         let projection = project_records(&records)?;
         let source_session_id = projection
             .session_id
@@ -1609,13 +1896,16 @@ impl LocalSessionLifecycleService {
         if initial_state != LocalSessionCatalogState::Ready {
             return entry;
         }
-        let records = match JsonlSessionStore::read_event_records(&candidate.path) {
-            Ok(records) => records,
-            Err(_) => {
-                entry.state = LocalSessionCatalogState::Invalid;
-                return entry;
-            }
-        };
+        let records =
+            match sigil_kernel::SessionRecordReadHandle::open_existing_observer(&candidate.path)
+                .and_then(|reader| reader.read_event_records())
+            {
+                Ok(records) => records,
+                Err(_) => {
+                    entry.state = LocalSessionCatalogState::Invalid;
+                    return entry;
+                }
+            };
         let projection = match project_records(&records) {
             Ok(projection) if projection.session_id.is_some() => projection,
             Ok(_) | Err(_) => {
@@ -2042,11 +2332,22 @@ fn conversation_fork_path(
     source_turn_digest: &str,
     destination_key: &str,
 ) -> PathBuf {
+    parent.join(format!(
+        "{}.jsonl",
+        conversation_fork_key(source_session_id, source_turn_digest, destination_key)
+    ))
+}
+
+fn conversation_fork_key(
+    source_session_id: &str,
+    source_turn_digest: &str,
+    destination_key: &str,
+) -> String {
     let identity = sigil_kernel::stable_event_uuid(
         "sigil-runtime-conversation-fork-path",
         &format!("{source_session_id}:{source_turn_digest}:{destination_key}"),
     );
-    parent.join(format!("session-fork-{identity}.jsonl"))
+    format!("session-fork-{identity}")
 }
 
 /// Checks the immutable source contract before a product surface creates or reopens a fork.
@@ -2071,13 +2372,22 @@ pub fn validate_conversation_fork_source_composition(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recover_conversation_fork_output(
     destination_path: &Path,
+    destination_session_ref: &SessionRef,
+    expected_source_ref: &SessionRef,
     expected_source_session_id: &str,
     expected_source_turn_digest: &str,
     root_config: &RootConfig,
+    target_model_ref: &sigil_kernel::ModelRef,
+    source_records: &[SessionStreamRecord],
 ) -> Result<ConversationForkOutput> {
-    let records = JsonlSessionStore::read_event_records(destination_path)?;
+    let store = JsonlSessionStore::open_existing(destination_path)?;
+    // The destination attachment is already held. Reuse its writer to recover an interrupted
+    // append intent before consuming the copy receipt; a strict observer cannot repair it.
+    let _destination = sigil_kernel::Session::load_from_store_for_control(store.clone())?;
+    let records = store.read_event_records_coordinated()?;
     validate_conversation_fork_source_composition(&records, root_config)?;
     let (fork_event, forked) = records
         .iter()
@@ -2090,17 +2400,35 @@ fn recover_conversation_fork_output(
         })
         .transpose()?
         .context("existing conversation fork has no durable fork receipt")?;
-    if forked.source_session_id != expected_source_session_id
+    if &forked.parent_session_ref != expected_source_ref
+        || forked.source_session_id != expected_source_session_id
         || forked.source_turn_digest != expected_source_turn_digest
     {
         bail!("existing conversation fork destination belongs to another source binding");
     }
+    let route = records
+        .iter()
+        .find_map(|record| match record.session_log_entry().ok().flatten() {
+            Some(sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionIdentity {
+                    resolved_model_route,
+                    ..
+                },
+            )) => resolved_model_route,
+            _ => None,
+        })
+        .context("existing conversation fork has no bound creation route")?;
+    anyhow::ensure!(
+        &route.model_ref == target_model_ref,
+        "existing conversation fork destination has a different creation route"
+    );
+    sigil_kernel::conversation_fork::validate_conversation_fork_copy(
+        source_records,
+        &records,
+        &forked,
+    )?;
     Ok(ConversationForkOutput {
-        destination_session_ref: SessionRef::new_relative(
-            destination_path
-                .file_name()
-                .context("conversation fork destination has no file name")?,
-        )?,
+        destination_session_ref: destination_session_ref.clone(),
         destination_path: destination_path.to_path_buf(),
         destination_session_id: forked.destination_session_id,
         fork_event,

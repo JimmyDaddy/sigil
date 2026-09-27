@@ -711,6 +711,44 @@ impl Session {
         Ok(events)
     }
 
+    pub(crate) fn append_initial_conversation_fork(
+        &mut self,
+        fork: &crate::ConversationForked,
+        entries: Vec<SessionLogEntry>,
+    ) -> Result<StoredEvent> {
+        for entry in &entries {
+            match entry {
+                SessionLogEntry::ToolResultV3(result) => result.validate()?,
+                SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => snapshot.validate()?,
+                SessionLogEntry::Control(control) => control.validate_durable_contract()?,
+                SessionLogEntry::User(_) | SessionLogEntry::Assistant(_) => {}
+            }
+        }
+        let store = self
+            .store
+            .as_ref()
+            .context("conversation fork requires a durable store")?;
+        let events = store
+            .append_events_and_session_entries_if(
+                vec![(
+                    DurableEventType::ConversationForked,
+                    EventClass::Critical,
+                    serde_json::to_value(fork)?,
+                )],
+                &entries,
+                |records| Ok(records.is_empty()),
+            )?
+            .context("conversation fork destination already contains records")?;
+        let fork_event = events
+            .first()
+            .context("conversation fork bundle returned no receipt")?
+            .clone();
+        self.bind_tool_artifacts_after_append(&entries, &events[1..]);
+        self.entries.extend(entries);
+        self.advance_durable_session_entry_count(&events);
+        Ok(fork_event)
+    }
+
     pub(super) fn bind_tool_artifacts_after_append(
         &self,
         entries: &[SessionLogEntry],
@@ -828,6 +866,7 @@ impl Session {
     /// crash, recovery can never expose a receipt without the provider-visible result that closes
     /// the corresponding tool call. The writer's append-bundle intent then recovers the multi-
     /// record range as all-or-none.
+    #[cfg(test)]
     pub(crate) fn append_tool_result_bundle(
         &mut self,
         result: ToolResultRecordedV3,

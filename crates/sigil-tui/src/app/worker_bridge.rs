@@ -1235,6 +1235,7 @@ impl AppState {
                     "conversation fork created",
                 );
                 self.runtime.worker_rebind_required = true;
+                self.active_pane = super::PaneFocus::Composer;
                 self.last_notice = Some(format!(
                     "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
                 ));
@@ -1243,6 +1244,13 @@ impl AppState {
                     "Conversation fork created. Active approvals/tasks were not copied; workspace files remain shared.",
                 );
                 self.schedule_balance_refresh();
+            }
+            WorkerMessage::ConversationForkPointsLoaded {
+                request_id,
+                source_session_id,
+                points,
+            } => {
+                self.apply_conversation_fork_points(request_id, &source_session_id, points);
             }
             WorkerMessage::LocalSessionInspected { request_id, entry } => {
                 if !self.apply_local_session_inspected(request_id, entry) {
@@ -1298,7 +1306,9 @@ impl AppState {
                 copied_message_count,
                 entries,
             } => {
-                if !self.local_session_action_request_matches(request_id) {
+                if !self.local_session_action_request_matches(request_id)
+                    && !self.conversation_fork_request_matches(request_id)
+                {
                     self.push_event(
                         "session:lifecycle",
                         format!("ignored stale fork response {request_id}"),
@@ -1317,6 +1327,7 @@ impl AppState {
                     entries,
                     "local conversation fork created",
                 );
+                self.active_pane = PaneFocus::Composer;
                 self.runtime.worker_rebind_required = true;
                 self.last_notice = Some(format!(
                     "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
@@ -1385,7 +1396,9 @@ impl AppState {
             }
             WorkerMessage::LocalSessionLifecycleFailed { request_id, error } => {
                 let summary = summarize_error(&error);
-                if self.apply_local_session_lifecycle_failed(request_id, summary.clone()) {
+                if self.apply_conversation_fork_failure(request_id, &summary)
+                    || self.apply_local_session_lifecycle_failed(request_id, summary.clone())
+                {
                     self.last_notice = Some(summary);
                     self.push_event("session:lifecycle:error", error);
                 } else {

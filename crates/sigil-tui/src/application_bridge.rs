@@ -697,6 +697,7 @@ impl TuiApplicationSession {
                 | AppAction::PreviewCheckpointRestore { .. }
                 | AppAction::ExecuteCheckpointRestore { .. }
                 | AppAction::ForkConversationAtCheckpoint { .. }
+                | AppAction::ForkConversation { .. }
                 | AppAction::LoadIntentStack { .. }
                 | AppAction::PreviewIntentDrop { .. }
                 | AppAction::ExecuteIntentDrop { .. }
@@ -1128,6 +1129,36 @@ impl TuiApplicationSession {
                     },
                 },
             )),
+            AppAction::ForkConversation {
+                request_id,
+                source_session_id,
+                source_turn_digest,
+                target_model_ref,
+            } => {
+                if latest.frontier.scope.session.as_ref().map(|id| id.as_str())
+                    != Some(source_session_id.as_str())
+                {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                Some(ApplicationCommand::Conversation(
+                    ConversationCommand::Recovery {
+                        action: ApplicationRecoveryAction::ForkConversation {
+                            source_turn_digest: sigil_application::SafeText::new(
+                                source_turn_digest.clone(),
+                            )?,
+                            connection_id: sigil_application::SafeText::new(
+                                target_model_ref.connection_id.as_str().to_owned(),
+                            )?,
+                            model_id: sigil_application::SafeText::new(
+                                target_model_ref.model_id.clone(),
+                            )?,
+                            request_id: Some(sigil_application::SafeText::new(
+                                request_id.to_string(),
+                            )?),
+                        },
+                    },
+                ))
+            }
             AppAction::ForkConversationAtCheckpoint {
                 request_id,
                 request,
@@ -1918,6 +1949,16 @@ fn reconcile_worker_operation(
         else {
             return Ok(None);
         };
+        let frontier = projection.durable_frontier().await?;
+        if let Some(receipt) =
+            sigil_runtime::application_operation_owner::reconcile_application_operation_receipt(
+                &request,
+                &projection.read_handle()?,
+                &frontier,
+            )?
+        {
+            return Ok(Some(receipt));
+        }
         let (binding, proof) = endpoint.query_operation(binding)?;
         let Some(proof) = proof else {
             return Ok(None);
@@ -2431,6 +2472,37 @@ impl TuiWorkerCommandExecutor {
                         request_id: parse_tui_request_id(request_id)?,
                         request: checkpoint_restore_request(checkpoint_id, checkpoint_digest)?,
                     },
+                    ApplicationRecoveryAction::ForkConversation {
+                        source_turn_digest,
+                        connection_id,
+                        model_id,
+                        request_id,
+                    } => WorkerCommand::ForkConversation {
+                        request_id: parse_tui_request_id(request_id.as_ref().ok_or_else(
+                            || {
+                                ApplicationError::InvalidRequest(
+                                    "TUI conversation fork requires its request identity"
+                                        .to_owned(),
+                                )
+                            },
+                        )?)?,
+                        source_session_id: self.session_id.clone(),
+                        source_turn_digest: source_turn_digest.as_str().to_owned(),
+                        target_model_ref: sigil_kernel::ModelRef::new(
+                            sigil_kernel::ConnectionId::new(connection_id.as_str().to_owned())
+                                .map_err(|_| {
+                                    ApplicationError::InvalidRequest(
+                                        "invalid fork connection identity".to_owned(),
+                                    )
+                                })?,
+                            model_id.as_str().to_owned(),
+                        )
+                        .map_err(|_| {
+                            ApplicationError::InvalidRequest(
+                                "invalid fork model identity".to_owned(),
+                            )
+                        })?,
+                    },
                     ApplicationRecoveryAction::LoadIntentStack { request_id } => {
                         WorkerCommand::LoadIntentStack {
                             request_id: parse_tui_request_id(request_id)?,
@@ -2451,8 +2523,7 @@ impl TuiWorkerCommandExecutor {
                         request: request.clone(),
                     },
                     ApplicationRecoveryAction::PrepareCompaction { .. }
-                    | ApplicationRecoveryAction::RestoreCheckpoint { .. }
-                    | ApplicationRecoveryAction::ForkConversation { .. } => {
+                    | ApplicationRecoveryAction::RestoreCheckpoint { .. } => {
                         return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
                             sigil_application::CommandRejection {
                                 kind: "unsupported_tui_recovery_command".to_owned(),

@@ -10,6 +10,11 @@ use crate::{ControlEntry, ConversationInputStatus, PlanDecision};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ApplicationOperationTargetV1 {
+    ForkConversation {
+        source_turn_digest: String,
+        connection_id: String,
+        model_id: String,
+    },
     QueueEnqueue {
         prompt_hash: String,
         target: crate::ConversationInputTarget,
@@ -62,6 +67,18 @@ pub enum ApplicationOperationTargetV1 {
 impl ApplicationOperationTargetV1 {
     pub(crate) fn matches(&self, control: &ControlEntry) -> bool {
         match (self, control) {
+            (
+                Self::ForkConversation {
+                    source_turn_digest,
+                    connection_id,
+                    model_id,
+                },
+                ControlEntry::ConversationForkCommittedV1(entry),
+            ) => {
+                &entry.source_turn_digest == source_turn_digest
+                    && entry.target_model_ref.connection_id.as_str() == connection_id
+                    && &entry.target_model_ref.model_id == model_id
+            }
             (
                 Self::QueueEnqueue {
                     prompt_hash,

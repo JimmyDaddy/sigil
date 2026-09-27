@@ -1969,6 +1969,9 @@ pub struct DesktopCheckpointView {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DesktopConversationForkPointView {
+    /// Bounded prompt shown when selecting a finalized source turn.
+    #[serde(default)]
+    pub prompt_preview: Option<String>,
     pub source_turn_index: usize,
     pub source_turn_digest: String,
     pub source_boundary_stream_sequence: u64,

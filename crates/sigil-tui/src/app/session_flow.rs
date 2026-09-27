@@ -699,7 +699,10 @@ impl AppState {
         self.composer.pending_queue_enqueues.clear();
         self.composer.queue_operation_errors.clear();
         self.blur_composer_queue_panel();
-        if self.checkpoint_restore_modal_open() || self.intent_stack_modal_open() {
+        if self.checkpoint_restore_modal_open()
+            || self.intent_stack_modal_open()
+            || self.conversation_fork_modal_open()
+        {
             self.modal_state = None;
         }
         self.session_log_path = session_log_path;

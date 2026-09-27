@@ -3101,6 +3101,13 @@
       },
       "ConversationForkPointView": {
         "properties": {
+          "prompt_preview": {
+            "maxLength": 360,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "source_boundary_stream_sequence": {
             "format": "uint64",
             "minimum": 1,

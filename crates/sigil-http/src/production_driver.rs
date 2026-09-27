@@ -847,6 +847,30 @@ fn canonical_http_session_path(session_log_path: &Path) -> Result<PathBuf> {
 }
 
 impl HttpProductionRunDriver {
+    fn catalog_reference_for_session(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<SessionRef, HttpConversationRecoveryDriverError> {
+        let lifecycle = self
+            .options
+            .session_lifecycle
+            .as_ref()
+            .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+        let expected_path = std::fs::canonicalize(&session.session_log_path)
+            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        lifecycle
+            .catalog()
+            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+            .entries
+            .into_iter()
+            .find(|entry| {
+                entry.session_id.as_deref() == Some(&session.durable_session_scope_id)
+                    && std::fs::canonicalize(&entry.path).is_ok_and(|path| path == expected_path)
+            })
+            .map(|entry| entry.session_ref)
+            .ok_or(HttpConversationRecoveryDriverError::StaleBinding)
+    }
+
     /// Returns the lifecycle service enriched with the current managed session-log source.
     #[must_use]
     pub fn session_lifecycle(&self) -> Option<&LocalSessionLifecycleService> {
@@ -2920,10 +2944,66 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| {
                 HttpRunDriverError::new(format!("application domain owner unavailable: {error}"))
             })?;
-        let proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)
+        let mut proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)
             .map_err(|error| {
-                HttpRunDriverError::new(format!("application operation query failed: {error}"))
+            HttpRunDriverError::new(format!("application operation query failed: {error}"))
+        })?;
+        if proof.is_none()
+            && let sigil_kernel::ApplicationOperationTargetV1::ForkConversation {
+                source_turn_digest,
+                connection_id,
+                model_id,
+            } = &binding.target
+        {
+            let recover = || -> anyhow::Result<()> {
+                // Binding reattachment verifies the original durable Prepared K/F. A query may
+                // finish only that existing child; it never redispatches an unexecuted fork.
+                let mut source = attachment.owner.attach_for_control()?;
+                source.bind_application_operation(binding.clone())?;
+                let lifecycle = self
+                    .options
+                    .session_lifecycle
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("fork lifecycle is unavailable"))?;
+                let source_ref = self
+                    .catalog_reference_for_session(session)
+                    .map_err(|_| anyhow!("fork source catalog binding is unavailable"))?;
+                let config = RootConfig::load(&self.options.config_path)?;
+                let model = sigil_kernel::ModelRef::new(
+                    sigil_kernel::ConnectionId::new(connection_id.clone())?,
+                    model_id.clone(),
+                )?;
+                if let Some(output) = lifecycle.recover_existing_fork_session_at_turn(
+                    &source_ref,
+                    &session.durable_session_scope_id,
+                    source_turn_digest,
+                    &binding.operation_id,
+                    &config,
+                    &model,
+                )? {
+                    source.append_control(ControlEntry::ConversationForkCommittedV1(
+                        sigil_kernel::ConversationForkCommittedV1::from_output(
+                            &session.durable_session_scope_id,
+                            source_turn_digest,
+                            &model,
+                            &output,
+                        )?,
+                    ))?;
+                }
+                Ok(())
+            };
+            recover().map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "existing conversation fork recovery failed: {error:#}"
+                ))
             })?;
+            proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "recovered conversation fork proof is unavailable: {error}"
+                    ))
+                })?;
+        }
         Ok(crate::driver::HttpApplicationOperationResolution { binding, proof })
     }
     fn requires_run_release_barrier(&self) -> bool {
@@ -4238,6 +4318,28 @@ impl HttpRunDriver for HttpProductionRunDriver {
         let session_attachment = self
             .acquire_session_attachment(session)
             .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+        let mut mutation_session = if matches!(
+            command.action,
+            HttpConversationRecoveryCommandAction::ForkConversation { .. }
+        ) {
+            let owner = session_attachment
+                .application_operation_owner()
+                .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
+            let mut writer = owner
+                .attach_for_control()
+                .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+            if writer.session_scope_id() != session.durable_session_scope_id {
+                return Err(HttpConversationRecoveryDriverError::StaleBinding);
+            }
+            if let Some(binding) = &command.application_operation {
+                writer
+                    .bind_application_operation(binding.clone())
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+            }
+            Some(writer)
+        } else {
+            None
+        };
         let mut compaction_receipt = None;
         let mut compaction_review = None;
         let mut tool_output_shrink = None;
@@ -4381,12 +4483,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     .session_lifecycle
                     .as_ref()
                     .ok_or(HttpConversationRecoveryDriverError::Unavailable)?;
-                let source_ref = SessionRef::new_relative(
-                    Path::new(&session.session_log_path)
-                        .file_name()
-                        .ok_or(HttpConversationRecoveryDriverError::Unavailable)?,
-                )
-                .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let source_ref = self.catalog_reference_for_session(session)?;
                 let root_config = RootConfig::load(&self.options.config_path)
                     .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
                 let target_model_ref = sigil_kernel::ModelRef::new(
@@ -4395,16 +4492,62 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     model_ref.model_id.clone(),
                 )
                 .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                let artifact_budget = sigil_kernel::SessionReadBudget::default();
+                let _artifact_read = authority_artifact_store_key(&self.services, session)
+                    .map(|key| self.artifact_access.begin_read(&key, &artifact_budget))
+                    .transpose()
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let source_artifacts = self
+                    .owned_tool_artifact_store(session)
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+                    .map(|(_, store)| store);
+                if let Some(binding) = &command.application_operation {
+                    let expected = sigil_kernel::ApplicationOperationTargetV1::ForkConversation {
+                        source_turn_digest: source_turn_digest.clone(),
+                        connection_id: model_ref.connection_id.clone(),
+                        model_id: model_ref.model_id.clone(),
+                    };
+                    if binding.target != expected {
+                        return Err(HttpConversationRecoveryDriverError::StaleBinding);
+                    }
+                }
+                let legacy_key = format!("{}:{}", command.client_id, command.command_id);
+                let destination_key = command
+                    .application_operation
+                    .as_ref()
+                    .map_or(legacy_key.as_str(), |binding| binding.operation_id.as_str());
                 let output = lifecycle
-                    .fork_session_at_turn(
+                    .fork_session_at_turn_with_artifacts(
                         &source_ref,
                         &session.durable_session_scope_id,
                         source_turn_digest,
-                        &format!("{}:{}", command.client_id, command.command_id),
+                        destination_key,
                         &root_config,
                         &target_model_ref,
+                        source_artifacts,
                     )
-                    .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                    .map_err(|error| {
+                        // Only pre-publication validation can establish no effect. Once the
+                        // destination owner was entered, retain the original K/F for recovery.
+                        if error.is::<sigil_runtime::application_operation_owner::ApplicationPublicationError>() {
+                            HttpConversationRecoveryDriverError::Unavailable
+                        } else {
+                            HttpConversationRecoveryDriverError::Conflict
+                        }
+                    })?;
+                mutation_session
+                    .as_mut()
+                    .ok_or(HttpConversationRecoveryDriverError::Unavailable)?
+                    .append_control(sigil_kernel::ControlEntry::ConversationForkCommittedV1(
+                        sigil_kernel::ConversationForkCommittedV1::from_output(
+                            &session.durable_session_scope_id,
+                            source_turn_digest,
+                            &target_model_ref,
+                            &output,
+                        )
+                        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?,
+                    ))
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
                 fork_receipt = Some(HttpConversationForkReceipt {
                     session_ref: output
                         .destination_session_ref

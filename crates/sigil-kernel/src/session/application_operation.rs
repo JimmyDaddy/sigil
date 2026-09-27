@@ -233,6 +233,51 @@ impl Session {
         self.runtime_attachments.application_operation = None;
     }
 
+    /// Checks a domain transition against the caller's already-prepared command, when present.
+    /// Unbound domain callers retain their normal validation and writer path.
+    ///
+    /// # Errors
+    /// Rejects a transition that differs from the existing exact application operation target.
+    pub fn ensure_application_operation_target(&self, control: &ControlEntry) -> Result<()> {
+        if self
+            .runtime_attachments
+            .application_operation
+            .as_ref()
+            .is_some_and(|binding| !binding.target.matches(control))
+        {
+            bail!("domain transition differs from its prepared application operation");
+        }
+        Ok(())
+    }
+
+    /// Validates a multi-stage operation before publishing its precursor controls.
+    ///
+    /// # Errors
+    /// Rejects a different target without treating the precursor as a completed operation.
+    pub fn ensure_application_operation_binding_target(
+        &self,
+        target: &crate::ApplicationOperationTargetV1,
+    ) -> Result<()> {
+        if self
+            .runtime_attachments
+            .application_operation
+            .as_ref()
+            .is_some_and(|binding| &binding.target != target)
+        {
+            bail!("domain transition differs from its prepared application operation");
+        }
+        Ok(())
+    }
+
+    /// Returns the identity of the already-prepared operation attached to this writer.
+    /// This is a read-only identity projection, not an admission or a new authority.
+    pub fn application_operation_id(&self) -> Option<&str> {
+        self.runtime_attachments
+            .application_operation
+            .as_ref()
+            .map(|binding| binding.operation_id.as_str())
+    }
+
     pub fn has_application_operation(&self) -> bool {
         self.runtime_attachments.application_operation.is_some()
     }
@@ -327,8 +372,13 @@ impl Session {
 #[derive(Debug, Clone)]
 pub struct ApplicationOperationCommitProofV1 {
     marker: StoredEvent,
+    matched_control: ControlEntry,
 }
 impl ApplicationOperationCommitProofV1 {
+    /// The exact control authenticated by the committed batch, never a current projection.
+    pub fn matched_control(&self) -> &ControlEntry {
+        &self.matched_control
+    }
     pub fn validate_binding(&self, binding: &ApplicationOperationBindingV1) -> Result<()> {
         let value = self
             .marker
@@ -467,7 +517,7 @@ impl<'a> ApplicationOperationReconciler<'a> {
             .stream_sequence()
             .checked_sub(commit.domain_events.len() as u64)
             .context("application operation sequence underflow")?;
-        let mut target_matched = false;
+        let mut matched_control = None;
         for evidence in &commit.domain_events {
             let actual = self
                 .domain
@@ -482,16 +532,19 @@ impl<'a> ApplicationOperationReconciler<'a> {
             {
                 bail!("application operation domain batch identity changed");
             }
-            if let Some(SessionLogEntry::Control(control)) = actual.session_log_entry()? {
-                target_matched |= binding.target.matches(&control);
+            if let Some(SessionLogEntry::Control(control)) = actual.session_log_entry()?
+                && binding.target.matches(&control)
+                && matched_control.is_none()
+            {
+                matched_control = Some(control);
             }
             expected_sequence += 1;
         }
-        if !target_matched {
-            bail!("application operation domain batch does not satisfy its original target");
-        }
+        let matched_control = matched_control
+            .context("application operation domain batch does not satisfy its original target")?;
         Ok(Some(ApplicationOperationCommitProofV1 {
             marker: record.stored_event().clone(),
+            matched_control,
         }))
     }
 }

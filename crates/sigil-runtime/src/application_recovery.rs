@@ -41,6 +41,8 @@ pub struct ApplicationCheckpointView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ApplicationConversationForkPointView {
+    /// Bounded source prompt for selection only; the digest remains the fork authority.
+    pub prompt_preview: Option<String>,
     pub source_turn_index: usize,
     pub source_turn_digest: String,
     pub source_boundary_stream_sequence: u64,
@@ -126,10 +128,25 @@ pub fn application_conversation_recovery_view(
             }
         })
         .collect();
+    let mut prompts = BTreeMap::new();
+    for record in &records {
+        if let Some(SessionLogEntry::User(message)) = record.session_log_entry()? {
+            let preview = message.content.as_deref().map(|text| {
+                sigil_kernel::safe_persistence_text(text)
+                    .chars()
+                    .take(360)
+                    .collect()
+            });
+            prompts.insert(record.stream_sequence(), preview);
+        }
+    }
     let fork_points = ConversationForkProjection::from_records(&records)?
         .points
         .into_iter()
         .map(|point| ApplicationConversationForkPointView {
+            prompt_preview: prompts
+                .remove(&point.source_boundary_stream_sequence)
+                .flatten(),
             source_turn_index: point.source_turn_index,
             source_turn_digest: point.source_turn_digest,
             source_boundary_stream_sequence: point.source_boundary_stream_sequence,

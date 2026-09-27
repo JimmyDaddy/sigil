@@ -608,9 +608,14 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
             else {
                 return Ok(None);
             };
-            let resolved = registry
-                .query_application_operation(&session_id, &binding)
-                .map_err(|_| ApplicationError::Unavailable)?;
+            // Reconciliation can finish an existing crash-safe fork bundle. The HTTP request's
+            // blocking owner waits for this worker before returning or completing shutdown.
+            let resolved = tokio::task::spawn_blocking(move || {
+                registry.query_application_operation(&session_id, &binding)
+            })
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?
+            .map_err(|_| ApplicationError::Unavailable)?;
             let Some(proof) = resolved.proof else {
                 return Ok(None);
             };
@@ -905,9 +910,22 @@ impl HttpApplicationCommandExecutor {
                             .correlation_id
                             .as_ref()
                             .map(|id| id.to_string()),
+                        sigil_runtime::application_operation_owner::application_operation_binding(
+                            request,
+                        )?,
                     ) {
                     Ok(receipt) => receipt,
                     Err(error) => {
+                        if matches!(
+                            error,
+                            crate::HttpRegistryError::ConversationRecoveryUnavailable
+                                | crate::HttpRegistryError::DriverPanicked { .. }
+                        ) {
+                            return uncertain_dispatch(
+                                request,
+                                format!("http-recovery:{}", self.session_id),
+                            );
+                        }
                         return confirmed_no_effect(
                             request,
                             sigil_application::CommandRejection {
@@ -917,6 +935,18 @@ impl HttpApplicationCommandExecutor {
                         );
                     }
                 };
+                // A real owner proof settles these append-only operations, including replay.
+                // Older recovery owners retain their existing receipt translation.
+                if sigil_runtime::application_operation_owner::application_operation_binding(
+                    request,
+                )?
+                .is_some()
+                {
+                    return uncertain_dispatch(
+                        request,
+                        format!("http-recovery:{}", self.session_id),
+                    );
+                }
                 let outcome = application_recovery_outcome(&receipt)?;
                 let frontier = sigil_application::ApplicationFrontier {
                     schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
@@ -1694,4 +1724,4 @@ fn http_run_start_request(
 
 #[cfg(test)]
 #[path = "tests/application_frontier_tests.rs"]
-mod frontier_tests;
+pub(crate) mod frontier_tests;

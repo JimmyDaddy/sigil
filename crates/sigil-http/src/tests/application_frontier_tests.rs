@@ -252,3 +252,14 @@ fn user_input_dispatch_failure_observation_is_exact_and_clears_after_the_invocat
     assert!(slot.lock().expect("observation lock").is_none());
     Ok(())
 }
+
+/// Freezes the same real client request that the authenticated HTTP route will reconstruct.
+pub(crate) fn prepare_http_request(
+    client: &HttpApplicationClient,
+    command_id: &str,
+    command: ApplicationCommand,
+) -> Result<ApplicationCommandRequest, ApplicationError> {
+    client
+        .client
+        .prepare_command(ApplicationCommandId::new(command_id)?, command)
+}

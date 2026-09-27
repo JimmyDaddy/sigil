@@ -3064,6 +3064,84 @@ async fn desktop_review_serve_contract_sends_outdated_exact_diff_without_restori
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_message_fork_uses_managed_catalog_identity_without_starting_a_run()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let provider = VisionProviderFixture::start()?;
+    write_config(&config_path, &provider.base_url);
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
+    )?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "branch contract",
+        )).await?;
+        let client = manager.client(&opened.id)?;
+        let session = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("parent".to_owned()), model_ref: None }).await?;
+        let receipt = client.start_run(&session.id, sigil_desktop::DesktopRunStartRequest {
+            review_annotations: Vec::new(), image_attachments: Vec::new(), prompt: "Inspect this branch source".to_owned(),
+            permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
+            model_ref: None, model_selection_binding: None, route_recovery_binding: None,
+            reasoning_effort: None, reasoning_effort_binding: None, skill_binding: None,
+            agent_binding: None, task_continuation: None,
+        }).await?;
+        let point = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(&receipt.run.id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(run.status == sigil_desktop::DesktopRunStatus::Finished, "fork source run failed: {run:?}");
+                    let recovery = client.conversation_recovery(&session.id).await?;
+                    if let Some(point) = recovery.fork_points.into_iter().next() { break Ok::<_, anyhow::Error>(point); }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        anyhow::ensure!(point.prompt_preview.as_deref() == Some("Inspect this branch source"));
+        let catalog = client.catalog(&Default::default()).await?;
+        let source = catalog.entries.iter().find(|entry| entry.session_id.as_deref() == Some(&session.durable_session_scope_id)).context("managed parent catalog entry")?;
+        anyhow::ensure!(source.session_ref != "records.jsonl", "fixture must exercise managed logical refs");
+        anyhow::ensure!(walkdir::WalkDir::new(workspace.path().join("state/managed/session-log")).into_iter().filter_map(Result::ok).any(|entry| entry.file_name() == "records.jsonl"), "fixture never used managed records.jsonl layout");
+        let model_ref = client.run_context(&session.id).await?.model_ref;
+        let forked = client.command_conversation_recovery(&session.id, sigil_desktop::DesktopConversationRecoveryCommandAction::ForkConversation {
+            source_turn_digest: point.source_turn_digest, model_ref,
+        }).await?.fork.context("fork receipt")?;
+        anyhow::ensure!(forked.session_id != session.durable_session_scope_id && forked.copied_message_count >= 2);
+        let branch = client.open_session(sigil_desktop::DesktopSessionOpenRequest {
+            session_ref: forked.session_ref, session_id: forked.session_id, label: Some("branch".to_owned()), recovery_binding: None,
+        }).await?;
+        anyhow::ensure!(branch.run_ids.is_empty(), "opening a branch must not start a model run");
+        let display = client.conversation_display(&branch.id, &Default::default()).await?;
+        anyhow::ensure!(display.items.iter().any(|item| matches!(&item.content, sigil_desktop::DesktopConversationDisplayContent::Message { text: Some(text), .. } if text == "Inspect this branch source")));
+        Ok(())
+    }.await;
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    result?;
+    anyhow::ensure!(
+        cleanup
+            .iter()
+            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
+        "managed fork server did not settle"
+    );
+    let run_requests = explicit_provider_requests(&requests);
+    anyhow::ensure!(
+        run_requests.len() == 1,
+        "fork/open unexpectedly invoked the provider: {} explicit requests; {} title requests",
+        run_requests.len(),
+        requests.len() - run_requests.len()
+    );
+    assert!(
+        requests.len() - run_requests.len() <= 1,
+        "at most one parent title maintenance request"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independent_check()
 -> anyhow::Result<()> {
     use anyhow::Context as _;

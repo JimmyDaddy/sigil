@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
+use crate::EventClass;
 use crate::session::ToolArtifactDescriptorV1;
-#[cfg(any(test, feature = "test-support"))]
 use crate::session::ToolArtifactStore;
 use crate::{
-    ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
-    ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session,
-    SessionCompositionSnapshotV1, SessionLogEntry, SessionRef, SessionStreamRecord, StoredEvent,
-    ToolArtifactBindingV1, ToolResultRecordedV3, stable_event_hash, stable_event_uuid,
+    ControlEntry, ControlledCheckpointProjection, DurableEventType, ExternalProvenanceEntry,
+    JsonlSessionStore, ResolvedModelRoute, Session, SessionCompositionSnapshotV1, SessionLogEntry,
+    SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolResultRecordedV3,
+    stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -142,7 +142,7 @@ pub struct ConversationTurnForkRequest {
     pub resolved_model_route: Option<ResolvedModelRoute>,
 }
 
-/// Durable provenance written into the destination before its safe conversation prefix.
+/// Durable provenance committed atomically with the complete safe conversation prefix.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ConversationForked {
@@ -160,6 +160,56 @@ pub struct ConversationForked {
     pub destination_session_id: String,
     pub copied_message_count: usize,
     pub copied_external_provenance_count: usize,
+}
+
+/// Source-side audit of a completed copy. It grants no authority in either session and does
+/// not change source conversation messages or workspace files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationForkCommittedV1 {
+    pub source_session_id: String,
+    pub source_turn_digest: String,
+    pub destination_session_ref: SessionRef,
+    pub destination_session_id: String,
+    pub target_model_ref: crate::ModelRef,
+    pub copied_message_count: usize,
+    pub copied_external_provenance_count: usize,
+}
+
+impl ConversationForkCommittedV1 {
+    /// Builds an audit only from the host's successfully created or exactly recovered branch.
+    pub fn from_output(
+        source_session_id: &str,
+        source_turn_digest: &str,
+        target_model_ref: &crate::ModelRef,
+        output: &ConversationForkOutput,
+    ) -> Result<Self> {
+        let receipt = Self {
+            source_session_id: source_session_id.to_owned(),
+            source_turn_digest: source_turn_digest.to_owned(),
+            destination_session_ref: output.destination_session_ref.clone(),
+            destination_session_id: output.destination_session_id.clone(),
+            target_model_ref: target_model_ref.clone(),
+            copied_message_count: output.copied_message_count,
+            copied_external_provenance_count: output.copied_external_provenance_count,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+    pub fn validate(&self) -> Result<()> {
+        for value in [
+            &self.source_session_id,
+            &self.source_turn_digest,
+            &self.destination_session_id,
+        ] {
+            if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+                bail!("invalid conversation fork receipt identity");
+            }
+        }
+        if self.source_session_id == self.destination_session_id {
+            bail!("conversation fork must name a distinct destination");
+        }
+        Ok(())
+    }
 }
 
 /// Result of creating a new append-only conversation branch.
@@ -258,6 +308,39 @@ pub fn fork_conversation_at_turn(
     )
 }
 
+/// Copies an exact finalized turn into a host-admitted empty session writer.
+///
+/// Logical catalog references describe lineage; they are not filesystem authority. The host
+/// must bind the source records and both catalog references to its workspace and retain the
+/// destination writer/artifact leases throughout this call. Published tool output is copied
+/// through the supplied source and destination artifact capabilities, never inferred paths.
+///
+/// # Errors
+/// Rejects a stale turn, mixed source identities, a nonempty or same-session destination,
+/// unavailable artifact capabilities, and incomplete artifact or transcript publication.
+pub fn fork_conversation_at_turn_into(
+    records: &[SessionStreamRecord],
+    source_session_ref: SessionRef,
+    source_turn_digest: &str,
+    destination: &mut Session,
+    destination_session_ref: SessionRef,
+    source_artifacts: Option<&ToolArtifactStore>,
+) -> Result<ConversationForkOutput> {
+    let point = ConversationForkProjection::from_records(records)?
+        .point(source_turn_digest)
+        .cloned()
+        .context("conversation fork turn changed or is no longer available")?;
+    persist_conversation_fork(
+        records,
+        source_session_ref,
+        destination,
+        destination_session_ref,
+        point,
+        None,
+        source_artifacts,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_conversation_fork(
     source_store: &JsonlSessionStore,
@@ -271,41 +354,88 @@ fn create_conversation_fork(
     checkpoint: Option<(String, String)>,
 ) -> Result<ConversationForkOutput> {
     validate_source_and_destination(source_store.path(), &source_session_ref, &destination_path)?;
-    let composition = conversation_fork_source_composition(records)?;
-    let mut prefix = safe_prefix_for_complete_turn(records, &point)?;
     if let Some(route) = resolved_model_route.as_ref() {
         anyhow::ensure!(
             route.model_ref.model_id == model_name,
             "conversation fork route model does not match destination identity"
         );
     }
-    remap_forked_tool_artifacts(source_store, &destination_path, &mut prefix.messages)?;
     let destination_store = JsonlSessionStore::new(&destination_path)?;
     let mut destination = resolved_model_route
-        .clone()
         .map_or_else(
             || Session::new(&provider_name, &model_name),
             |route| Session::new_with_route(&provider_name, route),
         )
         .with_store(destination_store);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let source_artifacts = None::<ToolArtifactStore>;
     #[cfg(any(test, feature = "test-support"))]
-    destination.attach_tool_artifact_store_override(ToolArtifactStore::for_session_path(
-        &destination_path,
-    ));
-    destination.append_control(ControlEntry::SessionIdentity {
-        provider_name: provider_name.clone(),
-        model_name: model_name.clone(),
-        resolved_model_route,
-    })?;
-    if let Some(composition) = composition {
-        destination.append_control(ControlEntry::SessionCompositionBound(composition))?;
-    }
-    let destination_session_id = destination.session_scope_id().to_owned();
+    let source_artifacts = {
+        destination.attach_tool_artifact_store_override(ToolArtifactStore::for_session_path(
+            &destination_path,
+        ));
+        Some(ToolArtifactStore::for_session_store(source_store))
+    };
     let destination_session_ref = SessionRef::new_relative(
         destination_path
             .file_name()
-            .ok_or_else(|| anyhow!("conversation fork destination has no file name"))?,
+            .context("conversation fork destination has no file name")?,
     )?;
+    persist_conversation_fork(
+        records,
+        source_session_ref,
+        &mut destination,
+        destination_session_ref,
+        point,
+        checkpoint,
+        source_artifacts.as_ref(),
+    )
+}
+
+fn persist_conversation_fork(
+    records: &[SessionStreamRecord],
+    source_session_ref: SessionRef,
+    destination: &mut Session,
+    destination_session_ref: SessionRef,
+    point: ConversationForkPoint,
+    checkpoint: Option<(String, String)>,
+    source_artifacts: Option<&ToolArtifactStore>,
+) -> Result<ConversationForkOutput> {
+    anyhow::ensure!(
+        records
+            .iter()
+            .all(|record| record.session_id() == point.source_session_id),
+        "conversation fork source contains mixed session identities"
+    );
+    let destination_path = destination
+        .store_path()
+        .context("conversation fork requires a durable store")?
+        .to_path_buf();
+    let destination_session_id = destination.session_scope_id().to_owned();
+    anyhow::ensure!(
+        destination_session_id != point.source_session_id,
+        "conversation fork requires a distinct destination session"
+    );
+    let composition = conversation_fork_source_composition(records)?;
+    let mut prefix = safe_prefix_for_complete_turn(records, &point)?;
+    let destination_artifacts = destination.tool_artifact_store();
+    remap_forked_tool_artifacts(
+        source_artifacts,
+        destination_artifacts.as_ref(),
+        &point.source_session_id,
+        &destination_session_id,
+        &mut prefix.messages,
+    )?;
+    let mut entries = vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: destination.provider_name().to_owned(),
+        model_name: destination.model_name().to_owned(),
+        resolved_model_route: destination.resolved_model_route().cloned(),
+    })];
+    if let Some(composition) = composition {
+        entries.push(SessionLogEntry::Control(
+            ControlEntry::SessionCompositionBound(composition),
+        ));
+    }
     let fork_id = format!(
         "conversation-fork:{}",
         stable_event_uuid(
@@ -330,28 +460,13 @@ fn create_conversation_fork(
         copied_message_count: prefix.messages.len(),
         copied_external_provenance_count: prefix.provenance.len(),
     };
-    let fork_event = destination
-        .append_durable_event(
-            DurableEventType::ConversationForked,
-            EventClass::Critical,
-            serde_json::to_value(&payload).context("failed to encode conversation fork")?,
-        )?
-        .ok_or_else(|| anyhow!("conversation fork destination is not durable"))?;
-
-    for entry in &prefix.messages {
-        match entry {
-            SessionLogEntry::ToolResultV3(result) => {
-                destination.append_tool_result_bundle(result.clone(), Vec::new())?;
-            }
-            _ => destination.append(entry.clone())?,
-        }
-    }
+    entries.extend(prefix.messages.iter().cloned());
     for provenance in prefix.provenance {
-        destination.append_external_provenance(rebind_external_provenance(
-            provenance,
-            &destination_session_id,
-        )?)?;
+        entries.push(SessionLogEntry::Control(ControlEntry::ExternalProvenance(
+            rebind_external_provenance(provenance, &destination_session_id)?,
+        )));
     }
+    let fork_event = destination.append_initial_conversation_fork(&payload, entries)?;
 
     Ok(ConversationForkOutput {
         destination_session_ref,
@@ -361,6 +476,86 @@ fn create_conversation_fork(
         copied_message_count: prefix.messages.len(),
         copied_external_provenance_count: payload.copied_external_provenance_count,
     })
+}
+
+/// Validates the copied prefix against its exact source before recovering a fork receipt.
+/// Later branch conversation remains outside this immutable creation prefix.
+///
+/// # Errors
+/// Rejects missing, altered, or partially copied messages/provenance and mismatched lineage.
+pub fn validate_conversation_fork_copy(
+    source_records: &[SessionStreamRecord],
+    destination_records: &[SessionStreamRecord],
+    forked: &ConversationForked,
+) -> Result<()> {
+    let point = ConversationForkProjection::from_records(source_records)?
+        .point(&forked.source_turn_digest)
+        .cloned()
+        .context("conversation fork source turn is no longer available")?;
+    anyhow::ensure!(
+        point.source_session_id == forked.source_session_id
+            && point.source_turn_index == forked.source_turn_index
+            && point.source_boundary_event_id == forked.source_boundary_event_id
+            && point.source_boundary_stream_sequence == forked.source_boundary_stream_sequence
+            && destination_records
+                .iter()
+                .all(|record| record.session_id() == forked.destination_session_id),
+        "conversation fork lineage differs from its exact source binding"
+    );
+    let prefix = safe_prefix_for_complete_turn(source_records, &point)?;
+    anyhow::ensure!(
+        prefix.messages.len() == forked.copied_message_count
+            && prefix.provenance.len() == forked.copied_external_provenance_count,
+        "conversation fork copy counts differ from its source prefix"
+    );
+    let mut messages = Vec::new();
+    let mut provenance = Vec::new();
+    for record in destination_records {
+        match session_entry(record)? {
+            Some(SessionLogEntry::Control(ControlEntry::ExternalProvenance(entry))) => {
+                provenance.push(entry)
+            }
+            Some(SessionLogEntry::Control(_)) | None => {}
+            Some(entry) => messages.push(entry),
+        }
+    }
+    anyhow::ensure!(
+        messages.len() >= prefix.messages.len() && provenance.len() >= prefix.provenance.len(),
+        "conversation fork destination contains an incomplete copied prefix"
+    );
+    for (mut expected, actual) in prefix.messages.into_iter().zip(messages) {
+        if let (SessionLogEntry::ToolResultV3(expected), SessionLogEntry::ToolResultV3(actual)) =
+            (&mut expected, &actual)
+            && let (
+                ToolArtifactBindingV1::Published { descriptor: source },
+                ToolArtifactBindingV1::Published { descriptor: target },
+            ) = (&expected.artifact, &actual.artifact)
+        {
+            // A copied artifact has a new opaque ref but the same complete content contract.
+            let mut descriptor = source.clone();
+            descriptor.artifact_ref = target.artifact_ref.clone();
+            descriptor.session_scope_id_hash =
+                stable_event_hash(forked.destination_session_id.as_bytes());
+            descriptor.retention_class = crate::ToolArtifactRetentionClass::SessionBound;
+            anyhow::ensure!(
+                serde_json::to_value(&descriptor)? == serde_json::to_value(target)?,
+                "conversation fork artifact binding differs from the source"
+            );
+            remap_tool_result_artifact(expected, descriptor)?;
+        }
+        anyhow::ensure!(
+            serde_json::to_value(&expected)? == serde_json::to_value(&actual)?,
+            "conversation fork copied message differs from the source prefix"
+        );
+    }
+    for (expected, actual) in prefix.provenance.into_iter().zip(provenance) {
+        let expected = rebind_external_provenance(expected, &forked.destination_session_id)?;
+        anyhow::ensure!(
+            serde_json::to_value(expected)? == serde_json::to_value(actual)?,
+            "conversation fork copied provenance differs from the source prefix"
+        );
+    }
+    Ok(())
 }
 
 /// Returns the source execution contract without inferring one for low-level unbound sources.
@@ -402,36 +597,13 @@ pub fn conversation_fork_source_composition(
     Ok(composition)
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
 fn remap_forked_tool_artifacts(
-    _source_store: &JsonlSessionStore,
-    _destination_path: &Path,
+    source_artifacts: Option<&ToolArtifactStore>,
+    destination_artifacts: Option<&ToolArtifactStore>,
+    source_session_id: &str,
+    destination_session_id: &str,
     messages: &mut [SessionLogEntry],
 ) -> Result<()> {
-    if messages.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::ToolResultV3(ToolResultRecordedV3 {
-                artifact: ToolArtifactBindingV1::Published { .. },
-                ..
-            })
-        )
-    }) {
-        bail!(
-            "conversation fork with published artifacts requires an authority-managed artifact route"
-        )
-    }
-    Ok(())
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn remap_forked_tool_artifacts(
-    source_store: &JsonlSessionStore,
-    destination_path: &Path,
-    messages: &mut [SessionLogEntry],
-) -> Result<()> {
-    let source_artifacts = ToolArtifactStore::for_session_store(source_store);
-    let destination_artifacts = ToolArtifactStore::for_session_path(destination_path);
     for entry in messages {
         let SessionLogEntry::ToolResultV3(result) = entry else {
             continue;
@@ -439,14 +611,21 @@ fn remap_forked_tool_artifacts(
         let ToolArtifactBindingV1::Published { descriptor } = &result.artifact else {
             continue;
         };
-        let descriptor =
-            destination_artifacts.fork_descriptor_from(&source_artifacts, descriptor)?;
+        let source = source_artifacts
+            .context("conversation fork source artifact capability is unavailable")?;
+        let destination = destination_artifacts
+            .context("conversation fork destination artifact capability is unavailable")?;
+        anyhow::ensure!(
+            source.session_scope_id() == source_session_id
+                && destination.session_scope_id() == destination_session_id,
+            "conversation fork artifact capability belongs to another session"
+        );
+        let descriptor = destination.fork_descriptor_from(source, descriptor)?;
         remap_tool_result_artifact(result, descriptor)?;
     }
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn remap_tool_result_artifact(
     result: &mut ToolResultRecordedV3,
     descriptor: ToolArtifactDescriptorV1,
