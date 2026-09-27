@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn eval_execution_error_does_not_claim_model_blame_or_hide_verification_failure() {
+    let failures = execution_failures(
+        ModelEvalRunExecutionStatus::ExecutionFailed,
+        VerificationVerdict::Failed,
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.kind == EvalFailureKind::Unknown)
+    );
+    assert!(
+        !failures
+            .iter()
+            .any(|failure| failure.kind == EvalFailureKind::Model)
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.kind == EvalFailureKind::VerificationFailed)
+    );
+    let completed = execution_failures(
+        ModelEvalRunExecutionStatus::Completed,
+        VerificationVerdict::Passed,
+    );
+    assert!(completed.is_empty());
+}
+
+#[test]
 fn eval_projection_preserves_failure_cancel_pause_and_interrupt() {
     for (terminal, expected) in [
         (

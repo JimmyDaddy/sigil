@@ -1,0 +1,2 @@
+The test-layout checker misses nested production modules. Fix recursive discovery, keeping external test modules allowed.
+Run the independent check command: python3 -B scripts/test-check-test-layout.py. Do not weaken or edit checks.

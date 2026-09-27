@@ -1,0 +1,2 @@
+A pending approval is hidden when the last run status is still running. Restore the user-visible approval state without changing the independent checks.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

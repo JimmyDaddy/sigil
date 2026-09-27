@@ -1,0 +1,2 @@
+Final markdown diagnostics report an attached closing fence as repaired, but the rendered source is still malformed. Repair normalization while preserving streaming bytes.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

@@ -1,0 +1,2 @@
+A prompt has no Starting feedback while the native request is pending. Repair the activity projection; keep pending approval and stopping priorities.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

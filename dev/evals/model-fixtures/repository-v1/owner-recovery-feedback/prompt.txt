@@ -1,0 +1,2 @@
+The composer stops explaining its state during owner reconciliation. Restore recovering feedback based on the actual continuity lifecycle.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

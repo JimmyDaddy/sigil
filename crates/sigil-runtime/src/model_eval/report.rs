@@ -306,7 +306,7 @@ fn build_model_eval_report_record(
         }
     }
 
-    let mut failures = execution_failures(execution, verification_verdict);
+    let mut failures = execution_failures(execution.status, verification_verdict);
     for reason in &mismatch_reasons {
         failures.push(EvalFailure::new(EvalFailureKind::Integrity, reason));
     }
@@ -390,10 +390,11 @@ fn build_model_eval_report_record(
             completion_tokens: execution.usage.completion_tokens,
             cache_hit_tokens: execution.usage.cache_hit_tokens,
             cache_miss_tokens: execution.usage.cache_miss_tokens,
-            reported_cost_microusd: execution.usage.total_cost_usd().and_then(usd_to_microusd),
+            reported_cost_microusd: execution.total_cost_usd().and_then(usd_to_microusd),
             charged_microusd: execution.charged_microusd,
             confidence: match execution.cost_confidence {
                 ModelEvalCostConfidence::Reported => ReportCostConfidence::Reported,
+                ModelEvalCostConfidence::Estimated => ReportCostConfidence::Estimated,
                 ModelEvalCostConfidence::Unknown => ReportCostConfidence::Unknown,
             },
         },
@@ -479,18 +480,20 @@ fn expected_verification_verdict(expected: ModelEvalExpectedVerification) -> Ver
 }
 
 fn execution_failures(
-    execution: &ModelEvalRunExecution,
+    status: ModelEvalRunExecutionStatus,
     verification_verdict: VerificationVerdict,
 ) -> Vec<EvalFailure> {
     let mut failures = Vec::new();
-    match execution.status {
+    match status {
         ModelEvalRunExecutionStatus::PreparationFailed => failures.push(EvalFailure::new(
             EvalFailureKind::Harness,
             "application run preparation failed",
         )),
         ModelEvalRunExecutionStatus::ExecutionFailed => failures.push(EvalFailure::new(
-            EvalFailureKind::Model,
-            "application run execution failed",
+            // Execution can fail in transport, storage, tools or runtime settlement. Without
+            // a typed cause, the status alone cannot attribute a failure to the model.
+            EvalFailureKind::Unknown,
+            "application run execution failed; cause is not classified",
         )),
         ModelEvalRunExecutionStatus::TimedOut => failures.push(EvalFailure::new(
             EvalFailureKind::Timeout,

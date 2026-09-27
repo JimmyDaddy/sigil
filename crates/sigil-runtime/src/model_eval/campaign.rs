@@ -60,6 +60,7 @@ pub struct ModelEvalIsolatedConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelEvalCostConfidence {
     Reported,
+    Estimated,
     Unknown,
 }
 
@@ -84,11 +85,14 @@ pub struct ModelEvalUsageTotals {
     pub input_cost_usd: f64,
     pub output_cost_usd: f64,
     pub usage_events: u32,
+    pub priced_usage_events: u32,
+    pub pricing_snapshot_ids: BTreeSet<String>,
     pub provider_system_fingerprints: BTreeSet<String>,
+    known_priced_cost_usd: f64,
 }
 
 impl ModelEvalUsageTotals {
-    fn record(&mut self, usage: &UsageStats) {
+    pub(super) fn record(&mut self, usage: &UsageStats) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt_tokens);
         self.completion_tokens = self
             .completion_tokens
@@ -100,6 +104,32 @@ impl ModelEvalUsageTotals {
         self.input_cost_usd += usage.input_cost;
         self.output_cost_usd += usage.output_cost;
         self.usage_events = self.usage_events.saturating_add(1);
+        let valid_snapshot = usage
+            .pricing_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.validate().is_ok());
+        if let Some(snapshot) = valid_snapshot {
+            self.pricing_snapshot_ids
+                .insert(snapshot.snapshot_id.clone());
+        }
+        let complete_prices = valid_snapshot.is_some_and(|snapshot| {
+            usage.cache_usage.as_ref().is_some_and(|cache| {
+                cache
+                    .validate_for_prompt_tokens(usage.prompt_tokens)
+                    .is_ok()
+                    && cache.read.is_some()
+                    && cache.uncached.is_some()
+                    && (cache.write.is_none() || snapshot.cache_write_per_unit.is_some())
+            })
+        });
+        let valid_costs = usage.input_cost.is_finite()
+            && usage.output_cost.is_finite()
+            && usage.input_cost >= 0.0
+            && usage.output_cost >= 0.0;
+        if valid_costs && (complete_prices || usage.input_cost > 0.0 || usage.output_cost > 0.0) {
+            self.priced_usage_events = self.priced_usage_events.saturating_add(1);
+            self.known_priced_cost_usd += usage.input_cost + usage.output_cost;
+        }
         if let Some(fingerprint) = usage
             .system_fingerprint
             .as_deref()
@@ -111,10 +141,107 @@ impl ModelEvalUsageTotals {
         }
     }
 
+    fn merge(&mut self, other: &Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.cache_hit_tokens = self.cache_hit_tokens.saturating_add(other.cache_hit_tokens);
+        self.cache_miss_tokens = self
+            .cache_miss_tokens
+            .saturating_add(other.cache_miss_tokens);
+        self.input_cost_usd += other.input_cost_usd;
+        self.output_cost_usd += other.output_cost_usd;
+        self.known_priced_cost_usd += other.known_priced_cost_usd;
+        self.usage_events = self.usage_events.saturating_add(other.usage_events);
+        self.priced_usage_events = self
+            .priced_usage_events
+            .saturating_add(other.priced_usage_events);
+        self.pricing_snapshot_ids
+            .extend(other.pricing_snapshot_ids.iter().cloned());
+        self.provider_system_fingerprints
+            .extend(other.provider_system_fingerprints.iter().cloned());
+    }
+
     #[must_use]
-    pub fn total_cost_usd(&self) -> Option<f64> {
+    pub(super) fn priced_usage_total_usd(&self) -> Option<f64> {
         let total = self.input_cost_usd + self.output_cost_usd;
-        (self.usage_events > 0 && total.is_finite() && total >= 0.0).then_some(total)
+        (self.usage_events > 0
+            && self.priced_usage_events == self.usage_events
+            && total.is_finite()
+            && total >= 0.0)
+            .then_some(total)
+    }
+
+    /// The known priced subset only; never a claim that every request was measured.
+    #[must_use]
+    pub fn known_usage_cost_usd(&self) -> Option<f64> {
+        (self.priced_usage_events > 0 && self.known_priced_cost_usd.is_finite())
+            .then_some(self.known_priced_cost_usd)
+    }
+}
+
+/// Exact durable-attempt coverage of the observed usage, not billing authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ModelEvalUsageCoverage {
+    pub observed: bool,
+    pub physical_attempts: usize,
+    pub attempts_with_usage: usize,
+    pub confirmed_no_model_consumption_attempts: usize,
+    pub missing_usage_attempts: usize,
+    pub unterminated_attempts: usize,
+    pub incomplete_attempts: usize,
+    pub unassociated_usage_events: usize,
+    pub observation_error: Option<String>,
+}
+
+impl ModelEvalUsageCoverage {
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.observed
+            && self.physical_attempts > 0
+            && self.missing_usage_attempts == 0
+            && self.unterminated_attempts == 0
+            && self.incomplete_attempts == 0
+            && self.unassociated_usage_events == 0
+            && self.observation_error.is_none()
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.observed &= other.observed;
+        self.physical_attempts += other.physical_attempts;
+        self.attempts_with_usage += other.attempts_with_usage;
+        self.confirmed_no_model_consumption_attempts +=
+            other.confirmed_no_model_consumption_attempts;
+        self.missing_usage_attempts += other.missing_usage_attempts;
+        self.unterminated_attempts += other.unterminated_attempts;
+        self.incomplete_attempts += other.incomplete_attempts;
+        self.unassociated_usage_events += other.unassociated_usage_events;
+        if self.observation_error.is_none() {
+            self.observation_error.clone_from(&other.observation_error);
+        }
+    }
+
+    pub(super) fn cost_usd(&self, usage: &ModelEvalUsageTotals) -> Option<f64> {
+        if !self.is_complete() {
+            return None;
+        }
+        if self.physical_attempts == self.confirmed_no_model_consumption_attempts
+            && usage.usage_events == 0
+        {
+            return Some(0.0);
+        }
+        usage.priced_usage_total_usd()
+    }
+
+    fn confidence(&self, usage: &ModelEvalUsageTotals) -> ModelEvalCostConfidence {
+        if self.cost_usd(usage).is_none() {
+            ModelEvalCostConfidence::Unknown
+        } else if usage.pricing_snapshot_ids.is_empty() {
+            ModelEvalCostConfidence::Reported
+        } else {
+            ModelEvalCostConfidence::Estimated
+        }
     }
 }
 
@@ -137,12 +264,23 @@ pub struct ModelEvalRunExecution {
     pub output: Option<ApplicationRunOutput>,
     pub usage: ModelEvalUsageTotals,
     pub cost_confidence: ModelEvalCostConfidence,
+    pub usage_coverage: ModelEvalUsageCoverage,
+    durable_sequence: Option<u64>,
     pub charged_microusd: u64,
     pub wall_time: Duration,
     pub public_event_count: u64,
     pub safe_error: Option<String>,
     pub verification: Option<ModelEvalVerificationExecution>,
     pub materialized_fixture: MaterializedModelEvalFixture,
+    pub turns: Vec<super::ModelEvalTurnTrace>,
+}
+
+impl ModelEvalRunExecution {
+    /// Complete observed request cost only; an incomplete request remains unknown.
+    #[must_use]
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        self.usage_coverage.cost_usd(&self.usage)
+    }
 }
 
 /// Aggregate raw execution output before verification/report acceptance.
@@ -331,19 +469,25 @@ pub async fn run_model_eval_campaign(
     services: &ApplicationRunServices,
 ) -> Result<ModelEvalCampaignExecution> {
     let started_at_unix_ms = unix_time_ms()?;
-    let (fixtures, orchestration_corpus_digest) = preflight_campaign(&request)?;
+    let (request, fixtures, orchestration_corpus_digest, output_dir) =
+        tokio::task::spawn_blocking(move || {
+            let (fixtures, digest) = preflight_campaign(&request)?;
+            let output_dir = if let Some(owner) = request.release_output_owner.as_deref() {
+                owner.prepare_tree_root(&request.output_dir)?;
+                request.output_dir.clone()
+            } else {
+                create_campaign_output_dir(&request.output_dir)?
+            };
+            Ok::<_, anyhow::Error>((request, fixtures, digest, output_dir))
+        })
+        .await
+        .context("model eval preflight worker failed")??;
     let planned_runs = fixtures
         .len()
         .checked_mul(request.repetitions as usize)
         .context("model eval planned run count overflowed")?;
     let reservation_microusd_per_run =
         model_eval_reservation_microusd(request.max_cost_microusd, planned_runs)?;
-    let output_dir = if let Some(owner) = request.release_output_owner.as_deref() {
-        owner.prepare_tree_root(&request.output_dir)?;
-        request.output_dir.clone()
-    } else {
-        create_campaign_output_dir(&request.output_dir)?
-    };
     let campaign_id = format!("model-eval-{}", uuid::Uuid::new_v4());
     let deadline = Instant::now()
         .checked_add(request.campaign_timeout)
@@ -354,12 +498,19 @@ pub async fn run_model_eval_campaign(
     for fixture in fixtures {
         for repetition in 1..=request.repetitions {
             let run_root = output_dir.join(format!("{}-{repetition}", fixture.manifest.id));
-            fs::create_dir(&run_root)
-                .with_context(|| format!("failed to create {}", run_root.display()))?;
-            let materialized =
-                materialize_model_eval_fixture(&fixture, run_root.join("workspace"))?;
-            let isolated =
-                write_isolated_model_eval_config(&request.config_path, &materialized, &run_root)?;
+            let fixture = fixture.clone();
+            let source_config = request.config_path.clone();
+            let (fixture, materialized, isolated) = tokio::task::spawn_blocking(move || {
+                fs::create_dir(&run_root)
+                    .with_context(|| format!("failed to create {}", run_root.display()))?;
+                let materialized =
+                    materialize_model_eval_fixture(&fixture, run_root.join("workspace"))?;
+                let isolated =
+                    write_isolated_model_eval_config(&source_config, &materialized, &run_root)?;
+                Ok::<_, anyhow::Error>((fixture, materialized, isolated))
+            })
+            .await
+            .context("model eval fixture materialization worker failed")??;
             let run_id = format!("{}-{}-{repetition}", campaign_id, fixture.manifest.id);
 
             if Instant::now() >= deadline
@@ -400,7 +551,7 @@ pub async fn run_model_eval_campaign(
             if execution.status != ModelEvalRunExecutionStatus::PreparationFailed {
                 let actual = execution
                     .usage
-                    .total_cost_usd()
+                    .known_usage_cost_usd()
                     .and_then(usd_to_microusd)
                     .unwrap_or(reservation_microusd_per_run);
                 execution.charged_microusd = actual.max(reservation_microusd_per_run);
@@ -422,13 +573,15 @@ pub async fn run_model_eval_campaign(
         orchestration_corpus_digest,
         runs,
     };
-    if let Some(owner) = request.release_output_owner.as_deref() {
-        super::write_model_eval_campaign_report_with_owner(&campaign, Some(owner))?;
-    } else {
-        super::write_model_eval_campaign_report(&campaign)?;
-    }
-    sync_directory(&campaign.output_dir)?;
-    Ok(campaign)
+    tokio::task::spawn_blocking(move || {
+        let owner = request.release_output_owner.as_deref();
+        super::write_model_eval_campaign_report_with_owner(&campaign, owner)?;
+        super::trajectory::write_campaign_trajectory(&campaign, owner)?;
+        sync_directory(&campaign.output_dir)?;
+        Ok(campaign)
+    })
+    .await
+    .context("model eval report worker failed")?
 }
 
 fn model_eval_run_services(
@@ -683,172 +836,306 @@ async fn execute_model_eval_run(
     fixture: &MaterializedModelEvalFixture,
     repetition: u32,
     run_id: String,
-    isolated: ModelEvalIsolatedConfig,
+    mut isolated: ModelEvalIsolatedConfig,
     timeout: Duration,
     services: &ApplicationRunServices,
 ) -> ModelEvalRunExecution {
     let started = Instant::now();
-    // Model-eval is a production application-run driver, so it must perform the same authority
-    // boot and exact workspace registration as the shipping CLI/HTTP/TUI surfaces before a
-    // managed file tool can plan or execute. The isolated run root gives this repetition its
-    // own durable authority state and state namespace.
-    let services = match crate::r71_authority_composition::attach_boot_authority_to_services(
-        services.clone(),
-        &isolated.config_path,
-        &fixture.workspace_root,
-    ) {
-        Ok(services) => services,
-        Err(_) => {
-            return base_execution(
-                fixture,
-                repetition,
-                run_id,
-                isolated,
-                ModelEvalRunExecutionStatus::PreparationFailed,
-                started.elapsed(),
-                Some("model eval authority boot failed before provider dispatch".to_owned()),
-            );
+    let mut usage = ModelEvalUsageTotals::default();
+    let mut coverage: Option<ModelEvalUsageCoverage> = None;
+    let mut durable_sequence = Some(0);
+    let mut event_count = 0_u64;
+    let mut turns = Vec::new();
+    let prompts = std::iter::once(&fixture.prompt).chain(&fixture.followup_prompts);
+    let mut result = None;
+    for (index, prompt) in prompts.enumerate() {
+        let mut turn_fixture = fixture.clone();
+        turn_fixture.prompt.clone_from(prompt);
+        turn_fixture.followup_prompts.clear();
+        let turn_id = if index == 0 {
+            run_id.clone()
+        } else {
+            format!("{run_id}-turn-{}", index + 1)
+        };
+        let timings_before = sigil_kernel::run_diagnostics::run_timing_snapshot();
+        let mut current = execute_model_eval_turn(
+            &turn_fixture,
+            repetition,
+            turn_id,
+            isolated.clone(),
+            timeout.saturating_sub(started.elapsed()),
+            services,
+            index == fixture.followup_prompts.len(),
+            durable_sequence,
+        )
+        .await;
+        let timings_after = sigil_kernel::run_diagnostics::run_timing_snapshot();
+        usage.merge(&current.usage);
+        match &mut coverage {
+            Some(coverage) => coverage.merge(&current.usage_coverage),
+            None => coverage = Some(current.usage_coverage.clone()),
         }
-    };
-    let mut request = ApplicationRunRequest::non_interactive(
-        &isolated.config_path,
-        &fixture.workspace_root,
-        fixture.prompt.clone(),
-        run_id.clone(),
-    );
-    request.session_path = Some(isolated.session_path.clone());
-    let request = request.with_constraints(ApplicationRunConstraints {
-        max_turns: fixture.max_turns as usize,
-        max_output_tokens: fixture.max_output_tokens,
-        tool_scope: fixture.tool_scope.clone(),
-    });
-    let prepared = match prepare_application_run(request, &services).await {
-        Ok(prepared) => prepared,
-        Err(_) => {
-            return base_execution(
-                fixture,
-                repetition,
-                run_id,
-                isolated,
-                ModelEvalRunExecutionStatus::PreparationFailed,
-                started.elapsed(),
-                Some("application run preparation failed before provider dispatch".to_owned()),
-            );
-        }
-    };
-    // Current-schema boot may redirect the requested session path to an authority-managed leaf;
-    // carry the admitted physical session path into verification and reporting instead of
-    // reopening the pre-admission request path.
-    let session_path = prepared.session_log_path().to_path_buf();
-    let (execution, control) = prepared.into_parts();
-    let mut events = ModelEvalEventRecorder::default();
-    let mut approvals = AutoApproveHandler;
-    let mut future = Box::pin(execution.execute(&mut events, &mut approvals));
-    let mut status = ModelEvalRunExecutionStatus::Completed;
-    let mut output = None;
-    let mut safe_error = None;
-    let mut cancellation_ticket = None;
-    let mut execution_joined = true;
-
-    match tokio::time::timeout(timeout, future.as_mut()).await {
-        Ok(Ok(run_output)) => output = Some(run_output),
-        Ok(Err(_)) => {
-            status = ModelEvalRunExecutionStatus::ExecutionFailed;
-            safe_error = Some("application run execution failed".to_owned());
-        }
-        Err(_) => {
-            status = ModelEvalRunExecutionStatus::TimedOut;
-            safe_error = Some("application run exceeded the campaign deadline".to_owned());
-            match control.request_cancellation(
-                "model eval campaign deadline reached",
-                Some(MODEL_EVAL_CANCELLATION_TIMEOUT),
-                || {},
-            ) {
-                Ok(ticket) => cancellation_ticket = Some(ticket),
-                Err(error) => cancellation_ticket = error.into_ticket(),
-            }
-            let join_timeout = cancellation_ticket
-                .as_ref()
-                .map_or(MODEL_EVAL_CANCELLATION_TIMEOUT, |ticket| {
-                    ticket.remaining_timeout()
-                });
-            match tokio::time::timeout(join_timeout, future.as_mut()).await {
-                Ok(Ok(run_output)) => output = Some(run_output),
-                Ok(Err(_)) => {}
-                Err(_) => execution_joined = false,
-            }
+        durable_sequence = current.durable_sequence;
+        event_count = event_count.saturating_add(current.public_event_count);
+        turns.push(super::ModelEvalTurnTrace::from_execution(
+            index + 1,
+            &current,
+            &timings_before,
+            &timings_after,
+        ));
+        isolated.session_path = current.session_path.clone();
+        let may_continue = current.status == ModelEvalRunExecutionStatus::Completed
+            && current.output.as_ref().is_some_and(|output| {
+                output.terminal_status
+                    == crate::application_run::ApplicationRunTerminalStatus::Succeeded
+            });
+        current.materialized_fixture = fixture.clone();
+        result = Some(current);
+        if !may_continue || started.elapsed() >= timeout {
+            break;
         }
     }
-    drop(future);
-    if let Some(ticket) = cancellation_ticket
-        && control
-            .finalize_cancellation(ticket, execution_joined, &mut events)
-            .await
-            .is_err()
+    let mut result = result.expect("every fixture has an initial prompt");
+    if turns.len() <= fixture.followup_prompts.len()
+        && result.status == ModelEvalRunExecutionStatus::Completed
+        && started.elapsed() >= timeout
     {
-        status = ModelEvalRunExecutionStatus::ExecutionFailed;
-        safe_error = Some("application run cancellation could not be audited".to_owned());
+        result.status = ModelEvalRunExecutionStatus::TimedOut;
+        result.safe_error =
+            Some("campaign deadline reached before all fixed user turns".to_owned());
     }
+    result.run_id = run_id;
+    result.usage = usage;
+    result.usage_coverage = coverage.unwrap_or_default();
+    result.cost_confidence = result.usage_coverage.confidence(&result.usage);
+    result.public_event_count = event_count;
+    result.wall_time = started.elapsed();
+    result.turns = turns;
+    result
+}
 
-    let verification = if status == ModelEvalRunExecutionStatus::Completed {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        match tokio::time::timeout(
-            remaining,
-            super::verify_model_eval_run(
+#[allow(clippy::too_many_arguments)]
+fn execute_model_eval_turn<'a>(
+    fixture: &'a MaterializedModelEvalFixture,
+    repetition: u32,
+    run_id: String,
+    isolated: ModelEvalIsolatedConfig,
+    timeout: Duration,
+    services: &'a ApplicationRunServices,
+    verify_final: bool,
+    after_sequence: Option<u64>,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = ModelEvalRunExecution> + 'a>> {
+    // Construct this large run future outside the campaign/case poll frames so the
+    // shared preparation state is not repeatedly materialized on ordinary worker stacks.
+    Box::pin(async move {
+        let started = Instant::now();
+        // Model-eval is a production application-run driver, so it must perform the same authority
+        // boot and exact workspace registration as the shipping CLI/HTTP/TUI surfaces before a
+        // managed file tool can plan or execute. The isolated run root gives this repetition its
+        // own durable authority state and state namespace.
+        let boot_services = services.clone();
+        let config_path = isolated.config_path.clone();
+        let workspace_root = fixture.workspace_root.clone();
+        let services = match tokio::task::spawn_blocking(move || {
+            crate::r71_authority_composition::attach_boot_authority_to_services(
+                boot_services,
+                &config_path,
+                &workspace_root,
+            )
+        })
+        .await
+        {
+            Ok(Ok(services)) => services,
+            Ok(Err(_)) | Err(_) => {
+                return base_execution(
+                    fixture,
+                    repetition,
+                    run_id,
+                    isolated,
+                    ModelEvalRunExecutionStatus::PreparationFailed,
+                    started.elapsed(),
+                    Some("model eval authority boot failed before provider dispatch".to_owned()),
+                );
+            }
+        };
+        let mut request = ApplicationRunRequest::non_interactive(
+            &isolated.config_path,
+            &fixture.workspace_root,
+            fixture.prompt.clone(),
+            run_id.clone(),
+        );
+        request.session_path = Some(isolated.session_path.clone());
+        let request = request.with_constraints(ApplicationRunConstraints {
+            max_turns: fixture.max_turns as usize,
+            max_output_tokens: fixture.max_output_tokens,
+            tool_scope: fixture.tool_scope.clone(),
+        });
+        let prepared = match prepare_application_run(request, &services).await {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                return base_execution(
+                    fixture,
+                    repetition,
+                    run_id,
+                    isolated,
+                    ModelEvalRunExecutionStatus::PreparationFailed,
+                    started.elapsed(),
+                    Some("application run preparation failed before provider dispatch".to_owned()),
+                );
+            }
+        };
+        // Current-schema boot may redirect the requested session path to an authority-managed leaf;
+        // carry the admitted physical session path into verification and reporting instead of
+        // reopening the pre-admission request path.
+        let session_path = prepared.session_log_path().to_path_buf();
+        let session_scope = prepared.session_id().to_owned();
+        let reader = prepared.session_projection_owner().read_handle();
+        let (execution, control) = prepared.into_parts();
+        let mut events = ModelEvalEventRecorder::default();
+        let mut approvals = AutoApproveHandler;
+        let mut future = Box::pin(execution.execute(&mut events, &mut approvals));
+        let mut status = ModelEvalRunExecutionStatus::Completed;
+        let mut output = None;
+        let mut safe_error = None;
+        let mut cancellation_ticket = None;
+        let mut execution_joined = true;
+
+        match tokio::time::timeout(timeout.saturating_sub(started.elapsed()), future.as_mut()).await
+        {
+            Ok(Ok(run_output)) => output = Some(run_output),
+            Ok(Err(_)) => {
+                status = ModelEvalRunExecutionStatus::ExecutionFailed;
+                safe_error = Some("application run execution failed".to_owned());
+            }
+            Err(_) => {
+                status = ModelEvalRunExecutionStatus::TimedOut;
+                safe_error = Some("application run exceeded the campaign deadline".to_owned());
+                match control.request_cancellation(
+                    "model eval campaign deadline reached",
+                    Some(MODEL_EVAL_CANCELLATION_TIMEOUT),
+                    || {},
+                ) {
+                    Ok(ticket) => cancellation_ticket = Some(ticket),
+                    Err(error) => cancellation_ticket = error.into_ticket(),
+                }
+                let join_timeout = cancellation_ticket
+                    .as_ref()
+                    .map_or(MODEL_EVAL_CANCELLATION_TIMEOUT, |ticket| {
+                        ticket.remaining_timeout()
+                    });
+                match tokio::time::timeout(join_timeout, future.as_mut()).await {
+                    Ok(Ok(run_output)) => output = Some(run_output),
+                    Ok(Err(_)) => {}
+                    Err(_) => execution_joined = false,
+                }
+            }
+        }
+        drop(future);
+        if let Some(ticket) = cancellation_ticket
+            && control
+                .finalize_cancellation(ticket, execution_joined, &mut events)
+                .await
+                .is_err()
+        {
+            status = ModelEvalRunExecutionStatus::ExecutionFailed;
+            safe_error = Some("application run cancellation could not be audited".to_owned());
+        }
+
+        let verification = if verify_final && status == ModelEvalRunExecutionStatus::Completed {
+            match super::verification::verify_model_eval_run_with_deadline(
                 fixture,
                 &isolated.config_path,
                 &session_path,
                 &isolated.provider,
                 &isolated.model,
                 &run_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(verification)) => Some(verification),
-            Ok(Err(_)) => {
-                safe_error =
-                    Some("fixture verification could not produce durable evidence".to_owned());
-                None
+                started.checked_add(timeout),
+            )
+            .await
+            {
+                Ok(verification) => Some(verification),
+                Err(_) => {
+                    safe_error =
+                        Some("fixture verification could not produce durable evidence".to_owned());
+                    None
+                }
             }
-            Err(_) => {
-                safe_error = Some("fixture verification exceeded the campaign deadline".to_owned());
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let cost_confidence = if events.usage.total_cost_usd().is_some() {
-        ModelEvalCostConfidence::Reported
-    } else {
-        ModelEvalCostConfidence::Unknown
-    };
-    ModelEvalRunExecution {
-        fixture_id: fixture.fixture_id.clone(),
-        repetition,
-        run_id,
-        workspace_root: fixture.workspace_root.clone(),
-        config_path: isolated.config_path,
-        config_digest: isolated.config_digest,
-        isolated_config_digest: isolated.isolated_config_digest,
-        session_path,
-        manifest_digest: fixture.manifest_digest.clone(),
-        tree_digest: fixture.tree_digest.clone(),
-        provider: isolated.provider,
-        model: isolated.model,
-        status,
-        output,
-        usage: events.usage,
-        cost_confidence,
-        charged_microusd: 0,
-        wall_time: started.elapsed(),
-        public_event_count: events.event_count,
-        safe_error,
-        verification,
-        materialized_fixture: fixture.clone(),
-    }
+        if status == ModelEvalRunExecutionStatus::Completed && started.elapsed() >= timeout {
+            status = ModelEvalRunExecutionStatus::TimedOut;
+            safe_error = Some("fixture verification reached the campaign deadline".to_owned());
+        }
+
+        // Observation cannot change execution, cancellation, or acceptance. Keep ownership of
+        // the bounded read worker until it returns, and mark unavailable evidence as unknown.
+        let observed_usage = events.usage.clone();
+        let observation = tokio::task::spawn_blocking(move || {
+            let records = reader.read_event_records()?;
+            let end = records
+                .last()
+                .map(|record| record.stored_event().stream_sequence);
+            let coverage = after_sequence
+                .context("previous usage boundary unavailable")
+                .and_then(|after| {
+                    super::trajectory::observe_usage_coverage(
+                        &records,
+                        &session_scope,
+                        after,
+                        &observed_usage,
+                    )
+                });
+            Ok::<_, anyhow::Error>((coverage, end))
+        })
+        .await;
+        let (usage_coverage, durable_sequence) = match observation {
+            Ok(Ok((Ok(coverage), end))) => (coverage, end),
+            Ok(Ok((Err(_), end))) => (
+                ModelEvalUsageCoverage {
+                    observation_error: Some("durable usage association unavailable".into()),
+                    ..ModelEvalUsageCoverage::default()
+                },
+                end,
+            ),
+            Ok(Err(_)) | Err(_) => (
+                ModelEvalUsageCoverage {
+                    observation_error: Some("durable usage observation unavailable".into()),
+                    ..ModelEvalUsageCoverage::default()
+                },
+                None,
+            ),
+        };
+        let cost_confidence = usage_coverage.confidence(&events.usage);
+        ModelEvalRunExecution {
+            fixture_id: fixture.fixture_id.clone(),
+            repetition,
+            run_id,
+            workspace_root: fixture.workspace_root.clone(),
+            config_path: isolated.config_path,
+            config_digest: isolated.config_digest,
+            isolated_config_digest: isolated.isolated_config_digest,
+            session_path,
+            manifest_digest: fixture.manifest_digest.clone(),
+            tree_digest: fixture.tree_digest.clone(),
+            provider: isolated.provider,
+            model: isolated.model,
+            status,
+            output,
+            usage: events.usage,
+            cost_confidence,
+            usage_coverage,
+            durable_sequence,
+            charged_microusd: 0,
+            wall_time: started.elapsed(),
+            public_event_count: events.event_count,
+            safe_error,
+            verification,
+            materialized_fixture: fixture.clone(),
+            turns: Vec::new(),
+        }
+    })
 }
 
 fn base_execution(
@@ -877,12 +1164,15 @@ fn base_execution(
         output: None,
         usage: ModelEvalUsageTotals::default(),
         cost_confidence: ModelEvalCostConfidence::Unknown,
+        usage_coverage: ModelEvalUsageCoverage::default(),
+        durable_sequence: None,
         charged_microusd: 0,
         wall_time,
         public_event_count: 0,
         safe_error,
         verification: None,
         materialized_fixture: fixture.clone(),
+        turns: Vec::new(),
     }
 }
 
@@ -957,3 +1247,7 @@ fn unix_time_ms() -> Result<u64> {
         .context("system clock is before Unix epoch")?;
     Ok(elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
 }
+
+#[cfg(test)]
+#[path = "../tests/model_eval_cost_tests.rs"]
+mod cost_tests;

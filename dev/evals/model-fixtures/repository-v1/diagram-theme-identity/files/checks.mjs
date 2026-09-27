@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {clearDiagramCache,diagramCacheKey,readDiagramCache,writeDiagramCache} from './apps/desktop/src/markdown/renderCache.ts';
+assert.notEqual(diagramCacheKey('graph A','light'),diagramCacheKey('graph A','dark'));
+assert.equal(diagramCacheKey('graph A','light'),diagramCacheKey('graph A','light'));
+clearDiagramCache();
+for(let i=0;i<64;i++)writeDiagramCache(String(i),{svg:String(i),diagramType:'flowchart'});
+assert.equal(readDiagramCache('0').svg,'0');
+writeDiagramCache('64',{svg:'64',diagramType:'flowchart'});
+assert.equal(readDiagramCache('1'),undefined);
+assert.equal(readDiagramCache('0').svg,'0');
+clearDiagramCache(); assert.equal(readDiagramCache('0'),undefined);

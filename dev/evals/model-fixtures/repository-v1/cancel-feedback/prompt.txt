@@ -1,0 +1,2 @@
+An acknowledged cancel request is displayed as running. Restore stopping feedback while retaining normal idle and active states.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

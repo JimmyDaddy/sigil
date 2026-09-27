@@ -1,0 +1,2 @@
+Streaming markdown mutates incomplete content before completion. Preserve append-only streaming content while retaining final repair.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

@@ -1,0 +1,194 @@
+{
+  "source_repository": "https://github.com/JimmyDaddy/sigil",
+  "source_commit": "9346771d139f15fe5d7c997521e64373ddfdb917",
+  "kind": "frozen-real-source-subset-with-controlled-regressions",
+  "not_claimed": [
+    "historical issue benchmark",
+    "full repository tasks",
+    "general coding success rate"
+  ],
+  "cases": [
+    {
+      "case": "package-identity",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-touched-packages.py"
+      ],
+      "fixture_sha256": "sha256:bef9ca990156009f097a2dc6cde18acc14f2d1c8d724fdf180a11ec4a074e41b"
+    },
+    {
+      "case": "nested-package-owner",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-touched-packages.py"
+      ],
+      "fixture_sha256": "sha256:189aad70bfee09f905e75a4c0cd70af8f6625cbe855e1086b59d51e00c7d641b"
+    },
+    {
+      "case": "workspace-lock-expansion",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-touched-packages.py"
+      ],
+      "fixture_sha256": "sha256:4baa303fb3e6b6c166b79819cbc1cc66aefd9669a3c52f2ea5cd0ae94504905a"
+    },
+    {
+      "case": "external-package-filter",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-touched-packages.py"
+      ],
+      "fixture_sha256": "sha256:ee2c22c17d200e0b60443a5879a433634c995fcae690f486f00d00e17c277078"
+    },
+    {
+      "case": "relative-path-validation",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-touched-packages.py"
+      ],
+      "fixture_sha256": "sha256:8bf7370c14a24c1b36f471803a13985a160ae31600cff5f8b511b283b5494881"
+    },
+    {
+      "case": "nested-test-discovery",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-test-layout.py"
+      ],
+      "fixture_sha256": "sha256:b4844f48018274ce3e465330db140184639bd3ba8454d66767b018e5812ce2ae"
+    },
+    {
+      "case": "physical-test-file-layout",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-test-layout.py"
+      ],
+      "fixture_sha256": "sha256:e919a3fe5bf686dad3fd5d274b4059e419dd519b9e012b6a950bdf6ab9e5cc67"
+    },
+    {
+      "case": "inline-test-indent",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "scripts/check-test-layout.py"
+      ],
+      "fixture_sha256": "sha256:b64c398dd12940281e3ce5621b61b50b32397a0e981425420713b48ca5878ac9"
+    },
+    {
+      "case": "prompt-feedback",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/conversation/composerActivity.ts"
+      ],
+      "fixture_sha256": "sha256:bb0eafa047b5777108901ab97c55403542e2edf3a07f8db41848efd9ca474858"
+    },
+    {
+      "case": "approval-visibility",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/conversation/composerActivity.ts"
+      ],
+      "fixture_sha256": "sha256:5170c0fc73f3f61d6ddcfda9ba6c9f5f5232a4794f113efa7f7272902cca14a8"
+    },
+    {
+      "case": "cancel-feedback",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/conversation/composerActivity.ts"
+      ],
+      "fixture_sha256": "sha256:a76fb9939843624967dd603407068871c63f8958d33b6db043025254873e1f84"
+    },
+    {
+      "case": "owner-recovery-feedback",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/conversation/composerActivity.ts"
+      ],
+      "fixture_sha256": "sha256:282eb2fef9fe2d1a86b5382b9eda9c5f0ff674776fcf6f7dca8692dc0ee1778d"
+    },
+    {
+      "case": "markdown-unicode-offsets",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/normalize.ts"
+      ],
+      "fixture_sha256": "sha256:8836a5aa26c9163e14d59715a95a0a21ec9fd5911876a4ddccb1698e19257fe3"
+    },
+    {
+      "case": "attached-markdown-fence",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/normalize.ts"
+      ],
+      "fixture_sha256": "sha256:e9db1c42786402ff5e748f20af57e88fb9c9ac5a9c943562de0cbd989a298956"
+    },
+    {
+      "case": "streaming-markdown-stability",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/normalize.ts"
+      ],
+      "fixture_sha256": "sha256:58f479a04169757e0c04c3c8362c48beedacaf073e255ffa412296ea8e0a93b8"
+    },
+    {
+      "case": "diagram-cache-recency",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/renderCache.ts"
+      ],
+      "fixture_sha256": "sha256:5c11e5c38ae9c5c4601046a686f1a1360cb244a01fe65b6b35fe9e17bda69d61"
+    },
+    {
+      "case": "diagram-theme-identity",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/renderCache.ts"
+      ],
+      "fixture_sha256": "sha256:c5c770d617360aa5dc13a4a6780f78b3997eed1d03dd7eb1db38ca7a34f1d917"
+    },
+    {
+      "case": "provider-failure-cache",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/settings/providerCatalogCache.ts"
+      ],
+      "fixture_sha256": "sha256:7f3a9a3ef90413a34afcd2a95b423f3eccdf573b8ec5e9742c12955b223ad69f"
+    },
+    {
+      "case": "continued-feedback-repair",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/features/conversation/composerActivity.ts",
+        "apps/desktop/src/statusPresentation.ts"
+      ],
+      "fixture_sha256": "sha256:f17346e4f85586e30dc2c9ea286d82668836de7934e8c1442457e9d4b8d6e857"
+    },
+    {
+      "case": "continued-cache-isolation",
+      "faulty_exit": 1,
+      "pristine_exit": 0,
+      "source_paths": [
+        "apps/desktop/src/markdown/renderCache.ts",
+        "apps/desktop/src/features/settings/providerCatalogCache.ts"
+      ],
+      "fixture_sha256": "sha256:c845ed7a001a4e6b435d574a4391f1f6c3652309eff8bdf869e5577881682f1c"
+    }
+  ]
+}

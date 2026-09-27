@@ -1,0 +1,34 @@
+schema_version = 1
+id = "repo-physical-test-file-layout"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:1ac3baa174d3d843f71b860b350f9c5deb602e30bc5594fbdd1b962655fee3a0"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "scripts/test-check-test-layout.py"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "scripts/check-test-layout.py"
+source = "files/scripts/check-test-layout.py"
+sha256 = "sha256:f4e22e526e4ef4362084b566c7c2c0531b89f9f39eb7c19ca9302dfeb386d6a8"
+
+[[files]]
+path = "scripts/test-check-test-layout.py"
+source = "files/scripts/test-check-test-layout.py"
+sha256 = "sha256:744f1bb6a52a47b0333e0d24b9b8b99bbac08e87a602df2becd4c8d637a771ec"
+
+[[checks]]
+id = "independent-regression"
+command = ["python3", "-B", "scripts/test-check-test-layout.py"]
+timeout_ms = 30000

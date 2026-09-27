@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {resolveComposerActivityState as resolve} from './apps/desktop/src/features/conversation/composerActivity.ts';
+const idle={active:false,submitting:false,controlBusy:false,approvalPending:false,continuityLifecycle:'idle'};
+assert.equal(resolve(idle),undefined);
+assert.equal(resolve({...idle,submitting:true}),'starting');
+assert.equal(resolve({...idle,active:true,approvalPending:true,runStatus:'running'}),'waiting_for_approval');
+assert.equal(resolve({...idle,active:true,runStatus:'cancel_requested'}),'stopping');
+assert.equal(resolve({...idle,continuityLifecycle:'checking_owner'}),'recovering');
+assert.equal(resolve({...idle,active:true,streamState:'reconnecting'}),'reconnecting');
+import {presentComposerActivity,presentRunStatus} from './apps/desktop/src/statusPresentation.ts';
+const t=(key)=>key;
+assert.equal(presentComposerActivity('starting',t).status,'loading');
+assert.equal(presentComposerActivity('starting',t).label,'composerActivityStarting');
+assert.equal(presentRunStatus('execution_uncertain',t).status,'uncertain');
+assert.equal(presentRunStatus('cancel_requested',t).status,'waiting');

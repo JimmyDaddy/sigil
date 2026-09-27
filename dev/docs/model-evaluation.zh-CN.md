@@ -142,6 +142,28 @@ reference 替换为 environment reference，并且不会把 connection label、c
 PTY/session/model artifact 只保留在显式选择且已忽略的本地 output。Aggregate budget 仍只是准入
 与记账限制，不能充当已经发出请求的 provider-side billing cap。
 
+## 固定仓库回归与同会话多轮
+
+`dev/evals/model-fixtures/repository-v1` 固定 20 个来自真实仓库模块的故障注入任务。
+来源提交、文件与检查 hash 写入材料；这类受控源码子集回归不能推导完整仓库历史 issue 的通用成功率。
+
+schema 1 可选 `[[followup_prompts]]`，每项包含 `prompt_file` 与 `prompt_sha256`，不额外限制轮数。
+初始和后续 prompt 与工作区文件共用已有的 1 MiB fixture 源码总预算，每条 prompt 仍限 16 KiB。
+初始 prompt 与后续固定用户 turn 使用同一实际准入的 session，每轮有独立 run ID；前轮真实
+join 且终态 completed 才提交下一轮。输入等待、取消、失败不自动继续，全部轮次共享本案例的
+campaign 剩余期限。独立检查与断言在最后一轮后验收，并同时检查此前要求的结果。
+
+fixture 的 `checks.command` 是显式可信的 direct argv，不再限制为两条 Cargo 命令；Python、
+Node 等使用相同 managed verification、真实执行 receipt 和源码前后快照。argv 有数量、大小与
+NUL 边界，不拼接 shell。`allowed_tools` 必须显式列出，实际是否注册仍由生产 registry 校验，
+不使用固定六工具名单。检查材料的 hash 在加载时确认，`file_unchanged` 独立断言会拒绝模型
+改写检查文件后制造的通过；assistant final 不能替代这些证据。评测 deadline 收窄原检查进程的
+有限 timeout，并等待真实执行结果，不通过丢弃 verification future 终止等待。
+
+新旧 engine 对照必须使用相同 fixture 和评测 harness，单独记录 engine commit、harness patch
+SHA、binary SHA、模型、权限、工具和任务顺序。如果旧 engine 应用了新评测 harness，不能将其
+描述为完全未修改的旧 binary。消融要记录实际结果与 retain/remove 理由，不能用源码推测代替。
+
 ## 产物
 
 output directory 只创建一次，包含：
@@ -149,7 +171,21 @@ output directory 只创建一次，包含：
 - `results.jsonl`：schema V3 source of truth，每次 repetition 一条记录；
 - `manifest.json`：campaign 计数、成本与精确 trend bucket；
 - `summary.md`：供人阅读的 projection；
+- `trajectory.jsonl`：固定各轮的 run ID、终态、用量/缓存、价格来源、durable provider/tool/check 轨迹，以及预算预留/记账；
+- `<fixture>-<repetition>.patch`：声明文件和审计发现的修改文件的实际 UTF-8 unified diff，侧表保留 before/after hash；二进制、超界或不可读取明确标记，不能声称完整；
 - 每次 run 的 generated workspace、无 secret config 与 V2 durable session。
+
+侧表中的 `known_usage_cost_usd` 是已观察且有价格证据的费用小计；失败或取消请求缺失用量时，
+它可能遗漏这次请求，不能当作完整账单。`usage_coverage` 使用实际 attempt terminal 的输出引用、
+同 session 身份与 start-event correlation 精确关联正式 usage，不能用事件计数相等代替覆盖证明。
+缺失 terminal、缺失或未关联 usage、未完整结束的流、未观察的子会话费用，都会让完整
+`reported_or_priced_cost_usd` 与报告总费用保持 unknown。真实 typed confirmed-no-model-consumption
+单独计数；没有 usage 不等于免费。完整覆盖仍要求每条 usage 有价格证据，价格快照换算的总额
+标记 `estimated`，不声称是供应商账单或已核实当前价格。观测读取/投影不可用只产生 unknown，
+不改变任务结果、补丁和验收。`budget_accounted_microusd` 仍取至少已知费用小计或预留值进行
+保守预算记账，不能当作实际账单。
+当前 durable 工具审计不足以证明“同 path + range、期间无写入”的重复读取，`redundant_reads`
+明确为 unknown，不根据 read 次数猜测冗余。轨迹是既有执行事实的派生产物，不提供权限。
 
 未通过验收的 run 仍可通过 session artifact path 和结构化 mismatch reason 定位。不要提交生成的 campaign 目录或 credential。
 
@@ -166,3 +202,15 @@ Deterministic 结果只证明本地 contract，不能表述为真实模型成功
 该入口同时检查生成的 orchestration corpus 未漂移，并执行 RFC-0053 的 permission、whole-batch、
 reverse completion、429、cancel/restart、approval、integration lane 与 cleanup inventory
 deterministic gate；它仍不替代真实 provider campaign 或 PTY 产品验收。
+
+### 无改动与失败轨迹
+
+没有文件改动时，评测仍发布真实的零字节 `.patch` 与空文件差异清单，并保留失败/暂停的运行结果。release output owner 允许空文件，仍校验固定输出根、单次 capsule、不可覆盖与字节上限。空 patch 不能被视为成功修复，也不应阻断其余报告导出。
+
+未分类的执行异常记为 `unknown`，不能直接归因于模型：同一执行边界还包含 provider 传输、runtime、工具、持久化与清理。独立观察到的验证失败仍保留自身分类。报告不根据错误文案猜测责任来源，也不泄露可能含私密数据的原始异常。
+
+### 独立长历史样本
+
+`long-session-v1/composer-handoff` 在同一会话中发送12个固定用户turn，结合真实Desktop composer函数的故障切片与149,235字节合成维护历史。末轮独立检查验证真实函数行为、首/中/末轮交接值的SHA256，以及检查与package文件未被修改。每个prompt均在既有16KiB限制内，没有增加产品预算或用户准入。
+
+它独立于已冻结的 `repository-v1` 20项比较。模型可以在回复或文件中外化历史，故通过仅证明带历史的继续工作，不证明无辅助记忆或盲测能力。结果报告实际执行turn、provider token用量和patch；没有实际触发溢出/压缩就不声称覆盖，普通model-eval关闭压缩，对应能力另查provider/application资格证据。

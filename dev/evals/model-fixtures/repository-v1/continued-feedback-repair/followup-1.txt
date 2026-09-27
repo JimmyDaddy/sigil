@@ -1,0 +1,1 @@
+Continue in the same session: inspect how the selected starting state is presented to the user. It must be loading with its existing localized Starting label, not claim model execution. Finish the whole feedback repair and preserve all independent checks.

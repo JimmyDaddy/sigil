@@ -1,0 +1,34 @@
+schema_version = 1
+id = "repo-external-package-filter"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:25f6c8b2fba7be0adf5fdf2feb3fb43331ee3efe3469ca2f4b8d584912d64e7a"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "scripts/test-check-touched-packages.py"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "scripts/check-touched-packages.py"
+source = "files/scripts/check-touched-packages.py"
+sha256 = "sha256:f3ace3a152fceee985a5e2e3074bfa49c12918efd1166d9aa60ef357a402d13c"
+
+[[files]]
+path = "scripts/test-check-touched-packages.py"
+source = "files/scripts/test-check-touched-packages.py"
+sha256 = "sha256:6630c7e446b72bf03990a72dd2be06fc5446634bac4b005325fc617306a591c9"
+
+[[checks]]
+id = "independent-regression"
+command = ["python3", "-B", "scripts/test-check-touched-packages.py"]
+timeout_ms = 30000

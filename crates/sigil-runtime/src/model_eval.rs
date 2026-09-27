@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -30,6 +30,8 @@ mod route_contract;
 pub use route_contract::*;
 mod verification;
 pub use verification::*;
+mod trajectory;
+pub use trajectory::{ModelEvalTrajectorySummary, ModelEvalTurnTrace};
 
 pub const MODEL_EVAL_FIXTURE_SCHEMA_VERSION: u16 = 1;
 pub const MODEL_EVAL_MAX_FILES: usize = 32;
@@ -42,14 +44,10 @@ pub const MODEL_EVAL_MAX_ASSERTIONS: usize = 8;
 pub const MODEL_EVAL_MAX_CHECK_TIMEOUT_MS: u64 = 60_000;
 pub const MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION: u16 = 2;
 
-const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &[
-    "edit_file",
-    "glob",
-    "grep",
-    "read_file",
-    "spawn_agents",
-    "write_file",
-];
+const MODEL_EVAL_MAX_ALLOWED_TOOLS: usize = 64;
+const MODEL_EVAL_MAX_CHECK_ARG_BYTES: usize = 4 * 1024;
+const MODEL_EVAL_MAX_CHECK_ARGS: usize = 32;
+const MODEL_EVAL_MAX_CHECK_COMMAND_BYTES: usize = 16 * 1024;
 
 /// Candidate-release facts that cannot be inferred safely from a provider alias or assistant text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +73,9 @@ pub struct ModelEvalFixtureManifest {
     pub id: String,
     pub prompt_file: PathBuf,
     pub prompt_sha256: String,
+    /// Explicit subsequent user turns in this same isolated session.
+    #[serde(default)]
+    pub followup_prompts: Vec<ModelEvalFixturePrompt>,
     pub allowed_tools: Vec<String>,
     pub max_turns: u32,
     pub max_output_tokens: u32,
@@ -89,6 +90,13 @@ pub struct ModelEvalFixtureManifest {
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<ModelEvalOrchestrationCase>,
+}
+
+/// A fixed follow-up turn with immutable source identity; never selected from model text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelEvalFixturePrompt {
+    pub prompt_file: PathBuf,
+    pub prompt_sha256: String,
 }
 
 /// Explicit RFC-0053 corpus metadata for a production-path orchestration case.
@@ -203,6 +211,7 @@ pub struct LoadedModelEvalFixture {
     pub manifest_path: PathBuf,
     pub manifest_digest: String,
     pub prompt: String,
+    pub followup_prompts: Vec<String>,
     pub manifest: ModelEvalFixtureManifest,
 }
 
@@ -214,6 +223,9 @@ pub struct MaterializedModelEvalFixture {
     pub manifest_digest: String,
     pub tree_digest: String,
     pub prompt: String,
+    pub followup_prompts: Vec<String>,
+    pub fixture_source_root: PathBuf,
+    pub fixture_file_sources: BTreeMap<PathBuf, PathBuf>,
     pub tool_scope: ToolRegistryScope,
     pub max_turns: u32,
     pub max_output_tokens: u32,
@@ -232,8 +244,8 @@ pub struct MaterializedModelEvalFixture {
 ///
 /// # Errors
 ///
-/// Returns an error for malformed manifests, unsupported bounds, unsafe paths, symlinks, unknown
-/// tools or commands, and any source digest mismatch.
+/// Returns an error for malformed manifests, unsupported bounds, unsafe paths, symlinks, malformed
+/// tools or command arguments, and any source digest mismatch.
 pub fn load_model_eval_fixture(source_root: impl AsRef<Path>) -> Result<LoadedModelEvalFixture> {
     let source_root = canonical_regular_directory(source_root.as_ref())?;
     let manifest_path = source_root.join("fixture.toml");
@@ -255,13 +267,42 @@ pub fn load_model_eval_fixture(source_root: impl AsRef<Path>) -> Result<LoadedMo
         "model eval fixture prompt",
     )?;
     validate_digest("prompt_sha256", &manifest.prompt_sha256, &prompt_bytes)?;
+    let mut total_bytes = prompt_bytes.len() as u64;
     let prompt = String::from_utf8(prompt_bytes)
         .with_context(|| format!("model eval prompt is not UTF-8: {}", prompt_path.display()))?;
     if prompt.trim().is_empty() {
         bail!("model eval fixture prompt must not be empty");
     }
 
-    let mut total_bytes = 0_u64;
+    let followup_prompts = manifest
+        .followup_prompts
+        .iter()
+        .map(|followup| {
+            let path = resolve_source_path(&source_root, &followup.prompt_file)?;
+            let bytes = read_bounded_regular_file(
+                &path,
+                MODEL_EVAL_MAX_PROMPT_BYTES,
+                "model eval follow-up prompt",
+            )?;
+            validate_digest("followup prompt_sha256", &followup.prompt_sha256, &bytes)?;
+            total_bytes = total_bytes
+                .checked_add(bytes.len() as u64)
+                .context("model eval fixture source byte count overflowed")?;
+            if total_bytes > MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES {
+                bail!(
+                    "model eval fixture source exceeds {} bytes",
+                    MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES
+                );
+            }
+            let prompt =
+                String::from_utf8(bytes).context("model eval follow-up prompt is not UTF-8")?;
+            if prompt.trim().is_empty() {
+                bail!("model eval follow-up prompt must not be empty");
+            }
+            Ok(prompt)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     for file in &manifest.files {
         let source_path = resolve_source_path(&source_root, &file.source)?;
         let bytes = read_bounded_regular_file(
@@ -286,6 +327,7 @@ pub fn load_model_eval_fixture(source_root: impl AsRef<Path>) -> Result<LoadedMo
         manifest_path,
         manifest_digest: sha256_digest(&manifest_bytes),
         prompt,
+        followup_prompts,
         manifest,
     })
 }
@@ -335,6 +377,14 @@ pub fn materialize_model_eval_fixture(
         manifest_digest: fixture.manifest_digest.clone(),
         tree_digest,
         prompt: fixture.prompt.clone(),
+        followup_prompts: fixture.followup_prompts.clone(),
+        fixture_source_root: fixture.source_root.clone(),
+        fixture_file_sources: fixture
+            .manifest
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.source.clone()))
+            .collect(),
         tool_scope: ToolRegistryScope::from_names_and_prefixes(
             fixture.manifest.allowed_tools.iter().cloned(),
             std::iter::empty::<String>(),
@@ -373,6 +423,10 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
     validate_id("fixture id", &manifest.id)?;
     validate_relative_path("prompt_file", &manifest.prompt_file)?;
     validate_sha256_shape("prompt_sha256", &manifest.prompt_sha256)?;
+    for prompt in &manifest.followup_prompts {
+        validate_relative_path("followup prompt_file", &prompt.prompt_file)?;
+        validate_sha256_shape("followup prompt_sha256", &prompt.prompt_sha256)?;
+    }
     if let Some(orchestration) = &manifest.orchestration {
         validate_id(
             "orchestration corpus version",
@@ -393,13 +447,18 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
     if manifest.allowed_tools.is_empty() {
         bail!("model eval fixture tool scope must not be empty");
     }
-    if manifest.allowed_tools.len() > MODEL_EVAL_ALLOWED_TOOLS.len() {
+    if manifest.allowed_tools.len() > MODEL_EVAL_MAX_ALLOWED_TOOLS {
         bail!("model eval fixture has too many allowed tools");
     }
     let mut tools = BTreeSet::new();
     for tool in &manifest.allowed_tools {
-        if !MODEL_EVAL_ALLOWED_TOOLS.contains(&tool.as_str()) {
-            bail!("model eval fixture contains unsupported tool: {tool}");
+        if tool.is_empty()
+            || tool.len() > 256
+            || !tool.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+            })
+        {
+            bail!("model eval allowed tool must be a bounded tool identifier");
         }
         if !tools.insert(tool.as_str()) {
             bail!("model eval fixture contains duplicate tool: {tool}");
@@ -548,20 +607,17 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
 }
 
 fn validate_check_command(command: &[String]) -> Result<()> {
-    let allowed = [
-        ["cargo", "check", "--quiet"].as_slice(),
-        ["cargo", "test", "--quiet"].as_slice(),
-    ];
-    if allowed.iter().any(|candidate| {
-        candidate.len() == command.len()
-            && candidate
-                .iter()
-                .zip(command)
-                .all(|(expected, observed)| expected == observed)
-    }) {
-        return Ok(());
+    if command.is_empty()
+        || command.len() > MODEL_EVAL_MAX_CHECK_ARGS
+        || command[0].trim().is_empty()
+        || command
+            .iter()
+            .any(|arg| arg.len() > MODEL_EVAL_MAX_CHECK_ARG_BYTES || arg.contains('\0'))
+        || command.iter().map(String::len).sum::<usize>() > MODEL_EVAL_MAX_CHECK_COMMAND_BYTES
+    {
+        bail!("model eval fixture check command must be bounded direct argv");
     }
-    bail!("model eval fixture check command is not in the V1 allowlist");
+    Ok(())
 }
 
 fn validate_id(field: &str, value: &str) -> Result<()> {
@@ -661,7 +717,12 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64, label: &str) -> Result
     if metadata.len() > max_bytes {
         bail!("{label} exceeds {max_bytes} bytes: {}", path.display());
     }
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     if bytes.len() as u64 != metadata.len() || bytes.len() as u64 > max_bytes {
         bail!("{label} changed while reading: {}", path.display());
     }

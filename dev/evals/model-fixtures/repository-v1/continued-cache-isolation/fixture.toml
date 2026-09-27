@@ -1,0 +1,48 @@
+schema_version = 1
+id = "repo-continued-cache-isolation"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:5d7aa3c02dfcdddc3f81fb89ecfebc3f584565810c2d0678c72047cad40fb7d6"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[followup_prompts]]
+prompt_file = "followup-1.txt"
+prompt_sha256 = "sha256:c366b199dc83e6e5221b0908d065e8c9f0d729eb36ea5e6d82626af43a8fed60"
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "checks.mjs"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "apps/desktop/src/features/settings/providerCatalogCache.ts"
+source = "files/apps/desktop/src/features/settings/providerCatalogCache.ts"
+sha256 = "sha256:7fdd627cf8a96173769ca56d7119ff8965da861347e8aaf52a595ef30342c1f2"
+
+[[files]]
+path = "apps/desktop/src/markdown/renderCache.ts"
+source = "files/apps/desktop/src/markdown/renderCache.ts"
+sha256 = "sha256:8c5f97ac0fe254d950743117b01193e5c22e41d3a1505fcf306f836296f525d2"
+
+[[files]]
+path = "checks.mjs"
+source = "files/checks.mjs"
+sha256 = "sha256:81615858291a432bde47bb4fa378da0511494bc42c1ea9086f28f21e81de83e1"
+
+[[files]]
+path = "package.json"
+source = "files/package.json"
+sha256 = "sha256:1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae"
+
+[[checks]]
+id = "independent-regression"
+command = ["node", "--experimental-strip-types", "checks.mjs"]
+timeout_ms = 30000

@@ -1,0 +1,2 @@
+The touched package resolver rejects valid metadata containing dependencies outside the workspace. Fix member selection; do not suppress incomplete-workspace errors.
+Run the independent check command: python3 -B scripts/test-check-touched-packages.py. Do not weaken or edit checks.

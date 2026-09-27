@@ -1,0 +1,2 @@
+Repair package selection so Cargo package identities are preserved even when directory names differ. Keep all independent checks unchanged.
+Run the independent check command: python3 -B scripts/test-check-touched-packages.py. Do not weaken or edit checks.

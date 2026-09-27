@@ -1,0 +1,1 @@
+This isolated fixture uses a real Sigil composer function with a planted approval-priority defect. The user supplies fixed maintenance history over twelve turns. Keep checks.mjs and package.json unchanged. Repair the function and create handoff.json on the final turn.

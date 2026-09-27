@@ -1,0 +1,1 @@
+Continue the cache review: provider model lists also must remain isolated by workspace and exact credential. Repair that independent cache without undoing the diagram fix. Keep both modules and the independent checks intact.

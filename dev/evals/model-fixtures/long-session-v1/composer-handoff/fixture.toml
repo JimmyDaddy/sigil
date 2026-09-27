@@ -1,0 +1,88 @@
+schema_version = 1
+id = "long-composer-handoff"
+prompt_file = "turn-01.txt"
+prompt_sha256 = "sha256:306c1e198b2faf081060d3bdafa32fc352297696e1e5abdf9aa9afcea097dbe5"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[followup_prompts]]
+prompt_file = "turn-02.txt"
+prompt_sha256 = "sha256:9e3fff203d9dfd3947b007cad7d346e15cd9f5553970abb033f68fa8e0ec86f3"
+
+[[followup_prompts]]
+prompt_file = "turn-03.txt"
+prompt_sha256 = "sha256:cd746f2202d0cff1ee66424d600d66fcfa741d1dbc2d2569b159e068af4994eb"
+
+[[followup_prompts]]
+prompt_file = "turn-04.txt"
+prompt_sha256 = "sha256:8c468b933050ac631612b0d4bf9747bcc301b3556b2bf2ab2f14a26e79455c13"
+
+[[followup_prompts]]
+prompt_file = "turn-05.txt"
+prompt_sha256 = "sha256:3dc2eea051d53cd8a97f7813f891a7331fa985d41295cb8a42b10e5fd188f510"
+
+[[followup_prompts]]
+prompt_file = "turn-06.txt"
+prompt_sha256 = "sha256:1c62de3518d22bdcfbdf008ede59200e13e1fd43b6ac4d3ec4d5d1837e769cfd"
+
+[[followup_prompts]]
+prompt_file = "turn-07.txt"
+prompt_sha256 = "sha256:ade8189d70e79cf4b4dbd491eca075c8c763ac2f5783f8130db1e5d424468ac2"
+
+[[followup_prompts]]
+prompt_file = "turn-08.txt"
+prompt_sha256 = "sha256:2159775497cd40ad26be07b7106c87152a17d94f6306d26d3d687bcecc77d069"
+
+[[followup_prompts]]
+prompt_file = "turn-09.txt"
+prompt_sha256 = "sha256:4ba0246f9918d761095e70b2844b7a6837258d2879470cf775256698fba7ec7e"
+
+[[followup_prompts]]
+prompt_file = "turn-10.txt"
+prompt_sha256 = "sha256:541aede9f6418c519cc2fc7c262498ad1d2246e73879bf2b22f59dc5000ff80d"
+
+[[followup_prompts]]
+prompt_file = "turn-11.txt"
+prompt_sha256 = "sha256:9f1e608254259091ff353a746f9f4d6c138974b88febbf8d5d1463cfa6deeb9b"
+
+[[followup_prompts]]
+prompt_file = "turn-12.txt"
+prompt_sha256 = "sha256:5e3f732e6284073a543c95343874cd20189124692cfcf12c71a28449c5e822be"
+
+[[assertions]]
+id = "checks-mjs-unchanged"
+kind = "file_unchanged"
+path = "checks.mjs"
+
+[[assertions]]
+id = "package-json-unchanged"
+kind = "file_unchanged"
+path = "package.json"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:3d63ff1a18566782483cfad76f345dc2ec07883bf1658b04ffebeef39bde5873"
+
+[[files]]
+path = "apps/desktop/src/features/conversation/composerActivity.ts"
+source = "files/apps/desktop/src/features/conversation/composerActivity.ts"
+sha256 = "sha256:2170607bfc443a44daebc7a39b32287a6eaebd2f568bcb0de382d34376aebe9f"
+
+[[files]]
+path = "checks.mjs"
+source = "files/checks.mjs"
+sha256 = "sha256:cab88202962f3a98e17b3c079ad823b326d20b0993a12deb200be80bc8e52804"
+
+[[files]]
+path = "package.json"
+source = "files/package.json"
+sha256 = "sha256:1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae"
+
+[[checks]]
+id = "source-and-conversation-contract"
+command = ["node", "--experimental-strip-types", "checks.mjs"]
+timeout_ms = 30000

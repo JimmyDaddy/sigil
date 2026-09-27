@@ -1,0 +1,2 @@
+The native desktop member is misidentified when its parent is also a workspace member. Repair nested path ownership without changing the tests.
+Run the independent check command: python3 -B scripts/test-check-touched-packages.py. Do not weaken or edit checks.

@@ -1,0 +1,39 @@
+schema_version = 1
+id = "repo-streaming-markdown-stability"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:2f1264230a72778dbc9565a7fd860163d3281d569dd03fee358a80b556300140"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "checks.mjs"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "apps/desktop/src/markdown/normalize.ts"
+source = "files/apps/desktop/src/markdown/normalize.ts"
+sha256 = "sha256:c9e46497e3cff0617031f15a0ae80536266a0e5c84f0076d0aabb030bd03859f"
+
+[[files]]
+path = "checks.mjs"
+source = "files/checks.mjs"
+sha256 = "sha256:a0cf4bc59c2b7f461468a8f85cb8903cf1a5c0f3076ae6f648bf72c8ccabd725"
+
+[[files]]
+path = "package.json"
+source = "files/package.json"
+sha256 = "sha256:1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae"
+
+[[checks]]
+id = "independent-regression"
+command = ["node", "--experimental-strip-types", "checks.mjs"]
+timeout_ms = 30000

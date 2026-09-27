@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {normalizeCompletedMarkdown as complete,normalizeStreamingMarkdown as stream,utf8Length,openingFence,isClosingFence} from './apps/desktop/src/markdown/normalize.ts';
+assert.equal(utf8Length('盒子🌍'),10);
+const text='```\n盒子```';
+assert.deepEqual(complete(text),{source:'```\n盒子\n```',diagnostics:[{kind:'attached_closing_fence',sourceStart:10,sourceEnd:13}]});
+assert.deepEqual(stream(text),{source:text,diagnostics:[]});
+assert.equal(openingFence('``bad'),undefined);
+assert.equal(isClosingFence('  ~~~',{marker:'~',length:3}),true);
+assert.equal(isClosingFence('   ~~',{marker:'~',length:3}),false);
+assert.equal(complete('````\nvalue```\ntext').source,'````\nvalue```\ntext');

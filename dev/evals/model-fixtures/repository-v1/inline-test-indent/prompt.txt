@@ -1,0 +1,2 @@
+The inline-test detector misses indented and tab-separated Rust test modules. Repair whitespace handling without flagging external module declarations.
+Run the independent check command: python3 -B scripts/test-check-test-layout.py. Do not weaken or edit checks.

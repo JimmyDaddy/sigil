@@ -1,0 +1,2 @@
+Rust files under a physical tests directory are incorrectly scanned as production. Fix the shared test-source classification; preserve the production inline-test rejection.
+Run the independent check command: python3 -B scripts/test-check-test-layout.py. Do not weaken or edit checks.

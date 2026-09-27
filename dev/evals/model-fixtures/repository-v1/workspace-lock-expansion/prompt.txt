@@ -1,0 +1,2 @@
+Changing Cargo.lock no longer selects the complete workspace. Restore workspace input handling and retain exact member identities.
+Run the independent check command: python3 -B scripts/test-check-touched-packages.py. Do not weaken or edit checks.

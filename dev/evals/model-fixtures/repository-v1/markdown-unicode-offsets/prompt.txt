@@ -1,0 +1,2 @@
+Unicode closing-fence diagnostics point at wrong byte ranges. Repair UTF-8 offsets throughout the markdown normalization flow.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

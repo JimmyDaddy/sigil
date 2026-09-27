@@ -5946,6 +5946,7 @@ dependencies = [
  "sigil-sandbox",
  "sigil-tools-builtin",
  "sigil-updater",
+ "similar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

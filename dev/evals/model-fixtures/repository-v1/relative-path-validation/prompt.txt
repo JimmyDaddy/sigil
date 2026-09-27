@@ -1,0 +1,2 @@
+The change-list validator accepts a parent traversal when Cargo.lock is also changed. Restore relative-path validation while preserving valid deleted-source paths.
+Run the independent check command: python3 -B scripts/test-check-touched-packages.py. Do not weaken or edit checks.

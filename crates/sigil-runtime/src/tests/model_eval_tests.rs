@@ -666,7 +666,7 @@ fn model_eval_fixture_rejects_digest_drift() {
 }
 
 #[test]
-fn model_eval_fixture_ignores_unknown_fields_but_rejects_unknown_tools() {
+fn model_eval_fixture_ignores_unknown_fields_and_defers_tool_availability_to_registry() {
     let source = fixture_root("small-code-edit");
     let temp = tempdir().expect("temp dir");
     copy_directory(&source, temp.path());
@@ -690,9 +690,15 @@ fn model_eval_fixture_ignores_unknown_fields_but_rejects_unknown_tools() {
             "allowed_tools = [\"read_file\", \"bash\"]",
         ),
     )
-    .expect("write invalid tool manifest");
-    let error = load_model_eval_fixture(temp.path()).expect_err("unknown tool must fail");
-    assert!(error.to_string().contains("unsupported tool"));
+    .expect("write registered tool manifest");
+    load_model_eval_fixture(temp.path()).expect("tool availability belongs to the actual registry");
+    fs::write(
+        &manifest_path,
+        manifest.replace("\"edit_file\"", "\"invalid tool\""),
+    )
+    .expect("write malformed tool identifier");
+    let error = load_model_eval_fixture(temp.path()).expect_err("malformed identifier must fail");
+    assert!(error.to_string().contains("bounded tool identifier"));
 }
 
 #[cfg(unix)]
@@ -1009,7 +1015,7 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         );
         assert_eq!(
             campaign.runs[0].cost_confidence,
-            ModelEvalCostConfidence::Reported
+            ModelEvalCostConfidence::Unknown
         );
         assert_eq!(
             campaign.runs[1].status,
@@ -1695,4 +1701,390 @@ fn enter_isolated_environment_test(test_name: &str, marker: &'static str) -> boo
         String::from_utf8_lossy(&output.stderr)
     );
     false
+}
+
+fn write_python_model_eval_fixture(root: &Path, followup: bool) {
+    copy_directory(&fixture_root("small-code-edit"), root);
+    let manifest_path = root.join("fixture.toml");
+    let mut manifest: crate::model_eval::ModelEvalFixtureManifest =
+        toml::from_str(&fs::read_to_string(&manifest_path).expect("manifest")).expect("parse");
+    let check_source =
+        "from pathlib import Path\nassert 'left * right' in Path('src/lib.rs').read_text()\n";
+    fs::write(root.join("files/check.py"), check_source).expect("check source");
+    manifest
+        .files
+        .push(crate::model_eval::ModelEvalFixtureFile {
+            path: "check.py".into(),
+            source: "files/check.py".into(),
+            sha256: format!("sha256:{:x}", Sha256::digest(check_source.as_bytes())),
+        });
+    manifest.checks[0].command = vec!["python3".into(), "-B".into(), "check.py".into()];
+    manifest
+        .assertions
+        .push(crate::model_eval::ModelEvalFixtureAssertion {
+            id: "independent-oracle".into(),
+            assertion: ModelEvalFixtureAssertionKind::FileUnchanged {
+                path: "check.py".into(),
+            },
+        });
+    if followup {
+        let prompt =
+            "Second fixed turn: retain the existing implementation and explain its result.";
+        fs::write(root.join("followup.txt"), prompt).expect("follow-up");
+        manifest
+            .followup_prompts
+            .push(crate::model_eval::ModelEvalFixturePrompt {
+                prompt_file: "followup.txt".into(),
+                prompt_sha256: format!("sha256:{:x}", Sha256::digest(prompt.as_bytes())),
+            });
+    }
+    fs::write(manifest_path, toml::to_string(&manifest).expect("encode")).expect("save manifest");
+}
+
+#[test]
+fn model_eval_fixed_followups_and_direct_python_checks_are_hash_bound() {
+    let temp = tempdir().expect("temp");
+    write_python_model_eval_fixture(temp.path(), true);
+    let fixture = load_model_eval_fixture(temp.path()).expect("Python/multiturn fixture");
+    assert_eq!(fixture.followup_prompts.len(), 1);
+    assert_eq!(
+        fixture.manifest.checks[0].command,
+        ["python3", "-B", "check.py"]
+    );
+    fs::write(temp.path().join("followup.txt"), "modified turn").expect("tamper");
+    assert!(
+        load_model_eval_fixture(temp.path())
+            .expect_err("reject prompt drift")
+            .to_string()
+            .contains("sha256 mismatch")
+    );
+}
+
+#[test]
+fn model_eval_followups_use_source_budget_instead_of_a_turn_count_gate() {
+    let temp = tempdir().expect("temp");
+    write_python_model_eval_fixture(temp.path(), true);
+    let manifest_path = temp.path().join("fixture.toml");
+    let mut manifest: crate::model_eval::ModelEvalFixtureManifest =
+        toml::from_str(&fs::read_to_string(&manifest_path).expect("manifest")).expect("parse");
+    manifest.followup_prompts = vec![manifest.followup_prompts[0].clone(); 6];
+    fs::write(&manifest_path, toml::to_string(&manifest).expect("encode")).expect("save");
+    let loaded = load_model_eval_fixture(temp.path()).expect("six fixed follow-up turns");
+    assert_eq!(loaded.followup_prompts.len(), 6);
+
+    let prompt = "x".repeat(crate::model_eval::MODEL_EVAL_MAX_PROMPT_BYTES as usize);
+    fs::write(temp.path().join(&manifest.prompt_file), &prompt).expect("initial prompt");
+    fs::write(temp.path().join("followup.txt"), &prompt).expect("follow-up prompt");
+    let digest = format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()));
+    manifest.prompt_sha256 = digest.clone();
+    let followup = crate::model_eval::ModelEvalFixturePrompt {
+        prompt_file: "followup.txt".into(),
+        prompt_sha256: digest,
+    };
+    // With 63 follow-ups the prompts fill the budget and workspace files exceed it.
+    // With 64 follow-ups the prompt bytes alone exceed the same budget.
+    for count in [63, 64] {
+        manifest.followup_prompts = vec![followup.clone(); count];
+        fs::write(&manifest_path, toml::to_string(&manifest).expect("encode")).expect("save");
+        assert!(
+            load_model_eval_fixture(temp.path())
+                .expect_err("shared source byte budget")
+                .to_string()
+                .contains("source exceeds 1048576 bytes"),
+            "follow-up count {count}"
+        );
+    }
+}
+
+#[test]
+fn model_eval_multiturn_reuses_session_and_preserves_usage_unknown_cost() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_multiturn_reuses_session_and_preserves_usage_unknown_cost",
+        "SIGIL_TEST_MODEL_EVAL_MULTITURN_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let base_url = spawn_direct_routing_eval_server(Arc::clone(&requests))
+                .await
+                .expect("server");
+            let temp = tempdir().expect("temp");
+            let fixture_path = temp.path().join("fixture");
+            fs::create_dir(&fixture_path).expect("fixture directory");
+            write_python_model_eval_fixture(&fixture_path, true);
+            let config_path = temp.path().join("source.toml");
+            write_source_config(&config_path, &base_url, "auto-edit");
+            let campaign = run_model_eval_campaign(
+                ModelEvalCampaignRequest {
+                    config_path,
+                    fixture_roots: vec![fixture_path],
+                    orchestration_route_contract: None,
+                    repetitions: 1,
+                    max_cost_microusd: 500_000,
+                    campaign_timeout: Duration::from_secs(30),
+                    output_dir: temp.path().join("campaign"),
+                    release_output_owner: None,
+                },
+                &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+            )
+            .await
+            .expect("campaign");
+            let run = &campaign.runs[0];
+            assert_eq!(run.turns.len(), 2);
+            assert_eq!(run.usage.usage_events, 2);
+            assert_eq!(run.usage.prompt_tokens, 40);
+            assert_eq!(
+                run.total_cost_usd(),
+                None,
+                "custom route has no known price"
+            );
+            assert_eq!(
+                run.verification
+                    .as_ref()
+                    .expect("real verification")
+                    .verdict,
+                VerificationVerdict::Failed
+            );
+            let captured = requests.lock().expect("requests");
+            assert_eq!(captured.len(), 2);
+            assert!(!captured[0].contains("Second fixed turn"));
+            assert!(captured[1].contains("Second fixed turn"));
+            assert!(
+                captured[1].contains("done"),
+                "second turn must include first assistant response"
+            );
+            let records =
+                JsonlSessionStore::read_event_records(&run.session_path).expect("session");
+            let users = records
+                .iter()
+                .filter_map(|record| record.session_log_entry().ok().flatten())
+                .filter(|entry| matches!(entry, sigil_kernel::SessionLogEntry::User(_)))
+                .count();
+            assert_eq!(users, 2);
+            let trajectory: serde_json::Value = serde_json::from_str(
+                fs::read_to_string(campaign.output_dir.join("trajectory.jsonl"))
+                    .expect("trajectory")
+                    .trim(),
+            )
+            .expect("decode trajectory");
+            assert_eq!(trajectory["turns"].as_array().map(Vec::len), Some(2));
+            for turn in trajectory["turns"].as_array().expect("turns") {
+                let timings = &turn["stage_timings"];
+                assert_eq!(timings["snapshots_available"], true);
+                let phases = timings["phases"].as_array().expect("phase side table");
+                for observed in ["preparation", "provider_dispatch", "provider_first_content"] {
+                    let phase = phases
+                        .iter()
+                        .find(|phase| phase["phase"] == observed)
+                        .expect("closed timing phase");
+                    assert!(
+                        phase["elapsed_us"]
+                            .as_array()
+                            .is_some_and(|values| values.len() == 1),
+                        "each turn must contain only its own actual phase: {turn}"
+                    );
+                }
+                let feedback = phases
+                    .iter()
+                    .find(|phase| phase["phase"] == "first_feedback_frame")
+                    .expect("UI phase remains explicit");
+                assert!(
+                    feedback["elapsed_us"].is_null(),
+                    "model eval has no UI frame sampling"
+                );
+            }
+            assert!(trajectory["trajectory"]["human_interventions"].is_null());
+            assert!(trajectory["trajectory"]["ineffective_repair_rounds"].is_null());
+            assert!(trajectory["billing"]["reported_or_priced_cost_usd"].is_null());
+            assert_eq!(
+                trajectory["billing"]["budget_accounting_is_actual_bill"],
+                false
+            );
+            assert!(trajectory["trajectory"]["redundant_reads"].is_null());
+        });
+}
+
+#[test]
+fn model_eval_python_verification_retains_actual_patch_and_rejects_changed_oracle() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_python_verification_retains_actual_patch_and_rejects_changed_oracle",
+        "SIGIL_TEST_MODEL_EVAL_PYTHON_PATCH_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime")
+        .block_on(async {
+            for corrupt_oracle in [false, true] {
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let args = if corrupt_oracle {
+                    serde_json::json!({"path": "check.py", "old_text": "assert 'left * right' in Path('src/lib.rs').read_text()", "new_text": "assert True"})
+                } else {
+                    serde_json::json!({"path": "src/lib.rs", "old_text": "left + right", "new_text": "left * right"})
+                };
+                let base_url = spawn_scripted_eval_tool_server(requests, "edit_file", args).await.expect("server");
+                let temp = tempdir().expect("temp");
+                let fixture_path = temp.path().join("fixture");
+                fs::create_dir(&fixture_path).expect("fixture directory");
+                write_python_model_eval_fixture(&fixture_path, false);
+                let config_path = temp.path().join("source.toml");
+                write_source_config(&config_path, &base_url, "auto-edit");
+                let campaign = run_model_eval_campaign(ModelEvalCampaignRequest {
+                    config_path, fixture_roots: vec![fixture_path], orchestration_route_contract: None,
+                    repetitions: 1, max_cost_microusd: 500_000,
+                    campaign_timeout: Duration::from_secs(30), output_dir: temp.path().join("campaign"),
+                    release_output_owner: None,
+                }, &ApplicationRunServices::new(Arc::new(RejectingPresenter))).await.expect("campaign");
+                let run = &campaign.runs[0];
+                assert_eq!(run.verification.as_ref().expect("verification").verdict, VerificationVerdict::Passed);
+                let row: serde_json::Value = serde_json::from_str(
+                    fs::read_to_string(campaign.output_dir.join("results.jsonl")).expect("report").trim(),
+                ).expect("decode report");
+                assert_eq!(row["acceptance_passed"], !corrupt_oracle);
+                let oracle = row["assertion_results"].as_array().expect("assertions").iter()
+                    .find(|entry| entry["assertion_id"] == "independent-oracle" || entry["id"] == "independent-oracle")
+                    .expect("oracle assertion");
+                assert_eq!(oracle["passed"], !corrupt_oracle);
+                let patch = fs::read_to_string(campaign.output_dir.join("small-code-edit-1.patch")).expect("actual patch");
+                if corrupt_oracle {
+                    assert!(patch.contains("+++ b/check.py"));
+                    assert!(patch.contains("+assert True"));
+                } else {
+                    assert!(patch.contains("--- a/src/lib.rs"));
+                    assert!(patch.contains("-    left + right"));
+                    assert!(patch.contains("+    left * right"));
+                }
+            }
+        });
+}
+
+#[cfg(unix)]
+#[test]
+fn model_eval_deadline_joins_real_python_verification_before_returning() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_deadline_joins_real_python_verification_before_returning",
+        "SIGIL_TEST_MODEL_EVAL_DEADLINE_JOIN_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime")
+        .block_on(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let base_url = spawn_direct_routing_eval_server(requests).await.expect("server");
+            let temp = tempdir().expect("temp");
+            let fixture_path = temp.path().join("fixture");
+            fs::create_dir(&fixture_path).expect("fixture directory");
+            write_python_model_eval_fixture(&fixture_path, false);
+            let manifest_path = fixture_path.join("fixture.toml");
+            let mut manifest: crate::model_eval::ModelEvalFixtureManifest =
+                toml::from_str(&fs::read_to_string(&manifest_path).expect("manifest")).expect("decode");
+            manifest.checks[0].command = vec!["python3".into(), "-B".into(), "-c".into(),
+                "import os,time; from pathlib import Path; Path('.observed-check-pid').write_text(str(os.getpid())); time.sleep(30)".into()];
+            fs::write(&manifest_path, toml::to_string(&manifest).expect("encode")).expect("manifest");
+            let config_path = temp.path().join("source.toml");
+            write_source_config(&config_path, &base_url, "auto-edit");
+            let started = std::time::Instant::now();
+            let campaign = run_model_eval_campaign(ModelEvalCampaignRequest {
+                config_path, fixture_roots: vec![fixture_path], orchestration_route_contract: None,
+                repetitions: 1, max_cost_microusd: 500_000,
+                campaign_timeout: Duration::from_secs(5), output_dir: temp.path().join("campaign"),
+                release_output_owner: None,
+            }, &ApplicationRunServices::new(Arc::new(RejectingPresenter))).await.expect("campaign");
+            assert!(started.elapsed() < Duration::from_secs(12));
+            let run = &campaign.runs[0];
+            assert_eq!(run.status, ModelEvalRunExecutionStatus::TimedOut);
+            let pid = fs::read_to_string(run.workspace_root.join(".observed-check-pid"))
+                .expect("real check must start before its deadline");
+            let still_alive = Command::new("kill").args(["-0", pid.trim()])
+                .output().expect("observe owned check exit").status.success();
+            assert!(!still_alive, "verification process must be reaped before returning");
+            let records = JsonlSessionStore::read_event_records(&run.session_path).expect("session");
+            let finished = records.iter().map(|record| record.stored_event()).find(|event|
+                event.event_type == sigil_kernel::DurableEventType::CommandFinished.as_str())
+                .expect("real durable command receipt");
+            assert_eq!(finished.payload["timed_out"], true);
+            assert_eq!(finished.payload["execution_resources"]["cleanup"]["status"], "completed");
+            assert_ne!(run.verification.as_ref().expect("joined verification").verdict, VerificationVerdict::Passed);
+        });
+}
+
+#[cfg(unix)]
+#[test]
+fn model_eval_registered_exec_command_runs_beyond_old_six_tool_gate() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_registered_exec_command_runs_beyond_old_six_tool_gate",
+        "SIGIL_TEST_MODEL_EVAL_EXEC_SCOPE_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let arguments = serde_json::json!({
+                "command": "python3 -B -c 'from pathlib import Path; p=Path(\"src/lib.rs\"); s=p.read_text(); assert \"left + right\" in s; p.write_text(s.replace(\"left + right\",\"left * right\"))'",
+                "shell": "sh",
+                "yield_time_ms": 30000,
+                "max_runtime_secs": 10
+            });
+            let base_url = spawn_scripted_eval_tool_server(
+                Arc::clone(&requests), "exec_command", arguments,
+            ).await.expect("server");
+            let temp = tempdir().expect("temp");
+            let fixture_path = temp.path().join("fixture");
+            fs::create_dir(&fixture_path).expect("fixture directory");
+            write_python_model_eval_fixture(&fixture_path, false);
+            let manifest_path = fixture_path.join("fixture.toml");
+            let mut manifest: crate::model_eval::ModelEvalFixtureManifest =
+                toml::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+                    .expect("parse manifest");
+            // One real registered tool isolates membership from the old six-entry count limit.
+            manifest.allowed_tools = vec!["exec_command".to_owned()];
+            fs::write(&manifest_path, toml::to_string(&manifest).expect("encode manifest"))
+                .expect("save manifest");
+            let config_path = temp.path().join("source.toml");
+            write_source_config(&config_path, &base_url, "danger-full-access");
+            let config = fs::read_to_string(&config_path).expect("source config");
+            fs::write(&config_path, format!("{config}\n[execution]\nstrategy = \"local\"\n"))
+                .expect("explicit local fixture backend");
+            let campaign = run_model_eval_campaign(
+                ModelEvalCampaignRequest {
+                    config_path,
+                    fixture_roots: vec![fixture_path],
+                    orchestration_route_contract: None,
+                    repetitions: 1,
+                    max_cost_microusd: 500_000,
+                    campaign_timeout: Duration::from_secs(30),
+                    output_dir: temp.path().join("campaign"),
+                    release_output_owner: None,
+                },
+                &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+            ).await.expect("registered exec_command campaign");
+            let run = &campaign.runs[0];
+            assert_eq!(run.verification.as_ref().expect("actual Python check").verdict,
+                VerificationVerdict::Passed);
+            assert!(fs::read_to_string(run.workspace_root.join("src/lib.rs"))
+                .expect("actual process edit").contains("left * right"));
+            let stored = JsonlSessionStore::read_event_records(&run.session_path).expect("records");
+            assert!(stored.iter().any(|record| matches!(record.session_log_entry().ok().flatten(),
+                Some(sigil_kernel::SessionLogEntry::Control(ControlEntry::ToolExecution(entry)))
+                if entry.tool_name == "exec_command"
+                    && entry.status == sigil_kernel::ToolExecutionStatus::Completed)));
+            let report: serde_json::Value = serde_json::from_str(
+                fs::read_to_string(campaign.output_dir.join("results.jsonl"))
+                    .expect("report").trim(),
+            ).expect("decode report");
+            assert_eq!(report["acceptance_passed"], true, "{report}");
+            assert_eq!(requests.lock().expect("requests").len(), 2);
+        });
 }

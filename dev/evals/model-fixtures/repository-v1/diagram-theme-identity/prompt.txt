@@ -1,0 +1,2 @@
+Switching between light and dark themes reuses the wrong rendered diagram. Fix cache identity while retaining deterministic source keys and eviction.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.
