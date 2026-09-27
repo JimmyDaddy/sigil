@@ -18,6 +18,8 @@ const AGENT_FINAL_REPORT_ARTIFACT_KIND: &str = "final_report";
 #[derive(Debug, Clone)]
 pub(crate) struct AgentResultMaterialization {
     pub(crate) final_text: String,
+    /// Complete policy-safe source for typed output consumers, independent of display limits.
+    pub(crate) execution_text: String,
     pub(crate) final_answer_ref: Option<AgentFinalAnswerRef>,
     pub(crate) extra_artifacts: Vec<AgentArtifactRef>,
     pub(crate) original_summary_chars: Option<usize>,
@@ -28,8 +30,10 @@ impl AgentResultMaterialization {
         final_text: impl Into<String>,
         final_answer_ref: Option<AgentFinalAnswerRef>,
     ) -> Self {
+        let final_text = final_text.into();
         Self {
-            final_text: final_text.into(),
+            execution_text: final_text.clone(),
+            final_text,
             final_answer_ref,
             extra_artifacts: Vec::new(),
             original_summary_chars: None,
@@ -185,6 +189,7 @@ pub(crate) async fn materialize_child_agent_final_answer(
         append_compact_final_answer(child_session, child_session_ref, final_text.clone())?;
     Ok(AgentResultMaterialization {
         final_text,
+        execution_text: safe_final_text,
         final_answer_ref: Some(final_answer_ref),
         extra_artifacts: vec![artifact_ref],
         original_summary_chars: Some(original_chars),

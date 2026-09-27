@@ -21,6 +21,7 @@ async fn prepare_background_isolated_write_controls(
             outcome,
             &workspace_root,
         )
+        .await
         .map(PreparedChatIsolatedChildControls::ChangesetOnly)
         .map(Some),
         Some(BackgroundChatAgentWriteOwner::Worktree {
@@ -99,7 +100,7 @@ pub(super) async fn record_finished_background_run(
                         session,
                         handler,
                         &thread_id,
-                        &materialized.final_text,
+                        &materialized.execution_text,
                         &output.outcome,
                         write_owner,
                     )

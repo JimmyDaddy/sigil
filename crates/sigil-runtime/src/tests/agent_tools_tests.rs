@@ -26,17 +26,19 @@ use sigil_kernel::{
     CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
     ConversationPurposeContext, ConversationTurnRef, DeclaredToolPermissionFacts,
     DelegationAuthority, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
-    MessageRole, MultiAgentMode, NetworkPolicy, PermissionConfig, PermissionEvaluationContext,
-    PermissionMode, PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
-    RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskIsolationMode,
-    TaskRoutingPolicy, TaskStepId, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking, ToolOperation,
-    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    MessageRole, ModelMessage, MultiAgentMode, NetworkPolicy, PermissionConfig,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicyChain, PermissionRisk, Provider,
+    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig,
+    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef, TaskId,
+    TaskIsolationMode, TaskRoutingPolicy, TaskStepId, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking,
+    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
     declared_tool_permission_plan, stable_workspace_id,
 };
+
+use crate::agent_tools::{DEFAULT_RESULT_SUMMARY_LIMIT, MAX_RESULT_PAGE_LIMIT};
 
 use super::{
     AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundEventSink,
@@ -8961,6 +8963,117 @@ async fn worker_background_changeset_is_owned_until_merge_review() -> Result<()>
             .get(&changeset_id)
             .and_then(|state| state.result.as_ref())
             .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_large_changeset_foreground_preserves_execution_artifact() -> Result<()> {
+    worker_large_changeset_preserves_execution_artifact("foreground").await
+}
+
+#[tokio::test]
+async fn worker_large_changeset_background_preserves_execution_artifact() -> Result<()> {
+    worker_large_changeset_preserves_execution_artifact("background").await
+}
+
+async fn worker_large_changeset_preserves_execution_artifact(mode: &str) -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let replacement = "long patch content ".repeat(3_000);
+    let patch =
+        format!("--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+{replacement}\n");
+    let child_output = json!({
+        "change_set": {
+            "id": "large-worker-patch", "title": "Update README", "summary": "Replace the text",
+            "risk": "low", "files": [{"path": "README.md", "action": "update", "risk": "low", "additions": 1, "deletions": 1}],
+            "validations": []
+        },
+        "artifact": {"media_type": "text/x-diff", "content": patch}
+    }).to_string();
+    assert!(child_output.chars().count() > MAX_RESULT_PAGE_LIMIT);
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor(&config)?,
+        config,
+        registry,
+        Arc::new(RecordingTextProviderFactory {
+            text: child_output,
+            observed_request: Arc::new(Mutex::new(None)),
+        }),
+    );
+    let workspace = tempfile::tempdir()?;
+    let session_home = tempfile::tempdir()?;
+    fs::write(workspace.path().join("README.md"), "old\n")?;
+    let store = JsonlSessionStore::new(session_home.path().join("parent.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store);
+    session.append_user_message(ModelMessage::user("update README"))?;
+    let options = run_options(workspace.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let spawn = runtime.handle_agent_tool_call(
+        &mut session,
+        &ToolCall { id: "large-worker".to_owned(), name: SPAWN_AGENT_TOOL_NAME.to_owned(), args_json: json!({
+            "profile_id": "worker", "objective": "Update README", "prompt": "Propose a patch", "isolation": "changeset_only", "mode": mode
+        }).to_string() },
+        &options, &mut handler, &mut approval,
+    ).await?.expect("spawn handled");
+    assert!(!spawn.is_error(), "{}", spawn.content);
+    let thread_id = chat_agent_thread_id_for_call("large-worker", &AgentProfileId::new("worker")?)?;
+    if mode == "background" {
+        wait_until_agent_result_tool(
+            &mut runtime,
+            &mut session,
+            &thread_id,
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    }
+    let projection = session.agent_thread_state_projection();
+    let thread = projection.threads.get(&thread_id).expect("recorded child");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    let result = thread.result.as_ref().expect("completed result");
+    assert!(result.summary.chars().count() <= DEFAULT_RESULT_SUMMARY_LIMIT);
+    assert!(result.summary_truncated);
+    let write_projection = session.write_isolation_projection();
+    let isolated = write_projection
+        .isolated_changesets
+        .get(&sigil_kernel::ChangeSetId::new("large-worker-patch")?)
+        .expect("durable proposal");
+    let artifact_ref = isolated.artifact_ref.as_ref().expect("artifact ref");
+    assert!(!artifact_ref.starts_with("inline:"));
+    assert_eq!(
+        session
+            .mutation_event_recorder()
+            .expect("recorder")
+            .read_immutable_content_artifact(artifact_ref)?,
+        patch.as_bytes()
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("README.md"))?,
+        "old\n"
+    );
+    let integrated = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "integrate-large-worker".to_owned(),
+                name: INTEGRATE_AGENT_CHANGES_TOOL_NAME.to_owned(),
+                args_json: json!({"thread_id": thread_id.as_str(), "decision": "accepted"})
+                    .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("integration handled");
+    assert!(!integrated.is_error(), "{}", integrated.content);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("README.md"))?,
+        format!("{replacement}\n")
     );
     Ok(())
 }

@@ -164,14 +164,18 @@ pub(super) fn integrate_agent_changes(
     };
 
     let artifact_content = if decision == MergeDecision::Accepted
-        && isolated_changeset.source_isolation == WriteIsolationMode::Worktree
+        && (isolated_changeset.source_isolation == WriteIsolationMode::Worktree
+            || isolated_changeset
+                .artifact_ref
+                .as_deref()
+                .is_some_and(|reference| !reference.starts_with("inline:")))
     {
         let Some(artifact_ref) = isolated_changeset.artifact_ref.as_deref() else {
             return ToolResult::error(
                 call.id.clone(),
                 call.name.clone(),
                 ToolErrorKind::Internal,
-                "worktree merge review is missing its durable artifact reference",
+                "merge review is missing its durable artifact reference",
             );
         };
         let Some(recorder) = session.mutation_event_recorder() else {
@@ -179,14 +183,14 @@ pub(super) fn integrate_agent_changes(
                 call.id.clone(),
                 call.name.clone(),
                 ToolErrorKind::Internal,
-                "worktree merge review requires a durable session store",
+                "merge review requires a durable session store",
             );
         };
         match recorder
             .read_immutable_content_artifact(&artifact_ref.to_owned())
             .and_then(|bytes| {
                 String::from_utf8(bytes)
-                    .map_err(|error| anyhow!("worktree changeset artifact is not UTF-8: {error}"))
+                    .map_err(|error| anyhow!("changeset artifact is not UTF-8: {error}"))
             }) {
             Ok(content) => content,
             Err(error) => {
@@ -194,7 +198,7 @@ pub(super) fn integrate_agent_changes(
                     call.id.clone(),
                     call.name.clone(),
                     ToolErrorKind::InvalidInput,
-                    format!("failed to read durable worktree changeset artifact: {error:#}"),
+                    format!("failed to read durable changeset artifact: {error:#}"),
                 );
             }
         }

@@ -673,10 +673,12 @@ impl AgentToolRuntime {
                 session,
                 &child_thread.thread_id,
                 &base_snapshot_id,
-                &materialized.final_text,
+                &materialized.execution_text,
                 &outcome,
                 &options.workspace_root,
-            ) {
+            )
+            .await
+            {
                 Ok(controls) => Some(PreparedChatIsolatedChildControls::ChangesetOnly(controls)),
                 Err(error) => {
                     let _ = self.supervisor.record_chat_child_failure(
@@ -1255,10 +1257,11 @@ impl AgentToolRuntime {
                         session,
                         &child_thread.thread_id,
                         &base_snapshot_id,
-                        &materialized.final_text,
+                        &materialized.execution_text,
                         &outcome,
                         &options.workspace_root,
                     )
+                    .await
                     .inspect_err(|error| {
                         let _ = self.supervisor.record_chat_child_failure(
                             session,
@@ -1688,7 +1691,7 @@ pub(super) struct PreparedChatChangesetOnlyControls {
     merge_review: MergeReviewRequested,
 }
 
-pub(super) fn prepare_chat_changeset_only_child_controls(
+pub(super) async fn prepare_chat_changeset_only_child_controls(
     session: &Session,
     thread_id: &AgentThreadId,
     base_snapshot_id: &str,
@@ -1715,7 +1718,30 @@ pub(super) fn prepare_chat_changeset_only_child_controls(
             thread_id.as_str()
         );
     }
-    let proposal = decode_changeset_only_child_output(final_text)?;
+    let mut proposal = decode_changeset_only_child_output(final_text)?;
+    let recorder = session
+        .mutation_event_recorder()
+        .ok_or_else(|| anyhow!("changeset-only proposal requires durable storage"))?;
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    let operation_id = format!(
+        "chat-changeset-artifact-{}",
+        stable_event_uuid(
+            "sigil-chat-changeset-artifact",
+            &format!("{}:{}", thread_id.as_str(), proposal.change_set.id.as_str())
+        )
+    );
+    let bytes = proposal.artifact.content.as_bytes().to_vec();
+    proposal.artifact_ref = tokio::task::spawn_blocking(move || {
+        recorder.capture_immutable_content_artifact(
+            &workspace_id,
+            &operation_id,
+            Path::new(".sigil-agent-artifacts/chat-changeset.diff"),
+            &bytes,
+        )
+    })
+    .await
+    .context("changeset-only artifact persistence task failed")??;
+    proposal.integration_facts.changeset_artifact_ref = proposal.artifact_ref.clone();
     let touched_subjects = changeset_touched_subjects(&proposal.change_set);
     let changeset_id = proposal.change_set.id.clone();
     let merge_review_id = chat_changeset_only_merge_review_id(thread_id, &proposal.change_set)?;
