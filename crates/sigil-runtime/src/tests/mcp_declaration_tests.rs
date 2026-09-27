@@ -807,7 +807,7 @@ async fn mcp_declaration_registry_preserves_plugin_binding_in_lifecycle_audit() 
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fixture","version":"1.0.0"},"capabilities":{"resources":{},"prompts":{}}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fixture","version":"1.0.0"},"capabilities":{"tools":{},"resources":{},"prompts":{}}}}'
       ;;
     *'"method":"tools/list"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}'
