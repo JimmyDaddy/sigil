@@ -454,6 +454,7 @@ impl Provider for OpenAiResponsesProvider {
     async fn prove_portable_compaction_target(
         &self,
         frozen_request: FrozenProviderRequestMaterial,
+        role: sigil_kernel::provider::PortableCompactionRequestRole,
     ) -> Result<PortableTargetRequestMaterial> {
         let request = frozen_request.request();
         if !self.uses_official_openai_endpoint() {
@@ -503,11 +504,19 @@ impl Provider for OpenAiResponsesProvider {
                 safety_buffer_tokens: OPENAI_RESPONSES_PORTABLE_TARGET_SAFETY_BUFFER_TOKENS,
             },
         };
-        proof.validate_for(
+        proof.input.validate_for(
             frozen_request.fingerprint(),
             TokenMeasurementScope::RenderedTargetInput,
             &binding,
         )?;
+        proof.budget.validate()?;
+        if role == sigil_kernel::provider::PortableCompactionRequestRole::Target {
+            proof.validate_for(
+                frozen_request.fingerprint(),
+                TokenMeasurementScope::RenderedTargetInput,
+                &binding,
+            )?;
+        }
         Ok(PortableTargetRequestMaterial::new(
             frozen_request,
             binding,

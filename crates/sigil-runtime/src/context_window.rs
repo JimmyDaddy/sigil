@@ -260,6 +260,11 @@ pub fn compaction_preview_for_strategy(
 pub fn provider_context_window_tokens(provider_name: &str, model_name: &str) -> Option<u32> {
     match crate::provider_config_key(provider_name) {
         "deepseek" => deepseek_context_window_tokens(model_name),
+        "anthropic"
+            if model_name == sigil_provider_anthropic::DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_MODEL =>
+        {
+            Some(1_048_576)
+        }
         _ => None,
     }
 }

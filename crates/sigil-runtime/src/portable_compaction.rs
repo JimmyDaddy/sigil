@@ -511,6 +511,131 @@ pub fn attach_portable_compaction_economics_v2(
     material.with_compaction_economics_v2(extension)
 }
 
+/// Measures the exact source and target once through the existing durable non-generating owner.
+///
+/// The caller must already hold the session execution owner and a manual, observed-pressure, or
+/// overflow compaction preflight. Only these two bound audit pairs may cross its source frontier.
+///
+/// # Errors
+///
+/// Returns an error for remote measurement failure, source/profile drift, incomplete audit, or a
+/// target that does not fit. A failed or interrupted measurement is never silently retried.
+pub async fn prepare_remote_portable_target_material(
+    provider: &dyn Provider,
+    session: &Session,
+    preflight: &mut sigil_kernel::PortableSemanticCompactionPreflight,
+    frozen_before_request: &FrozenProviderRequestMaterial,
+    frozen_target_request: FrozenProviderRequestMaterial,
+    logical_run_id: &str,
+) -> Result<PortableTargetRequestMaterial> {
+    use sigil_kernel::provider::PortableCompactionRequestRole;
+    let (before, receipt) = measure_portable_request_input(
+        provider,
+        session,
+        format!("{logical_run_id}:before-input-token-measurement"),
+        frozen_before_request.clone(),
+        PortableCompactionRequestRole::Before,
+    )
+    .await?;
+    preflight
+        .admit_completed_input_token_measurement(receipt, before.frozen_request().fingerprint())?;
+    let (target, receipt) = measure_portable_request_input(
+        provider,
+        session,
+        format!("{logical_run_id}:target-input-token-measurement"),
+        frozen_target_request,
+        PortableCompactionRequestRole::Target,
+    )
+    .await?;
+    preflight
+        .admit_completed_input_token_measurement(receipt, target.frozen_request().fingerprint())?;
+    target.with_portable_economics_v2_candidate(frozen_before_request, before.proof().input.clone())
+}
+
+async fn measure_portable_request_input(
+    provider: &dyn Provider,
+    session: &Session,
+    logical_run_id: String,
+    frozen_request: FrozenProviderRequestMaterial,
+    role: sigil_kernel::provider::PortableCompactionRequestRole,
+) -> Result<(
+    PortableTargetRequestMaterial,
+    sigil_kernel::ProviderNonGeneratingAttemptReceipt,
+)> {
+    use sigil_kernel::{
+        ProviderNonGeneratingAttempt, ProviderPhysicalAttemptOutcome,
+        ProviderPhysicalAttemptPurpose, TokenMeasurementScope,
+    };
+    let expected_fingerprint = frozen_request.fingerprint().to_owned();
+    let mut attempt = ProviderNonGeneratingAttempt::start(
+        session,
+        &logical_run_id,
+        &frozen_request,
+        ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
+    )
+    .await?;
+    let measured = provider
+        .prove_portable_compaction_target(frozen_request, role)
+        .await
+        .and_then(|material| {
+            anyhow::ensure!(
+                material.frozen_request().fingerprint() == expected_fingerprint,
+                "remote token measurement changed the frozen request"
+            );
+            let sigil_kernel::InputTokenEvidence::Exact { binding, .. } = &material.proof().input
+            else {
+                bail!("remote token measurement did not return exact input evidence");
+            };
+            material.proof().input.validate_for(
+                &expected_fingerprint,
+                TokenMeasurementScope::RenderedTargetInput,
+                binding,
+            )?;
+            material.proof().budget.validate()?;
+            if role == sigil_kernel::provider::PortableCompactionRequestRole::Target {
+                material.proof().validate_for(
+                    &expected_fingerprint,
+                    TokenMeasurementScope::RenderedTargetInput,
+                    binding,
+                )?;
+            }
+            Ok(material)
+        });
+    match measured {
+        Ok(material) => {
+            attempt
+                .finish(session, ProviderPhysicalAttemptOutcome::Completed)
+                .await?;
+            let receipt = attempt
+                .completed_receipt()
+                .cloned()
+                .context("input-token measurement has no durable receipt")?;
+            Ok((material, receipt))
+        }
+        Err(error) => {
+            attempt
+                .finish(
+                    session,
+                    ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+                )
+                .await
+                .with_context(|| {
+                    format!("input-token measurement failed after durable start: {error:#}")
+                })?;
+            Err(error).context("portable input-token measurement failed")
+        }
+    }
+}
+
+/// Returns whether the provider/model has a remote-count portable profile.
+/// Endpoint and request-shaping qualification remains the provider adapter's responsibility.
+#[must_use]
+pub fn is_server_count_portable_target_profile(provider_name: &str, model_name: &str) -> bool {
+    is_openai_responses_portable_target_profile(provider_name, model_name)
+        || (provider_name == "anthropic"
+            && model_name == sigil_provider_anthropic::DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_MODEL)
+}
+
 /// Returns the explicit output cap used by the admitted DeepSeek V4 portable target request.
 #[must_use]
 pub const fn deepseek_v4_flash_portable_target_output_tokens() -> u32 {
@@ -524,26 +649,26 @@ pub fn is_deepseek_v4_flash_portable_target_profile(provider_name: &str, model_n
 }
 
 /// Returns whether a request identity is the only OpenAI Responses profile that may use the
-/// server-count overflow-recovery path.
+/// server-count portable-compaction path.
 #[must_use]
 pub fn is_openai_responses_portable_target_profile(provider_name: &str, model_name: &str) -> bool {
     provider_name == "openai_responses" && model_name == OPENAI_RESPONSES_PORTABLE_TARGET_MODEL
 }
 
-/// Returns whether automatic cache-aware V3 rotation has both a local exact portable proof
-/// profile and a trusted route capability.
+/// Returns whether automatic cache-aware V3 rotation has an exact portable proof profile
+/// and a trusted route capability.
 ///
 /// Model identity alone is insufficient: compatible/custom routes remain ineligible until their
-/// adapter advertises a validated cache contract. Profiles that need
-/// provider-side token measurement (currently OpenAI Responses) are reserved for the separately
-/// bounded overflow-recovery path and cannot enter the idle automatic path.
+/// adapter advertises a validated cache contract. Remote-count profiles are considered only
+/// after the scheduler has observed actual usage pressure; this predicate performs no I/O.
 #[must_use]
 pub fn cache_aware_v3_automatic_supported(
     provider_name: &str,
     model_name: &str,
     capabilities: &sigil_kernel::ProviderContextCapabilities,
 ) -> bool {
-    is_deepseek_v4_flash_portable_target_profile(provider_name, model_name)
+    (is_deepseek_v4_flash_portable_target_profile(provider_name, model_name)
+        || is_server_count_portable_target_profile(provider_name, model_name))
         && capabilities.validate().is_ok()
         && !matches!(
             capabilities.cache_mode,
@@ -627,6 +752,10 @@ pub fn portable_compaction_target_output_tokens(
         Some(deepseek_v4_flash_portable_target_output_tokens())
     } else if is_openai_responses_portable_target_profile(provider_name, model_name) {
         Some(OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS)
+    } else if provider_name == "anthropic"
+        && model_name == sigil_provider_anthropic::DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_MODEL
+    {
+        Some(sigil_provider_anthropic::DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_OUTPUT_TOKENS)
     } else {
         None
     }

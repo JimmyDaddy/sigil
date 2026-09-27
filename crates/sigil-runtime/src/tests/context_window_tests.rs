@@ -131,3 +131,15 @@ fn cache_aware_strategy_uses_adaptive_whole_turn_preview_in_production_helper() 
     assert!(preview.plan.adaptive_tail.retained_complete_turns >= 2);
     Ok(())
 }
+
+#[test]
+fn deepseek_messages_context_metadata_is_known_without_granting_exact_proof() {
+    assert_eq!(
+        super::provider_context_window_tokens("anthropic", "deepseek-flash"),
+        Some(1_048_576)
+    );
+    assert_eq!(
+        super::provider_context_window_tokens("anthropic", "deepseek-flash-unknown"),
+        None
+    );
+}

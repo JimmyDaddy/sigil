@@ -31,6 +31,8 @@ struct SourceBinding {
 
 pub struct StreamMapper {
     tool_parts: ToolCallStreamAccumulator,
+    thinking_replay_model: Option<String>,
+    thinking_replay_bytes: u64,
     hosted: Option<AnthropicHostedStreamContext>,
     server_parts: BTreeMap<usize, ServerToolPart>,
     client_tool_inputs: BTreeMap<usize, String>,
@@ -54,6 +56,8 @@ impl StreamMapper {
     pub fn new(hosted: Option<AnthropicHostedStreamContext>) -> Self {
         Self {
             tool_parts: ToolCallStreamAccumulator::new(),
+            thinking_replay_model: None,
+            thinking_replay_bytes: 0,
             hosted,
             server_parts: BTreeMap::new(),
             client_tool_inputs: BTreeMap::new(),
@@ -72,6 +76,11 @@ impl StreamMapper {
             stop_reason: None,
             usage_emitted: false,
         }
+    }
+
+    pub(crate) fn with_thinking_replay(mut self, model: Option<String>) -> Self {
+        self.thinking_replay_model = model;
+        self
     }
 
     pub fn map_envelope(
@@ -106,6 +115,7 @@ impl StreamMapper {
             AnthropicStreamEnvelope::MessageStop => {
                 self.complete_open_tool_calls(&mut chunks);
                 self.emit_usage(&mut chunks);
+                self.emit_thinking_continuation(&mut chunks)?;
                 self.emit_hosted_continuation(&mut chunks)?;
                 chunks.push(ProviderChunk::Done);
             }
@@ -123,6 +133,11 @@ impl StreamMapper {
     }
 
     pub fn finish(&mut self) -> Result<Vec<ProviderChunk>> {
+        if self.thinking_replay_model.is_some() {
+            return Err(anyhow!(
+                "Messages thinking stream ended before message_stop"
+            ));
+        }
         if self.hosted.is_some() && self.hosted_started {
             return Err(anyhow!(
                 "Anthropic hosted stream ended before message_stop; continuation is unsafe"
@@ -213,6 +228,7 @@ impl StreamMapper {
                 thinking,
                 signature,
             } => {
+                self.reserve_thinking_bytes(thinking.len().saturating_add(signature.len()))?;
                 self.exact_blocks.insert(
                     index,
                     json!({"type": "thinking", "thinking": thinking, "signature": signature}),
@@ -278,6 +294,7 @@ impl StreamMapper {
                 }
             }
             AnthropicContentBlockDelta::ThinkingDelta { thinking } => {
+                self.reserve_thinking_bytes(thinking.len())?;
                 append_exact_string_if_required(
                     &mut self.exact_blocks,
                     index,
@@ -290,6 +307,7 @@ impl StreamMapper {
                 }
             }
             AnthropicContentBlockDelta::SignatureDelta { signature } => {
+                self.reserve_thinking_bytes(signature.len())?;
                 append_exact_string_if_required(
                     &mut self.exact_blocks,
                     index,
@@ -572,6 +590,42 @@ impl StreamMapper {
             pricing_snapshot: None,
         }));
         self.usage_emitted = true;
+    }
+
+    fn reserve_thinking_bytes(&mut self, bytes: usize) -> Result<()> {
+        if self.thinking_replay_model.is_some() {
+            self.thinking_replay_bytes = self.thinking_replay_bytes.saturating_add(bytes as u64);
+            if self.thinking_replay_bytes > sigil_kernel::MAX_PROVIDER_CONTINUATION_PAYLOAD_BYTES {
+                return Err(anyhow!(
+                    "Messages thinking continuation exceeds the durable payload limit"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_thinking_continuation(&self, chunks: &mut Vec<ProviderChunk>) -> Result<()> {
+        let Some(model) = self.thinking_replay_model.as_deref() else {
+            return Ok(());
+        };
+        if self.stop_reason.as_deref() != Some("tool_use") {
+            return Ok(());
+        }
+        let blocks = self
+            .exact_blocks
+            .values()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if blocks.is_empty() {
+            return Err(anyhow!(
+                "Messages tool response has no thinking continuation"
+            ));
+        }
+        chunks.push(ProviderChunk::ContinuationState(
+            crate::thinking_replay::into_state(model, blocks)?,
+        ));
+        Ok(())
     }
 
     fn emit_hosted_continuation(&mut self, chunks: &mut Vec<ProviderChunk>) -> Result<()> {

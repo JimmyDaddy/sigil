@@ -106,9 +106,8 @@ impl PortableSemanticCompactionPreflight {
     /// Binds one completed non-generating token measurement that occurred after this preflight.
     ///
     /// The executor permits exactly the bound start/terminal pairs between the planned source and
-    /// its portable `Started` barrier. A normal portable attempt admits at most one target
-    /// measurement. Overflow recovery may admit two: one for the rejected pre-compaction request
-    /// and one for the compacted target, so the activation can prove exact before/after economics.
+    /// its portable `Started` barrier. A portable attempt admits at most the source and target
+    /// measurements, in that order. Both must bind the exact before/after economics at activation.
     /// Any other durable append remains a stale-plan failure.
     ///
     /// # Errors
@@ -137,11 +136,7 @@ impl PortableSemanticCompactionPreflight {
         {
             bail!("portable preflight already has this input-token measurement");
         }
-        let maximum_measurements = usize::from(matches!(
-            &self.request.initiation,
-            CompactionInitiation::OverflowRecovery { .. }
-        )) + 1;
-        if self.interleaved_input_token_measurements.len() >= maximum_measurements {
+        if self.interleaved_input_token_measurements.len() >= 2 {
             bail!("portable preflight input-token measurement limit exceeded");
         }
         self.interleaved_input_token_measurements.push(receipt);

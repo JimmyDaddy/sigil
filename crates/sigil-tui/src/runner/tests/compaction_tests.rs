@@ -219,6 +219,8 @@ fn has_v2_compaction_lifecycle_event(path: &Path) -> Result<bool> {
 
 #[derive(Clone)]
 struct OverflowRecoveryProvider {
+    provider_name: &'static str,
+    before_tokens: u64,
     plans: Arc<Mutex<VecDeque<StreamPlan>>>,
     stream_calls: Arc<Mutex<usize>>,
     target_proof_calls: Arc<Mutex<usize>>,
@@ -227,6 +229,8 @@ struct OverflowRecoveryProvider {
 impl OverflowRecoveryProvider {
     fn new(plans: Vec<StreamPlan>) -> Self {
         Self {
+            provider_name: "openai_responses",
+            before_tokens: 10_000,
             plans: Arc::new(Mutex::new(VecDeque::from(plans))),
             stream_calls: Arc::new(Mutex::new(0)),
             target_proof_calls: Arc::new(Mutex::new(0)),
@@ -255,6 +259,7 @@ fn overflow_recovery_profile(profile_id: &str) -> VersionedProfileIdentity {
 fn overflow_recovery_target_material(
     frozen_request: FrozenProviderRequestMaterial,
     input_tokens: u64,
+    role: sigil_kernel::provider::PortableCompactionRequestRole,
 ) -> Result<PortableTargetRequestMaterial> {
     let request = frozen_request.request();
     let binding = TokenMeasurementBinding {
@@ -283,11 +288,19 @@ fn overflow_recovery_target_material(
             safety_buffer_tokens: 8_192,
         },
     };
-    proof.validate_for(
+    proof.input.validate_for(
         frozen_request.fingerprint(),
         TokenMeasurementScope::RenderedTargetInput,
         &binding,
     )?;
+    proof.budget.validate()?;
+    if role == sigil_kernel::provider::PortableCompactionRequestRole::Target {
+        proof.validate_for(
+            frozen_request.fingerprint(),
+            TokenMeasurementScope::RenderedTargetInput,
+            &binding,
+        )?;
+    }
     Ok(PortableTargetRequestMaterial::new(
         frozen_request,
         binding,
@@ -298,11 +311,18 @@ fn overflow_recovery_target_material(
 #[async_trait]
 impl Provider for OverflowRecoveryProvider {
     fn name(&self) -> &str {
-        "openai_responses"
+        self.provider_name
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
         PlannedProvider::new(Vec::new()).capabilities()
+    }
+
+    fn context_capabilities(&self, _model_name: &str) -> sigil_kernel::ProviderContextCapabilities {
+        sigil_kernel::ProviderContextCapabilities {
+            cache_mode: sigil_kernel::CacheMode::ImplicitPrefix,
+            ..sigil_kernel::ProviderContextCapabilities::default()
+        }
     }
 
     fn classify_pre_generation_rejection(
@@ -315,14 +335,15 @@ impl Provider for OverflowRecoveryProvider {
     async fn prove_portable_compaction_target(
         &self,
         frozen_request: FrozenProviderRequestMaterial,
+        role: sigil_kernel::provider::PortableCompactionRequestRole,
     ) -> Result<PortableTargetRequestMaterial> {
         let mut calls = self
             .target_proof_calls
             .lock()
             .expect("target proof mutex should not be poisoned");
         *calls += 1;
-        let input_tokens = if *calls == 1 { 10_000 } else { 1 };
-        overflow_recovery_target_material(frozen_request, input_tokens)
+        let input_tokens = if *calls == 1 { self.before_tokens } else { 1 };
+        overflow_recovery_target_material(frozen_request, input_tokens, role)
     }
 
     async fn stream(
@@ -363,9 +384,18 @@ impl Provider for OverflowRecoveryProvider {
             })
             .to_string();
             return Ok(Box::pin(stream::iter(
-                [ProviderChunk::TextDelta(output), ProviderChunk::Done]
-                    .into_iter()
-                    .map(Ok::<_, anyhow::Error>),
+                [
+                    ProviderChunk::TextDelta(output),
+                    ProviderChunk::Usage(sigil_kernel::UsageStats {
+                        prompt_tokens: self.before_tokens,
+                        completion_tokens: 64,
+                        cache_miss_tokens: self.before_tokens,
+                        ..Default::default()
+                    }),
+                    ProviderChunk::Done,
+                ]
+                .into_iter()
+                .map(Ok::<_, anyhow::Error>),
             )));
         }
         let plan = self
@@ -395,9 +425,18 @@ fn seed_overflow_recovery_history(
     store: &JsonlSessionStore,
     root_config: &sigil_kernel::RootConfig,
 ) -> Result<()> {
+    seed_remote_compaction_history(store, root_config, "openai_responses", "gpt-4.1-2025-04-14")
+}
+
+fn seed_remote_compaction_history(
+    store: &JsonlSessionStore,
+    root_config: &sigil_kernel::RootConfig,
+    provider_name: &str,
+    model_name: &str,
+) -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "openai_responses".to_owned(),
-        model_name: "gpt-4.1-2025-04-14".to_owned(),
+        provider_name: provider_name.to_owned(),
+        model_name: model_name.to_owned(),
         resolved_model_route: None,
     }))?;
     store.append(&SessionLogEntry::Control(
@@ -594,6 +633,79 @@ fn assert_overflow_public_run_boundaries(
         run_boundaries[0].1 < run_boundaries[1].0,
         "the rejected run is terminal before the separately owned retry starts"
     );
+    Ok(())
+}
+
+#[test]
+fn remote_messages_pressure_compacts_through_the_actual_worker_and_reopens() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/messages-pressure.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut root_config = test_root_config(&workspace_root, "anthropic", "deepseek-flash");
+    root_config.compaction.context_window_tokens = Some(1_047_576);
+    seed_remote_compaction_history(&store, &root_config, "anthropic", "deepseek-flash")?;
+    let mut provider = OverflowRecoveryProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("completed turn before idle pressure check".to_owned()),
+        ProviderChunk::Usage(sigil_kernel::UsageStats {
+            prompt_tokens: 1_030_000,
+            completion_tokens: 10,
+            cache_miss_tokens: 1_030_000,
+            ..Default::default()
+        }),
+        ProviderChunk::Done,
+    ])]);
+    provider.provider_name = "anthropic";
+    provider.before_tokens = 1_030_000;
+    let observed_provider = provider.clone();
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "finish the current observation".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut notices = Vec::new();
+    loop {
+        let message = worker
+            .recv_with_timeout(deadline.saturating_duration_since(Instant::now()))
+            .with_context(|| format!("idle pressure did not apply; notices: {notices:?}"))?;
+        match message {
+            WorkerMessage::V2CompactionApplied {
+                source: super::super::V2CompactionApplySource::IdleAutomatic,
+                ..
+            } => break,
+            WorkerMessage::Notice(notice) => notices.push(notice),
+            WorkerMessage::RunFailed(error) => anyhow::bail!("pressure run failed: {error}"),
+            _ => {}
+        }
+    }
+    worker.shutdown()?;
+    assert_eq!(
+        observed_provider.stream_calls(),
+        2,
+        "one ordinary turn and one summary"
+    );
+    assert_eq!(
+        observed_provider.target_proof_calls(),
+        2,
+        "one before and one target measurement"
+    );
+    let restored = Session::load_from_store("anthropic", "deepseek-flash", store)?;
+    let projection = restored
+        .active_projection_snapshot()?
+        .context("durable projection")?;
+    assert!(
+        projection
+            .compaction()
+            .latest_applied_compaction_id()
+            .is_some()
+    );
+    assert_eq!(projection.compaction().open_attempt_count(), 0);
     Ok(())
 }
 

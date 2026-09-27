@@ -120,7 +120,10 @@ async fn server_count_target_proof_rejects_unpinned_models_before_network_io() -
     let frozen = FrozenProviderRequestMaterial::freeze("test-session", request)?;
 
     let error = provider
-        .prove_portable_compaction_target(frozen)
+        .prove_portable_compaction_target(
+            frozen,
+            sigil_kernel::provider::PortableCompactionRequestRole::Target,
+        )
         .await
         .expect_err("an alias must not become a server-count proof profile");
     assert!(error.to_string().contains("unavailable for model gpt-4.1"));

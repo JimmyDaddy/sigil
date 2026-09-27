@@ -637,8 +637,18 @@ fn cache_aware_v3_automatic_requires_both_exact_profile_and_trusted_route_capabi
     ));
     assert!(
         !cache_aware_v3_automatic_supported("openai_responses", "gpt-4.1", &trusted),
-        "provider-side token measurement is not admitted in the idle automatic path"
+        "an alias cannot borrow the pinned OpenAI portable profile"
     );
+    assert!(cache_aware_v3_automatic_supported(
+        "anthropic",
+        "deepseek-flash",
+        &trusted
+    ));
+    assert!(!cache_aware_v3_automatic_supported(
+        "anthropic",
+        "deepseek-flash",
+        &ProviderContextCapabilities::unknown()
+    ));
 }
 
 fn profile(id: &str) -> VersionedProfileIdentity {

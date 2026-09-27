@@ -1473,7 +1473,9 @@ VerbatimTail -> DynamicOverlay`。正常 turn 只追加 active tail；epoch rota
 - 首版在摘要调用前的 exact upper-bound economics gate 闭合前，idle cost-only automatic 一律
   fail closed，避免为了判断是否省钱而先产生一次确定账单；fit-required/pre-turn/overflow 不受此限制；
 - 只有具备 exact portable proof profile 且 adapter 在受信 official route 上声明有效 cache capability
-  时才启用 automatic V3；custom/compatible/未知 route 没有足够证明时直接不可用。
+  时才启用 automatic V3；协议兼容本身不构成证明。官方 DeepSeek Messages 的 `deepseek-flash`
+  profile 使用当前冻结请求的远端 exact count，manual 与已观察 usage 的压力触发共享它；小请求
+  不为判断压力而调用远端计数。未知 endpoint/model/header 仍没有此证明，普通生成不受此限制。
 
 TUI、serve 与 Desktop 消费同一个两阶段 typed preview。`prepared` 表示 local plan 已完成且没有
 provider consumption；`ready` 表示摘要调用已经发生、actual usage 与 exact target admission 已通过但
@@ -1503,7 +1505,20 @@ source cursor、store/retention/expiry 与 protected payload；carrier 丢失、
 policy 不兼容时追加失效审计并直接从 portable checkpoint 组装请求，不调用模型修复记忆。native
 失败只能降级为 notice，不能回滚或污染 portable truth。
 
-发生 context-window 拒绝也不能仅凭 HTTP status 或错误文本自动重试。唯一启用的 overflow recovery 是官方 OpenAI Responses `https://api.openai.com/v1` 上固定 `gpt-4.1-2025-04-14` snapshot：同一 foreground logical run 必须恰好一条 `context_window_exceeded + ConfirmedNoModelConsumption` durable terminal 且没有 output/side-effect refs；随后对同一冻结 post-compaction target 调用官方 `/responses/input_tokens`，并以该计数、显式 32K output reservation 与 8K safety buffer 完成完整 fit proof。计数本身先写同步、non-generating 的 `InputTokenMeasurement` start/terminal，成功后才允许新的 portable lifecycle；TUI 先刷新 lifecycle，再把仅存在进程内的一个冻结 target 交给一次新的 conversation attempt。alias、兼容 endpoint、普通错误、计数失败、profile drift、多个 physical attempt、任何 crash/restart 均 fail closed，不重发计数、不 apply、不 replay conversation；恢复后的 run 也不具备递归恢复资格。DeepSeek V4 Flash 仍没有本项 provider rejection contract，因此不进入 overflow path。
+发生 context-window 拒绝也不能仅凭 HTTP status 或错误文本自动重试。provider 必须在精确 route 上
+认证其拒绝合同：既有官方 OpenAI Responses `gpt-4.1-2025-04-14` 使用自己的 typed error；官方
+DeepSeek Messages `deepseek-flash` 使用已实测的 validation envelope，核对完整错误字段、context
+上限、请求的 output reservation 与 token 加法关系。其它 400、截断或变形错误不具备资格。
+同一 foreground logical run 必须恰好一条 `context_window_exceeded + ConfirmedNoModelConsumption`
+durable terminal，且没有 output/side-effect refs；之后仍须生成并校验 portable checkpoint。
+manual、pressure 与 overflow 复用同一远端计数 owner：before 和 target 分别绑定一次真实
+`InputTokenMeasurement` start/terminal。before 允许超出窗口，target 必须在显式 32K output
+reservation 与 8K safety buffer 下 fit；两条计数只豁免自己的审计追加，其它 source 变化仍由
+writer-lock CAS 拒绝。TUI 刷新 lifecycle 后，只把进程内冻结 target 交给一次新的 conversation
+attempt。计数失败、profile drift、多个 physical attempt、任何 crash/restart 都不自动重发计数、
+不 apply、不 replay conversation；恢复后的 run 也不具备递归恢复资格。已激活的 portable checkpoint
+与其 provider-private continuation 则可按正常 session restore 使用。具体材料与协议边界见
+[portable compaction protocols](portable-compaction-protocols.md)。
 
 模型切换由 runtime 的 session controller 持有跨 worker 操作：busy 状态拒绝新的切换；idle 时先冻结原 K/F、route/trust/frontier 和目标配置，再依次追加 Intent、Configured、Activated。Configured 将 route/trust 与阶段记录放入同一 durable CAS，后台停止旧 owner、启动新 worker，并核对真实 RuntimeReady 的 operation/revision/generation/boot 后才 Activated；同 route 也不能跳过 Ready。UI 在等待与失败期间保留输入和恢复入口，不提前展示新 route 已激活。详见 [session runtime controller](session-runtime-controller.md)。路由边界事件继续隔离
 provider-native continuation/cache，边界前 material 不得被新 route 复用；Desktop 与 TUI

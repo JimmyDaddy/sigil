@@ -6,9 +6,11 @@ mod hosted_search;
 mod mapper;
 mod models;
 mod native_compaction;
+mod portable_compaction;
 mod provider;
 mod request;
 mod stream;
+mod thinking_replay;
 
 pub use capabilities::anthropic_capabilities;
 pub use catalog::{
@@ -21,6 +23,9 @@ pub use config::{
     SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_VERSION_ENV,
 };
 pub use native_compaction::AnthropicNativeCompactionOptions;
+pub use portable_compaction::{
+    DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_MODEL, DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_OUTPUT_TOKENS,
+};
 pub use provider::AnthropicProvider;
 
 #[cfg(test)]

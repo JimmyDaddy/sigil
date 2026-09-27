@@ -12,6 +12,10 @@ pub enum AnthropicProviderError {
     RetryableStatus(u16),
     #[error("Anthropic request failed with status {status}: {body}")]
     Status { status: u16, body: String },
+    #[error(
+        "Messages request was rejected before generation because its context window was exceeded"
+    )]
+    ContextWindowExceeded,
     #[error("Anthropic stream error: {0}")]
     Stream(String),
     #[error("Anthropic hosted web search is unsupported for model {0}")]

@@ -980,3 +980,83 @@ fn default_max_output_tokens_follows_the_configured_messages_cap() -> anyhow::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires the explicitly authorized DeepSeek live environment"]
+async fn live_deepseek_messages_count_and_tool_continuation() -> Result<()> {
+    use sigil_kernel::provider::PortableCompactionRequestRole;
+    let key = std::env::var("DEEPSEEK_API_KEY").context("authorized DeepSeek key unavailable")?;
+    let provider = AnthropicProvider::new_exact(
+        AnthropicProviderConfig {
+            api_key: Some(key),
+            base_url: "https://api.deepseek.com/anthropic".to_owned(),
+            model: "deepseek-flash".to_owned(),
+            ..AnthropicProviderConfig::default()
+        },
+        ModelRequestTimeouts::default(),
+    )?;
+    let mut request = test_request();
+    request.model_name = "deepseek-flash".to_owned();
+    request.max_tokens = Some(crate::DEEPSEEK_ANTHROPIC_PORTABLE_TARGET_OUTPUT_TOKENS);
+    request.messages = vec![ModelMessage::user(
+        "Call get_value with name X now. After the tool result, reply with its number only.",
+    )];
+    request.tools = vec![sigil_kernel::ToolSpec {
+        name: "get_value".to_owned(),
+        description: "Read a named test value.".to_owned(),
+        input_schema: serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}),
+        category: sigil_kernel::ToolCategory::File,
+        access: sigil_kernel::ToolAccess::Read,
+        network_effect: None,
+        preview: sigil_kernel::ToolPreviewCapability::None,
+    }];
+    let mut stream = provider.stream(request.clone()).await?;
+    let mut calls = Vec::new();
+    let mut text = String::new();
+    let mut states = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk? {
+            ProviderChunk::ToolCallComplete(call) => calls.push(call),
+            ProviderChunk::TextDelta(delta) => text.push_str(&delta),
+            ProviderChunk::ContinuationState(state) => states.push(state),
+            _ => {}
+        }
+    }
+    anyhow::ensure!(
+        !calls.is_empty() && states.len() == 1,
+        "live route must produce actual tool and thinking source"
+    );
+    let assistant = ModelMessage::assistant((!text.is_empty()).then_some(text), calls.clone());
+    states[0].message_id = Some(assistant.id.clone());
+    request.messages.push(assistant);
+    for call in &calls {
+        request
+            .messages
+            .push(ModelMessage::tool(call.id.clone(), "7"));
+    }
+    // Serialize and reconstruct the durable opaque contract before using a fresh provider owner.
+    request.continuation_states = serde_json::from_slice(&serde_json::to_vec(&states)?)?;
+    let restored =
+        AnthropicProvider::new_exact(provider.config.clone(), ModelRequestTimeouts::default())?;
+    let frozen = FrozenProviderRequestMaterial::freeze("live-messages-restart", request.clone())?;
+    let proof = restored
+        .prove_portable_compaction_target(frozen, PortableCompactionRequestRole::Target)
+        .await?;
+    let mut stream = restored.stream(request).await?;
+    let mut actual = None;
+    let mut answer = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk? {
+            ProviderChunk::Usage(usage) => actual = Some(usage.prompt_tokens),
+            ProviderChunk::TextDelta(delta) => answer.push_str(&delta),
+            _ => {}
+        }
+    }
+    assert_eq!(actual, Some(proof.proof().input.admission_tokens()));
+    assert_eq!(answer.trim(), "7");
+    println!(
+        "B1_MESSAGES_LIVE {}",
+        serde_json::json!({"actual_input_tokens":actual,"count_input_tokens":proof.proof().input.admission_tokens(),"tool_calls":calls.len(),"thinking_restored":true})
+    );
+    Ok(())
+}

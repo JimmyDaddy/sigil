@@ -1688,3 +1688,57 @@ fn portable_executor_rejects_target_material_from_a_different_session_scope() ->
     );
     Ok(())
 }
+
+#[test]
+fn manual_portable_executor_admits_exact_before_and_after_measurements() -> Result<()> {
+    let (_temp, store, session) = setup_session()?;
+    let session_scope_id = session_scope_id(&store)?;
+    let mut request = request(&store, "attempt-overflow", "compaction-overflow", None)?;
+    request.initiation = CompactionInitiation::Manual;
+    let mut preflight = store.prepare_portable_semantic_compaction(request)?;
+    let target = target_material(
+        &session_scope_id,
+        preflight.checkpoint(),
+        preflight.task_memory(),
+        preflight.candidate_messages(),
+    )?;
+    let frozen_target_request = target.frozen_request.clone();
+    let mut before_request = frozen_target_request.request().clone();
+    before_request
+        .messages
+        .push(ModelMessage::user("uncompacted overflow source material"));
+    let frozen_before_request =
+        FrozenProviderRequestMaterial::freeze(&session_scope_id, before_request)?;
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 80,
+        material_fingerprint: frozen_before_request.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: target.binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    let target = PortableTargetRequestMaterial::new(
+        frozen_target_request.clone(),
+        target.binding,
+        target.proof,
+    )
+    .with_portable_economics(&frozen_before_request, before_input)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for (logical_run_id, frozen_request) in [
+        ("overflow-before-count", &frozen_before_request),
+        ("overflow-target-count", &frozen_target_request),
+    ] {
+        let receipt = runtime.block_on(record_completed_input_measurement(
+            &session,
+            logical_run_id,
+            frozen_request,
+        ))?;
+        preflight.admit_completed_input_token_measurement(receipt, frozen_request.fingerprint())?;
+    }
+
+    let outcome = store.execute_portable_semantic_compaction(preflight, target)?;
+    assert_eq!(outcome.compaction_id, "compaction-overflow");
+    Ok(())
+}

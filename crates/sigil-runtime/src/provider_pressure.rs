@@ -647,9 +647,10 @@ impl Provider for PressureAwareTaskProvider {
     async fn prove_portable_compaction_target(
         &self,
         frozen_request: FrozenProviderRequestMaterial,
+        role: sigil_kernel::provider::PortableCompactionRequestRole,
     ) -> Result<PortableTargetRequestMaterial> {
         self.inner
-            .prove_portable_compaction_target(frozen_request)
+            .prove_portable_compaction_target(frozen_request, role)
             .await
     }
 

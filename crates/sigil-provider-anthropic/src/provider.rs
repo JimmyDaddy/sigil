@@ -111,6 +111,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn context_capabilities(&self, model_name: &str) -> ProviderContextCapabilities {
+        if self.deepseek_portable_profile(model_name) {
+            return crate::portable_compaction::deepseek_context_capabilities();
+        }
         let official_route = self.hosted_platform == AnthropicHostedPlatform::ClaudeApi;
         anthropic_context_capabilities(
             official_route,
@@ -195,7 +198,32 @@ impl Provider for AnthropicProvider {
         }) {
             return sigil_kernel::ProviderFailureObservationV1::transport_interrupted(wire_state);
         }
-        sigil_kernel::ProviderFailureObservationV1::from_known_error(error, None, wire_state)
+        sigil_kernel::ProviderFailureObservationV1::from_known_error(
+            error,
+            self.classify_pre_generation_rejection(error),
+            wire_state,
+        )
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<sigil_kernel::ProviderRequestRejection> {
+        (self.deepseek_portable_profile(&self.config.model)
+            && error
+                .downcast_ref::<AnthropicProviderError>()
+                .is_some_and(|error| {
+                    matches!(error, AnthropicProviderError::ContextWindowExceeded)
+                }))
+        .then_some(sigil_kernel::ProviderRequestRejection::ContextWindowExceeded)
+    }
+
+    async fn prove_portable_compaction_target(
+        &self,
+        frozen_request: FrozenProviderRequestMaterial,
+        role: sigil_kernel::provider::PortableCompactionRequestRole,
+    ) -> Result<sigil_kernel::PortableTargetRequestMaterial> {
+        self.deepseek_portable_target(frozen_request, role).await
     }
 
     async fn stream(
@@ -229,7 +257,10 @@ impl Provider for AnthropicProvider {
             continuation_store: self.hosted_continuations.clone(),
             prior_invocations: prepared.prior_hosted_invocations.clone(),
         });
-        let body = prepared.body;
+        let mut body = prepared.body;
+        if self.deepseek_portable_profile(&request.model_name) {
+            crate::thinking_replay::apply(&mut body, &request)?;
+        }
         let url = self.messages_url();
         let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
             .await
@@ -244,6 +275,8 @@ impl Provider for AnthropicProvider {
                 request.model_name.clone(),
                 self.timeouts,
                 hosted_context,
+                self.deepseek_portable_profile(&request.model_name)
+                    .then(|| request.model_name.clone()),
             ));
         }
         let status_code = status.as_u16();
@@ -261,10 +294,21 @@ impl Provider for AnthropicProvider {
             status_code,
         )
         .await?;
+        let classified = if status_code == 400
+            && !error_body.truncated()
+            && self.deepseek_portable_profile(&request.model_name)
+            && crate::portable_compaction::context_window_rejection(
+                error_body.text(),
+                body.max_tokens,
+            ) {
+            AnthropicProviderError::ContextWindowExceeded
+        } else {
+            classify_status(status_code, error_body.text())
+        };
         Err(provider_status_error(
             status_code,
             retry_after.as_deref(),
-            classify_status(status_code, error_body.text()).into(),
+            classified.into(),
         ))
     }
 }
@@ -339,10 +383,11 @@ fn response_stream(
     model_name: String,
     timeouts: ModelRequestTimeouts,
     hosted_context: Option<AnthropicHostedStreamContext>,
+    thinking_replay_model: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
     let byte_stream = response.bytes_stream();
     let decoder = AnthropicSseDecoder::default();
-    let mapper = StreamMapper::new(hosted_context);
+    let mapper = StreamMapper::new(hosted_context).with_thinking_replay(thinking_replay_model);
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
     let saw_done = false;

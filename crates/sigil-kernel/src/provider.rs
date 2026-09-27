@@ -1241,6 +1241,14 @@ impl SessionStats {
     }
 }
 
+/// Distinguishes source measurement from admission of the next compacted request.
+/// Before material may exceed the budget; it never authorizes provider generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortableCompactionRequestRole {
+    Before,
+    Target,
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Returns the stable provider registry name.
@@ -1362,13 +1370,15 @@ pub trait Provider: Send + Sync {
         anyhow::bail!("provider transport fallback is unavailable on this route")
     }
 
-    /// Proves that one frozen portable-compaction target fits the provider/model request budget.
+    /// Measures one frozen portable-compaction request against an exact provider profile.
     ///
     /// Implementations may use a provider-owned exact measurement endpoint, but must return an
     /// error unless the resulting material is bound to the supplied frozen request, an explicit
     /// versioned profile, and a complete output/safety budget. Callers must record a durable
-    /// non-generating physical-attempt lifecycle before invoking a remote implementation and may
-    /// use it only after a durable pre-generation context-window rejection.
+    /// non-generating physical-attempt lifecycle before invoking a remote implementation, within
+    /// explicit manual compaction, observed-pressure compaction, or durable overflow recovery.
+    /// Target material must fit the complete budget; Before material only supplies exact source
+    /// evidence and may exceed that budget. Idle requests without pressure must not call this.
     ///
     /// # Errors
     ///
@@ -1377,6 +1387,7 @@ pub trait Provider: Send + Sync {
     async fn prove_portable_compaction_target(
         &self,
         _frozen_request: crate::FrozenProviderRequestMaterial,
+        _role: PortableCompactionRequestRole,
     ) -> Result<crate::PortableTargetRequestMaterial> {
         anyhow::bail!("provider does not support exact portable-compaction target proof")
     }
@@ -1440,9 +1451,10 @@ where
     async fn prove_portable_compaction_target(
         &self,
         frozen_request: crate::FrozenProviderRequestMaterial,
+        role: PortableCompactionRequestRole,
     ) -> Result<crate::PortableTargetRequestMaterial> {
         (**self)
-            .prove_portable_compaction_target(frozen_request)
+            .prove_portable_compaction_target(frozen_request, role)
             .await
     }
 

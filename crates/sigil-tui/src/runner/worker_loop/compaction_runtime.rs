@@ -7,8 +7,7 @@ use sigil_kernel::{
     CompactionThresholdStatus, ControlEntry, ExpectedRemainingTurnsV1,
     FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
     PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, ProviderContextCapabilities, ProviderNonGeneratingAttempt,
-    ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptOutcome,
+    PortableTargetRequestMaterial, ProviderContextCapabilities, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptPurpose, ProviderRequestRejection, RuntimeContextCandidates,
     ToolOutputProjectionPolicy, V2CompactionPreview,
 };
@@ -454,43 +453,42 @@ impl PreparedPortableV2Compaction {
         })
     }
 
-    async fn into_server_count_pending<P>(
+    async fn into_profile_pending(
+        self,
+        provider: &dyn sigil_kernel::Provider,
+        session: &Session,
+    ) -> Result<PendingV2Compaction> {
+        if sigil_runtime::portable_compaction::is_server_count_portable_target_profile(
+            session.provider_name(),
+            session.model_name(),
+        ) {
+            let logical_id = format!(
+                "portable-count-{}",
+                stable_event_uuid("portable-count", self.frozen_target_request.fingerprint())
+            );
+            self.into_server_count_pending(provider, session, &logical_id)
+                .await
+        } else {
+            self.into_pending()
+        }
+    }
+
+    async fn into_server_count_pending(
         mut self,
-        provider: &P,
+        provider: &dyn sigil_kernel::Provider,
         session: &Session,
         source_physical_attempt_id: &str,
-    ) -> Result<PendingV2Compaction>
-    where
-        P: sigil_kernel::Provider,
-    {
-        let (before_material, before_receipt) = measure_portable_request_input(
-            provider,
-            session,
-            format!("overflow-before-input-token-measurement:{source_physical_attempt_id}"),
-            self.frozen_before_request.clone(),
-            "pre-compaction overflow request",
-        )
-        .await?;
-        let before_input = before_material.proof().input.clone();
-        self.preflight.admit_completed_input_token_measurement(
-            before_receipt,
-            before_material.frozen_request().fingerprint(),
-        )?;
-
-        let (target_material, target_receipt) = measure_portable_request_input(
-            provider,
-            session,
-            format!("overflow-target-input-token-measurement:{source_physical_attempt_id}"),
-            self.frozen_target_request,
-            "post-compaction overflow target",
-        )
-        .await?;
-        self.preflight.admit_completed_input_token_measurement(
-            target_receipt,
-            target_material.frozen_request().fingerprint(),
-        )?;
-        let target_material = target_material
-            .with_portable_economics_v2_candidate(&self.frozen_before_request, before_input)?;
+    ) -> Result<PendingV2Compaction> {
+        let target_material =
+            sigil_runtime::portable_compaction::prepare_remote_portable_target_material(
+                provider,
+                session,
+                &mut self.preflight,
+                &self.frozen_before_request,
+                self.frozen_target_request,
+                source_physical_attempt_id,
+            )
+            .await?;
         let target_material = sigil_runtime::attach_portable_compaction_economics_v2(
             target_material,
             self.economics_v2_input.clone(),
@@ -512,57 +510,6 @@ impl PreparedPortableV2Compaction {
                 portable_compaction_id: self.native_portable_compaction_id,
             },
         })
-    }
-}
-
-async fn measure_portable_request_input<P>(
-    provider: &P,
-    session: &Session,
-    logical_run_id: String,
-    frozen_request: FrozenProviderRequestMaterial,
-    description: &str,
-) -> Result<(
-    PortableTargetRequestMaterial,
-    ProviderNonGeneratingAttemptReceipt,
-)>
-where
-    P: sigil_kernel::Provider,
-{
-    let mut measurement = ProviderNonGeneratingAttempt::start(
-        session,
-        &logical_run_id,
-        &frozen_request,
-        ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
-    )
-    .await?;
-    match provider
-        .prove_portable_compaction_target(frozen_request)
-        .await
-    {
-        Ok(target_material) => {
-            measurement
-                .finish(session, ProviderPhysicalAttemptOutcome::Completed)
-                .await?;
-            let receipt = measurement
-                .completed_receipt()
-                .cloned()
-                .with_context(|| format!("{description} measurement has no durable receipt"))?;
-            Ok((target_material, receipt))
-        }
-        Err(error) => {
-            if let Err(terminal_error) = measurement
-                .finish(
-                    session,
-                    ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
-                )
-                .await
-            {
-                return Err(terminal_error.context(format!(
-                    "{description} measurement failed after its durable start: {error:#}"
-                )));
-            }
-            Err(error).with_context(|| format!("{description} measurement failed"))
-        }
     }
 }
 
@@ -816,13 +763,11 @@ where
     let initiation = CompactionInitiation::OverflowRecovery {
         source_physical_attempt_id: source_physical_attempt_id.clone(),
     };
-    if !sigil_runtime::is_openai_responses_portable_target_profile(
+    if !sigil_runtime::portable_compaction::is_server_count_portable_target_profile(
         session.provider_name(),
         session.model_name(),
     ) {
-        bail!(
-            "overflow recovery is unavailable outside the pinned official OpenAI Responses target profile"
-        );
+        bail!("overflow recovery is unavailable outside a qualified server-count target profile");
     }
     if provider.name() != session.provider_name() {
         bail!("overflow recovery provider does not match the durable session provider");
@@ -1141,7 +1086,7 @@ async fn prepare_v2_compaction(
         transient_messages: Vec::new(),
         runtime_context,
     };
-    match prepare_portable_v2_compaction(
+    let prepared = prepare_portable_v2_compaction(
         request_id,
         initiation,
         root_config,
@@ -1153,9 +1098,12 @@ async fn prepare_v2_compaction(
         target_input,
         preview.clone(),
     )
-    .await
-    .and_then(PreparedPortableV2Compaction::into_pending)
-    {
+    .await;
+    let pending = match prepared {
+        Ok(prepared) => prepared.into_profile_pending(provider, session).await,
+        Err(error) => Err(error),
+    };
+    match pending {
         Ok(pending) => {
             let source_preview = pending.source_preview().clone();
             let continuity = Some(continuity_preview(&pending.preflight));
@@ -1387,13 +1335,16 @@ async fn prepare_portable_v2_compaction(
         session.provider_name(),
         session.model_name(),
     );
-    let overflow_server_count_profile =
-        matches!(&initiation, CompactionInitiation::OverflowRecovery { .. })
-            && sigil_runtime::is_openai_responses_portable_target_profile(
-                session.provider_name(),
-                session.model_name(),
-            );
-    if !local_target_profile && !overflow_server_count_profile {
+    let server_count_profile =
+        sigil_runtime::portable_compaction::is_server_count_portable_target_profile(
+            session.provider_name(),
+            session.model_name(),
+        ) && sigil_runtime::cache_aware_v3_automatic_supported(
+            session.provider_name(),
+            session.model_name(),
+            &provider.context_capabilities(session.model_name()),
+        );
+    if !local_target_profile && !server_count_profile {
         bail!("route has no admitted portable target profile for this compaction initiation");
     }
     if sigil_runtime::is_deepseek_v4_flash_portable_target_profile(

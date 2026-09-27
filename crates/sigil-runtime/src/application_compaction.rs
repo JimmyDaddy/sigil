@@ -948,10 +948,19 @@ async fn prepare_exact_application_compaction(
     PortableTargetRequestMaterial,
     ApplicationNativeCarrierSource,
 )> {
-    if !crate::is_deepseek_v4_flash_portable_target_profile(
+    let local_profile = crate::is_deepseek_v4_flash_portable_target_profile(
         session.provider_name(),
         session.model_name(),
-    ) {
+    );
+    let remote_profile = crate::portable_compaction::is_server_count_portable_target_profile(
+        session.provider_name(),
+        session.model_name(),
+    ) && crate::cache_aware_v3_automatic_supported(
+        session.provider_name(),
+        session.model_name(),
+        &provider.context_capabilities(session.model_name()),
+    );
+    if !local_profile && !remote_profile {
         bail!("route has no admitted normal portable compaction target profile");
     }
     let valid_for_snapshot = compaction_workspace_snapshot_id(root_config, workspace_root);
@@ -1049,7 +1058,7 @@ async fn prepare_exact_application_compaction(
         started_at_unix_ms: now,
         completed_at_unix_ms: crate::current_unix_time_ms(),
     };
-    let preflight = store.prepare_portable_semantic_compaction(request)?;
+    let mut preflight = store.prepare_portable_semantic_compaction(request)?;
     let target_request = session.build_portable_compaction_candidate_request(
         workspace_root,
         memory_config,
@@ -1069,12 +1078,23 @@ async fn prepare_exact_application_compaction(
         FrozenProviderRequestMaterial::freeze(session.session_scope_id(), target_request)?;
     let paths =
         crate::resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
-    let target_material =
+    let target_material = if remote_profile {
+        crate::portable_compaction::prepare_remote_portable_target_material(
+            provider,
+            session,
+            &mut preflight,
+            &frozen_before_request,
+            frozen_target_request,
+            &format!("application-portable:{preview_id}"),
+        )
+        .await?
+    } else {
         crate::deepseek_v4_flash_portable_target_material_with_economics_v2_candidate(
             &paths.cache_root,
             &frozen_before_request,
             frozen_target_request,
-        )?;
+        )?
+    };
     let latest_usage = session.entries().iter().rev().find_map(|entry| {
         let SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) = entry else {
             return None;
@@ -1414,3 +1434,7 @@ fn safe_compaction_unavailable_reason(error: &anyhow::Error) -> &'static str {
 #[cfg(test)]
 #[path = "tests/application_compaction_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/application_remote_compaction_tests.rs"]
+mod remote_tests;

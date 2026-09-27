@@ -725,3 +725,49 @@ fn v2_session_portable_transport_uses_its_durable_model_route() -> Result<()> {
     require_deepseek_portable_transport(&root_config, &session)?;
     Ok(())
 }
+
+#[test]
+fn remote_count_profile_only_enters_preparation_after_observed_pressure() {
+    let state = requested_idle_auto_state();
+    let mut session = Session::new("anthropic", "deepseek-flash");
+    session.stats_mut().last_prompt_tokens = 2_000;
+    let small = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &trusted_cache_context_capabilities(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+    assert_eq!(
+        small.decision,
+        IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::NotFitRequired
+        )
+    );
+    assert_eq!(small.evidence.detailed_preparation_candidate_count, 0);
+    session.stats_mut().last_prompt_tokens = 800_000;
+    let pressured = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &trusted_cache_context_capabilities(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+    assert!(matches!(
+        pressured.decision,
+        IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation { .. }
+    ));
+    let unknown_route = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &ProviderContextCapabilities::unknown(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+    assert_eq!(
+        unknown_route.decision,
+        IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::ProviderCapabilityUnavailable
+        )
+    );
+}
