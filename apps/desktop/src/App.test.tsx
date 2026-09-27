@@ -592,6 +592,16 @@ async function readyComposer(): Promise<HTMLTextAreaElement> {
   return composer;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
+}
+
 function installMediaQueries(matches: (query: string) => boolean): () => void {
   const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
   Object.defineProperty(window, "matchMedia", {
@@ -5247,6 +5257,119 @@ describe("desktop workspace and history shell", () => {
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("shows new-conversation progress while native creation is pending", async () => {
+    const user = userEvent.setup();
+    const request = deferred<SessionSummary>();
+    const createSession = vi.fn(() => request.promise);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      createSession,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText("Creating a new conversation…")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("Sigil is working")).toBeNull();
+    await act(async () => {
+      request.resolve({ id: "http-session-new", label: "New conversation", runCount: 0 });
+      await request.promise;
+    });
+    await readyComposer();
+    await waitFor(() => expect(screen.queryByLabelText("Creating a new conversation…")).toBeNull());
+  });
+
+  it.each(["accepted", "failed"] as const)("shows submission feedback before the native request settles (%s)", async (outcome) => {
+    const user = userEvent.setup();
+    const request = deferred<Awaited<ReturnType<DesktopBridge["startRun"]>>>();
+    const startRun = vi.fn(() => request.promise);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      startRun,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    await user.type(composer, "Show immediate feedback");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(startRun).toHaveBeenCalledOnce();
+    expect(screen.getByText("Starting task")).toBeTruthy();
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    expect(within(timeline).getByText("Show immediate feedback")).toBeTruthy();
+    expect(within(timeline).getByText("sending")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("Sigil is working")).toBeNull();
+
+    await act(async () => {
+      if (outcome === "accepted") {
+        request.resolve({ id: "run-deferred", sessionId: "http-session-new", status: "running", permissionMode: "manual", streamSequence: 0 });
+      } else {
+        request.reject(new Error("start unavailable"));
+      }
+      await request.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(screen.queryByText("Starting task")).toBeNull());
+    if (outcome === "failed") {
+      expect(composer.value).toBe("Show immediate feedback");
+      expect(within(timeline).queryByText("sending")).toBeNull();
+    } else {
+      await screen.findByRole("button", { name: "Stop run" });
+      expect(composer.value).toBe("");
+    }
+  });
+
+  it.each(["accepted", "failed"] as const)("marks a pending follow-up as sending until queue admission settles (%s)", async (outcome) => {
+    const user = userEvent.setup();
+    const request = deferred<Awaited<ReturnType<DesktopBridge["commandConversationQueue"]>>>();
+    const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(() => request.promise);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      commandConversationQueue,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    await user.type(composer, "Start the first run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop run" });
+    await waitFor(() => expect(composer.value).toBe(""));
+    await user.type(composer, "Follow-up waiting for receipt");
+    const queueButton = screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement;
+    await waitFor(() => expect(queueButton.disabled).toBe(false));
+    await user.click(queueButton);
+
+    expect(commandConversationQueue).toHaveBeenCalledOnce();
+    const pendingRow = within(screen.getByRole("log", { name: "Conversation timeline" }))
+      .getByText("Follow-up waiting for receipt").closest("article")!;
+    expect(within(pendingRow).getByText("sending")).toBeTruthy();
+    expect(within(pendingRow).queryByText("queued")).toBeNull();
+    expect(queueButton.disabled).toBe(true);
+    await user.clear(composer);
+    await user.type(composer, "Another draft during queue admission");
+
+    const input = commandConversationQueue.mock.calls[0][1];
+    await act(async () => {
+      if (outcome === "failed") {
+        request.reject(new Error("queue unavailable"));
+      } else request.resolve({
+        commandId: "queue-deferred", clientId: "sigil-desktop", sessionId: input.sessionId,
+        action: "enqueue", expectedGeneration: input.expectedGeneration, generation: "queue-accepted", replayed: false,
+        queue: {
+          schemaVersion: 1, sessionId: input.sessionId, generation: "queue-accepted", paused: false, totalItems: 1, truncated: false,
+          items: [{ entryId: "queued-deferred", order: 0, kind: "chat", status: "queued", promptPreview: "Follow-up waiting for receipt", promptPreviewTruncated: false, promptMaterial: "persisted_safe", dispatchable: false, blockedReason: "foreground_run_active" }],
+        },
+      });
+      await request.promise.catch(() => undefined);
+    });
+    if (outcome === "accepted") {
+      expect(within(pendingRow).getByText("queued")).toBeTruthy();
+    } else {
+      expect(screen.queryByText("Follow-up waiting for receipt")).toBeNull();
+    }
+    expect(composer.value).toBe("Another draft during queue admission");
+  });
+
   it("preserves IME text, accepts clipboard input, and does not submit during composition", async () => {
     const user = userEvent.setup();
     const prompts: string[] = [];
@@ -6245,20 +6368,11 @@ describe("desktop workspace and history shell", () => {
     ));
   });
 
-  it("restores paused Task controls from the canonical durable display without live events", async () => {
+  it.each(["accepted", "failed"] as const)("restores paused Task controls and shows a pending continuation (%s)", async (outcome) => {
     const user = userEvent.setup();
-    const continueTask = vi.fn(async (
-      _workspaceId: string,
-      sessionId: string,
-      _taskId: string,
-      permissionMode: PermissionMode,
-    ) => ({
-      id: "run-task-restarted",
-      sessionId,
-      status: "running" as const,
-      permissionMode,
-      streamSequence: 0,
-    }));
+    const request = deferred<Awaited<ReturnType<DesktopBridge["continueTask"]>>>();
+    const continueTask = vi.fn<DesktopBridge["continueTask"]>(() => request.promise);
+    const startRun = vi.fn<DesktopBridge["startRun"]>();
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -6301,6 +6415,7 @@ describe("desktop workspace and history shell", () => {
         },
       }),
       continueTask,
+      startRun,
     });
     render(<App bridge={bridge} />);
 
@@ -6317,6 +6432,27 @@ describe("desktop workspace and history shell", () => {
       "manual",
       undefined,
     ));
+    expect(screen.getByText("Starting task")).toBeTruthy();
+    const composer = await readyComposer();
+    await user.type(composer, "Preserve guidance while continuing");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(startRun).not.toHaveBeenCalled();
+    await act(async () => {
+      if (outcome === "accepted") {
+        request.resolve({ id: "run-task-restarted", sessionId: "http-session-new", status: "running", permissionMode: "manual", streamSequence: 0 });
+      } else {
+        request.reject(new Error("continuation unavailable"));
+      }
+      await request.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(screen.queryByText("Starting task")).toBeNull());
+    expect(composer.value).toBe("Preserve guidance while continuing");
+    if (outcome === "failed") {
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+    } else {
+      await screen.findByRole("button", { name: "Stop run" });
+    }
   });
 
   it.each([false, true])("pauses the exact active Task without using ordinary run cancellation (stream recovery=%s)", async (recovering) => {

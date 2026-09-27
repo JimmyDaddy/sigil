@@ -1,5 +1,5 @@
 import { createRef, type ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -514,6 +514,25 @@ describe("structured composer", () => {
     const status = screen.getByRole("status");
     expect(within(status).getByText("Sigil is working")).toBeTruthy();
     expect(within(status).getByText("Live output is updating. New messages will be queued.")).toBeTruthy();
+  });
+
+  it.each([false, true])("preserves edits made while a submission is pending (accepted=%s)", async (accepted) => {
+    const user = userEvent.setup();
+    let settle: (accepted: boolean) => void = () => undefined;
+    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
+    const onSubmit = vi.fn(() => pending);
+    renderComposer({ onSubmit });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+    await user.type(input, "First request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSubmit).toHaveBeenCalledWith("First request", undefined, undefined);
+
+    await user.clear(input);
+    await user.type(input, "Next request written while waiting");
+    await act(async () => { settle(accepted); await pending; });
+
+    expect(input.value).toBe("Next request written while waiting");
+    expect(window.localStorage.getItem("composer-test")).toBe("Next request written while waiting");
   });
 
   it("renders the parent supplied typed status presentation", () => {

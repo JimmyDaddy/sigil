@@ -129,6 +129,7 @@ interface PendingPrompt {
   readonly runId?: string;
   /** Set when the prompt was queued as a follow-up instead of starting a run. */
   readonly queued?: boolean;
+  readonly queueAccepted?: boolean;
 }
 
 interface RetryableRunStartRequest {
@@ -1394,7 +1395,7 @@ export function ConversationPanel({
       label: t("you"),
       text: pendingPrompt.text,
       skill: pendingPrompt.skill,
-      status: pendingPrompt.queued ? "queued" : "sending",
+      status: pendingPrompt.queueAccepted ? "queued" : "sending",
     }];
   }, [continuityState, liveEventState, pendingPrompt, t]);
   const approvalPresentation = useMemo(
@@ -1575,6 +1576,11 @@ export function ConversationPanel({
       const enqueued = action.action === "enqueue";
       queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue);
       if (enqueued) {
+        if (pendingPromptRef.current?.queued === true) {
+          const acceptedPrompt = { ...pendingPromptRef.current, queueAccepted: true };
+          pendingPromptRef.current = acceptedPrompt;
+          setPendingPrompt(acceptedPrompt);
+        }
         // The predecessor may already have finished while its background terminal
         // stream remains live. Queue admission must discover the successor itself.
         pendingPredecessorRunId.current = activeRunIdRef.current;
@@ -1616,6 +1622,7 @@ export function ConversationPanel({
         onNotice(t("queueExtensionBindingUnavailable"), true);
         return false;
       }
+      pendingPromptCounter.current += 1;
       const queuedPrompt: PendingPrompt = {
         identity: `optimistic:${session.id}:${pendingPromptCounter.current}`,
         text: nextPrompt,
@@ -1816,11 +1823,13 @@ export function ConversationPanel({
       (!allowStaleActiveRun && active)
       || (!allowStaleActiveRun && submissionBlocked)
       || taskControlBusy
+      || submitting
       || pendingApproval?.approval !== undefined
     ) {
       return false;
     }
     setTaskControlBusy(true);
+    setSubmitting(true);
     startRunPendingRef.current = true;
     try {
       const started = await bridge.continueTask(
@@ -1848,6 +1857,7 @@ export function ConversationPanel({
       return false;
     } finally {
       startRunPendingRef.current = false;
+      setSubmitting(false);
       setTaskControlBusy(false);
     }
   };
@@ -2407,7 +2417,7 @@ export function ConversationPanel({
           key={taskProjection.taskId}
           task={taskProjection}
           runActive={active}
-          disabled={submissionBlocked || pendingApproval?.approval !== undefined}
+          disabled={submissionBlocked || submitting || pendingApproval?.approval !== undefined}
           busy={taskControlBusy || taskIntegrationBusy}
           reviewReady={taskIntegrationReview !== undefined}
           reviewBusy={taskIntegrationLoading}

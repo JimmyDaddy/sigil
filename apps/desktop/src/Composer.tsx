@@ -112,6 +112,7 @@ export function Composer({
 }) {
   const { t } = useLocale();
   const [prompt, setPrompt] = useState(() => readDraft(draftKey));
+  const draftRevision = useRef(0);
   const [selectedSkill, setSelectedSkill] = useState<SkillCatalogEntry>();
   const [selectedAgent, setSelectedAgent] = useState<AgentCatalogEntry>();
   const [activeSuggestion, setActiveSuggestion] = useState(0);
@@ -121,12 +122,14 @@ export function Composer({
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
     if (requestedSkill === undefined) return;
+    draftRevision.current += 1;
     setSelectedSkill(requestedSkill);
     setSelectedAgent(undefined);
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   }, [composerRef, requestedSkill]);
   useEffect(() => {
     if (requestedAgent === undefined) return;
+    draftRevision.current += 1;
     setSelectedAgent(requestedAgent);
     setSelectedSkill(undefined);
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
@@ -150,6 +153,7 @@ export function Composer({
   }, [composerRef, prompt]);
 
   const submit = async () => {
+    const submittedRevision = draftRevision.current;
     let nextPrompt = prompt.trim();
     if (
       nextPrompt === ""
@@ -159,7 +163,7 @@ export function Composer({
     ) return;
     const command = resolveCommand(runContext, nextPrompt);
     if (command !== undefined) {
-      if (await executeCommand(command.suggestion, command.argument)) clearComposer();
+      if (await executeCommand(command.suggestion, command.argument)) clearComposer(submittedRevision);
       return;
     }
     const directSkill = selectedSkill === undefined && selectedAgent === undefined
@@ -193,14 +197,17 @@ export function Composer({
       return;
     }
     if (await onSubmit(nextPrompt, skill?.binding, agent?.binding)) {
-      clearComposer();
+      clearComposer(submittedRevision);
     }
   };
-  const clearComposer = () => {
-      setPrompt("");
-      setSelectedSkill(undefined);
-      setSelectedAgent(undefined);
-      writeDraft(draftKey, "");
+  const clearComposer = (expectedRevision = draftRevision.current) => {
+    // An accepted request owns only the draft that was submitted, not edits made while waiting.
+    if (draftRevision.current !== expectedRevision) return;
+    draftRevision.current += 1;
+    setPrompt("");
+    setSelectedSkill(undefined);
+    setSelectedAgent(undefined);
+    writeDraft(draftKey, "");
   };
   const selectSuggestion = (suggestion: ComposerSuggestion) => {
     if (!suggestion.available) {
@@ -229,8 +236,9 @@ export function Composer({
       replacePrompt(`${suggestion.token} `);
       return;
     }
+    const submittedRevision = draftRevision.current;
     void executeCommand(suggestion, "").then((completed) => {
-      if (completed) clearComposer();
+      if (completed) clearComposer(submittedRevision);
     });
   };
   const executeCommand = async (suggestion: ComposerSuggestion, argument: string) => {
@@ -313,6 +321,7 @@ export function Composer({
     }
   };
   const replacePrompt = (value: string) => {
+    draftRevision.current += 1;
     setPrompt(value);
     writeDraft(draftKey, value);
     setSuggestionsDismissedFor(undefined);
@@ -420,7 +429,7 @@ export function Composer({
                 className="composer-binding binding-skill"
                 variant="quiet"
                 type="button"
-                onClick={() => setSelectedSkill(undefined)}
+                onClick={() => { draftRevision.current += 1; setSelectedSkill(undefined); }}
                 aria-label={t("removeSkill", { name: selectedSkill.name })}
               >
                 <span>{selectedSkill.invocationToken}</span>
@@ -433,7 +442,7 @@ export function Composer({
                 className="composer-binding binding-agent"
                 variant="quiet"
                 type="button"
-                onClick={() => setSelectedAgent(undefined)}
+                onClick={() => { draftRevision.current += 1; setSelectedAgent(undefined); }}
                 aria-label={t("removeAgent", { name: selectedAgent.id })}
               >
                 <span>{selectedAgent.invocationToken}</span>
@@ -472,6 +481,7 @@ export function Composer({
             }
           }}
           onChange={(event) => {
+            draftRevision.current += 1;
             setPrompt(event.target.value);
             setSuggestionsDismissedFor(undefined);
             setActiveSuggestion(0);
