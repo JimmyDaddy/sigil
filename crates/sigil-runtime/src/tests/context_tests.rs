@@ -1423,3 +1423,34 @@ async fn repository_context_can_be_reenabled_without_changing_core_tools() -> Re
     assert!(!enabled.resolve("README.md").await?.items.is_empty());
     Ok(())
 }
+
+#[test]
+fn lexical_context_bounds_empty_directory_walks_without_limiting_explicit_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("000-marker.md"), "search_marker")?;
+    let directories = temp.path().join("directories");
+    fs::create_dir(&directories)?;
+    for index in 0..super::REPO_CONTEXT_MAX_ENTRIES_WALKED {
+        fs::create_dir(directories.join(format!("entry-{index:04}")))?;
+    }
+    let late_marker = directories.join("late/marker.md");
+    fs::create_dir(late_marker.parent().expect("fixture marker has a parent"))?;
+    fs::write(&late_marker, "search_marker")?;
+    let terms = std::collections::BTreeSet::from(["marker".to_owned()]);
+    let mut candidates = std::collections::BTreeMap::new();
+    super::collect_lexical_file_candidates(temp.path(), &terms, &mut candidates);
+    assert!(candidates.contains_key(std::path::Path::new("000-marker.md")));
+    assert!(
+        !candidates.contains_key(std::path::Path::new("directories/late/marker.md")),
+        "empty directories must consume the traversal budget too"
+    );
+    let explicit = context_candidates_from_repo_query(temp.path(), "directories/late/marker.md")?;
+    assert!(
+        explicit
+            .items
+            .iter()
+            .any(|item| item.id == "repo-file:directories/late/marker.md"),
+        "an explicit user path does not require a repository walk"
+    );
+    Ok(())
+}

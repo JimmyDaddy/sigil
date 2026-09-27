@@ -17,6 +17,7 @@ mod lsp;
 mod prepared_mutation;
 mod process;
 mod repo_language;
+mod repository_walk;
 mod service;
 mod tools;
 mod workspace;
@@ -29,6 +30,7 @@ pub use context::{
 pub use process::{
     LanguageServerLaunchPortV1, LanguageServerLaunchRequestV1, LanguageServerProcessIoV1,
 };
+pub use repository_walk::visit_repository_files;
 pub use service::{CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol};
 pub use tools::register_code_intelligence_tools;
 pub use workspace::{

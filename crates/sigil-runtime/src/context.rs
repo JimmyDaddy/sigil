@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use ignore::WalkBuilder;
 use sigil_code_intel::{
     CodeContextBuilder, CodeContextHit, CodeDiagnostic, CodeIntelligenceService, CodeLocation,
     CodeRange, CodeSymbol, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
@@ -23,6 +22,7 @@ use sigil_kernel::{
 };
 
 const REPO_CONTEXT_MAX_FILES_SCANNED: usize = 160;
+const REPO_CONTEXT_MAX_ENTRIES_WALKED: usize = 2_560;
 const REPO_CONTEXT_MAX_ITEMS: usize = 3;
 const REPO_CONTEXT_MAX_BYTES_PER_FILE: usize = 8 * 1024;
 const SOURCE_CONTEXT_MAX_FILES_SCANNED: usize = 640;
@@ -1155,61 +1155,33 @@ fn collect_lexical_file_candidates(
     terms: &BTreeSet<String>,
     candidates: &mut BTreeMap<PathBuf, RepoContextCandidate>,
 ) {
-    let filter_root = workspace_root.to_path_buf();
-    let mut walker = WalkBuilder::new(workspace_root);
-    walker
-        .hidden(false)
-        .parents(true)
-        .ignore(true)
-        .git_global(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .require_git(false)
-        .follow_links(false)
-        .sort_by_file_path(|left, right| left.cmp(right))
-        .filter_entry(move |entry| {
-            entry
-                .path()
-                .strip_prefix(&filter_root)
-                .map_or(true, |relative| !should_skip_repo_context_path(relative))
-        });
     let mut scanned = 0usize;
-    for result in walker.build() {
-        if scanned >= REPO_CONTEXT_MAX_FILES_SCANNED {
-            break;
-        }
-        let Ok(entry) = result else {
-            continue;
-        };
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() || file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.into_path();
-        let Ok(relative) = path.strip_prefix(workspace_root) else {
-            continue;
-        };
-        if should_skip_repo_context_path(relative) {
-            continue;
-        }
-        scanned = scanned.saturating_add(1);
-        if is_secret_like_path(relative) {
-            continue;
-        }
-        if let Some(scored) = lexical_file_score(&path, relative, terms) {
-            upsert_context_candidate(
-                candidates,
-                relative.to_path_buf(),
-                scored.score,
-                scored.score_breakdown,
-                ContextInclusionReason::RetrievalHit,
-                BTreeSet::new(),
-                None,
-            );
-        }
-    }
+    let _ = sigil_code_intel::visit_repository_files(
+        workspace_root,
+        REPO_CONTEXT_MAX_ENTRIES_WALKED,
+        should_skip_repo_context_path,
+        |path| {
+            let Ok(relative) = path.strip_prefix(workspace_root) else {
+                return Ok(true);
+            };
+            scanned = scanned.saturating_add(1);
+            if is_secret_like_path(relative) {
+                return Ok(scanned < REPO_CONTEXT_MAX_FILES_SCANNED);
+            }
+            if let Some(scored) = lexical_file_score(path, relative, terms) {
+                upsert_context_candidate(
+                    candidates,
+                    relative.to_path_buf(),
+                    scored.score,
+                    scored.score_breakdown,
+                    ContextInclusionReason::RetrievalHit,
+                    BTreeSet::new(),
+                    None,
+                );
+            }
+            Ok(scanned < REPO_CONTEXT_MAX_FILES_SCANNED)
+        },
+    );
 }
 
 fn collect_source_symbol_candidates(

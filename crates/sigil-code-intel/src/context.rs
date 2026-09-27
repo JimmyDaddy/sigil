@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     ContextBodyRef, ContextEgressDecisionId, ContextInclusionReason, ContextItem, ContextItemId,
@@ -266,7 +265,7 @@ pub enum RepoMapEdgeKind {
 /// Hard caps for one request-local repository-map build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoMapLiteOptions {
-    /// Maximum directory entries visited before stopping traversal.
+    /// Maximum raw directory entries enumerated before filtering and sorting bounded prefixes.
     pub max_walked_entries: usize,
     /// Maximum source files retained for parsing and ranking.
     pub max_source_files: usize,
@@ -333,97 +332,72 @@ pub fn build_repo_map_lite(
         edges: Vec::new(),
     };
 
-    let filter_root = workspace_root.clone();
-    let mut walker = WalkBuilder::new(&workspace_root);
-    walker
-        .hidden(false)
-        .parents(true)
-        .ignore(true)
-        .git_global(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .require_git(false)
-        .follow_links(false)
-        .sort_by_file_path(|left, right| left.cmp(right))
-        .filter_entry(move |entry| {
-            entry
-                .path()
-                .strip_prefix(&filter_root)
-                .map_or(true, |relative| !should_skip_repo_map_path(relative))
-        });
-
-    for result in walker.build() {
-        if map.entries_walked >= max_walked_entries || map.files_scanned >= max_source_files {
-            break;
-        }
-        map.entries_walked = map.entries_walked.saturating_add(1);
-        let Ok(entry) = result else {
-            continue;
-        };
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() || file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.into_path();
-        let Ok(relative) = path.strip_prefix(&workspace_root) else {
-            continue;
-        };
-        if is_secret_like_repo_map_path(relative) {
-            continue;
-        }
-        let Some(language) = repo_language_for_path(relative) else {
-            continue;
-        };
-        map.files_scanned = map.files_scanned.saturating_add(1);
-        let Some(indexed) = read_repo_map_index(&path, max_index_bytes) else {
-            continue;
-        };
-        let relative = relative.to_path_buf();
-        let tags = extract_repo_tags(
-            language,
-            &workspace_root,
-            &path,
-            &indexed.text,
-            max_definitions_per_file,
-            max_references_per_file,
-        )
-        .with_context(|| format!("failed to extract RepoMap tags from {}", relative.display()))?;
-        map.source_files.push(RepoSourceFileRef {
-            path: relative.clone(),
-            language: language.as_str().to_owned(),
-            token_cost_hint: estimate_context_token_cost(&indexed.text),
-            indexed_text: indexed.text,
-            truncated: indexed.truncated,
-        });
-
-        for definition in tags.definitions {
-            if map.symbols.len() >= max_definitions {
-                break;
+    map.entries_walked = crate::visit_repository_files(
+        &workspace_root,
+        max_walked_entries,
+        should_skip_repo_map_path,
+        |path| {
+            let Ok(relative) = path.strip_prefix(&workspace_root) else {
+                return Ok(true);
+            };
+            if is_secret_like_repo_map_path(relative) {
+                return Ok(true);
             }
-            let symbol_ref = repo_symbol_ref(language, &relative, definition);
-            if map.edges.len() < max_edges {
-                map.edges.push(RepoMapEdge {
-                    from: symbol_ref.symbol_id.clone(),
-                    to: format!("file:{}", symbol_ref.path.display()),
-                    kind: RepoMapEdgeKind::DeclaredIn,
+            let Some(language) = repo_language_for_path(relative) else {
+                return Ok(true);
+            };
+            map.files_scanned = map.files_scanned.saturating_add(1);
+            let Some(indexed) = read_repo_map_index(path, max_index_bytes) else {
+                return Ok(map.files_scanned < max_source_files);
+            };
+            let relative = relative.to_path_buf();
+            let tags = extract_repo_tags(
+                language,
+                &workspace_root,
+                path,
+                &indexed.text,
+                max_definitions_per_file,
+                max_references_per_file,
+            )
+            .with_context(|| {
+                format!("failed to extract RepoMap tags from {}", relative.display())
+            })?;
+            map.source_files.push(RepoSourceFileRef {
+                path: relative.clone(),
+                language: language.as_str().to_owned(),
+                token_cost_hint: estimate_context_token_cost(&indexed.text),
+                indexed_text: indexed.text,
+                truncated: indexed.truncated,
+            });
+
+            for definition in tags.definitions {
+                if map.symbols.len() >= max_definitions {
+                    break;
+                }
+                let symbol_ref = repo_symbol_ref(language, &relative, definition);
+                if map.edges.len() < max_edges {
+                    map.edges.push(RepoMapEdge {
+                        from: symbol_ref.symbol_id.clone(),
+                        to: format!("file:{}", symbol_ref.path.display()),
+                        kind: RepoMapEdgeKind::DeclaredIn,
+                    });
+                }
+                map.symbols.push(symbol_ref);
+            }
+            for reference in tags.references {
+                if map.references.len() >= max_references {
+                    break;
+                }
+                map.references.push(RepoReferenceRef {
+                    name: reference.name,
+                    language: language.as_str().to_owned(),
+                    path: relative.clone(),
+                    range: reference.range,
                 });
             }
-            map.symbols.push(symbol_ref);
-        }
-        for reference in tags.references {
-            if map.references.len() >= max_references {
-                break;
-            }
-            map.references.push(RepoReferenceRef {
-                name: reference.name,
-                language: language.as_str().to_owned(),
-                path: relative.clone(),
-                range: reference.range,
-            });
-        }
-    }
+            Ok(map.files_scanned < max_source_files)
+        },
+    )?;
 
     map.source_files
         .sort_by(|left, right| left.path.cmp(&right.path));

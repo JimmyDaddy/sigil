@@ -437,6 +437,32 @@ fn context_repo_map_lite_respects_ignore_secret_symlink_and_walk_caps() {
 }
 
 #[test]
+fn context_repo_map_lite_charges_ignored_directories_to_the_raw_walk_budget() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join(".gitignore"), "ignored-*\n")?;
+    for index in 0..32 {
+        let directory = temp.path().join(format!("ignored-{index:02}"));
+        fs::create_dir(&directory)?;
+        fs::write(directory.join("source.rs"), "pub fn ignored_source() {}\n")?;
+    }
+    let map = build_repo_map_lite(
+        temp.path(),
+        RepoMapLiteOptions {
+            max_walked_entries: 8,
+            ..RepoMapLiteOptions::default()
+        },
+    )?;
+    assert_eq!(
+        map.entries_walked, 8,
+        "raw ignored entries consume the budget before matching"
+    );
+    assert_eq!(map.files_scanned, 0);
+    assert!(map.source_files.is_empty());
+    Ok(())
+}
+
+#[test]
 fn context_repo_map_lite_applies_global_caps_and_is_deterministic() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(
