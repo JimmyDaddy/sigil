@@ -17,7 +17,9 @@ use std::fs::OpenOptions;
 use std::io::Read;
 
 mod cache;
+mod source_observation;
 mod streaming;
+pub use source_observation::{HostSourceEntryObservation, HostSourceObservationRoot};
 mod traversal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

@@ -19,9 +19,9 @@ use crate::{
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DurableEventType, EventClass, MutationBatchId, MutationBatchStatus, MutationEventRecorder,
     MutationSubject, OperationId, Session, VerificationScope, WorkspaceId, WorkspaceSnapshotId,
-    build_workspace_snapshot, bytes_hash, delete_file_with_mutation_in_batch, file_content_hash,
+    build_workspace_snapshot, bytes_hash, delete_file_with_mutation_expected_in_batch,
     session::{ControlEntry, SessionLogEntry},
-    stable_event_uuid, stable_workspace_id, write_file_with_mutation_in_batch,
+    stable_event_uuid, stable_workspace_id, write_file_with_mutation_expected_in_batch,
 };
 
 pub type WriteIsolationAgentId = String;
@@ -327,6 +327,149 @@ pub struct MergeReviewRequested {
     pub review_id: MergeReviewId,
     pub changeset_id: ChangeSetId,
     pub parent_workspace_snapshot_id: WorkspaceSnapshotId,
+    /// Host-captured target provenance. Without a scoped binding this review retains its explicit
+    /// whole-workspace snapshot precondition; model-declared file hashes do not replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<MergeReviewSourceBinding>,
+}
+
+/// Exact parent subjects captured by the host before a child prepares its proposal.
+///
+/// This binds the workspace, complete target set, source content (including explicit absence),
+/// and immutable patch. It grants no permission; accepted integration still owns mutation/CAS.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MergeReviewSourceBinding {
+    workspace_id: WorkspaceId,
+    artifact_hash: String,
+    files: BTreeMap<PathBuf, Option<String>>,
+}
+
+impl MergeReviewSourceBinding {
+    /// Binds host-observed sources to a completed patch, independently of unrelated files.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable workspace, empty target set, unsafe path or bad hash.
+    pub fn new(
+        workspace_root: &Path,
+        files: BTreeMap<PathBuf, Option<String>>,
+        artifact_content: &str,
+    ) -> Result<Self> {
+        let binding = Self {
+            workspace_id: stable_workspace_id(workspace_root)?,
+            artifact_hash: bytes_hash(artifact_content.as_bytes()),
+            files,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    /// Returns the content-bound snapshot identity for exactly this binding's target scope.
+    ///
+    /// # Errors
+    /// Returns an error when the binding or its target-scope manifest is invalid.
+    pub fn snapshot_id(&self) -> Result<WorkspaceSnapshotId> {
+        self.validate()?;
+        crate::WorkspaceSnapshotManifestV1 {
+            workspace_id: self.workspace_id.clone(),
+            scope_hash: "merge-review-targets-v1".to_owned(),
+            entries: self
+                .files
+                .iter()
+                .map(|(path, hash)| crate::WorkspaceSnapshotEntry {
+                    normalized_path: path.clone(),
+                    file_type: crate::FileType::File,
+                    content_hash: hash.clone(),
+                    mode: None,
+                    file_metadata: None,
+                    symlink_target: None,
+                    state: if hash.is_some() {
+                        crate::SnapshotEntryState::Present
+                    } else {
+                        crate::SnapshotEntryState::Missing
+                    },
+                })
+                .collect(),
+        }
+        .workspace_snapshot_id()
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.workspace_id.is_empty() && !self.files.is_empty(),
+            "merge source binding is empty"
+        );
+        for (path, hash) in &self.files {
+            let text = path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("merge source path is not UTF-8"))?;
+            anyhow::ensure!(
+                changeset_relative_path(text)? == *path,
+                "merge source path is not normalized"
+            );
+            if let Some(hash) = hash {
+                validate_merge_source_hash(hash)?;
+            }
+        }
+        validate_merge_source_hash(&self.artifact_hash)
+    }
+
+    fn bind_changeset(
+        &self,
+        workspace_root: &Path,
+        change_set: &ChangeSet,
+        artifact: &str,
+    ) -> Result<ChangeSet> {
+        self.validate()?;
+        anyhow::ensure!(
+            self.workspace_id == stable_workspace_id(workspace_root)?,
+            "merge source belongs to another workspace"
+        );
+        anyhow::ensure!(
+            self.artifact_hash == bytes_hash(artifact.as_bytes()),
+            "merge source artifact hash mismatch"
+        );
+        anyhow::ensure!(
+            self.files.len() == change_set.files.len(),
+            "merge source target set does not match changeset"
+        );
+        let mut bound = change_set.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for file in &mut bound.files {
+            let path = changeset_relative_path(&file.path)?;
+            anyhow::ensure!(
+                seen.insert(path.clone()),
+                "merge changeset repeats a target path"
+            );
+            let hash = self.files.get(&path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "merge changeset target is missing host source provenance: {}",
+                    file.path
+                )
+            })?;
+            anyhow::ensure!(
+                match file.action {
+                    ChangeSetFileAction::Create => hash.is_none(),
+                    ChangeSetFileAction::Update | ChangeSetFileAction::Delete => hash.is_some(),
+                    ChangeSetFileAction::Rename => false,
+                },
+                "merge source state does not support the requested file action: {}",
+                file.path
+            );
+            file.before_hash = hash.clone();
+        }
+        Ok(bound)
+    }
+}
+
+fn validate_merge_source_hash(hash: &str) -> Result<()> {
+    anyhow::ensure!(
+        hash.strip_prefix("sha256:").is_some_and(
+            |digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ),
+        "merge source hash is invalid"
+    );
+    Ok(())
 }
 
 /// Durable fact emitted when a parent merge review is resolved.
@@ -520,8 +663,8 @@ pub fn apply_parent_changeset_mutation_batch(
 /// Resolves a merge review and applies accepted changesets through RFC-0002 mutation evidence.
 ///
 /// Rejected, conflicted or cancelled decisions only append `MergeReviewResolved`. An accepted
-/// request first compares the exact current parent snapshot with the review precondition and
-/// preflights every file/hash/artifact operation. Snapshot drift or any preflight conflict resolves
+/// request validates host-captured source bindings (or the review's explicit workspace snapshot)
+/// and preflights every file/hash/artifact operation. Target drift or any preflight conflict resolves
 /// the review as `Conflict` with zero parent mutation. Only a fully preflighted request enters one
 /// RFC-0002 mutation batch.
 ///
@@ -586,8 +729,27 @@ pub fn resolve_merge_review_parent_mutation(
         .ok_or_else(|| anyhow::anyhow!("accepted merge review requires a durable session store"))?;
     let workspace_root = canonical_workspace_root(&request.workspace_root)?;
     let artifact = UnifiedDiffArtifact::parse(&request.artifact_content)?;
-    let observed_parent_snapshot_id = parent_workspace_snapshot_id(&workspace_root)?;
-    if observed_parent_snapshot_id != requested.parent_workspace_snapshot_id {
+    let bound_change_set = if let Some(binding) = &requested.source_binding {
+        anyhow::ensure!(
+            binding.snapshot_id()? == requested.parent_workspace_snapshot_id,
+            "merge source snapshot identity does not match its review"
+        );
+        Some(binding.bind_changeset(
+            &workspace_root,
+            &request.change_set,
+            &request.artifact_content,
+        )?)
+    } else {
+        None
+    };
+    let observed_parent_snapshot_id = if bound_change_set.is_none() {
+        Some(parent_workspace_snapshot_id(&workspace_root)?)
+    } else {
+        None
+    };
+    if let Some(observed_parent_snapshot_id) = observed_parent_snapshot_id
+        && observed_parent_snapshot_id != requested.parent_workspace_snapshot_id
+    {
         let reason = format!(
             "stale parent workspace snapshot: expected {}, observed {}",
             requested.parent_workspace_snapshot_id, observed_parent_snapshot_id
@@ -607,26 +769,29 @@ pub fn resolve_merge_review_parent_mutation(
             failed_operations: Vec::new(),
         });
     }
-    let prepared_files =
-        match prepare_changeset_files(&workspace_root, &request.change_set, &artifact) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                session.append_control(ControlEntry::MergeReviewResolved(MergeReviewResolved {
-                    review_id: request.review_id.clone(),
-                    decision: MergeDecision::Conflict,
-                    reason: Some(format!("changeset preflight conflict: {error:#}")),
-                }))?;
-                return Ok(MergeReviewParentMutationOutcome {
-                    review_id: request.review_id,
-                    decision: MergeDecision::Conflict,
-                    change_set_result: None,
-                    batch_id: None,
-                    batch_status: None,
-                    committed_operations: Vec::new(),
-                    failed_operations: Vec::new(),
-                });
-            }
-        };
+    let prepared_files = match prepare_changeset_files(
+        &workspace_root,
+        bound_change_set.as_ref().unwrap_or(&request.change_set),
+        &artifact,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            session.append_control(ControlEntry::MergeReviewResolved(MergeReviewResolved {
+                review_id: request.review_id.clone(),
+                decision: MergeDecision::Conflict,
+                reason: Some(format!("changeset preflight conflict: {error:#}")),
+            }))?;
+            return Ok(MergeReviewParentMutationOutcome {
+                review_id: request.review_id,
+                decision: MergeDecision::Conflict,
+                change_set_result: None,
+                batch_id: None,
+                batch_status: None,
+                committed_operations: Vec::new(),
+                failed_operations: Vec::new(),
+            });
+        }
+    };
     let batch_id = changeset_merge_batch_id(&request.review_id, &request.change_set.id);
     let batch_operation_id =
         changeset_merge_operation_id(&request.review_id, &request.change_set.id);
@@ -694,7 +859,18 @@ pub fn resolve_merge_review_parent_mutation(
     };
     session.append_control(ControlEntry::ChangeSetApplied(result.clone()))?;
     if latest_snapshot_id.is_some() {
-        let after_snapshot_id = parent_workspace_snapshot_id(&workspace_root)?;
+        let after_snapshot_id = match build_workspace_snapshot(
+            &workspace_root,
+            stable_workspace_id(&workspace_root)?,
+            &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+            0,
+        ) {
+            Ok(snapshot) => snapshot.workspace_snapshot_id,
+            Err(error) => {
+                tracing::warn!(%error, "post-merge workspace observation unavailable");
+                None
+            }
+        };
         session.append_durable_event(
             DurableEventType::ChildChangesetMerged,
             EventClass::Critical,
@@ -703,6 +879,7 @@ pub fn resolve_merge_review_parent_mutation(
                 "changeset_id": request.change_set.id.as_str(),
                 "batch_id": batch_id,
                 "parent_workspace_snapshot_before_id": requested.parent_workspace_snapshot_id,
+                "parent_workspace_snapshot_before_scope": if requested.source_binding.is_some() { "merge_review_targets" } else { "workspace" },
                 "parent_workspace_snapshot_after_id": after_snapshot_id,
                 "committed_operations": committed_operations,
                 "failed_operations": failed_operations,
@@ -1229,6 +1406,46 @@ fn prepare_changeset_files(
         .collect()
 }
 
+fn read_changeset_source(absolute_path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+
+    let source = match fs::File::open(absolute_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to open changeset source {}",
+                    absolute_path.display()
+                )
+            });
+        }
+    };
+    let limit = crate::verification::MAX_WORKSPACE_SNAPSHOT_FILE_BYTES;
+    anyhow::ensure!(
+        source.metadata()?.len() <= limit,
+        "changeset source exceeds {limit} byte read limit: {}",
+        absolute_path.display()
+    );
+    let mut bytes = Vec::new();
+    source
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!(
+                "failed to read changeset source {}",
+                absolute_path.display()
+            )
+        })?;
+    // The handle can grow after metadata observation; never allocate/read its unbounded size.
+    anyhow::ensure!(
+        bytes.len() as u64 <= limit,
+        "changeset source exceeds {limit} byte read limit: {}",
+        absolute_path.display()
+    );
+    Ok(Some(bytes))
+}
+
 fn prepare_changeset_file(
     workspace_root: &Path,
     file: &ChangeSetFile,
@@ -1236,35 +1453,57 @@ fn prepare_changeset_file(
 ) -> Result<PreparedChangeSetFile> {
     let relative_path = changeset_relative_path(&file.path)?;
     let absolute_path = workspace_root.join(&relative_path);
-    validate_declared_before_hash(file, &absolute_path)?;
+    validate_changeset_target_path(workspace_root, &relative_path)?;
+    let source_bytes = read_changeset_source(&absolute_path)?;
+    let expected_before_hash = source_bytes.as_deref().map(bytes_hash);
+    validate_declared_before_hash_value(file, expected_before_hash.as_deref())?;
     let operation = match file.action {
         ChangeSetFileAction::Create => {
-            if file_content_hash(&absolute_path)?.is_some() {
+            if source_bytes.is_some() {
                 bail!("changeset create target already exists: {}", file.path);
             }
-            let content = artifact.materialize(&relative_path, &absolute_path, true)?;
+            let content = artifact.materialize(&relative_path, b"")?;
             validate_declared_after_hash(file, Some(&content))?;
             PreparedChangeSetFileOperation::Write(content)
         }
         ChangeSetFileAction::Update => {
-            let content = artifact.materialize(&relative_path, &absolute_path, false)?;
+            let content = artifact.materialize(
+                &relative_path,
+                source_bytes
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("changeset source is missing: {}", file.path))?,
+            )?;
             validate_declared_after_hash(file, Some(&content))?;
             PreparedChangeSetFileOperation::Write(content)
         }
         ChangeSetFileAction::Delete => {
             validate_declared_after_hash(file, None)?;
-            let _ = artifact.materialize(&relative_path, &absolute_path, false)?;
+            let _ = artifact.materialize(
+                &relative_path,
+                source_bytes
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("changeset source is missing: {}", file.path))?,
+            )?;
             PreparedChangeSetFileOperation::Delete
         }
         ChangeSetFileAction::Rename => {
             bail!("changeset rename apply is not supported in changeset-only merge handoff")
         }
     };
+    anyhow::ensure!(
+        read_changeset_source(&absolute_path)?
+            .as_deref()
+            .map(bytes_hash)
+            == expected_before_hash,
+        "changeset source changed during preflight: {}",
+        file.path
+    );
     Ok(PreparedChangeSetFile {
         file: file.clone(),
         relative_path,
         absolute_path,
         operation,
+        expected_before_hash,
     })
 }
 
@@ -1275,16 +1514,18 @@ fn apply_prepared_changeset_file_to_parent(
     batch_id: &str,
     prepared: PreparedChangeSetFile,
 ) -> Result<AppliedChangeSetFile> {
+    validate_changeset_target_path(workspace_root, &prepared.relative_path)?;
     validate_declared_before_hash(&prepared.file, &prepared.absolute_path)?;
     match prepared.operation {
         PreparedChangeSetFileOperation::Write(content) => {
-            let committed = write_file_with_mutation_in_batch(
+            let committed = write_file_with_mutation_expected_in_batch(
                 Some(recorder),
                 workspace_root,
                 tool_call_id,
                 Some(batch_id.to_owned()),
                 prepared.relative_path,
                 prepared.absolute_path,
+                prepared.expected_before_hash,
                 &content,
             )?
             .ok_or_else(|| anyhow::anyhow!("durable recorder did not return mutation commit"))?;
@@ -1294,13 +1535,14 @@ fn apply_prepared_changeset_file_to_parent(
             })
         }
         PreparedChangeSetFileOperation::Delete => {
-            let committed = delete_file_with_mutation_in_batch(
+            let committed = delete_file_with_mutation_expected_in_batch(
                 Some(recorder),
                 workspace_root,
                 tool_call_id,
                 Some(batch_id.to_owned()),
                 prepared.relative_path,
                 prepared.absolute_path,
+                prepared.expected_before_hash,
             )?
             .ok_or_else(|| anyhow::anyhow!("durable recorder did not return mutation commit"))?;
             Ok(AppliedChangeSetFile {
@@ -1311,12 +1553,37 @@ fn apply_prepared_changeset_file_to_parent(
     }
 }
 
+fn validate_changeset_target_path(workspace_root: &Path, relative_path: &Path) -> Result<()> {
+    let mut path = workspace_root.to_path_buf();
+    for component in relative_path.components() {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "changeset target traverses an alias: {}",
+                    relative_path.display()
+                );
+                anyhow::ensure!(
+                    std::fs::canonicalize(&path)? == path,
+                    "changeset target identity changed: {}",
+                    relative_path.display()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct PreparedChangeSetFile {
     file: ChangeSetFile,
     relative_path: PathBuf,
     absolute_path: PathBuf,
     operation: PreparedChangeSetFileOperation,
+    expected_before_hash: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1332,19 +1599,22 @@ struct AppliedChangeSetFile {
 }
 
 fn validate_declared_before_hash(file: &ChangeSetFile, absolute_path: &Path) -> Result<()> {
+    let current = read_changeset_source(absolute_path)?
+        .as_deref()
+        .map(bytes_hash);
+    validate_declared_before_hash_value(file, current.as_deref())
+}
+
+fn validate_declared_before_hash_value(file: &ChangeSetFile, current: Option<&str>) -> Result<()> {
     let Some(expected) = file.before_hash.as_deref() else {
         return Ok(());
     };
-    let current = file_content_hash(absolute_path)?;
-    if !current
-        .as_deref()
-        .is_some_and(|observed| digest_values_equal(observed, expected))
-    {
+    if !current.is_some_and(|observed| digest_values_equal(observed, expected)) {
         bail!(
             "changeset before_hash mismatch for {}: expected {}, observed {}",
             file.path,
             expected,
-            current.as_deref().unwrap_or("absent")
+            current.unwrap_or("absent")
         );
     }
     Ok(())
@@ -1491,31 +1761,20 @@ impl UnifiedDiffArtifact {
         Ok(Self { patches })
     }
 
-    fn materialize(
-        &self,
-        relative_path: &Path,
-        absolute_path: &Path,
-        creating: bool,
-    ) -> Result<Vec<u8>> {
+    fn materialize(&self, relative_path: &Path, source_bytes: &[u8]) -> Result<Vec<u8>> {
         let patch = self.patch_for(relative_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "changeset artifact does not include unified diff for {}",
                 relative_path.display()
             )
         })?;
-        let old_lines = if creating {
-            Vec::new()
-        } else {
-            let bytes = fs::read(absolute_path)
-                .with_context(|| format!("failed to read {}", absolute_path.display()))?;
-            let content = String::from_utf8(bytes).with_context(|| {
-                format!(
-                    "changeset merge only supports utf-8 text files: {}",
-                    absolute_path.display()
-                )
-            })?;
-            split_preserving_newline(&content)
-        };
+        let content = std::str::from_utf8(source_bytes).with_context(|| {
+            format!(
+                "changeset merge only supports utf-8 text files: {}",
+                relative_path.display()
+            )
+        })?;
+        let old_lines = split_preserving_newline(content);
         let new_lines = patch.apply(&old_lines)?;
         Ok(new_lines.concat().into_bytes())
     }

@@ -376,14 +376,9 @@ impl AgentToolRuntime {
             &grant,
         );
 
-        let changeset_only_base_snapshot_id = match changeset_only_write {
-            true => match capture_chat_changeset_only_parent_snapshot_id(
-                session,
-                &child_thread.thread_id,
-                &options.workspace_root,
-                "base",
-            ) {
-                Ok(snapshot_id) => Some(snapshot_id),
+        let changeset_only_source_observation = match changeset_only_write {
+            true => match ChangesetSourceObservation::capture(&options.workspace_root).await {
+                Ok(observation) => Some(observation),
                 Err(error) => {
                     let _ = self.supervisor.record_chat_child_failure(
                         session,
@@ -423,21 +418,20 @@ impl AgentToolRuntime {
                     "background agent mailbox was not created",
                 );
             };
-            let write_owner =
-                if let Some(base_snapshot_id) = changeset_only_base_snapshot_id.as_ref() {
-                    Some(BackgroundChatAgentWriteOwner::ChangesetOnly {
-                        base_snapshot_id: base_snapshot_id.clone(),
-                        workspace_root: options.workspace_root.clone(),
-                    })
-                } else if let Some(worktree) = chat_worktree.take() {
-                    Some(BackgroundChatAgentWriteOwner::Worktree {
-                        worktree: Box::new(worktree),
-                        workspace_root: options.workspace_root.clone(),
-                        objective: parsed.objective.clone(),
-                    })
-                } else {
-                    None
-                };
+            let write_owner = if let Some(source_observation) = changeset_only_source_observation {
+                Some(BackgroundChatAgentWriteOwner::ChangesetOnly {
+                    source_observation,
+                    workspace_root: options.workspace_root.clone(),
+                })
+            } else if let Some(worktree) = chat_worktree.take() {
+                Some(BackgroundChatAgentWriteOwner::Worktree {
+                    worktree: Box::new(worktree),
+                    workspace_root: options.workspace_root.clone(),
+                    objective: parsed.objective.clone(),
+                })
+            } else {
+                None
+            };
             let thread_id = child_thread.thread_id.clone();
             let cancellation_owner = background_cancellation_owner
                 .take()
@@ -666,13 +660,13 @@ impl AgentToolRuntime {
         } else {
             None
         };
-        let changeset_only_controls = if let Some(base_snapshot_id) =
-            changeset_only_base_snapshot_id
+        let changeset_only_controls = if let Some(source_observation) =
+            changeset_only_source_observation
         {
             match prepare_chat_changeset_only_child_controls(
                 session,
                 &child_thread.thread_id,
-                &base_snapshot_id,
+                source_observation,
                 &materialized.execution_text,
                 &outcome,
                 &options.workspace_root,
@@ -1203,13 +1197,8 @@ impl AgentToolRuntime {
             supervisor: self.supervisor.clone(),
             thread_id: child_thread.thread_id.clone(),
         };
-        let changeset_only_base_snapshot_id = if changeset_only_write {
-            Some(capture_chat_changeset_only_parent_snapshot_id(
-                session,
-                &child_thread.thread_id,
-                &options.workspace_root,
-                "base",
-            )?)
+        let changeset_only_source_observation = if changeset_only_write {
+            Some(ChangesetSourceObservation::capture(&options.workspace_root).await?)
         } else {
             None
         };
@@ -1251,12 +1240,12 @@ impl AgentToolRuntime {
         .await?;
         let outcome = output.outcome;
         let changeset_only_controls =
-            if let Some(base_snapshot_id) = changeset_only_base_snapshot_id {
+            if let Some(source_observation) = changeset_only_source_observation {
                 Some(
                     prepare_chat_changeset_only_child_controls(
                         session,
                         &child_thread.thread_id,
-                        &base_snapshot_id,
+                        source_observation,
                         &materialized.execution_text,
                         &outcome,
                         &options.workspace_root,
@@ -1348,7 +1337,7 @@ async fn prepare_chat_worktree(
     workspace_root: &Path,
 ) -> Result<crate::isolated_workspace::MaterializedGitWorktree> {
     let base_snapshot_id =
-        capture_chat_changeset_only_parent_snapshot_id(session, thread_id, workspace_root, "base")?;
+        capture_chat_worktree_base_snapshot_id(session, thread_id, workspace_root, "base")?;
     let recorder = session
         .mutation_event_recorder()
         .ok_or_else(|| anyhow!("worktree chat child requires a durable parent session store"))?;
@@ -1521,14 +1510,9 @@ pub(super) async fn prepare_chat_worktree_child_controls(
     else {
         return Ok(None);
     };
-    let observed_digest = format!("{:x}", Sha256::digest(proposal.artifact.content.as_bytes()));
-    if observed_digest != proposal.artifact.content_sha256 {
-        bail!("worktree child changeset artifact digest changed before persistence");
-    }
     let recorder = session
         .mutation_event_recorder()
         .ok_or_else(|| anyhow!("worktree child changeset requires durable storage"))?;
-    let workspace_id = stable_workspace_id(workspace_root)?;
     let operation_id = format!(
         "chat-worktree-changeset-artifact-{}",
         stable_event_uuid(
@@ -1536,27 +1520,38 @@ pub(super) async fn prepare_chat_worktree_child_controls(
             &format!("{}:{}", thread_id.as_str(), proposal.change_set.id.as_str()),
         )
     );
-    let bytes = proposal.artifact.content.as_bytes().to_vec();
-    let artifact_ref = tokio::task::spawn_blocking(move || {
-        recorder.capture_immutable_content_artifact(
-            &workspace_id,
-            &operation_id,
-            Path::new(".sigil-agent-artifacts/chat-worktree.diff"),
-            &bytes,
-        )
-    })
-    .await
-    .context("chat worktree changeset artifact persistence task failed")??;
-    proposal.artifact_ref = artifact_ref;
-    proposal.integration_facts.changeset_artifact_ref = proposal.artifact_ref.clone();
+    let workspace_root = workspace_root.to_path_buf();
+    let (proposal, source_binding, source_snapshot_id) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let observed_digest =
+                format!("{:x}", Sha256::digest(proposal.artifact.content.as_bytes()));
+            if observed_digest != proposal.artifact.content_sha256 {
+                bail!("worktree child changeset artifact digest changed before persistence");
+            }
+            let source_binding = sigil_kernel::write_isolation::MergeReviewSourceBinding::new(
+                &workspace_root,
+                proposal
+                    .change_set
+                    .files
+                    .iter()
+                    .map(|file| (PathBuf::from(&file.path), file.before_hash.clone()))
+                    .collect(),
+                &proposal.artifact.content,
+            )?;
+            let source_snapshot_id = source_binding.snapshot_id()?;
+            proposal.artifact_ref = recorder.capture_immutable_content_artifact(
+                &stable_workspace_id(&workspace_root)?,
+                &operation_id,
+                Path::new(".sigil-agent-artifacts/chat-worktree.diff"),
+                proposal.artifact.content.as_bytes(),
+            )?;
+            proposal.integration_facts.changeset_artifact_ref = proposal.artifact_ref.clone();
+            Ok((proposal, source_binding, source_snapshot_id))
+        })
+        .await
+        .context("chat worktree changeset artifact persistence task failed")??;
     let touched_subjects = changeset_touched_subjects(&proposal.change_set);
     let changeset_id = proposal.change_set.id.clone();
-    let after_snapshot_id = capture_chat_changeset_only_parent_snapshot_id(
-        session,
-        thread_id,
-        workspace_root,
-        "after",
-    )?;
     let merge_review_id = chat_changeset_only_merge_review_id(thread_id, &proposal.change_set)?;
     Ok(Some(PreparedChatWorktreeControls {
         change_set: proposal.change_set,
@@ -1573,7 +1568,8 @@ pub(super) async fn prepare_chat_worktree_child_controls(
         merge_review: MergeReviewRequested {
             review_id: merge_review_id,
             changeset_id,
-            parent_workspace_snapshot_id: after_snapshot_id,
+            parent_workspace_snapshot_id: source_snapshot_id,
+            source_binding: Some(source_binding),
         },
     }))
 }
@@ -1656,7 +1652,7 @@ fn worktree_preparation_unavailable_tool_result(
     )
 }
 
-fn capture_chat_changeset_only_parent_snapshot_id(
+fn capture_chat_worktree_base_snapshot_id(
     session: &Session,
     thread_id: &AgentThreadId,
     workspace_root: &Path,
@@ -1679,7 +1675,7 @@ fn capture_chat_changeset_only_parent_snapshot_id(
     )?;
     snapshot.workspace_snapshot_id.ok_or_else(|| {
         anyhow!(
-            "changeset-only chat worker {} cannot bind {label} parent workspace snapshot",
+            "worktree chat worker {} cannot bind {label} parent workspace snapshot",
             thread_id.as_str()
         )
     })
@@ -1694,7 +1690,7 @@ pub(super) struct PreparedChatChangesetOnlyControls {
 pub(super) async fn prepare_chat_changeset_only_child_controls(
     session: &Session,
     thread_id: &AgentThreadId,
-    base_snapshot_id: &str,
+    source_observation: ChangesetSourceObservation,
     final_text: &str,
     outcome: &sigil_kernel::AgentRunOutcome,
     workspace_root: &Path,
@@ -1706,23 +1702,10 @@ pub(super) async fn prepare_chat_changeset_only_child_controls(
             outcome.changed_files.join(", ")
         );
     }
-    let after_snapshot_id = capture_chat_changeset_only_parent_snapshot_id(
-        session,
-        thread_id,
-        workspace_root,
-        "after",
-    )?;
-    if after_snapshot_id != base_snapshot_id {
-        bail!(
-            "changeset-only chat worker {} changed parent workspace snapshot",
-            thread_id.as_str()
-        );
-    }
     let mut proposal = decode_changeset_only_child_output(final_text)?;
     let recorder = session
         .mutation_event_recorder()
         .ok_or_else(|| anyhow!("changeset-only proposal requires durable storage"))?;
-    let workspace_id = stable_workspace_id(workspace_root)?;
     let operation_id = format!(
         "chat-changeset-artifact-{}",
         stable_event_uuid(
@@ -1730,18 +1713,26 @@ pub(super) async fn prepare_chat_changeset_only_child_controls(
             &format!("{}:{}", thread_id.as_str(), proposal.change_set.id.as_str())
         )
     );
-    let bytes = proposal.artifact.content.as_bytes().to_vec();
-    proposal.artifact_ref = tokio::task::spawn_blocking(move || {
-        recorder.capture_immutable_content_artifact(
-            &workspace_id,
-            &operation_id,
-            Path::new(".sigil-agent-artifacts/chat-changeset.diff"),
-            &bytes,
-        )
-    })
-    .await
-    .context("changeset-only artifact persistence task failed")??;
-    proposal.integration_facts.changeset_artifact_ref = proposal.artifact_ref.clone();
+    let workspace_root = workspace_root.to_path_buf();
+    let (proposal, source_binding, source_snapshot_id) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let source_binding = source_observation.bind(
+                &workspace_root,
+                &mut proposal.change_set,
+                &proposal.artifact.content,
+            )?;
+            let source_snapshot_id = source_binding.snapshot_id()?;
+            proposal.artifact_ref = recorder.capture_immutable_content_artifact(
+                &stable_workspace_id(&workspace_root)?,
+                &operation_id,
+                Path::new(".sigil-agent-artifacts/chat-changeset.diff"),
+                proposal.artifact.content.as_bytes(),
+            )?;
+            proposal.integration_facts.changeset_artifact_ref = proposal.artifact_ref.clone();
+            Ok((proposal, source_binding, source_snapshot_id))
+        })
+        .await
+        .context("changeset-only artifact persistence task failed")??;
     let touched_subjects = changeset_touched_subjects(&proposal.change_set);
     let changeset_id = proposal.change_set.id.clone();
     let merge_review_id = chat_changeset_only_merge_review_id(thread_id, &proposal.change_set)?;
@@ -1750,7 +1741,7 @@ pub(super) async fn prepare_chat_changeset_only_child_controls(
         isolated: IsolatedChangeSetProduced {
             changeset_id: changeset_id.clone(),
             owner_agent_id: format!("agent:{}", thread_id.as_str()),
-            base_snapshot_id: base_snapshot_id.to_owned(),
+            base_snapshot_id: source_snapshot_id.clone(),
             child_snapshot_id: None,
             source_isolation: WriteIsolationMode::ChangesetOnly,
             artifact_ref: Some(proposal.artifact_ref),
@@ -1760,7 +1751,8 @@ pub(super) async fn prepare_chat_changeset_only_child_controls(
         merge_review: MergeReviewRequested {
             review_id: merge_review_id,
             changeset_id,
-            parent_workspace_snapshot_id: after_snapshot_id,
+            parent_workspace_snapshot_id: source_snapshot_id,
+            source_binding: Some(source_binding),
         },
     })
 }

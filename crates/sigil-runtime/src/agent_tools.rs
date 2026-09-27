@@ -100,6 +100,7 @@ mod permissions;
 mod result_pages;
 mod runtime;
 mod shared;
+mod source_observation;
 mod spawn;
 mod surface;
 mod user_input;
@@ -154,6 +155,7 @@ use shared::{
     short_digest, simple_agent_preview, terminal_status_label, thread_id_arg, thread_status_label,
     unix_time_ms, usage_summary_from_stats,
 };
+use source_observation::ChangesetSourceObservation;
 use spawn::{
     PreparedChatIsolatedChildControls, append_prepared_chat_isolated_child_controls,
     cleanup_chat_worktree, prepare_chat_changeset_only_child_controls,

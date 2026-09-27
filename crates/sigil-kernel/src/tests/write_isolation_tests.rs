@@ -75,6 +75,7 @@ fn append_merge_review_request(
         review_id: review_id(),
         changeset_id: change_set_id,
         parent_workspace_snapshot_id: super::parent_workspace_snapshot_id(workspace_root)?,
+        source_binding: None,
     }))
 }
 
@@ -177,6 +178,7 @@ fn write_isolation_projection_tracks_lease_and_merge_review_state() {
         review_id: review_id(),
         changeset_id: produced.changeset_id.clone(),
         parent_workspace_snapshot_id: "snapshot-parent".to_owned(),
+        source_binding: None,
     };
     let resolved = MergeReviewResolved {
         review_id: requested.review_id.clone(),
@@ -529,6 +531,7 @@ fn write_isolation_projection_replays_durable_stream_records() -> Result<()> {
         review_id: review_id(),
         changeset_id: change_set_id(),
         parent_workspace_snapshot_id: "snapshot-parent".to_owned(),
+        source_binding: None,
     };
     let resolved = MergeReviewResolved {
         review_id: review.review_id.clone(),
@@ -1059,5 +1062,297 @@ fn accepted_merge_review_preflight_conflict_is_zero_mutation() -> Result<()> {
     let event_types = stored_event_types(&store)?;
     assert!(!event_types.contains(&DurableEventType::MutationBatchStarted.as_str().to_owned()));
     assert!(!event_types.contains(&DurableEventType::ChildChangesetMerged.as_str().to_owned()));
+    Ok(())
+}
+
+fn append_scoped_merge_review(
+    session: &mut Session,
+    review: MergeReviewId,
+    change_set: &ChangeSet,
+    workspace_root: &std::path::Path,
+    artifact: &str,
+) -> Result<()> {
+    let files = change_set
+        .files
+        .iter()
+        .map(|file| {
+            let content = std::fs::read(workspace_root.join(&file.path));
+            let hash = match content {
+                Ok(bytes) => Some(bytes_hash(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            Ok((std::path::PathBuf::from(&file.path), hash))
+        })
+        .collect::<Result<_>>()?;
+    let source_binding = super::MergeReviewSourceBinding::new(workspace_root, files, artifact)?;
+    session.append_control(ControlEntry::MergeReviewRequested(MergeReviewRequested {
+        review_id: review,
+        changeset_id: change_set.id.clone(),
+        parent_workspace_snapshot_id: source_binding.snapshot_id()?,
+        source_binding: Some(source_binding),
+    }))
+}
+
+#[test]
+fn accepted_merge_reviews_with_disjoint_sources_apply_sequentially() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    std::fs::write(workspace_root.join("other.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let first = note_change_set(change_set_id());
+    let mut second = note_change_set(ChangeSetId::new("second-change")?);
+    second.files[0].path = "other.txt".to_owned();
+    let second_diff = note_diff().replace("note.txt", "other.txt");
+    let second_review = MergeReviewId::new("second-review")?;
+    append_scoped_merge_review(
+        &mut session,
+        review_id(),
+        &first,
+        &workspace_root,
+        &note_diff(),
+    )?;
+    append_scoped_merge_review(
+        &mut session,
+        second_review.clone(),
+        &second,
+        &workspace_root,
+        &second_diff,
+    )?;
+    // This prevents complete whole-workspace snapshots; it says nothing about either target.
+    std::fs::File::create(workspace_root.join("unrelated.bin"))?
+        .set_len(crate::verification::MAX_WORKSPACE_SNAPSHOT_FILE_BYTES + 1)?;
+    for (review, change_set, artifact) in [
+        (review_id(), first, note_diff()),
+        (second_review.clone(), second, second_diff),
+    ] {
+        let outcome = resolve_merge_review_parent_mutation(
+            &mut session,
+            MergeReviewParentMutationRequest {
+                review_id: review,
+                decision: MergeDecision::Accepted,
+                reason: None,
+                change_set,
+                artifact_content: artifact,
+                workspace_root: workspace_root.clone(),
+                tool_call_id: "scoped-merge".to_owned(),
+            },
+        )?;
+        assert_eq!(outcome.decision, MergeDecision::Accepted);
+        assert_eq!(outcome.batch_status, Some(MutationBatchStatus::Applied));
+    }
+    assert_eq!(std::fs::read(workspace_root.join("note.txt"))?, b"new\n");
+    assert_eq!(std::fs::read(workspace_root.join("other.txt"))?, b"new\n");
+    assert!(
+        session.write_isolation_projection().merge_reviews[&second_review]
+            .requested
+            .as_ref()
+            .expect("recorded scoped review")
+            .source_binding
+            .is_some()
+    );
+    assert_eq!(
+        stored_event_types(&store)?
+            .iter()
+            .filter(|event| *event == DurableEventType::ChildChangesetMerged.as_str())
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn accepted_merge_review_target_drift_ignores_model_claimed_current_hash() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let mut change_set = note_change_set(change_set_id());
+    // The patch deliberately applies to the later user content. Host provenance must still win.
+    let artifact = note_diff().replace("-old", "-user");
+    append_scoped_merge_review(
+        &mut session,
+        review_id(),
+        &change_set,
+        &workspace_root,
+        &artifact,
+    )?;
+    std::fs::write(workspace_root.join("note.txt"), b"user\n")?;
+    change_set.files[0].before_hash = Some(bytes_hash(b"user\n"));
+    let outcome = resolve_merge_review_parent_mutation(
+        &mut session,
+        MergeReviewParentMutationRequest {
+            review_id: review_id(),
+            decision: MergeDecision::Accepted,
+            reason: None,
+            change_set,
+            artifact_content: artifact,
+            workspace_root: workspace_root.clone(),
+            tool_call_id: "scoped-merge".to_owned(),
+        },
+    )?;
+    assert_eq!(outcome.decision, MergeDecision::Conflict);
+    assert_eq!(outcome.batch_status, None);
+    assert_eq!(std::fs::read(workspace_root.join("note.txt"))?, b"user\n");
+    assert!(
+        !stored_event_types(&store)?
+            .contains(&DurableEventType::MutationBatchStarted.as_str().to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn accepted_merge_review_oversized_target_is_zero_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    let target = workspace_root.join("note.txt");
+    std::fs::write(&target, b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let change_set = note_change_set(change_set_id());
+    append_scoped_merge_review(
+        &mut session,
+        review_id(),
+        &change_set,
+        &workspace_root,
+        &note_diff(),
+    )?;
+    // A target may grow after the host bound its small original source.
+    let oversized = crate::verification::MAX_WORKSPACE_SNAPSHOT_FILE_BYTES + 1;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)?
+        .set_len(oversized)?;
+    let outcome = resolve_merge_review_parent_mutation(
+        &mut session,
+        MergeReviewParentMutationRequest {
+            review_id: review_id(),
+            decision: MergeDecision::Accepted,
+            reason: None,
+            change_set,
+            artifact_content: note_diff(),
+            workspace_root,
+            tool_call_id: "oversized-merge".to_owned(),
+        },
+    )?;
+    assert_eq!(outcome.decision, MergeDecision::Conflict);
+    assert_eq!(outcome.batch_status, None);
+    assert!(outcome.committed_operations.is_empty());
+    assert!(outcome.failed_operations.is_empty());
+    assert_eq!(std::fs::metadata(target)?.len(), oversized);
+    let projection = session.write_isolation_projection();
+    let resolved = projection.merge_reviews[&review_id()]
+        .resolved
+        .as_ref()
+        .expect("resolved review");
+    assert!(
+        resolved
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("byte read limit"))
+    );
+    let event_types = stored_event_types(&store)?;
+    for event in [
+        DurableEventType::MutationBatchStarted,
+        DurableEventType::MutationCommitted,
+        DurableEventType::ChildChangesetMerged,
+    ] {
+        assert!(!event_types.contains(&event.as_str().to_owned()));
+    }
+    Ok(())
+}
+
+#[test]
+fn merge_source_binding_rejects_changed_artifact_workspace_or_target_set() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let other_root = tempfile::tempdir()?;
+    let files = [(
+        std::path::PathBuf::from("note.txt"),
+        Some(bytes_hash(b"old\n")),
+    )]
+    .into_iter()
+    .collect();
+    let binding = super::MergeReviewSourceBinding::new(root.path(), files, &note_diff())?;
+    let mut changes = note_change_set(change_set_id());
+    assert!(
+        binding
+            .bind_changeset(root.path(), &changes, &note_diff())
+            .is_ok()
+    );
+    assert!(
+        binding
+            .bind_changeset(
+                root.path(),
+                &changes,
+                &note_diff().replace("+new", "+altered")
+            )
+            .is_err()
+    );
+    assert!(
+        binding
+            .bind_changeset(other_root.path(), &changes, &note_diff())
+            .is_err()
+    );
+    changes.files[0].path = "other.txt".to_owned();
+    assert!(
+        binding
+            .bind_changeset(root.path(), &changes, &note_diff())
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn merge_mutation_rechecks_preflight_source_at_actual_write_and_delete() -> Result<()> {
+    for action in [
+        ChangeSetFileAction::Update,
+        ChangeSetFileAction::Delete,
+        ChangeSetFileAction::Create,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let workspace_root = std::fs::canonicalize(temp.path())?;
+        if action != ChangeSetFileAction::Create {
+            std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+        }
+        let store = JsonlSessionStore::new(workspace_root.join("session.jsonl"))?;
+        let session = Session::new("test", "model").with_store(store.clone());
+        let recorder = session.mutation_event_recorder().expect("durable recorder");
+        let mut file = note_change_set(change_set_id()).files.remove(0);
+        file.action = action;
+        let diff = match action {
+            ChangeSetFileAction::Update => note_diff(),
+            ChangeSetFileAction::Delete => {
+                "--- a/note.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-old\n".to_owned()
+            }
+            ChangeSetFileAction::Create => {
+                "--- /dev/null\n+++ b/note.txt\n@@ -0,0 +1,1 @@\n+new\n".to_owned()
+            }
+            ChangeSetFileAction::Rename => unreachable!(),
+        };
+        let artifact = super::UnifiedDiffArtifact::parse(&diff)?;
+        let prepared = super::prepare_changeset_file(&workspace_root, &file, &artifact)?;
+        std::fs::write(workspace_root.join("note.txt"), b"user\n")?;
+        assert!(
+            super::apply_prepared_changeset_file_to_parent(
+                &recorder,
+                &workspace_root,
+                "race-merge",
+                "race-batch",
+                prepared
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(workspace_root.join("note.txt"))?, b"user\n");
+        assert!(
+            !stored_event_types(&store)?
+                .contains(&DurableEventType::MutationCommitted.as_str().to_owned())
+        );
+    }
     Ok(())
 }

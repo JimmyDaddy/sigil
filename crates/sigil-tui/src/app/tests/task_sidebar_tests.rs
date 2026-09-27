@@ -1613,6 +1613,7 @@ fn append_merge_review(entries: &mut Vec<SessionLogEntry>, decision: Option<Merg
             review_id: review_id.clone(),
             changeset_id: ChangeSetId::new("changeset-1").expect("changeset id"),
             parent_workspace_snapshot_id: "parent-snapshot-1".to_owned(),
+            source_binding: None,
         }),
     ));
     if let Some(decision) = decision {

@@ -8792,6 +8792,31 @@ async fn worker_background_worktree_isolates_changes_and_persists_merge_artifact
             .as_ref()
             .is_some_and(|cleanup| cleanup.status.is_terminal())
     }));
+    let review = projection
+        .merge_reviews
+        .values()
+        .find(|review| {
+            review
+                .requested
+                .as_ref()
+                .is_some_and(|requested| requested.changeset_id == changeset_id)
+        })
+        .expect("worktree result has a merge review");
+    assert!(review.is_pending());
+    assert!(
+        review
+            .requested
+            .as_ref()
+            .expect("requested review")
+            .source_binding
+            .is_some()
+    );
+    fs::write(
+        workspace.path().join("user-notes.txt"),
+        "unrelated user edit\n",
+    )?;
+    let unknown_size = sigil_kernel::verification::MAX_WORKSPACE_SNAPSHOT_FILE_BYTES + 1;
+    fs::File::create(workspace.path().join("unrelated.bin"))?.set_len(unknown_size)?;
 
     let integration = runtime
         .handle_agent_tool_call(
@@ -8820,6 +8845,14 @@ async fn worker_background_worktree_isolates_changes_and_persists_merge_artifact
     assert_eq!(
         fs::read_to_string(workspace.path().join("README.md"))?,
         "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("user-notes.txt"))?,
+        "unrelated user edit\n"
+    );
+    assert_eq!(
+        fs::metadata(workspace.path().join("unrelated.bin"))?.len(),
+        unknown_size
     );
     assert!(
         session
@@ -9074,6 +9107,100 @@ async fn worker_large_changeset_preserves_execution_artifact(mode: &str) -> Resu
     assert_eq!(
         fs::read_to_string(workspace.path().join("README.md"))?,
         format!("{replacement}\n")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_changeset_sources_allow_disjoint_pending_reviews_and_unrelated_drift() -> Result<()>
+{
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor(&config)?,
+        config,
+        registry,
+        Arc::new(TextProviderFactory {
+            text: String::new(),
+        }),
+    );
+    let workspace = tempfile::tempdir()?;
+    let session_home = tempfile::tempdir()?;
+    for path in ["first.txt", "second.txt"] {
+        fs::write(workspace.path().join(path), "old\n")?;
+    }
+    fs::File::create(workspace.path().join("unrelated.bin"))?
+        .set_len(sigil_kernel::verification::MAX_WORKSPACE_SNAPSHOT_FILE_BYTES + 1)?;
+    let store = JsonlSessionStore::new(session_home.path().join("parent.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store);
+    session.append_user_message(ModelMessage::user("update first and second files"))?;
+    let options = run_options(workspace.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let mut threads = Vec::new();
+    for (index, path) in ["first.txt", "second.txt"].into_iter().enumerate() {
+        let patch = format!("--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-old\n+new\n");
+        runtime.provider_factory = Arc::new(TextProviderFactory {
+            text: json!({
+                "change_set": {
+                    "id": format!("source-worker-{index}"), "title": "Update file", "summary": "Update file",
+                    "risk": "low", "files": [{"path": path, "action": "update", "risk": "low", "additions": 1, "deletions": 1}],
+                    "validations": []
+                },
+                "artifact": {"media_type": "text/x-diff", "content": patch}
+            }).to_string(),
+        });
+        let invocation = runtime
+            .invoke_agent_profile(
+                &mut session,
+                AgentProfileId::new("worker")?,
+                format!("update {path}"),
+                &options,
+                &mut handler,
+                &mut approval,
+            )
+            .await?;
+        assert_eq!(invocation.status, Some(AgentThreadStatus::Completed));
+        threads.push(invocation.thread_id);
+    }
+    assert_eq!(
+        session
+            .write_isolation_projection()
+            .merge_reviews
+            .values()
+            .filter(|review| review.is_pending())
+            .count(),
+        2
+    );
+    fs::write(
+        workspace.path().join("user-notes.txt"),
+        "unrelated user edit\n",
+    )?;
+    for (index, thread_id) in threads.iter().enumerate() {
+        let result = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: format!("integrate-source-{index}"),
+                    name: INTEGRATE_AGENT_CHANGES_TOOL_NAME.to_owned(),
+                    args_json: json!({"thread_id": thread_id.as_str(), "decision": "accepted"})
+                        .to_string(),
+                },
+                &options,
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("integration handled");
+        assert!(!result.is_error(), "{}", result.content);
+    }
+    for path in ["first.txt", "second.txt"] {
+        assert_eq!(fs::read_to_string(workspace.path().join(path))?, "new\n");
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("user-notes.txt"))?,
+        "unrelated user edit\n"
     );
     Ok(())
 }

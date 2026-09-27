@@ -11,12 +11,12 @@ async fn prepare_background_isolated_write_controls(
     match owner {
         None => Ok(None),
         Some(BackgroundChatAgentWriteOwner::ChangesetOnly {
-            base_snapshot_id,
+            source_observation,
             workspace_root,
         }) => prepare_chat_changeset_only_child_controls(
             session,
             thread_id,
-            &base_snapshot_id,
+            source_observation,
             final_text,
             outcome,
             &workspace_root,

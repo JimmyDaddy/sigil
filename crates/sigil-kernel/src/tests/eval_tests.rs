@@ -1958,6 +1958,7 @@ fn active_merge_parent_mutation_handoff_result(
         review_id: active_review_id()?,
         changeset_id: change_set.id.clone(),
         parent_workspace_snapshot_id,
+        source_binding: None,
     }))?;
 
     let outcome = resolve_merge_review_parent_mutation(

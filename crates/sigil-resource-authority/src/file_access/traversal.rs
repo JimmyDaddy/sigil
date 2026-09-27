@@ -71,7 +71,7 @@ pub(super) fn open_plan_file(
     }
 }
 
-fn open_child(
+pub(super) fn open_child(
     directory: &std::fs::File,
     name: &str,
     path: &Path,
@@ -170,7 +170,7 @@ fn child_is_directory(
     }
 }
 
-fn names(
+pub(super) fn names(
     directory: &std::fs::File,
     path: &Path,
     max_entries: usize,

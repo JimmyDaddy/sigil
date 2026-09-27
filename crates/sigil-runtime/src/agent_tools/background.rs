@@ -62,7 +62,7 @@ pub(super) struct BackgroundChatAgentHandle {
 /// Process-local owner for an isolated write result until its durable merge proposal is recorded.
 pub(super) enum BackgroundChatAgentWriteOwner {
     ChangesetOnly {
-        base_snapshot_id: String,
+        source_observation: ChangesetSourceObservation,
         workspace_root: PathBuf,
     },
     Worktree {
