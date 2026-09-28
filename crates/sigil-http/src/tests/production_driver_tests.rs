@@ -30,6 +30,50 @@ use sigil_kernel::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+async fn read_complete_provider_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let count = socket.read(&mut chunk).await?;
+        if count == 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "provider request ended before its declared body",
+            ));
+        }
+        request.extend_from_slice(&chunk[..count]);
+        if request.len() > MAX_REQUEST_BYTES {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "provider request too large",
+            ));
+        }
+        let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+            continue;
+        };
+        let header = std::str::from_utf8(&request[..header_end])
+            .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+        let content_length = header
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?;
+        if content_length > MAX_REQUEST_BYTES - header_end - 4 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "provider request too large",
+            ));
+        }
+        if request.len() >= header_end + 4 + content_length {
+            return Ok(());
+        }
+    }
+}
+
 use super::*;
 
 #[path = "production_fork_recovery_tests.rs"]
@@ -7691,8 +7735,9 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
                 let Ok((mut socket, _)) = listener.accept().await else {
                     break;
                 };
-                let mut buffer = vec![0; 16384];
-                let _read = socket.read(&mut buffer).await.unwrap_or(0);
+                read_complete_provider_request(&mut socket)
+                    .await
+                    .expect("revision provider request should be complete");
                 let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
                 let body = if call_index >= 3 {
                     concat!(
@@ -8129,8 +8174,9 @@ async fn plan_review_revision_cooperative_cancellation_commits_one_exact_termina
                 .accept()
                 .await
                 .expect("provider request should arrive");
-            let mut buffer = vec![0; 16 * 1024];
-            let _ = socket.read(&mut buffer).await;
+            read_complete_provider_request(&mut socket)
+                .await
+                .expect("revision provider request should be complete");
             provider_started.add_permits(1);
             provider_release
                 .acquire()
@@ -8543,8 +8589,9 @@ async fn production_plan_review_waiting_input_resumes_same_run_without_a_termina
                 let Ok((mut socket, _)) = listener.accept().await else {
                     break;
                 };
-                let mut buffer = vec![0; 16384];
-                let _read = socket.read(&mut buffer).await.unwrap_or(0);
+                read_complete_provider_request(&mut socket)
+                    .await
+                    .expect("revision provider request should be complete");
                 let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
                 let body = if call_index == 0 {
                     concat!(
@@ -8963,8 +9010,9 @@ async fn production_plan_review_waiting_cancel_scenario(recover_accepted_child: 
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
-            let mut buffer = vec![0; 16384];
-            let _read = socket.read(&mut buffer).await.unwrap_or(0);
+            read_complete_provider_request(&mut socket)
+                .await
+                .expect("revision provider request should be complete");
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-cancel-question\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\"}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                 "data: [DONE]\n\n"

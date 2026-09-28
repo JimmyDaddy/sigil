@@ -2901,6 +2901,12 @@ impl HttpSessionRunRegistry {
         let mut first_error = None;
         for run_id in run_ids {
             if let Err(error) = self.cancel_run_with_reason(&run_id, Some(reason.to_owned()))
+                // The snapshot can race with a naturally completed run. A terminal registry
+                // receipt means cancellation is no longer needed; the caller still waits for
+                // driver-owned supervisors to release after this pass.
+                && !self
+                    .get_run(&run_id)
+                    .is_ok_and(|run| run.status.is_terminal())
                 && first_error.is_none()
             {
                 first_error = Some(error);

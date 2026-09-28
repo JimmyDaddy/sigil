@@ -5717,10 +5717,12 @@ fn natural_terminal_wins_a_shutdown_cancellation_claim_before_driver_ack() {
         )
         .expect("natural terminal should settle the claimed run");
     }));
+    driver
+        .reject_next_cancel("production cancellation owner stopped before durable acknowledgement");
 
     registry
         .cancel_active_runs("HTTP server graceful shutdown")
-        .expect("an exact natural terminal should satisfy shutdown cancellation");
+        .expect("an exact natural terminal should satisfy shutdown despite a closed cancel owner");
     assert_eq!(
         registry.get_run(&run.id).expect("run should settle").status,
         HttpRunStatus::Finished
@@ -5744,6 +5746,36 @@ fn natural_terminal_wins_a_shutdown_cancellation_claim_before_driver_ack() {
             .count(),
         1,
         "shutdown must retain the single natural terminal"
+    );
+}
+
+#[test]
+fn shutdown_cancellation_rejection_without_terminal_is_not_suppressed() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("still active", HttpPermissionMode::ReadOnly),
+        )
+        .expect("run should start");
+    driver
+        .reject_next_cancel("production cancellation owner stopped before durable acknowledgement");
+
+    let error = registry
+        .cancel_active_runs("HTTP server graceful shutdown")
+        .expect_err("missing terminal must retain the cancellation error");
+    assert!(
+        error
+            .to_string()
+            .contains("production cancellation owner stopped")
+    );
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should remain visible")
+            .status,
+        HttpRunStatus::Running,
     );
 }
 
