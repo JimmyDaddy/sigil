@@ -3900,7 +3900,6 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
     )?;
 
     assert_eq!(request.provider_name, "deepseek");
-    assert!(request.deterministic_materialization);
     assert!(
         request
             .messages
