@@ -2334,7 +2334,7 @@ fn task_start_clears_hidden_main_queue_focus_and_returns_input_to_composer() -> 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![queued_conversation_input_entry(
         "queue_main",
-        "run after the current turn",
+        "run at the next safe point",
     )?]);
     assert!(app.focus_composer_queue_panel());
 

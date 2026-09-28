@@ -63,6 +63,21 @@ function renderQueue(
 }
 
 describe("conversation queue panel", () => {
+  it("describes safe handoff instead of promising to wait for the run terminal", () => {
+    renderQueue(undefined, {
+      ...queue,
+      items: [{
+        ...queue.items[1]!,
+        order: 0,
+        blockedReason: "foreground_run_active",
+      }],
+      totalItems: 1,
+    });
+
+    expect(screen.getByText("Runs at a safe handoff in the current run or after it finishes")).toBeTruthy();
+    expect(screen.getByText("Waiting for a safe handoff from the current run")).toBeTruthy();
+  });
+
   it("requires a blank exact re-entry instead of prefilling a redacted preview", async () => {
     const user = userEvent.setup();
     const onCommand = renderQueue();

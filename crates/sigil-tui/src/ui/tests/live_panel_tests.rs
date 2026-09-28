@@ -402,7 +402,7 @@ fn queue_action_ultranarrow_selected_delete_keeps_semantic_and_style_coordinates
         QueueActionButtonViewModel {
             enabled: true,
             label: "Run next".to_owned(),
-            detail: "run after the current turn".to_owned(),
+            detail: "run at the next safe point".to_owned(),
             selected: false,
             destructive: false,
         },
@@ -768,7 +768,7 @@ fn render_live_panel_shows_queue_strip_actions_above_status() -> anyhow::Result<
             QueueActionButtonViewModel {
                 enabled: true,
                 label: "Run next".to_owned(),
-                detail: "run after the current turn".to_owned(),
+                detail: "run at the next safe point".to_owned(),
                 selected: true,
                 destructive: false,
             },
@@ -895,7 +895,7 @@ fn render_live_panel_keeps_focused_queue_rows_single_line_on_narrow_width() -> a
             QueueActionButtonViewModel {
                 enabled: true,
                 label: "Run next".to_owned(),
-                detail: "run after the current turn".to_owned(),
+                detail: "run at the next safe point".to_owned(),
                 selected: true,
                 destructive: false,
             },
@@ -1178,7 +1178,7 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
         queue_action_buttons: vec![QueueActionButtonViewModel {
             enabled: true,
             label: "Run next".to_owned(),
-            detail: "run after the current turn".to_owned(),
+            detail: "run at the next safe point".to_owned(),
             selected: true,
             destructive: false,
         }],

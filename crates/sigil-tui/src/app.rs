@@ -180,7 +180,7 @@ impl ComposerQueueAction {
 
     pub(crate) fn detail(self) -> &'static str {
         match self {
-            Self::KeepNext => "run after the current turn",
+            Self::KeepNext => "run at the next safe point",
             Self::Edit => "edit follow-up",
             Self::Delete => "remove follow-up",
         }
