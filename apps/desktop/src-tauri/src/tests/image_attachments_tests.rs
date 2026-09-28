@@ -123,7 +123,7 @@ fn selected_image_symlink_ablation_removes_only_the_picker_target_gate()
             .is_symlink()
     );
     assert!(
-        OpenOptions::new()
+        std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&selected)

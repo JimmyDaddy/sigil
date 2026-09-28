@@ -6,7 +6,7 @@ use sigil_desktop::{
     DesktopImageAttachment, MAX_DESKTOP_IMAGE_BYTES, MAX_DESKTOP_IMAGE_BYTES_PER_TURN,
     MAX_DESKTOP_IMAGES_PER_TURN,
 };
-use std::{collections::BTreeMap, fs::OpenOptions, io::Read, path::Path};
+use std::{collections::BTreeMap, path::Path};
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
@@ -226,35 +226,12 @@ pub(crate) async fn desktop_pick_image(
 }
 
 fn read_selected_image(path: &Path) -> Result<Vec<u8>, DesktopCommandError> {
-    let invalid = || {
+    crate::selected_file::read_selected_file(path, MAX_DESKTOP_IMAGE_BYTES as u64).map_err(|_| {
         image_error(
             "image_read_failed",
             "Select a regular local image no larger than 8 MiB.",
         )
-    };
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // The native picker authorizes the selected target, including symlinks. Avoid blocking
-        // on a FIFO before the opened descriptor can be checked for a regular file.
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|_| invalid())?;
-    let metadata = file.metadata().map_err(|_| invalid())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_DESKTOP_IMAGE_BYTES as u64
-    {
-        return Err(invalid());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_DESKTOP_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| invalid())?;
-    if bytes.len() as u64 != metadata.len() || bytes.len() > MAX_DESKTOP_IMAGE_BYTES {
-        return Err(invalid());
-    }
-    Ok(bytes)
+    })
 }
 
 #[tauri::command]
