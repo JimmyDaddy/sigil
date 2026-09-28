@@ -1875,9 +1875,13 @@ fn production_queued_preparation(
 impl HttpApplicationRunPreparer for ControlledPreparation {
     async fn prepare(
         &self,
-        _request: ApplicationRunRequest,
+        request: ApplicationRunRequest,
         _services: ApplicationRunServices,
     ) -> Result<PreparedApplicationRun> {
+        assert!(
+            request.additional_mcp_servers.is_empty(),
+            "ordinary HTTP runs must not inherit editor-scoped MCP declarations"
+        );
         let started = Arc::clone(&self.started);
         let release = Arc::clone(&self.release);
         let runtime = tokio::runtime::Handle::current();

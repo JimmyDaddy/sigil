@@ -11069,3 +11069,46 @@ fn provider_capabilities() -> ProviderCapabilities {
         tool_name_max_chars: 64,
     }
 }
+
+#[tokio::test]
+async fn session_disconnect_joins_all_owned_children_when_durable_projection_is_missing()
+-> Result<()> {
+    let runs = AgentToolBackgroundRuns::default();
+    let joined = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for id in ["lost-projection-one", "lost-projection-two"] {
+        let thread_id = AgentThreadId::new(id)?;
+        let owner = RunCancellationOwner::new();
+        let cancellation = owner.handle();
+        let task_guard = cancellation.register_task()?;
+        let completed = Arc::clone(&joined);
+        let task = BackgroundChatAgentTask::spawn(thread_id.clone(), None, async move {
+            let _task_guard = task_guard;
+            cancellation.cancelled().await;
+            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow!("owned child observed cancellation"))
+        });
+        let mut background = completion_ready_background_handle(thread_id.clone(), task)?;
+        background.cancellation_owner = owner;
+        runs.insert(thread_id, background)?;
+    }
+    let mut session = Session::new("fixture", "fixture");
+    let result = runs
+        .shutdown_session_background_runs(
+            &mut session,
+            "editor disconnected",
+            &mut RecordingEventHandler::default(),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "missing durable authority remains an error after physical join"
+    );
+    assert_eq!(joined.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(
+        runs.thread_ids()?.is_empty(),
+        "no original child owner may survive disconnect"
+    );
+    assert!(!session.entries().iter().any(|entry| matches!(entry, sigil_kernel::SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status)) if status.status == AgentThreadStatus::Cancelled)),
+        "physical cancellation cannot fabricate missing durable terminal controls");
+    Ok(())
+}

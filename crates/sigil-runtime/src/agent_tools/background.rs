@@ -324,6 +324,117 @@ impl sigil_kernel::PendingConversationInputProvider for BackgroundMailboxPending
 }
 
 impl AgentToolBackgroundRuns {
+    /// Closes the child invocations held by this exact session attachment. The caller must first
+    /// stop/join foreground admissions. This uses their original supervisors and cancellation
+    /// owners; it does not infer completion from a timeout or recreate a writer from a path.
+    ///
+    /// # Errors
+    /// Returns aggregated audit/cleanup failures after attempting to join every owned child.
+    pub async fn shutdown_session_background_runs(
+        &self,
+        session: &mut Session,
+        reason: &str,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<()> {
+        let registries = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?
+            .values()
+            .filter_map(|background| background.tool_registry.upgrade())
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for thread_id in self.thread_ids()? {
+            if let Some(background) = self.remove_if_finished(&thread_id) {
+                if let Err(error) =
+                    super::chat::record_finished_background_run(session, handler, background).await
+                {
+                    failures.push(format!(
+                        "agent {} result settlement failed: {error:#}",
+                        thread_id.as_str()
+                    ));
+                }
+                continue;
+            }
+            match self
+                .cancel_agent_thread_durably(session, &thread_id, reason.to_owned(), handler)
+                .await
+            {
+                Ok(Some(result)) if result.cleanup_complete => {}
+                Ok(Some(result)) => failures.push(format!(
+                    "agent {} cleanup unconfirmed ({})",
+                    thread_id.as_str(),
+                    result.status_label
+                )),
+                Ok(None) => failures.push(format!(
+                    "agent {} cancellation owner unavailable",
+                    thread_id.as_str()
+                )),
+                Err(error) => failures.push(format!(
+                    "agent {} cancellation failed: {error:#}",
+                    thread_id.as_str()
+                )),
+            }
+            // Durable projection/audit can fail before cancel_agent_thread_durably reaches
+            // the physical owner. Disconnect must still consume that exact original handle.
+            if self.contains(&thread_id) {
+                if let Err(error) = self.reserve_cancellation_scope(&thread_id) {
+                    failures.push(format!(
+                        "agent {} cancellation reservation failed: {error:#}",
+                        thread_id.as_str()
+                    ));
+                }
+                match self.cancel(&thread_id, Duration::from_secs(5)).await {
+                    Ok(Some(mut cancellation)) => {
+                        cancellation
+                            .collection_supervisor
+                            .release_runtime_thread(&thread_id);
+                        if cancellation.cleanup_complete {
+                            if let Some(write_owner) = cancellation.write_owner.take()
+                                && let Err(error) =
+                                    super::chat::cleanup_background_isolated_write_owner(
+                                        session,
+                                        handler,
+                                        write_owner,
+                                    )
+                                    .await
+                            {
+                                failures.push(format!(
+                                    "agent {} isolated workspace cleanup failed: {error:#}",
+                                    thread_id.as_str()
+                                ));
+                            }
+                        } else {
+                            failures.push(format!(
+                                "agent {} physical cleanup remains unconfirmed",
+                                thread_id.as_str()
+                            ));
+                        }
+                    }
+                    Ok(None) => failures.push(format!(
+                        "agent {} owner disappeared before disconnect join",
+                        thread_id.as_str()
+                    )),
+                    Err(error) => failures.push(format!(
+                        "agent {} disconnect join failed: {error:#}",
+                        thread_id.as_str()
+                    )),
+                }
+            }
+        }
+        for mut registry in registries {
+            if let Err(error) = crate::shutdown_mcp_generations(&mut registry).await {
+                failures.push(format!("child MCP cleanup failed: {error:#}"));
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "session background cleanup failed: {}",
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
     #[must_use]
     pub fn with_event_sink(event_sink: Arc<dyn AgentToolBackgroundEventSink>) -> Self {
         Self {

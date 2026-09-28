@@ -112,10 +112,22 @@ impl McpProcessLaunchRequest {
     /// Declaration-aware launchers may call this only after validating their origin/attestation
     /// and execution base, then replace the command with the already resolved executable.
     pub fn from_config(config: &McpServerConfig, working_dir: Option<PathBuf>) -> Result<Self> {
-        let (_, args, inherit_env) = config
+        let (_, _, inherit_env) = config
             .stdio()
             .ok_or_else(|| anyhow!("remote MCP config cannot be launched as a stdio process"))?;
         let environment = resolve_extension_process_environment(inherit_env)?;
+        Self::with_environment(config, working_dir, environment)
+    }
+
+    /// Resolves an already authorized host-local environment without changing global variables.
+    pub fn with_environment(
+        config: &McpServerConfig,
+        working_dir: Option<PathBuf>,
+        environment: ResolvedProcessEnvironment,
+    ) -> Result<Self> {
+        let (_, args, _) = config
+            .stdio()
+            .ok_or_else(|| anyhow!("remote MCP config cannot be launched as a stdio process"))?;
         let fingerprint_working_dir = working_dir
             .clone()
             .map(Ok)
@@ -594,6 +606,17 @@ pub trait McpProcessLauncher: Send + Sync {
         fallback_working_dir: Option<PathBuf>,
     ) -> Result<McpProcessLaunchRequest> {
         McpProcessLaunchRequest::from_config(config, fallback_working_dir)
+    }
+
+    /// Re-resolves the exact environment source used by this launch. Host-local declarations
+    /// may override the default parent lookup without bypassing receipt freshness checks.
+    fn current_environment(
+        &self,
+        receipt: &McpProcessLaunchReceipt,
+    ) -> Result<ResolvedProcessEnvironment> {
+        Ok(resolve_extension_process_environment(
+            &receipt.environment_grant_names,
+        )?)
     }
 
     /// Launches one local MCP stdio process and returns its coverage receipt.

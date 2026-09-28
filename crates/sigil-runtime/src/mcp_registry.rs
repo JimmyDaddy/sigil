@@ -137,6 +137,7 @@ pub async fn register_session_plugin_mcp_tools(
         presenter,
         startup_context,
         None,
+        Arc::default(),
     )
     .await
 }
@@ -158,6 +159,7 @@ pub(crate) async fn register_session_plugin_mcp_tools_with_registry_slot(
     presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
     startup_context: Option<(MutationEventRecorder, ExtensionProcessNetworkAdmission)>,
     registry_slot: Option<&std::sync::Mutex<Vec<sigil_kernel::WeakToolRegistry>>>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 ) -> Result<Vec<McpServerConfig>> {
     if !root_config
         .composition
@@ -181,7 +183,7 @@ pub(crate) async fn register_session_plugin_mcp_tools_with_registry_slot(
         .iter()
         .map(|declaration| declaration.config().clone())
         .collect::<Vec<_>>();
-    if plugin_servers.is_empty() {
+    if plugin_servers.is_empty() && process_environments.is_empty() {
         return Ok(plugin_servers);
     }
     let mut registry_slot = registry_slot.map(|slot| {
@@ -203,6 +205,7 @@ pub(crate) async fn register_session_plugin_mcp_tools_with_registry_slot(
         plugin_declarations,
         plugin_trust_source: Some(source),
         startups: Arc::new(McpActivationStartups::default()),
+        process_environments,
     });
     registry.register(activation.clone());
     if let Some(slot) = registry_slot.as_mut() {
@@ -237,6 +240,7 @@ pub struct McpDeclarationRegistrationOptions {
         Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     strict_registration: bool,
     startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 }
 
 impl McpDeclarationRegistrationOptions {
@@ -253,6 +257,7 @@ impl McpDeclarationRegistrationOptions {
             managed_extension_execution: None,
             strict_registration: false,
             startup_cancellation: None,
+            process_environments: Arc::default(),
         }
     }
 
@@ -364,6 +369,7 @@ pub async fn register_mcp_server_declarations(
         &stdio_declarations,
         options.plugin_trust_source,
         options.managed_extension_execution,
+        options.process_environments,
     )?;
     let plugin_servers = stdio_declarations
         .iter()
@@ -1350,6 +1356,7 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
         network_admission,
         None,
         None,
+        Arc::default(),
     )
     .await
 }
@@ -1462,6 +1469,7 @@ pub async fn activate_mcp_tools_from_product_surface_with_managed_extension_exec
         network_admission,
         plugin_trust_source,
         None,
+        Arc::default(),
     )
     .await?;
     for remote_server_name in remote_servers {
@@ -1502,6 +1510,7 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     network_admission: ExtensionProcessNetworkAdmission,
     plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
     startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 ) -> Result<LazyMcpActivationResult> {
     require_mcp_composition(root_config)?;
     let effective_config = root_config.with_effective_composition()?;
@@ -1545,6 +1554,7 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     let mut registration_options = McpDeclarationRegistrationOptions::new(startup)
         .with_handlers(elicitation_handler, runtime_event_handler)
         .with_network_admission(network_admission);
+    registration_options.process_environments = process_environments;
     if let Some(cancellation) = startup_cancellation {
         registration_options = registration_options.with_startup_cancellation(cancellation);
     }
@@ -1737,6 +1747,7 @@ fn declaration_mcp_process_launcher(
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 ) -> Result<Arc<dyn McpProcessLauncher>> {
     if plugin_trust_source.is_none()
         && let Some(declaration) = declarations.iter().find(|declaration| {
@@ -1758,6 +1769,7 @@ fn declaration_mcp_process_launcher(
         },
         declarations: declarations_by_effective_name(declarations)?,
         plugin_trust_source,
+        process_environments,
     }))
 }
 
@@ -1766,6 +1778,7 @@ struct DeclarationAwareMcpProcessLauncher {
     configured: ConfiguredMcpProcessLauncher,
     declarations: BTreeMap<String, ResolvedMcpServerDeclaration>,
     plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 }
 
 impl std::fmt::Debug for DeclarationAwareMcpProcessLauncher {
@@ -1833,7 +1846,17 @@ impl DeclarationAwareMcpProcessLauncher {
         let launch = declaration
             .resolve_stdio_launch(&current_plugin_trust)
             .map_err(|error| error.with_safe_projection(declaration.safe_projection()))?;
-        let mut request = McpProcessLaunchRequest::from_config(config, Some(launch.cwd.clone()))?;
+        let mut request = if let Some(values) = self.process_environments.get(&config.name) {
+            McpProcessLaunchRequest::with_environment(
+                config,
+                Some(launch.cwd.clone()),
+                sigil_kernel::process_environment::resolve_explicit_extension_process_environment(
+                    values,
+                )?,
+            )?
+        } else {
+            McpProcessLaunchRequest::from_config(config, Some(launch.cwd.clone()))?
+        };
         if declaration.uses_declaration_static_binding() {
             let projection = declaration.safe_projection();
             request.launch_static_fingerprint =
@@ -1923,6 +1946,23 @@ impl DeclarationAwareMcpProcessLauncher {
 
 #[async_trait::async_trait]
 impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
+    fn current_environment(
+        &self,
+        receipt: &McpProcessLaunchReceipt,
+    ) -> Result<sigil_kernel::ResolvedProcessEnvironment> {
+        if let Some(values) = self.process_environments.get(&receipt.server_name) {
+            Ok(
+                sigil_kernel::process_environment::resolve_explicit_extension_process_environment(
+                    values,
+                )?,
+            )
+        } else {
+            Ok(sigil_kernel::resolve_extension_process_environment(
+                &receipt.environment_grant_names,
+            )?)
+        }
+    }
+
     fn resolve_launch_request(
         &self,
         config: &McpServerConfig,
@@ -2579,6 +2619,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
         plugin_declarations: Vec::new(),
         plugin_trust_source: None,
         startups: Arc::new(McpActivationStartups::default()),
+        process_environments: Arc::default(),
     }));
 }
 
@@ -2677,6 +2718,7 @@ pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
         plugin_declarations: Vec::new(),
         plugin_trust_source: None,
         startups: Arc::new(McpActivationStartups::default()),
+        process_environments: Arc::default(),
     }));
     Ok(())
 }
@@ -2695,6 +2737,7 @@ struct McpActivateServerTool {
     plugin_declarations: Vec<ResolvedMcpServerDeclaration>,
     plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
     startups: Arc<McpActivationStartups>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 }
 
 fn mcp_activation_tool_spec() -> ToolSpec {
@@ -2877,6 +2920,7 @@ impl Tool for McpActivateServerTool {
                 "trust_class": server.trust.trust_class.as_str(),
                 "startup": server.startup.as_str(),
                 "environment_grant_names": environment.grant_names(),
+                "environment_grant_source": if self.process_environments.contains_key(&server.name) { "explicit_process_values" } else { "parent_environment" },
                 "environment_static_fingerprint": environment.static_fingerprint(),
                 "environment_live_fingerprint": environment.live_fingerprint(),
                 "launch_static_fingerprint": request.launch_static_fingerprint,
@@ -3013,6 +3057,7 @@ impl McpActivateServerTool {
             &[declaration],
             self.plugin_trust_source.clone(),
             self.managed_extension_execution.clone(),
+            Arc::clone(&self.process_environments),
         )?
         .resolve_launch_request(server, Some(self.workspace_root.clone()))
     }

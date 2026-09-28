@@ -750,6 +750,51 @@ fn mcp_environment_grant_is_orthogonal_to_payload_secret_policy() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn explicitly_resolved_mcp_environment_reaches_child_without_parent_grant() -> Result<()> {
+    use sigil_kernel::process_environment::resolve_explicit_extension_process_environment;
+
+    let temp = tempfile::tempdir()?;
+    let config = mcp_server_config! {
+        name: "explicit-env".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "printf '%s' \"$SIGIL_C2_TEST_VALUE\"".to_owned()],
+        ..McpServerConfig::default()
+    };
+    let environment = resolve_explicit_extension_process_environment(&BTreeMap::from([(
+        "SIGIL_C2_TEST_VALUE".to_owned(),
+        SecretString::new("editor-declared-value".to_owned()),
+    )]))?;
+    let request = McpProcessLaunchRequest::with_environment(
+        &config,
+        Some(temp.path().to_path_buf()),
+        environment,
+    )?;
+    let mut launch = LocalMcpProcessLauncher.launch(request)?;
+    let mut output = String::new();
+    launch
+        .child
+        .as_mut()
+        .expect("local launcher must return a child")
+        .stdout
+        .take()
+        .expect("child stdout must be piped")
+        .read_to_string(&mut output)
+        .await?;
+    assert_eq!(output, "editor-declared-value");
+    assert!(
+        launch
+            .child
+            .as_mut()
+            .expect("local launcher must return a child")
+            .wait()
+            .await?
+            .success()
+    );
+    Ok(())
+}
+
 #[test]
 fn missing_mcp_environment_grant_is_typed_pre_spawn_configuration_error() {
     let config = mcp_server_config! {

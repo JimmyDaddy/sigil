@@ -171,6 +171,7 @@ pub async fn prepare_application_task_continuation(
         safe_persistence_text,
     );
     let blocking_request = ApplicationRunRequest {
+        additional_mcp_servers: Vec::new(),
         review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         config_path: request.config_path,
@@ -308,6 +309,7 @@ pub async fn prepare_application_task_continuation(
         false,
         None,
         terminal_lifecycle_sink,
+        Arc::default(),
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;

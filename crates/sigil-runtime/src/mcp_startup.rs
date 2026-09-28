@@ -156,6 +156,7 @@ impl McpActivationStartups {
                 events: Arc::clone(&tool.runtime_event_handler),
                 managed: tool.managed_extension_execution.clone(),
                 trust: tool.plugin_trust_source.clone(),
+                process_environments: Arc::clone(&tool.process_environments),
                 server_name: server_name.to_owned(),
                 context,
                 published_owners: Arc::clone(&published_owners),
@@ -438,6 +439,7 @@ struct StartupLaunch {
     events: Arc<dyn McpRuntimeEventHandler>,
     managed: Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     trust: Option<Arc<dyn McpPluginTrustSource>>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
     server_name: String,
     context: StartupInputs,
     published_owners: Arc<Mutex<Vec<sigil_kernel::ToolLifecycleOwner>>>,
@@ -464,6 +466,7 @@ impl StartupLaunch {
             self.context.network_admission,
             self.trust.clone(),
             Some(cancellation.clone()),
+            Arc::clone(&self.process_environments),
         )
         .await;
         let publish = async {
@@ -495,6 +498,7 @@ impl StartupLaunch {
                 &selected,
                 self.trust.clone(),
                 self.managed.clone(),
+                Arc::clone(&self.process_environments),
             )?;
             let current = launcher.resolve_launch_request(selected[0].config(), None)?;
             anyhow::ensure!(

@@ -521,6 +521,8 @@ pub struct ApplicationSessionRouteRecoveryView {
 /// Input required to prepare one application run.
 #[derive(Debug, Clone)]
 pub struct ApplicationRunRequest {
+    /// Explicit host-local MCP declarations for this run; never saved to user configuration.
+    pub additional_mcp_servers: Vec<crate::ApplicationMcpServerDeclaration>,
     /// User-selected recorded source comments; no authority to mutate the referenced files.
     pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     /// Resolved Sigil config path.
@@ -586,6 +588,7 @@ impl ApplicationRunRequest {
         run_id: impl Into<String>,
     ) -> Self {
         Self {
+            additional_mcp_servers: Vec::new(),
             config_path: config_path.into(),
             launch_cwd: launch_cwd.into(),
             prompt: prompt.into(),
@@ -3827,6 +3830,7 @@ async fn assemble_application_tool_surface(
     agent_delegation_available: bool,
     tool_scope: Option<&ToolRegistryScope>,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
 ) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
     let managed_extension_execution = services
         .authority_composition()
@@ -3947,6 +3951,7 @@ async fn assemble_application_tool_surface(
                 Arc::clone(&services.disclosure_presenter),
                 Some(startup_context),
                 Some(registry_views.as_ref()),
+                process_environments,
             )
             .await
             {
@@ -4126,6 +4131,9 @@ async fn prepare_application_run_internal(
     let managed_plan_review_child_resources = services
         .authority_composition()
         .map(|composition| composition.plan_review_child_resource_provisioner());
+    let process_environments =
+        crate::application_mcp::environments(&request.additional_mcp_servers)
+            .map_err(ApplicationRunPrepareError::configuration)?;
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             request,
@@ -4268,6 +4276,7 @@ async fn prepare_application_run_internal(
         agent_delegation_available,
         tool_scope.as_ref(),
         terminal_lifecycle_sink,
+        process_environments,
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
@@ -6232,6 +6241,8 @@ fn prepare_application_run_blocking_with_writer(
         });
     }
     let mut root_config = load_application_root_config(&request.config_path)?;
+    crate::application_mcp::merge(&mut root_config, &request.additional_mcp_servers)
+        .map_err(ApplicationRunPrepareError::configuration)?;
     let expected_composition = expected_composition.as_ref().ok_or_else(|| {
         application_authority_prepare_error(
             sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable,

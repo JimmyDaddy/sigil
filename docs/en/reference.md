@@ -86,6 +86,7 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | Build an exact read-only Drop preview |
 | `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | Confirm and execute the exact preview |
 | `sigil serve` | Start the authenticated loopback-only local service |
+| `sigil --config <path> acp` | Serve ACP v1 over stdio for an editor; keeps shared approval, cancellation and session recovery semantics |
 | `sigil update check [--channel current|stable|beta] [--refresh] [--output text|json]` | Check for a release without changing the installation |
 | `sigil update apply --yes [--channel current|stable|beta] [--output text|json]` | Explicitly install an admitted standalone update or print the owning package-manager command |
 | `sigil --version` | Print the installed version |

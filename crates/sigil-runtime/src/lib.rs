@@ -137,8 +137,10 @@ pub use application_review::{
     application_checkpoint_review, materialize_queued_review_annotations,
     materialize_review_annotations,
 };
+mod application_mcp;
 pub mod application_reservation_store;
 pub mod application_run;
+pub use application_mcp::ApplicationMcpServerDeclaration;
 pub use application_run::{ApplicationRunCleanupError, ApplicationRunEventRecorder};
 pub use application_run::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub mod application_service;

@@ -86,6 +86,7 @@
 | `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | 生成精确、只读的 Drop preview |
 | `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | 确认并执行该精确 preview |
 | `sigil serve` | 启动带认证且只监听回环地址的本机服务 |
+| `sigil --config <path> acp` | 通过 stdio 为编辑器提供 ACP v1，复用共享审批、取消与会话恢复语义 |
 | `sigil update check [--channel current|stable|beta] [--refresh] [--output text|json]` | 只检查发布版本，不修改当前安装 |
 | `sigil update apply --yes [--channel current|stable|beta] [--output text|json]` | 明确安装已准入的独立更新，或显示对应包管理器命令 |
 | `sigil --version` | 打印已安装版本 |

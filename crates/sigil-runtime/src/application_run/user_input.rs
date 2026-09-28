@@ -406,6 +406,7 @@ pub async fn prepare_application_user_input_decision(
 
     let public_prompt = "Continue after answering a requested question".to_owned();
     let blocking_request = ApplicationRunRequest {
+        additional_mcp_servers: Vec::new(),
         review_annotations: Vec::new(),
         image_attachments: Vec::new(),
         config_path: request.config_path,
@@ -562,6 +563,7 @@ pub async fn prepare_application_user_input_decision(
         false,
         None,
         terminal_lifecycle_sink,
+        Arc::default(),
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;

@@ -451,6 +451,53 @@ pub fn resolve_extension_process_environment(
     )
 }
 
+/// Resolves explicitly supplied, process-local values with the same isolated baseline.
+/// Values are never copied into the parent environment or a serializable configuration. The
+/// source and names enter the static binding; values enter only the process-keyed live binding.
+///
+/// # Errors
+/// Returns an error for invalid names, NUL values, or invalid fingerprint material.
+pub fn resolve_explicit_extension_process_environment(
+    values: &BTreeMap<String, SecretString>,
+) -> Result<ResolvedProcessEnvironment, ExtensionProcessLaunchError> {
+    let names = normalize_environment_variable_names(&values.keys().cloned().collect::<Vec<_>>())?;
+    for (name, value) in values {
+        if value.expose_secret().contains('\0') {
+            return Err(ExtensionProcessLaunchError::configuration_invalid(
+                name,
+                "explicit environment value contains NUL",
+            ));
+        }
+    }
+    let mut resolved = resolve_extension_process_environment_with(
+        &names,
+        |name| Ok(env::var_os(name).map(|value| value.to_string_lossy().into_owned())),
+        |name| {
+            Ok(values
+                .get(name)
+                .map(|value| value.expose_secret().to_owned()))
+        },
+        process_environment_fingerprint_key(),
+    )?;
+    let material = serde_json::to_vec(&json!({
+        "policy": EXTENSION_ENVIRONMENT_POLICY_VERSION,
+        "source": "explicit_process_values",
+        "grant_names": names,
+    }))
+    .map_err(|error| {
+        ExtensionProcessLaunchError::configuration_invalid("environment", error.to_string())
+    })?;
+    resolved.static_fingerprint = format!("sha256:{:x}", Sha256::digest(material));
+    resolved.live_fingerprint = environment_live_fingerprint(
+        process_environment_fingerprint_key(),
+        &resolved.static_fingerprint,
+        &resolved.baseline_names,
+        &resolved.grant_names,
+        &resolved.variables,
+    );
+    Ok(resolved)
+}
+
 fn resolve_extension_process_environment_with<BaselineLookup, GrantLookup>(
     grant_names: &[String],
     mut baseline_lookup: BaselineLookup,

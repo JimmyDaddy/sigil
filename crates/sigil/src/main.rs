@@ -7,6 +7,8 @@ use std::{
     thread::JoinHandle,
 };
 
+#[cfg_attr(test, allow(dead_code))]
+mod acp;
 pub mod egress_disclosure;
 #[cfg_attr(test, allow(dead_code))]
 mod intent_cli;
@@ -113,6 +115,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Serve the Agent Client Protocol over stdin/stdout for an editor client.
+    Acp,
     Run {
         prompt: String,
         #[arg(long, value_enum, default_value = "text")]
@@ -333,6 +337,9 @@ fn init_tracing(cli: &Cli) {
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_writer(io::sink)
             .init();
+    } else if matches!(cli.command, Some(Commands::Acp)) {
+        // ACP exclusively owns stdout; diagnostics cannot corrupt its JSON-RPC framing.
+        tracing_subscriber::fmt().with_writer(io::stderr).init();
     } else {
         tracing_subscriber::fmt::init();
     }
@@ -473,6 +480,7 @@ async fn run_main(cli: Cli) -> Result<u8> {
                 .write_json();
             return Ok(u8::try_from(exit.as_i32()).expect("machine exit codes must fit in u8"));
         }
+        Commands::Acp => acp::serve(&config_path).await?,
         Commands::Mcp { command } => {
             print!("{}", mcp_cli::execute_mcp_command(&config_path, command)?);
         }

@@ -305,6 +305,7 @@ credential = { source = "none" }
         &declarations,
         Some(Arc::new(SessionMcpPluginTrustSource::new(trust_path))),
         None,
+        Arc::new(BTreeMap::new()),
     )
     .expect("launcher should build");
     let request = launcher
@@ -403,6 +404,7 @@ credential = { source = "none" }
         &declarations,
         Some(Arc::new(SessionMcpPluginTrustSource::new(trust_path))),
         None,
+        Arc::new(BTreeMap::new()),
     )
     .expect("launcher should build");
     let request = launcher
@@ -465,6 +467,7 @@ credential = { source = "none" }
         std::slice::from_ref(&declaration),
         None,
         None,
+        Arc::new(BTreeMap::new()),
     )
     .expect("root launcher should build");
 

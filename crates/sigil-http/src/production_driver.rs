@@ -6361,6 +6361,7 @@ impl HttpRunSupervisor {
             })?;
         let model_name = selected_model.map(|model_ref| model_ref.model_id.clone());
         let mut request = ApplicationRunRequest {
+            additional_mcp_servers: Vec::new(),
             review_annotations: self.start.review_annotations.clone(),
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),

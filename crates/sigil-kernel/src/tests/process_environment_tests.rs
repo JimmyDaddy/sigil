@@ -195,3 +195,35 @@ fn extension_lifetime_readiness_requires_exact_confirmed_stop() -> anyhow::Resul
     );
     Ok(())
 }
+
+#[test]
+fn explicit_process_environment_is_private_source_bound_and_value_sensitive() {
+    let name = "SIGIL_C2_FIXTURE_EXPLICIT_VALUE".to_owned();
+    let before = std::env::var_os(&name);
+    let mut values = BTreeMap::from([(name.clone(), SecretString::new("private-one"))]);
+    let first =
+        resolve_explicit_extension_process_environment(&values).expect("explicit environment");
+    let same = resolve_explicit_extension_process_environment(&values).expect("same environment");
+    assert_eq!(first, same);
+    assert_eq!(
+        first
+            .variable(&name)
+            .expect("explicit value")
+            .expose_secret(),
+        "private-one"
+    );
+    assert_eq!(std::env::var_os(&name), before);
+    assert!(!format!("{first:?}").contains("private-one"));
+    assert_ne!(
+        first.static_fingerprint(),
+        extension_environment_static_fingerprint(std::slice::from_ref(&name))
+            .expect("parent static binding")
+    );
+    values.insert(name.clone(), SecretString::new("private-two"));
+    let changed =
+        resolve_explicit_extension_process_environment(&values).expect("changed environment");
+    assert_eq!(first.static_fingerprint(), changed.static_fingerprint());
+    assert_ne!(first.live_fingerprint(), changed.live_fingerprint());
+    values.insert(name, SecretString::new("bad\0value"));
+    assert!(resolve_explicit_extension_process_environment(&values).is_err());
+}

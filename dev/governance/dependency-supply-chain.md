@@ -347,3 +347,9 @@ workspace、文档、站点和分发 gate。
 |---|---|---|---|---|---|
 | `base64` | `0.22.1`；复用 workspace 默认 `std` / `alloc` | `sigil-desktop-app/image_attachments` | 将已通过共享图片校验的有界 bytes 转成 renderer 可展示的 data URL；不传源路径、文件名或凭证 | MIT OR Apache-2.0；marshallpierce/rust-base64 | 增加直接依赖边，复用已锁版本；发布前仍执行仓库 supply-chain gate |
 | `libc` | lock `0.2.189`（workspace `0.2.186` semver）；默认 `std`，调用仅 `cfg(unix)` | `sigil-desktop-app/image_attachments` | 系统 picker 已授权目标的读取使用 `O_NONBLOCK`，避免 FIFO 在 opened descriptor 的 regular-file/大小检查前卡住；允许明确选择的符号链接，不授予 renderer 通用文件权限 | MIT OR Apache-2.0；rust-lang/libc | 增加直接依赖边，复用已锁版本；共享 HTTP/runtime 图片 cache 边界不变，发布前仍执行仓库 supply-chain gate |
+
+## ACP 编辑器适配（C2）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+| --- | --- | --- | --- | --- | --- |
+| `agent-client-protocol` | `=2.2.0`；默认 feature 为空，未启用 unstable | `sigil/acp` | 官方 ACP stdio JSON-RPC framing、typed v1 schema 与 editor permission/session 接口；沿共享 application run/approval/session/cleanup owner，不持有第二 agent loop；stdout 专用于协议，ResourceLink 不自动读取，客户端 env 仅 session/run-local | Apache-2.0；agentclientprotocol/rust-sdk；Cargo.lock 锁定 SDK、derive 2.2.0 与 schema 1.9.1 | SDK/current-thread fixtures、真实 editor deny/cancel/reconnect 及 supply-chain gate 均需当前非零证据；旧 binary 的审批 panic 不算拒绝通过。不得把 SDK fixture 代替编辑器或跨平台资格化 |

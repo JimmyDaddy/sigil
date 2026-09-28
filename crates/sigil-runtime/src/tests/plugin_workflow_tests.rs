@@ -1112,3 +1112,292 @@ fn assert_cancelled_initialization_is_settled(records: &[sigil_kernel::SessionSt
     );
     assert_eq!(events[3].payload["subject"], events[0].payload["subject"]);
 }
+
+#[tokio::test]
+async fn application_mcp_explicit_environment_reaches_managed_child_and_binds_request_approval()
+-> Result<()> {
+    let fixture = WorkflowFixture::new(usize::MAX)?;
+    let workspace = fixture.directory.path();
+    let environment_name = format!("SIGIL_C2_CLIENT_{}", uuid::Uuid::new_v4().simple());
+    // This client-only value never enters the parent environment. A request-time fallback to
+    // inherited environment grants therefore cannot accidentally validate the running child.
+    assert!(std::env::var_os(&environment_name).is_none());
+    let values = ["client-private-value-first", "client-private-value-second"];
+    fs::write(
+        workspace.join("explicit-environment.py"),
+        r#"import hashlib, json, os, pathlib, sys
+with pathlib.Path("explicit-launches.txt").open("a") as marker:
+    marker.write("launched\n")
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2025-06-18", "serverInfo":{"name":"client-env","version":"1.0.0"}, "capabilities":{"tools":{}}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"fingerprint", "inputSchema":{"type":"object"}, "annotations":{"readOnlyHint":True}}]}
+    elif method == "tools/call":
+        with pathlib.Path("explicit-calls.txt").open("a") as marker:
+            marker.write("called\n")
+        value = os.environ.get(sys.argv[1], "absent").encode()
+        result = {"content":[{"type":"text","text":hashlib.sha256(value).hexdigest()}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}), flush=True)
+"#,
+    )?;
+    let state = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(state.path().join("session.jsonl"))?;
+    let context = ToolContext::new(workspace, 5)
+        .with_mutation_recorder(sigil_kernel::MutationEventRecorder::new(store.clone()));
+    let capabilities =
+        crate::provider_capabilities_for_name("deepseek").expect("provider capability fixture");
+    let mut registries = [ToolRegistry::new(), ToolRegistry::new()];
+    for (registry, value) in registries.iter_mut().zip(values) {
+        let declaration = crate::ApplicationMcpServerDeclaration {
+            server: sigil_kernel::McpServerConfig {
+                name: "client-env".to_owned(),
+                startup: sigil_kernel::McpServerStartup::Lazy,
+                startup_timeout_secs: 5,
+                transport: sigil_kernel::McpServerTransportConfig::Stdio {
+                    command: "python3".to_owned(),
+                    args: vec![
+                        "explicit-environment.py".to_owned(),
+                        environment_name.clone(),
+                    ],
+                    inherit_env: Vec::new(),
+                },
+                ..Default::default()
+            },
+            environment: std::collections::BTreeMap::from([(
+                environment_name.clone(),
+                sigil_kernel::SecretString::new(value),
+            )]),
+        };
+        let mut config: sigil_kernel::RootConfig = toml::from_str(
+            "config_version = 2\n[agent]\nconnection = \"fixture\"\nmodel = \"fixture\"\n",
+        )?;
+        let environments =
+            crate::application_mcp::environments(std::slice::from_ref(&declaration))?;
+        crate::application_mcp::merge(&mut config, std::slice::from_ref(&declaration))?;
+        assert!(!toml::to_string(&config)?.contains(value));
+        crate::mcp_registry::register_session_plugin_mcp_tools_with_registry_slot(
+            registry,
+            &config,
+            &capabilities,
+            workspace.to_path_buf(),
+            fixture.source.clone(),
+            sigil_mcp::unsupported_mcp_elicitation_handler(),
+            sigil_mcp::unsupported_mcp_runtime_event_handler(),
+            fixture.composition.extension_execution.clone(),
+            Arc::new(WorkflowMcpDisclosurePresenter),
+            None,
+            None,
+            environments,
+        )
+        .await?;
+    }
+    assert!(!workspace.join("explicit-launches.txt").exists());
+    let activation = ToolCall {
+        id: "client-env-activation".to_owned(),
+        name: "mcp_activate_server".to_owned(),
+        args_json: json!({"server_name":"client-env"}).to_string(),
+    };
+    let first_subjects = registries[0]
+        .permission_plan(&context, &activation)?
+        .subjects;
+    let second_subjects = registries[1]
+        .permission_plan(&context, &activation)?
+        .subjects;
+    assert_ne!(first_subjects, second_subjects);
+    let observation = async {
+        let mut owners = Vec::new();
+        for (index, registry) in registries.iter().enumerate() {
+            if index == 1 {
+                // Same declaration/scope/name, different explicit values: the first process's
+                // approval must not authorize a replacement process with the second value.
+                let rejected = registry
+                    .execute(
+                        context
+                            .clone()
+                            .with_approved_subjects(first_subjects.clone()),
+                        activation.clone(),
+                    )
+                    .await;
+                anyhow::ensure!(rejected.is_err(), "changed values reused stale approval");
+                anyhow::ensure!(
+                    fs::read_to_string(workspace.join("explicit-launches.txt"))? == "launched\n",
+                    "stale approval physically started a second child"
+                );
+                let error = format!("{:#}", rejected.expect_err("checked rejected result"));
+                anyhow::ensure!(values.iter().all(|value| !error.contains(value)));
+            }
+            let subjects = if index == 0 {
+                first_subjects.clone()
+            } else {
+                second_subjects.clone()
+            };
+            let activated = registry
+                .execute(
+                    context.clone().with_approved_subjects(subjects),
+                    activation.clone(),
+                )
+                .await?;
+            anyhow::ensure!(!activated.is_error(), "{}", activated.content);
+            let owner = registry
+                .lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE)
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("managed child must expose its exact generation"))?;
+            let name = registry
+                .tool_names_by_lifecycle_owner(&owner)
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("managed child did not publish its tool"))?;
+            let call = ToolCall {
+                id: format!("client-env-call-{index}"),
+                name,
+                args_json: "{}".to_owned(),
+            };
+            let subjects = registry.permission_plan(&context, &call)?.subjects;
+            let authorized = context.clone().with_approved_subjects(subjects);
+            // The production agent persists this profile before dispatch. Missing that record
+            // must still reject the call before the real child receives any tools/call request.
+            let unaudited = registry
+                .execute(authorized.clone(), call.clone())
+                .await
+                .expect_err("local MCP calls require the persisted execution profile");
+            anyhow::ensure!(
+                unaudited
+                    .to_string()
+                    .contains("requires persisted ToolExecutionStarted"),
+                "unexpected unaudited rejection: {unaudited:#}"
+            );
+            let calls_before =
+                fs::read_to_string(workspace.join("explicit-calls.txt")).or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(String::new())
+                    } else {
+                        Err(error)
+                    }
+                })?;
+            anyhow::ensure!(calls_before == "called\n".repeat(index * 2));
+            // Each physical request reruns the client's environment-source check. Match the
+            // existing agent boundary: append Started with its actual profile, then dispatch.
+            for request_index in 0..2 {
+                let call = ToolCall {
+                    id: format!("client-env-call-{index}-{request_index}"),
+                    ..call.clone()
+                };
+                let mut started = sigil_kernel::durable_tool_execution_entry(
+                    &call,
+                    authorized.approved_subjects(),
+                    sigil_kernel::ToolExecutionStatus::Started,
+                    None,
+                    None,
+                )?;
+                let profile = registry
+                    .execution_mutation_profile(&authorized, &call)?
+                    .ok_or_else(|| anyhow::anyhow!("local MCP execution profile is required"))?;
+                started.metadata.details["execution_mutation_profile"] =
+                    serde_json::to_value(profile)?;
+                store.append(&sigil_kernel::SessionLogEntry::Control(
+                    ControlEntry::ToolExecution(Box::new(started)),
+                ))?;
+                let result = registry
+                    .execute_after_started_audit(authorized.clone(), call.clone())
+                    .await?;
+                let finished = sigil_kernel::durable_tool_execution_entry(
+                    &call,
+                    authorized.approved_subjects(),
+                    if result.is_error() {
+                        sigil_kernel::ToolExecutionStatus::Failed
+                    } else {
+                        sigil_kernel::ToolExecutionStatus::Completed
+                    },
+                    Some(0),
+                    Some(&result),
+                )?;
+                store.append(&sigil_kernel::SessionLogEntry::Control(
+                    ControlEntry::ToolExecution(Box::new(finished)),
+                ))?;
+                anyhow::ensure!(!result.is_error(), "{}", result.content);
+                anyhow::ensure!(
+                    result.content == format!("{:x}", Sha256::digest(values[index].as_bytes())),
+                    "the actual child did not receive this declaration's explicit value"
+                );
+            }
+            owners.push(owner);
+        }
+        anyhow::ensure!(owners[0].generation() != owners[1].generation());
+        Ok::<_, anyhow::Error>(owners)
+    }
+    .await;
+    // Every constructed owner is settled even if a request or a negative assertion failed.
+    let mut cleanup_errors = Vec::new();
+    for registry in &mut registries {
+        if let Err(error) = crate::shutdown_mcp_generations(registry).await {
+            cleanup_errors.push(format!("{error:#}"));
+        }
+    }
+    anyhow::ensure!(cleanup_errors.is_empty(), "{}", cleanup_errors.join("; "));
+    let owners = observation?;
+    assert_eq!(
+        fs::read_to_string(workspace.join("explicit-launches.txt"))?,
+        "launched\nlaunched\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("explicit-calls.txt"))?,
+        "called\ncalled\ncalled\ncalled\n"
+    );
+    assert!(std::env::var_os(&environment_name).is_none());
+    let records = store.read_event_records_coordinated()?;
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(store.path())?;
+    let executions = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            sigil_kernel::SessionLogEntry::Control(ControlEntry::ToolExecution(entry)) => {
+                Some(entry.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(executions.len(), 8);
+    for (pair, call_id) in executions.chunks_exact(2).zip([
+        "client-env-call-0-0",
+        "client-env-call-0-1",
+        "client-env-call-1-0",
+        "client-env-call-1-1",
+    ]) {
+        assert_eq!(pair[0].call_id, call_id);
+        assert_eq!(pair[0].status, sigil_kernel::ToolExecutionStatus::Started);
+        assert!(pair[0].metadata.details["execution_mutation_profile"].is_object());
+        assert_eq!(pair[1].call_id, call_id);
+        assert_eq!(pair[1].status, sigil_kernel::ToolExecutionStatus::Completed);
+    }
+    for owner in owners {
+        let statuses = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| {
+                event.event_type == "extension_process_lifecycle_recorded"
+                    && event.payload["safe_metadata"]["process_generation"] == owner.generation()
+            })
+            .map(|event| event.payload["status"].as_str().expect("lifecycle status"))
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, ["starting", "running", "stopped"]);
+    }
+    let persisted = format!(
+        "{}\n{}",
+        fs::read_to_string(store.path())?,
+        fixture.records()?
+    );
+    for value in values {
+        assert!(
+            !persisted.contains(value),
+            "explicit process value leaked into audit"
+        );
+    }
+    Ok(())
+}

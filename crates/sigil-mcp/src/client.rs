@@ -133,6 +133,7 @@ pub(super) struct McpClient {
     lifecycle_owner: ToolLifecycleOwner,
     lifetime: Option<Arc<super::process_lifetime::McpProcessLifetime>>,
     pre_request_check: Option<Arc<dyn McpPreRequestCheck>>,
+    environment_source: Arc<dyn McpProcessLauncher>,
     declaration_check: Mutex<Option<JoinHandle<Result<()>>>>,
     startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     startup_complete: std::sync::atomic::AtomicBool,
@@ -370,6 +371,7 @@ impl McpClient {
                 lifecycle_owner,
                 lifetime,
                 pre_request_check,
+                environment_source: process_launcher,
                 declaration_check: Mutex::new(None),
                 startup_cancellation,
                 startup_complete: std::sync::atomic::AtomicBool::new(false),
@@ -1170,8 +1172,9 @@ impl McpClient {
     }
 
     async fn ensure_environment_binding_current(&self) -> Result<()> {
-        let current =
-            resolve_extension_process_environment(&self._process_receipt.environment_grant_names)?;
+        let current = self
+            .environment_source
+            .current_environment(&self._process_receipt)?;
         if environment_binding_matches(&self._process_receipt, &current) {
             return Ok(());
         }
