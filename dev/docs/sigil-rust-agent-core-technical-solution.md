@@ -398,6 +398,8 @@ Desktop 的截断消息另提供显式正文分页：canonical display identity 
 
 HTTP application command 的前置 snapshot 也复用该严格只读 owner；健康会话的写 attachment 因切换或迟到请求离开缓存，不等于读服务不可用。实际 dispatch 仍独立获取写 attachment 并执行 authority/run admission，现有活动 owner 的读取故障不能回退为按路径重开。Plan 决策在前台运行或清理尚未释放时，仅记录“执行前延期”并返回 typed busy；同一 command fingerprint 可重新准入，已执行、不确定或崩溃中断的命令不能借此自动重放。
 
+同一 durable session scope 的普通与 queued foreground run admission 在读取 pending user input 前取得已有 durable-mutation reservation，并在 registry state mutex 内将 reservation 原子转换为 foreground owner。HTTP background-agent monitor 在收集完成子任务、回写 `AgentUserInputRoute` 或触发 Direct Task continuation 前取得同一 reservation；竞争期间保留既有 completion signal，不能在 run 已读旧 projection 后插入新的 root attention，也不能因 typed busy 丢失唯一收集通知。该收敛不新增 public API 或第二次 durable scan。
+
 Desktop 队列入队成功后主动查询前台 owner，不能依赖仍在传输后台终端状态的旧 run stream 通知后继运行；交接期间按已有有界退避等待，快速完成的后继运行通过 canonical display 回补。Plan 问题投影按 review/attempt 的最新控制状态折叠，恢复或完成只退休该 attempt 的问题；同 run 的等待输入可以经有序恢复和更新的持久终态结清，旧页面与迟到的已覆盖终态不能回滚当前状态，真正互斥的最终状态仍拒绝。
 
 初始 attach/owner confirmation 进行时到达的终态必须留下后续查询请求，避免较早取得的 running snapshot 把已结束运行重新显示为 live。后续查询不重新改写 owner/predecessor，订阅前的既有回放由首次新查询覆盖；失败则停止自动重试并进入显式恢复，不能以反复 attach 掩盖持续故障。

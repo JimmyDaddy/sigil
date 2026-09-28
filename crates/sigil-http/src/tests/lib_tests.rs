@@ -6080,6 +6080,62 @@ fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fin
 }
 
 #[test]
+fn queued_run_admission_blocks_a_late_durable_user_input_mutation() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let admission_entered = Arc::new(Barrier::new(2));
+    let release_admission = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&admission_entered);
+    let observer_release = Arc::clone(&release_admission);
+    driver.observe_queued_admission(Arc::new(move || {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+
+    let command = conversation_queue_command(
+        "queue-command-linearized-admission",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: Vec::new(),
+            prompt: "run before late input".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: None,
+        },
+    );
+    let command_registry = Arc::clone(&registry);
+    let session_id = session.id.clone();
+    let command_thread = std::thread::spawn(move || {
+        command_registry.command_conversation_queue(&session_id, command)
+    });
+    admission_entered.wait();
+
+    let late_mutation_admitted =
+        match registry.reserve_durable_session_mutation(&session.durable_session_scope_id) {
+            Ok(mutation) => {
+                driver.recording.set_unresolved_user_input(true);
+                mutation.finish(false);
+                true
+            }
+            Err(HttpRegistryError::DurableSessionMutationActive) => false,
+            Err(error) => panic!("late queued mutation returned an unexpected error: {error}"),
+        };
+    release_admission.wait();
+
+    assert!(
+        !late_mutation_admitted,
+        "queued admission must retain the durable mutation lease after reading pending input"
+    );
+    command_thread
+        .join()
+        .expect("queue command thread should join")
+        .expect("the earlier queued admission should complete");
+    assert_eq!(driver.queued_starts().len(), 1);
+}
+
+#[test]
 fn conversation_queue_stale_and_malformed_commands_have_zero_mutation() {
     let driver = Arc::new(QueueTestDriver::default());
     let registry = HttpSessionRunRegistry::new(driver.clone());
@@ -8570,6 +8626,56 @@ fn unresolved_user_input_owns_the_session_frontier_before_run_allocation() {
 }
 
 #[test]
+fn run_admission_blocks_a_late_durable_user_input_mutation() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let admission_entered = Arc::new(Barrier::new(2));
+    let release_admission = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&admission_entered);
+    let observer_release = Arc::clone(&release_admission);
+    driver.observe_admission(Arc::new(move || {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+
+    let start_registry = Arc::clone(&registry);
+    let session_id = session.id.clone();
+    let start = std::thread::spawn(move || {
+        start_registry.start_run(
+            &session_id,
+            run_start("admit before late input", HttpPermissionMode::Manual),
+        )
+    });
+    admission_entered.wait();
+
+    let late_mutation_admitted =
+        match registry.reserve_durable_session_mutation(&session.durable_session_scope_id) {
+            Ok(mutation) => {
+                // This is the old unsafe interleaving: pending=false was already observed, then the
+                // background monitor appended a routed request before foreground registration.
+                driver.set_unresolved_user_input(true);
+                mutation.finish(false);
+                true
+            }
+            Err(HttpRegistryError::DurableSessionMutationActive) => false,
+            Err(error) => panic!("late mutation returned an unexpected error: {error}"),
+        };
+    release_admission.wait();
+
+    assert!(
+        !late_mutation_admitted,
+        "run admission must retain the durable mutation lease after reading pending input"
+    );
+    let run = start
+        .join()
+        .expect("run admission thread should join")
+        .expect("the earlier admission should own the linearized foreground cut");
+    assert_eq!(run.status, HttpRunStatus::Running);
+    assert_eq!(driver.starts().len(), 1);
+}
+
+#[test]
 fn task_continuation_uses_the_foreground_run_control_plane() {
     let (registry, driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());
@@ -9870,6 +9976,7 @@ struct QueueTestDriver {
     reject_next_queued_start_as_stale: AtomicUsize,
     release_barrier: bool,
     interrupt_validation_observer: Mutex<Option<QueueInterruptValidationObserver>>,
+    queued_admission_observer: Mutex<Option<AdmissionObserver>>,
 }
 
 impl Default for QueueTestDriver {
@@ -9888,6 +9995,7 @@ impl QueueTestDriver {
             reject_next_queued_start_as_stale: AtomicUsize::new(0),
             release_barrier,
             interrupt_validation_observer: Mutex::new(None),
+            queued_admission_observer: Mutex::new(None),
         }
     }
 
@@ -9922,6 +10030,10 @@ impl QueueTestDriver {
 
     fn observe_interrupt_validation(&self, observer: QueueInterruptValidationObserver) {
         *lock(&self.interrupt_validation_observer) = Some(observer);
+    }
+
+    fn observe_queued_admission(&self, observer: AdmissionObserver) {
+        *lock(&self.queued_admission_observer) = Some(observer);
     }
 }
 
@@ -10063,7 +10175,7 @@ impl HttpRunDriver for QueueTestDriver {
         if state.paused {
             return Ok(None);
         }
-        Ok(state
+        let admission = state
             .entries
             .iter()
             .find(|entry| {
@@ -10078,7 +10190,12 @@ impl HttpRunDriver for QueueTestDriver {
                 prompt_preview: entry.item.prompt_preview.clone(),
                 permission_mode: HttpPermissionMode::Manual,
                 reasoning_effort: entry.reasoning_effort,
-            }))
+            });
+        drop(state);
+        if let Some(observer) = lock(&self.queued_admission_observer).clone() {
+            observer();
+        }
+        Ok(admission)
     }
 
     fn start_queued_run(&self, start: HttpQueuedRunDriverStart) -> Result<(), HttpRunDriverError> {
@@ -10139,6 +10256,7 @@ struct RecordingRunDriver {
     unresolved_user_input: Mutex<bool>,
     next_start_error: Mutex<Option<String>>,
     next_admission_error: Mutex<Option<HttpRunAdmissionError>>,
+    admission_observer: Mutex<Option<AdmissionObserver>>,
     next_session_mutation_attachment_error: Mutex<Option<HttpRunAdmissionError>>,
     next_binding_error: Mutex<Option<String>>,
     next_binding: Mutex<Option<HttpSessionBinding>>,
@@ -10258,6 +10376,10 @@ impl RecordingRunDriver {
         *lock(&self.start_observer) = Some(observer);
     }
 
+    fn observe_admission(&self, observer: AdmissionObserver) {
+        *lock(&self.admission_observer) = Some(observer);
+    }
+
     fn observe_approval(&self, observer: ApprovalObserver) {
         *lock(&self.approval_observer) = Some(observer);
     }
@@ -10370,6 +10492,9 @@ impl HttpRunDriver for RecordingRunDriver {
         _session: &crate::HttpSessionSnapshot,
         _request: &HttpRunStartRequest,
     ) -> Result<(), HttpRunAdmissionError> {
+        if let Some(observer) = lock(&self.admission_observer).clone() {
+            observer();
+        }
         match lock(&self.next_admission_error).take() {
             Some(error) => Err(error),
             None => Ok(()),
@@ -10985,6 +11110,7 @@ fn write_catalog_session(path: &std::path::Path, prompt: &str, provider: &str, m
 }
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;
+type AdmissionObserver = Arc<dyn Fn() + Send + Sync>;
 type DisplayObserver = Arc<dyn Fn(&sigil_kernel::SessionReadBudget) + Send + Sync>;
 type CancelObserver = Arc<dyn Fn(&HttpRunDriverCancel) + Send + Sync>;
 type ApprovalObserver = Arc<dyn Fn(&HttpRunDriverApproval) + Send + Sync>;

@@ -1043,9 +1043,22 @@ enabled = true
     let sender = driver
         .bind_background_agent_monitor(&session, &attachment, &registry)
         .expect("HTTP background monitor should bind");
+    let mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("test mutation should hold the durable admission cut");
     sender
         .send(HttpBackgroundAgentSignal::Rescan)
         .expect("background monitor should accept a durable rescan");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        preparer
+            .requests
+            .lock()
+            .expect("Task request recorder should not be poisoned")
+            .is_empty(),
+        "background monitor must not collect or continue through another durable mutation"
+    );
+    mutation.finish(false);
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

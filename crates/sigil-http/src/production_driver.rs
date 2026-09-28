@@ -640,6 +640,45 @@ async fn run_http_background_agent_monitor(
             tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not wait for session idle");
             continue;
         }
+        let Some(registry) = registry.upgrade() else {
+            return;
+        };
+        let mut contention_backoff = Duration::from_millis(10);
+        let mutation = loop {
+            match registry.reserve_durable_session_mutation(&session.durable_session_scope_id) {
+                Ok(mutation) => break mutation,
+                Err(HttpRegistryError::SessionForegroundRunActive { .. }) => {
+                    // A run may claim the registry immediately before its driver registers in
+                    // `active_runs`. Retain this signal and return to the event-driven idle wait;
+                    // only the short registry-to-driver handoff can complete it immediately.
+                    if let Err(error) = active_runs_ready
+                        .wait_for_session_idle(&active_runs, &session.id)
+                        .await
+                    {
+                        tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not wait for the competing run");
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(
+                    HttpRegistryError::DurableSessionMutationActive
+                    | HttpRegistryError::SessionRunCleanupActive { .. }
+                    | HttpRegistryError::SessionVerificationActive { .. },
+                ) => {
+                    // No event source covers every bounded mutation or the registry release
+                    // barrier after `active_runs` becomes empty. Preserve this completion signal
+                    // and use capped backoff instead of spinning through that cleanup interval.
+                    tokio::time::sleep(contention_backoff).await;
+                    contention_backoff = contention_backoff
+                        .saturating_mul(2)
+                        .min(Duration::from_millis(250));
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not reserve its durable mutation");
+                    return;
+                }
+            }
+        };
 
         let background_runs = match attachment.agent_tool_background_runs() {
             Ok(owner) => owner,
@@ -688,11 +727,10 @@ async fn run_http_background_agent_monitor(
             .into_iter()
             .next()
         else {
+            mutation.finish(false);
             continue;
         };
-        let Some(registry) = registry.upgrade() else {
-            return;
-        };
+        mutation.finish(false);
         let request = crate::HttpRunStartRequest {
             permission_mode: Some(crate::HttpPermissionMode::Manual),
             task_continuation: Some(crate::HttpTaskContinuationRequest {

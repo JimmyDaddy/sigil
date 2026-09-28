@@ -2161,6 +2161,17 @@ impl HttpSessionRunRegistry {
             }
             current.snapshot()
         };
+        let mut durable_admission =
+            match self.reserve_durable_session_mutation(&session.durable_session_scope_id) {
+                Ok(admission) => admission,
+                Err(
+                    HttpRegistryError::DurableSessionMutationActive
+                    | HttpRegistryError::SessionForegroundRunActive { .. }
+                    | HttpRegistryError::SessionRunCleanupActive { .. }
+                    | HttpRegistryError::SessionVerificationActive { .. },
+                ) => return Ok(None),
+                Err(error) => return Err(error),
+            };
 
         let awaiting_user_input = catch_unwind(AssertUnwindSafe(|| {
             self.driver.has_unresolved_user_input(&session)
@@ -2208,13 +2219,14 @@ impl HttpSessionRunRegistry {
                 .binding
                 .session_scope_id
                 .clone();
-            if state
-                .durable_session_mutations
-                .contains(&durable_session_id)
+            if durable_session_id != session.durable_session_scope_id
+                || !state
+                    .durable_session_mutations
+                    .contains(&durable_session_id)
             {
                 return Ok(None);
             }
-            let current = state.sessions.get_mut(session_id).ok_or_else(|| {
+            let current = state.sessions.get(session_id).ok_or_else(|| {
                 HttpRegistryError::SessionNotFound {
                     session_id: session_id.to_owned(),
                 }
@@ -2225,6 +2237,7 @@ impl HttpSessionRunRegistry {
             {
                 return Ok(None);
             }
+            durable_admission.release_for_foreground_registration(&mut state)?;
             let run = HttpRunState::new(
                 admission.dispatch_run_id.clone(),
                 session_id.to_owned(),
@@ -2232,6 +2245,11 @@ impl HttpSessionRunRegistry {
                 admission.reasoning_effort,
                 prompt_preview(&admission.prompt_preview),
             );
+            let current = state.sessions.get_mut(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
             current.run_ids.push(admission.dispatch_run_id.clone());
             current.foreground_owner_generation =
                 current.foreground_owner_generation.saturating_add(1);
@@ -2349,6 +2367,12 @@ impl HttpSessionRunRegistry {
                 })?
                 .snapshot()
         };
+        // Serialize the complete durable admission cut with every other foreground mutation.
+        // In particular, the background-agent monitor must not append a new routed user-input
+        // request after this run observed the pending-input projection but before it claims the
+        // process-local foreground slot.
+        let mut durable_admission =
+            self.reserve_durable_session_mutation(&admission_session.durable_session_scope_id)?;
         let awaiting_user_input = catch_unwind(AssertUnwindSafe(|| {
             self.driver.has_unresolved_user_input(&admission_session)
         }))
@@ -2403,13 +2427,14 @@ impl HttpSessionRunRegistry {
                 .binding
                 .session_scope_id
                 .clone();
-            if state
-                .durable_session_mutations
-                .contains(&durable_session_id)
+            if durable_session_id != admission_session.durable_session_scope_id
+                || !state
+                    .durable_session_mutations
+                    .contains(&durable_session_id)
             {
                 return Err(HttpRegistryError::DurableSessionMutationActive);
             }
-            let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+            let session = state.sessions.get(session_id).ok_or_else(|| {
                 HttpRegistryError::SessionNotFound {
                     session_id: session_id.to_owned(),
                 }
@@ -2431,6 +2456,7 @@ impl HttpSessionRunRegistry {
                     session_id: session_id.to_owned(),
                 });
             }
+            durable_admission.release_for_foreground_registration(&mut state)?;
             let run = HttpRunState::new(
                 run_id.clone(),
                 session_id.to_owned(),
@@ -2438,6 +2464,11 @@ impl HttpSessionRunRegistry {
                 reasoning_effort,
                 prompt_preview(&prompt),
             );
+            let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+                HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                }
+            })?;
             session.run_ids.push(run_id.clone());
             session.foreground_owner_generation =
                 session.foreground_owner_generation.saturating_add(1);
@@ -5218,6 +5249,23 @@ pub(crate) struct HttpDurableSessionMutationGuard<'a> {
 }
 
 impl HttpDurableSessionMutationGuard<'_> {
+    /// Converts this durable-mutation lease into the registry foreground owner while the caller
+    /// still holds the registry state mutex. No competing durable mutation can enter between the
+    /// lease release and foreground registration.
+    fn release_for_foreground_registration(
+        &mut self,
+        state: &mut HttpRegistryState,
+    ) -> Result<(), HttpRegistryError> {
+        if !state
+            .durable_session_mutations
+            .remove(&self.durable_session_id)
+        {
+            return Err(HttpRegistryError::DurableSessionMutationActive);
+        }
+        self.released = true;
+        Ok(())
+    }
+
     pub(crate) fn finish(mut self, evict_adapter_sessions: bool) {
         if evict_adapter_sessions {
             self.registry
