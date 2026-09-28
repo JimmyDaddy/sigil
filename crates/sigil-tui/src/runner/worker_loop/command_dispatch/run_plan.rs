@@ -947,7 +947,6 @@ where
                         continue;
                     }
                 }
-
                 let run_id = state.run.next_id;
                 let loaded = match load_worker_skill(
                     root_config,

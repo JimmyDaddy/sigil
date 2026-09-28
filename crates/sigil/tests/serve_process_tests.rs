@@ -3002,104 +3002,88 @@ fn serve_process_rejects_unsafe_startup_before_creating_listener_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn desktop_review_serve_contract_sends_outdated_exact_diff_without_restoring_files()
+async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_servers()
 -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    async fn finish(client: &sigil_desktop::DesktopHttpClient, run_id: &str) -> anyhow::Result<()> {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let run = client.run(run_id).await?;
-                if run.status.is_terminal() {
-                    anyhow::ensure!(
-                        run.status == sigil_desktop::DesktopRunStatus::Finished,
-                        "review fixture run failed: {run:?}"
-                    );
-                    return Ok::<_, anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await??;
-        Ok(())
-    }
     let workspace = tempfile::tempdir()?;
     let config_path = workspace.path().join("sigil.toml");
-    let item = serde_json::json!({ "id": "review-function-item", "type": "function_call", "call_id": "review-write-call", "name": "write_file", "arguments": serde_json::to_string(&serde_json::json!({"path":"note.txt","content":"recorded line one\nrecorded line two\n"}))? });
-    let first_response = format!(
-        "event: response.output_item.added\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
-        serde_json::json!({"item":item}),
-        serde_json::json!({"item":item}),
-        serde_json::json!({"response":{"id":"review-write","status":"completed","output":[item]}})
-    );
-    let provider = VisionProviderFixture::start_with_first_response(Some(first_response))?;
-    write_config(&config_path, &provider.base_url);
-    fs::write(
-        &config_path,
-        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
-    )?;
+    write_config(&config_path, "http://127.0.0.1:1");
+    let original = fs::read(&config_path)?;
+    let marker = workspace.path().join("import-must-not-start");
+    let import = serde_json::to_vec(&serde_json::json!({
+        "futureField": true,
+        "mcpServers": {
+            "selected": {"command":"/bin/sh", "args":["-c", "printf launched > \"$1\"", "sh", marker], "env":{"PRIVATE_TOKEN":"never-copy-this-value"}},
+            "unselected": {"url":"https://example.test/mcp"}
+        }
+    }))?;
     let manager = sigil_desktop::DesktopWorkspaceManager::default();
     let result: anyhow::Result<()> = async {
-        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "review contract")).await?;
+        let opened = manager
+            .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+                sigil_desktop::DesktopLaunchRequest::new(
+                    env!("CARGO_BIN_EXE_sigil"),
+                    &config_path,
+                    workspace.path(),
+                ),
+                "MCP import",
+            ))
+            .await?;
         let client = manager.client(&opened.id)?;
-        let session = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("recorded change".to_owned()), model_ref: None }).await?;
-        let mut request = sigil_desktop::DesktopRunStartRequest {
-            review_annotations: Vec::new(), image_attachments: Vec::new(), prompt: "Create note.txt with two lines".to_owned(),
-            permission_mode: sigil_desktop::DesktopPermissionMode::AutoEdit, model_ref: None,
-            model_selection_binding: None, route_recovery_binding: None, reasoning_effort: None,
-            reasoning_effort_binding: None, skill_binding: None, agent_binding: None, task_continuation: None,
-        };
-        let started = client.start_run(&session.id, request.clone()).await?;
-        finish(&client, &started.run.id).await?;
-        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "recorded line one\nrecorded line two\n");
-        let checkpoint = client.conversation_recovery(&session.id).await?.checkpoints.into_iter().next().context("real write checkpoint")?;
-        let selector = sigil_desktop::DesktopCheckpointRestoreRequest { checkpoint_id: checkpoint.checkpoint_id, checkpoint_digest: checkpoint.checkpoint_digest };
-        let original = client.checkpoint_review(&session.id, selector.clone()).await?;
-        let recorded = original.diffs.iter().find(|diff| diff.path == "note.txt").context("recorded forward diff")?;
-        assert_eq!(recorded.file_state, sigil_desktop::DesktopReviewFileState::Current);
-        fs::write(workspace.path().join("note.txt"), "unrelated newer content\n")?;
-        let outdated = client.checkpoint_review(&session.id, selector.clone()).await?;
-        assert_eq!(outdated.diffs.iter().find(|diff| diff.path == "note.txt").context("outdated diff")?.file_state, sigil_desktop::DesktopReviewFileState::Changed);
-        assert!(!client.checkpoint_restore_review(&session.id, selector).await?.ready);
-        request.prompt = "Explain this original line".to_owned();
-        request.permission_mode = sigil_desktop::DesktopPermissionMode::ReadOnly;
-        request.review_annotations = vec![sigil_desktop::DesktopReviewAnnotation {
-            checkpoint_id: original.checkpoint_id, checkpoint_digest: original.checkpoint_digest,
-            source_call_id: recorded.source_call_id.clone(), diff_digest: recorded.diff_digest.clone(), path: recorded.path.clone(),
-            side: sigil_desktop::DesktopReviewDiffSide::New, start_line: 1, end_line: 1,
-            comment: sigil_desktop::DesktopReviewComment::new("Explain this original line")?,
-        }];
-        let reviewed = client.start_run(&session.id, request).await?;
-        finish(&client, &reviewed.run.id).await?;
-        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "unrelated newer content\n");
-        let display = client.conversation_display(&session.id, &Default::default()).await?;
-        assert!(display.items.iter().any(|item| matches!(&item.content, sigil_desktop::DesktopConversationDisplayContent::Message { text: Some(text), .. } if text.contains("User review of recorded change") && text.contains("recorded line one"))));
+        let preview = client.preview_mcp_import(import.clone()).await?;
+        assert_eq!(preview.candidates.len(), 2);
+        assert!(preview.root_fields_ignored);
+        let public = serde_json::to_string(&preview)?;
+        assert!(!public.contains("never-copy-this-value"));
+        assert!(!public.contains("printf"));
+        assert!(!public.contains(&marker.display().to_string()));
+        assert_eq!(fs::read(&config_path)?, original);
+        let selected = preview
+            .candidates
+            .iter()
+            .find(|item| item.name == "selected")
+            .expect("selected preview");
+        let saved = client
+            .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
+                preview_id: preview.preview_id.clone(),
+                selected_indices: vec![selected.index],
+            })
+            .await?;
+        assert_eq!(saved.imported_names, ["selected"]);
+        assert!(!marker.exists());
+        let config = sigil_kernel::RootConfig::load_persisted(&config_path)?;
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "selected");
+        assert_eq!(
+            config.mcp_servers[0].startup,
+            sigil_kernel::McpServerStartup::Lazy
+        );
+        assert!(!fs::read_to_string(&config_path)?.contains("never-copy-this-value"));
+        assert!(
+            client
+                .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
+                    preview_id: preview.preview_id,
+                    selected_indices: vec![selected.index],
+                })
+                .await
+                .is_err(),
+            "consumed draft must not be applied twice"
+        );
+        manager.restart(&opened.id).await?;
+        let client = manager.client(&opened.id)?;
+        let fresh = client.preview_mcp_import(import).await?;
+        assert_eq!(fresh.candidates.len(), 2);
+        assert!(!marker.exists(), "reload must preserve lazy startup");
+        manager.close(&opened.id).await?;
+        assert!(!marker.exists());
         Ok(())
-    }.await;
+    }
+    .await;
     let cleanup = manager.close_all().await;
-    let requests = provider.finish()?;
     result?;
     anyhow::ensure!(
-        cleanup
-            .iter()
-            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
-        "review serve cleanup failed"
+        cleanup.iter().all(|(_, result)| result.is_ok()),
+        "owned serve cleanup failed: {cleanup:?}"
     );
-    let run_requests = explicit_provider_requests(&requests);
-    assert_eq!(
-        run_requests.len(),
-        3,
-        "one write/tool-result turn then one explicitly sent review"
-    );
-    assert!(
-        requests.len() - run_requests.len() <= 1,
-        "at most one title maintenance request"
-    );
-    let review_request =
-        serde_json::to_string(run_requests.last().context("provider review request")?)?;
-    assert!(review_request.contains("User review of recorded change"));
-    assert!(review_request.contains("recorded line one"));
-    assert!(review_request.contains("Explain this original line"));
-    assert!(review_request.contains("no file-write authority"));
     Ok(())
 }
 
@@ -3342,6 +3326,111 @@ async fn desktop_branch_knowledge_serve_contract_preserves_lineage_and_imports_o
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_review_serve_contract_sends_outdated_exact_diff_without_restoring_files()
+-> anyhow::Result<()> {
+    use anyhow::Context as _;
+    async fn finish(client: &sigil_desktop::DesktopHttpClient, run_id: &str) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(run_id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(
+                        run.status == sigil_desktop::DesktopRunStatus::Finished,
+                        "review fixture run failed: {run:?}"
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let item = serde_json::json!({ "id": "review-function-item", "type": "function_call", "call_id": "review-write-call", "name": "write_file", "arguments": serde_json::to_string(&serde_json::json!({"path":"note.txt","content":"recorded line one\nrecorded line two\n"}))? });
+    let first_response = format!(
+        "event: response.output_item.added\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        serde_json::json!({"item":item}),
+        serde_json::json!({"item":item}),
+        serde_json::json!({"response":{"id":"review-write","status":"completed","output":[item]}})
+    );
+    let provider = VisionProviderFixture::start_with_first_response(Some(first_response))?;
+    write_config(&config_path, &provider.base_url);
+    fs::write(
+        &config_path,
+        fs::read_to_string(&config_path)?.replace("chat_completions", "responses"),
+    )?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager.open(sigil_desktop::DesktopWorkspaceOpenRequest::new(sigil_desktop::DesktopLaunchRequest::new(env!("CARGO_BIN_EXE_sigil"), &config_path, workspace.path()), "review contract")).await?;
+        let client = manager.client(&opened.id)?;
+        let session = client.create_session(sigil_desktop::DesktopSessionCreateRequest { label: Some("recorded change".to_owned()), model_ref: None }).await?;
+        let mut request = sigil_desktop::DesktopRunStartRequest {
+            review_annotations: Vec::new(), image_attachments: Vec::new(), prompt: "Create note.txt with two lines".to_owned(),
+            permission_mode: sigil_desktop::DesktopPermissionMode::AutoEdit, model_ref: None,
+            model_selection_binding: None, route_recovery_binding: None, reasoning_effort: None,
+            reasoning_effort_binding: None, skill_binding: None, agent_binding: None, task_continuation: None,
+        };
+        let started = client.start_run(&session.id, request.clone()).await?;
+        finish(&client, &started.run.id).await?;
+        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "recorded line one\nrecorded line two\n");
+        let checkpoint = client.conversation_recovery(&session.id).await?.checkpoints.into_iter().next().context("real write checkpoint")?;
+        let selector = sigil_desktop::DesktopCheckpointRestoreRequest { checkpoint_id: checkpoint.checkpoint_id, checkpoint_digest: checkpoint.checkpoint_digest };
+        let original = client.checkpoint_review(&session.id, selector.clone()).await?;
+        let recorded = original.diffs.iter().find(|diff| diff.path == "note.txt").context("recorded forward diff")?;
+        assert_eq!(recorded.file_state, sigil_desktop::DesktopReviewFileState::Current);
+        fs::write(workspace.path().join("note.txt"), "unrelated newer content\n")?;
+        let outdated = client.checkpoint_review(&session.id, selector.clone()).await?;
+        assert_eq!(outdated.diffs.iter().find(|diff| diff.path == "note.txt").context("outdated diff")?.file_state, sigil_desktop::DesktopReviewFileState::Changed);
+        assert!(!client.checkpoint_restore_review(&session.id, selector).await?.ready);
+        request.prompt = "Explain this original line".to_owned();
+        request.permission_mode = sigil_desktop::DesktopPermissionMode::ReadOnly;
+        request.review_annotations = vec![sigil_desktop::DesktopReviewAnnotation {
+            checkpoint_id: original.checkpoint_id, checkpoint_digest: original.checkpoint_digest,
+            source_call_id: recorded.source_call_id.clone(), diff_digest: recorded.diff_digest.clone(), path: recorded.path.clone(),
+            side: sigil_desktop::DesktopReviewDiffSide::New, start_line: 1, end_line: 1,
+            comment: sigil_desktop::DesktopReviewComment::new("Explain this original line")?,
+        }];
+        let reviewed = client.start_run(&session.id, request).await?;
+        finish(&client, &reviewed.run.id).await?;
+        assert_eq!(fs::read_to_string(workspace.path().join("note.txt"))?, "unrelated newer content\n");
+        let display = client.conversation_display(&session.id, &Default::default()).await?;
+        assert!(display.items.iter().any(|item| matches!(&item.content, sigil_desktop::DesktopConversationDisplayContent::Message { text: Some(text), .. } if text.contains("User review of recorded change") && text.contains("recorded line one"))));
+        Ok(())
+    }.await;
+    let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
+    result?;
+    anyhow::ensure!(
+        cleanup
+            .iter()
+            .all(|(_, result)| result.as_ref().is_ok_and(|report| report.success)),
+        "review serve cleanup failed"
+    );
+    let run_requests = explicit_provider_requests(&requests);
+    assert_eq!(
+        run_requests.len(),
+        3,
+        "one write/tool-result turn then one explicitly sent review"
+    );
+    assert!(
+        requests.len() - run_requests.len() <= 1,
+        "at most one title maintenance request"
+    );
+    let review_request =
+        serde_json::to_string(run_requests.last().context("provider review request")?)?;
+    assert!(review_request.contains("User review of recorded change"));
+    assert!(review_request.contains("recorded line one"));
+    assert!(review_request.contains("Explain this original line"));
+    assert!(review_request.contains("no file-write authority"));
+    Ok(())
+}
+
+#[path = "serve_process/plugin_tests.rs"]
+mod plugin_contract_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independent_check()
 -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -3512,92 +3601,3 @@ async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independ
     assert!(edited.contains("review-apply-fix") && edited.contains("function_call_output"));
     Ok(())
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_servers()
--> anyhow::Result<()> {
-    let workspace = tempfile::tempdir()?;
-    let config_path = workspace.path().join("sigil.toml");
-    write_config(&config_path, "http://127.0.0.1:1");
-    let original = fs::read(&config_path)?;
-    let marker = workspace.path().join("import-must-not-start");
-    let import = serde_json::to_vec(&serde_json::json!({
-        "futureField": true,
-        "mcpServers": {
-            "selected": {"command":"/bin/sh", "args":["-c", "printf launched > \"$1\"", "sh", marker], "env":{"PRIVATE_TOKEN":"never-copy-this-value"}},
-            "unselected": {"url":"https://example.test/mcp"}
-        }
-    }))?;
-    let manager = sigil_desktop::DesktopWorkspaceManager::default();
-    let result: anyhow::Result<()> = async {
-        let opened = manager
-            .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
-                sigil_desktop::DesktopLaunchRequest::new(
-                    env!("CARGO_BIN_EXE_sigil"),
-                    &config_path,
-                    workspace.path(),
-                ),
-                "MCP import",
-            ))
-            .await?;
-        let client = manager.client(&opened.id)?;
-        let preview = client.preview_mcp_import(import.clone()).await?;
-        assert_eq!(preview.candidates.len(), 2);
-        assert!(preview.root_fields_ignored);
-        let public = serde_json::to_string(&preview)?;
-        assert!(!public.contains("never-copy-this-value"));
-        assert!(!public.contains("printf"));
-        assert!(!public.contains(&marker.display().to_string()));
-        assert_eq!(fs::read(&config_path)?, original);
-        let selected = preview
-            .candidates
-            .iter()
-            .find(|item| item.name == "selected")
-            .expect("selected preview");
-        let saved = client
-            .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
-                preview_id: preview.preview_id.clone(),
-                selected_indices: vec![selected.index],
-            })
-            .await?;
-        assert_eq!(saved.imported_names, ["selected"]);
-        assert!(!marker.exists());
-        let config = sigil_kernel::RootConfig::load_persisted(&config_path)?;
-        assert_eq!(config.mcp_servers.len(), 1);
-        assert_eq!(config.mcp_servers[0].name, "selected");
-        assert_eq!(
-            config.mcp_servers[0].startup,
-            sigil_kernel::McpServerStartup::Lazy
-        );
-        assert!(!fs::read_to_string(&config_path)?.contains("never-copy-this-value"));
-        assert!(
-            client
-                .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
-                    preview_id: preview.preview_id,
-                    selected_indices: vec![selected.index],
-                })
-                .await
-                .is_err(),
-            "consumed draft must not be applied twice"
-        );
-        manager.restart(&opened.id).await?;
-        let client = manager.client(&opened.id)?;
-        let fresh = client.preview_mcp_import(import).await?;
-        assert_eq!(fresh.candidates.len(), 2);
-        assert!(!marker.exists(), "reload must preserve lazy startup");
-        manager.close(&opened.id).await?;
-        assert!(!marker.exists());
-        Ok(())
-    }
-    .await;
-    let cleanup = manager.close_all().await;
-    result?;
-    anyhow::ensure!(
-        cleanup.iter().all(|(_, result)| result.is_ok()),
-        "owned serve cleanup failed: {cleanup:?}"
-    );
-    Ok(())
-}
-
-#[path = "serve_process/plugin_tests.rs"]
-mod plugin_contract_tests;

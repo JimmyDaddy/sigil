@@ -952,73 +952,6 @@ fn inline_skill_images_cross_application_boundary_without_placeholder_arguments(
 }
 
 #[test]
-fn change_review_shared_submit_preserves_typed_references_to_existing_worker_loop() -> Result<()> {
-    let scope = ApplicationScope {
-        application_instance: sigil_application::ApplicationInstanceId::new("review-bridge")?,
-        authenticated_subject: AuthenticatedSubject::new("local-user")?,
-        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
-        session: Some(sigil_application::SessionScopeId::new("review-source")?),
-    };
-    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
-        snapshot(scope.clone()).envelope,
-    )?);
-    let app = session(port, scope)?;
-    let mut request = app
-        .prepare_action(
-            &AppAction::SubmitPrompt("Clarify this change".to_owned()),
-            None,
-            None,
-        )?
-        .expect("submit");
-    let annotation = sigil_application::ReviewAnnotation {
-        checkpoint_id: "checkpoint".to_owned(),
-        checkpoint_digest: "a".repeat(64),
-        source_call_id: "write-call".to_owned(),
-        diff_digest: "b".repeat(64),
-        path: "note.txt".to_owned(),
-        side: sigil_application::ReviewDiffSide::New,
-        start_line: 1,
-        end_line: 2,
-        comment: SafeText::new("Clarify both lines")?,
-    };
-    request.envelope.command =
-        ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
-            prompt: Some(SafeText::new("Clarify this change")?),
-            options: Some(Box::new(sigil_application::RunStartOptions {
-                review_annotations: vec![annotation.clone()],
-                permission_mode: sigil_application::ApplicationPermissionMode::Manual,
-                model: None,
-                route_recovery_binding: None,
-                reasoning_effort: None,
-                reasoning_effort_binding: None,
-                skill: None,
-                agent: None,
-                task_continuation: None,
-            })),
-        });
-    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
-    let executor = TuiWorkerCommandExecutor {
-        endpoint: TuiWorkerEndpoint::new(worker_tx),
-        projection_binding: None,
-        reasoning_effort: ReasoningEffort::Medium,
-        session_id: "review-source".to_owned(),
-        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-    };
-    assert!(!matches!(
-        executor.dispatch_sync(&request)?,
-        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
-    ));
-    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
-        WorkerCommand::SubmitReviewedPrompt { prompt, expected_session_id, annotations, .. }
-        if prompt == "Clarify this change" && expected_session_id == "review-source" && annotations == vec![annotation]));
-    Ok(())
-}
-
-#[test]
 fn conversation_fork_application_action_dispatches_exact_turn_and_route() -> Result<()> {
     let scope = ApplicationScope {
         application_instance: sigil_application::ApplicationInstanceId::new("fork-bridge")?,
@@ -1088,6 +1021,143 @@ fn conversation_fork_application_action_dispatches_exact_turn_and_route() -> Res
         if source_session_id == "fork-source" && source_turn_digest == "sha256:exact-turn"
             && target_model_ref.connection_id.as_str() == "exact-connection"
             && target_model_ref.model_id == "exact-model"));
+    Ok(())
+}
+
+#[test]
+fn branch_knowledge_application_action_binds_current_target_and_exact_source() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("knowledge-bridge")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("target")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let app = session(port, scope)?;
+    let selected =
+        sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest {
+            source_session_ref: sigil_kernel::SessionRef::new_relative("branch.jsonl")?,
+            source_session_id: "source".to_owned(),
+            source_turn_digest: "a".repeat(64),
+            source_message_id: "final-answer".to_owned(),
+            source_text_sha256: "b".repeat(64),
+            summary_sha256: "c".repeat(64),
+        };
+    assert!(
+        app.prepare_action(
+            &AppAction::ImportBranchKnowledge {
+                request_id: 510,
+                target_session_id: "foreign-target".to_owned(),
+                request: selected.clone(),
+            },
+            None,
+            None
+        )
+        .is_err()
+    );
+    let request = app
+        .prepare_action(
+            &AppAction::ImportBranchKnowledge {
+                request_id: 511,
+                target_session_id: "target".to_owned(),
+                request: selected.clone(),
+            },
+            None,
+            None,
+        )?
+        .expect("knowledge must use shared application recovery");
+    assert!(matches!(&request.envelope.command,
+        ApplicationCommand::Conversation(ConversationCommand::Recovery {
+            action: ApplicationRecoveryAction::ImportBranchKnowledge { source_turn_digest, summary_sha256, .. }
+        }) if source_turn_digest.as_str() == selected.source_turn_digest && summary_sha256.as_str() == selected.summary_sha256));
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
+    let executor = TuiWorkerCommandExecutor {
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: "target".to_owned(),
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    assert!(!matches!(
+        executor.dispatch_sync(&request)?,
+        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
+    ));
+    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
+        WorkerCommand::ImportBranchKnowledge { request_id: 511, target_session_id, request }
+        if target_session_id == "target" && request == selected));
+    Ok(())
+}
+
+#[test]
+fn change_review_shared_submit_preserves_typed_references_to_existing_worker_loop() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("review-bridge")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("review-source")?),
+    };
+    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
+        snapshot(scope.clone()).envelope,
+    )?);
+    let app = session(port, scope)?;
+    let mut request = app
+        .prepare_action(
+            &AppAction::SubmitPrompt("Clarify this change".to_owned()),
+            None,
+            None,
+        )?
+        .expect("submit");
+    let annotation = sigil_application::ReviewAnnotation {
+        checkpoint_id: "checkpoint".to_owned(),
+        checkpoint_digest: "a".repeat(64),
+        source_call_id: "write-call".to_owned(),
+        diff_digest: "b".repeat(64),
+        path: "note.txt".to_owned(),
+        side: sigil_application::ReviewDiffSide::New,
+        start_line: 1,
+        end_line: 2,
+        comment: SafeText::new("Clarify both lines")?,
+    };
+    request.envelope.command =
+        ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+            prompt: Some(SafeText::new("Clarify this change")?),
+            options: Some(Box::new(sigil_application::RunStartOptions {
+                review_annotations: vec![annotation.clone()],
+                permission_mode: sigil_application::ApplicationPermissionMode::Manual,
+                model: None,
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill: None,
+                agent: None,
+                task_continuation: None,
+            })),
+        });
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
+    let executor = TuiWorkerCommandExecutor {
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: "review-source".to_owned(),
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    };
+    assert!(!matches!(
+        executor.dispatch_sync(&request)?,
+        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
+    ));
+    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
+        WorkerCommand::SubmitReviewedPrompt { prompt, expected_session_id, annotations, .. }
+        if prompt == "Clarify this change" && expected_session_id == "review-source" && annotations == vec![annotation]));
     Ok(())
 }
 
@@ -1249,76 +1319,6 @@ async fn conversation_fork_causal_receipt_survives_closed_worker_and_source_rest
         assert_eq!(std::fs::read(&path)?, source_before);
         assert_eq!(std::fs::read(&output.destination_path)?, branch_before);
     }
-    Ok(())
-}
-
-#[test]
-fn branch_knowledge_application_action_binds_current_target_and_exact_source() -> Result<()> {
-    let scope = ApplicationScope {
-        application_instance: sigil_application::ApplicationInstanceId::new("knowledge-bridge")?,
-        authenticated_subject: AuthenticatedSubject::new("local-user")?,
-        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
-        session: Some(sigil_application::SessionScopeId::new("target")?),
-    };
-    let port: Arc<dyn ApplicationPort> = Arc::new(sigil_application::FakeApplication::new(
-        snapshot(scope.clone()).envelope,
-    )?);
-    let app = session(port, scope)?;
-    let selected =
-        sigil_runtime::application_branch_knowledge::ApplicationBranchKnowledgeImportRequest {
-            source_session_ref: sigil_kernel::SessionRef::new_relative("branch.jsonl")?,
-            source_session_id: "source".to_owned(),
-            source_turn_digest: "a".repeat(64),
-            source_message_id: "final-answer".to_owned(),
-            source_text_sha256: "b".repeat(64),
-            summary_sha256: "c".repeat(64),
-        };
-    assert!(
-        app.prepare_action(
-            &AppAction::ImportBranchKnowledge {
-                request_id: 510,
-                target_session_id: "foreign-target".to_owned(),
-                request: selected.clone(),
-            },
-            None,
-            None
-        )
-        .is_err()
-    );
-    let request = app
-        .prepare_action(
-            &AppAction::ImportBranchKnowledge {
-                request_id: 511,
-                target_session_id: "target".to_owned(),
-                request: selected.clone(),
-            },
-            None,
-            None,
-        )?
-        .expect("knowledge must use shared application recovery");
-    assert!(matches!(&request.envelope.command,
-        ApplicationCommand::Conversation(ConversationCommand::Recovery {
-            action: ApplicationRecoveryAction::ImportBranchKnowledge { source_turn_digest, summary_sha256, .. }
-        }) if source_turn_digest.as_str() == selected.source_turn_digest && summary_sha256.as_str() == selected.summary_sha256));
-    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
-    let executor = TuiWorkerCommandExecutor {
-        endpoint: TuiWorkerEndpoint::new(worker_tx),
-        projection_binding: None,
-        reasoning_effort: ReasoningEffort::Medium,
-        session_id: "target".to_owned(),
-        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
-    };
-    assert!(!matches!(
-        executor.dispatch_sync(&request)?,
-        sigil_runtime::RuntimeApplicationDispatch::Rejected(_)
-    ));
-    assert!(matches!(worker_rx.recv_timeout(Duration::from_secs(1))?,
-        WorkerCommand::ImportBranchKnowledge { request_id: 511, target_session_id, request }
-        if target_session_id == "target" && request == selected));
     Ok(())
 }
 
