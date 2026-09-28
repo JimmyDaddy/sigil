@@ -222,7 +222,6 @@ where
     let mut next_physical_attempt_id = initial_physical_attempt_id.map(str::to_owned);
     loop {
         let request = request_template.clone();
-        let request_for_transport_fallback = request.clone();
         let hosted_context = crate::HostedFinalizationContext {
             session_scope_id: session.session_scope_id().to_owned(),
             provider_name: request.provider_name.clone(),
@@ -392,10 +391,8 @@ where
                 let budget = session
                     .provider_turn_recovery_projection()?
                     .budget_for_logical_run_id(logical_run_id);
-                let transport_fallback = provider.transport_fallback_candidate(
-                    &request_for_transport_fallback,
-                    &evidence.failure,
-                );
+                let transport_fallback =
+                    provider.transport_fallback_candidate(&request_template, &evidence.failure);
                 if let Some(candidate) = &transport_fallback {
                     candidate.validate()?;
                 }
