@@ -55,10 +55,38 @@ pub fn register_skill_tools(
     Ok(report)
 }
 
-#[derive(Debug, Clone)]
+/// Registers the existing skill loader with a read-through plugin trust source. The snapshot
+/// describes this run's surface; actual plugin reads revalidate current declaration and trust.
+///
+/// # Errors
+/// Returns discovery or current session trust read failures.
+pub fn register_session_skill_tools(
+    registry: &mut ToolRegistry,
+    workspace_root: &Path,
+    user_config_dir: Option<&Path>,
+    config: &SkillConfig,
+    source: Arc<dyn crate::McpPluginTrustSource>,
+) -> Result<SkillDiscoveryReport> {
+    let trust = source.current_plugin_trust()?;
+    let report = super::discover_skill_index_with_plugin_trust(
+        workspace_root,
+        user_config_dir,
+        config,
+        &trust,
+    )?;
+    if config.enabled {
+        let mut tool = LoadSkillTool::new(workspace_root.to_path_buf(), report.snapshot.clone());
+        tool.plugin_trust_source = Some(source);
+        registry.register(Arc::new(tool));
+    }
+    Ok(report)
+}
+
+#[derive(Clone)]
 pub(super) struct LoadSkillTool {
     workspace_root: PathBuf,
     snapshot: SkillIndexSnapshot,
+    plugin_trust_source: Option<Arc<dyn crate::McpPluginTrustSource>>,
 }
 
 impl LoadSkillTool {
@@ -66,6 +94,7 @@ impl LoadSkillTool {
         Self {
             workspace_root,
             snapshot,
+            plugin_trust_source: None,
         }
     }
 }
@@ -184,6 +213,43 @@ impl Tool for LoadSkillTool {
                 ));
             }
         };
+        if let Some(descriptor) = self
+            .snapshot
+            .descriptors
+            .iter()
+            .find(|item| item.id == skill_id)
+            && matches!(descriptor.source, sigil_kernel::SkillSource::Plugin { .. })
+        {
+            let source = self.plugin_trust_source.clone();
+            let workspace = self.workspace_root.clone();
+            let descriptor = descriptor.clone();
+            // The owned read is joined before this tool returns, including trust/read failures.
+            let current = tokio::task::spawn_blocking(move || -> Result<()> {
+                let source = source.ok_or_else(|| {
+                    anyhow!("plugin skill requires a current session trust source")
+                })?;
+                let trust = source.current_plugin_trust()?;
+                let plugins = crate::discover_workspace_plugins(&workspace, &trust)?;
+                anyhow::ensure!(
+                    plugins
+                        .registrations
+                        .skills
+                        .iter()
+                        .any(|item| item == &descriptor),
+                    "plugin skill is no longer trusted or its declaration/content changed"
+                );
+                Ok(())
+            })
+            .await?;
+            if let Err(error) = current {
+                return Ok(ToolResult::error(
+                    call_id,
+                    LOAD_SKILL_TOOL_NAME,
+                    ToolErrorKind::PermissionDenied,
+                    error.to_string(),
+                ));
+            }
+        }
         let loaded = match load_skill_context(
             &self.workspace_root,
             &self.snapshot,

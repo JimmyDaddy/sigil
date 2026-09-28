@@ -43,13 +43,21 @@ pub enum ExtensionProcessLaunchPhase {
     PostSpawn,
 }
 
-/// Stable terminal state for one extension process startup attempt.
+/// Durable state for an extension process attempt and its exact lifetime.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionProcessLifecycleStatus {
     Registered,
     StartupFailed,
     ToolsListFailed,
+    /// Admission is about to enter the physical launch seam; effects are not yet known.
+    Starting,
+    /// A real launch receipt is available and the exact process generation is live.
+    Running,
+    /// Physical cleanup confirmed that this generation can no longer write.
+    Stopped,
+    /// Cleanup or launch outcome could not establish that this generation has stopped.
+    StopUnconfirmed,
 }
 
 /// Secret-free durable audit payload for one extension process startup outcome.
@@ -62,6 +70,76 @@ pub struct ExtensionProcessLifecycleAudit {
     pub status: ExtensionProcessLifecycleStatus,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub safe_metadata: BTreeMap<String, String>,
+}
+
+/// Replays only exact, locally writable extension lifetimes. A later unrelated check does not
+/// erase a still-running process; only the matching generation's confirmed stop can close it.
+pub(crate) fn active_extension_mutation_evidence(
+    records: &[crate::SessionStreamRecord],
+    scope: &crate::VerificationScope,
+) -> Vec<crate::WorkspaceMutationEvidence> {
+    let mut active = BTreeMap::new();
+    for record in records {
+        let event = record.stored_event();
+        if event.event_type != crate::DurableEventType::ExtensionProcessLifecycleRecorded.as_str() {
+            continue;
+        }
+        let Ok(audit) =
+            serde_json::from_value::<ExtensionProcessLifecycleAudit>(event.payload.clone())
+        else {
+            continue;
+        };
+        if audit.process_kind != "mcp_stdio" {
+            continue;
+        }
+        let Some(generation) = audit
+            .safe_metadata
+            .get("process_generation")
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let key = (audit.subject.clone(), generation.clone());
+        match audit.status {
+            ExtensionProcessLifecycleStatus::Starting
+            | ExtensionProcessLifecycleStatus::Running
+            | ExtensionProcessLifecycleStatus::StopUnconfirmed => {
+                if audit
+                    .safe_metadata
+                    .get("workspace_effect")
+                    .map(String::as_str)
+                    == Some("read_only")
+                {
+                    active.remove(&key);
+                    continue;
+                }
+                active.insert(
+                    key,
+                    crate::WorkspaceMutationEvidence {
+                        event_id: event.event_id.clone(),
+                        source_event_type: "running_extension_process".to_owned(),
+                        source_label: Some(format!("MCP server {}", audit.subject)),
+                        recovery_hint: Some(
+                            "deactivate this MCP generation, then run the check again".to_owned(),
+                        ),
+                        scope_hash: scope.scope_hash.clone(),
+                        recorded_at_stream_sequence: event.stream_sequence,
+                        from_workspace_snapshot_id: None,
+                        to_workspace_snapshot_id: None,
+                        tool_effect: crate::ToolEffect::Unknown,
+                        unknown_dirty: true,
+                    },
+                );
+            }
+            ExtensionProcessLifecycleStatus::Stopped => {
+                active.remove(&key);
+            }
+            ExtensionProcessLifecycleStatus::Registered
+            | ExtensionProcessLifecycleStatus::StartupFailed
+            | ExtensionProcessLifecycleStatus::ToolsListFailed => {}
+        }
+    }
+    active.into_values().collect()
 }
 
 impl ProcessEnvironmentPolicy {

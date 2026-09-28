@@ -142,6 +142,56 @@ impl WorkerLoopSessionAttachment {
 #[allow(clippy::too_many_arguments)] // Worker-loop entry: one context bundle per surface.
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
+    agent: Arc<Agent<P>>,
+    root_config: RootConfig,
+    config_path: PathBuf,
+    workspace_root: PathBuf,
+    session_attachment: WorkerLoopSessionAttachment,
+    options: AgentRunOptions,
+    permission_mode_override: std::sync::Arc<sigil_kernel::PermissionModeOverride>,
+    event_inbox: WorkerEventInbox,
+    message_tx: mpsc::Sender<WorkerMessage>,
+    mcp_handlers: WorkerLoopMcpHandlers,
+    terminal_runtime: WorkerLoopTerminalRuntime,
+    managed_storage_writer: Option<
+        std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
+) where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let mut cleanup_registry = agent.tool_registry().clone();
+    let cleanup_messages = message_tx.clone();
+    let cleanup_stop = terminal_runtime.stop_control.clone();
+    run_worker_loop_inner(
+        &runtime,
+        agent,
+        root_config,
+        config_path,
+        workspace_root,
+        session_attachment,
+        options,
+        permission_mode_override,
+        event_inbox,
+        message_tx,
+        mcp_handlers,
+        terminal_runtime,
+        managed_storage_writer,
+        managed_artifact_store,
+    );
+    // Initialization has fallible returns before WorkerLoopState exists. Keep the actual runtime
+    // and registry alive until their owned extension startup tasks and processes have settled.
+    super::super::spawn::settle_worker_mcp_generations(
+        &runtime,
+        &mut cleanup_registry,
+        &cleanup_messages,
+        &cleanup_stop,
+    );
+}
+
+#[allow(clippy::too_many_arguments)] // Worker-loop entry: one context bundle per surface.
+fn run_worker_loop_inner<P>(
+    runtime: &tokio::runtime::Runtime,
     mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
     config_path: PathBuf,
@@ -170,6 +220,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let task_orchestration_enabled = super::agent_runtime::task_orchestration_enabled(&root_config);
     let (event_tx, event_rx, urgent_command_rx) = event_inbox;
     let WorkerLoopMcpHandlers {
+        plugin_hook_execution,
         elicitation_handler,
         event_handler: mcp_event_handler,
         role_provider_builder,
@@ -206,6 +257,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
         },
         None => sigil_runtime::AgentToolBackgroundRuns::default(),
     };
+    let managed_verification_execution = managed_verification_execution.map(|inner| {
+        sigil_runtime::verification_with_mcp_settlement(
+            inner,
+            agent.tool_registry().clone(),
+            background_agent_runs.clone(),
+        )
+    });
     super::super::spawn::send_startup_notice(&message_tx, "opening durable session");
     let initial_session_result = {
         let _phase = crate::phase_timing::PhaseTimer::new("startup.durable_session_load");
@@ -443,6 +501,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_storage_writer,
         managed_artifact_store,
     );
+    state.plugin_hook_execution = plugin_hook_execution;
     state.stop_control = stop_control;
     state.managed_plan_review_child_resources = managed_plan_review_child_resources;
     match super::recover_owned_user_input_attention(&state) {
@@ -523,7 +582,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             if matches!(
                 dispatch_worker_command(
                     WorkerCommandContext {
-                        runtime: &runtime,
+                        runtime,
                         agent: &mut agent,
                         root_config: &root_config,
                         config_path: &config_path,
@@ -552,7 +611,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         if state.readiness.has_priority_ready_work() {
             record_worker_advancement();
             let _ = advance_worker_loop(WorkerAdvancementContext {
-                runtime: &runtime,
+                runtime,
                 agent: &mut agent,
                 root_config: &root_config,
                 provider_capabilities: &provider_capabilities,
@@ -570,6 +629,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
             continue;
         }
 
+        super::mcp_refresh::refresh_reviewed_plugin_surface(WorkerCommandContext {
+            runtime,
+            agent: &mut agent,
+            root_config: &root_config,
+            config_path: &config_path,
+            provider_capabilities: &provider_capabilities,
+            workspace_root: &workspace_root,
+            options: &options,
+            permission_mode_override: &permission_mode_override,
+            message_tx: &message_tx,
+            elicitation_handler: &elicitation_handler,
+            mcp_event_handler: &mcp_event_handler,
+            role_provider_builder: &role_provider_builder,
+            context_resolver: &context_resolver,
+            managed_extension_execution: &managed_extension_execution,
+            managed_verification_execution: &managed_verification_execution,
+            state: &mut state,
+        });
         let artifact_gc_active = state.artifact_gc.tasks.has_active();
         if let Some(command) = pop_next_ordinary_command(
             &mut state.readiness,
@@ -579,7 +656,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             if matches!(
                 dispatch_worker_command(
                     WorkerCommandContext {
-                        runtime: &runtime,
+                        runtime,
                         agent: &mut agent,
                         root_config: &root_config,
                         config_path: &config_path,
@@ -608,7 +685,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         if state.readiness.has_ready_work() {
             record_worker_advancement();
             let _ = advance_worker_loop(WorkerAdvancementContext {
-                runtime: &runtime,
+                runtime,
                 agent: &mut agent,
                 root_config: &root_config,
                 provider_capabilities: &provider_capabilities,
@@ -629,7 +706,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         record_worker_advancement();
         if matches!(
             advance_worker_loop(WorkerAdvancementContext {
-                runtime: &runtime,
+                runtime,
                 agent: &mut agent,
                 root_config: &root_config,
                 provider_capabilities: &provider_capabilities,
@@ -665,11 +742,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
     super::shutdown::shutdown_worker_state(
         &mut state,
-        &runtime,
+        runtime,
         &root_config,
         &message_tx,
         &elicitation_handler,
     );
+    let mut registry = agent.tool_registry().clone();
+    if let Err(error) = runtime.block_on(sigil_runtime::shutdown_mcp_generations(&mut registry)) {
+        state.stop_control.fail_stage(WorkerShutdownStage::Runtime);
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "MCP process cleanup incomplete: {error:#}"
+        )));
+    }
 }
 
 fn pop_next_urgent_command(

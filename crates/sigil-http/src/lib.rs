@@ -1,7 +1,16 @@
 #![recursion_limit = "1024"]
 
 mod branches;
-pub use branches::*;
+pub use branches::{
+    HttpBranchKnowledgeImport, HttpBranchKnowledgePoint, HttpBranchKnowledgePreview,
+    HttpBranchKnowledgeReceipt, HttpBranchKnowledgeSource, HttpBranchLineage, HttpBranchLink,
+};
+
+mod plugins;
+pub use plugins::{
+    HttpPluginCapabilityView, HttpPluginCatalog, HttpPluginReview, HttpPluginReviewReceipt,
+};
+
 mod application_bridge;
 mod auth;
 mod command_store;
@@ -73,12 +82,13 @@ pub use dto::{
     HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
     HttpIntentDropCommandReceipt, HttpIntentDropExecution, HttpIntentDropPreview,
     HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpIntentStackView,
-    HttpModelSelectionPolicy, HttpPendingApproval, HttpPendingApprovalDisplay,
-    HttpPendingApprovalSubject, HttpPermissionMode, HttpPlanAction, HttpPlanDecisionAction,
-    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpPlanReview, HttpPlanReviewDetail,
-    HttpPlanReviewSource, HttpPlanReviewStatus, HttpProviderConfigMode,
-    HttpProviderConnectionEntry, HttpProviderConnectionInventory, HttpProviderConnectionIssue,
-    HttpProviderConnectionReadiness, HttpProviderCredentialSource,
+    HttpMcpImportApplyRequest, HttpMcpImportApplyResult, HttpMcpImportCandidate,
+    HttpMcpImportPreview, HttpModelSelectionPolicy, HttpPendingApproval,
+    HttpPendingApprovalDisplay, HttpPendingApprovalSubject, HttpPermissionMode, HttpPlanAction,
+    HttpPlanDecisionAction, HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest,
+    HttpPlanReview, HttpPlanReviewDetail, HttpPlanReviewSource, HttpPlanReviewStatus,
+    HttpProviderConfigMode, HttpProviderConnectionEntry, HttpProviderConnectionInventory,
+    HttpProviderConnectionIssue, HttpProviderConnectionReadiness, HttpProviderCredentialSource,
     HttpProviderDefaultModelSaveRequest, HttpProviderDefaultModelSaveResult, HttpProviderModelRef,
     HttpProviderSetupCatalog, HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource,
     HttpProviderSetupModel, HttpProviderSetupProtocol, HttpProviderSetupSaveRequest,

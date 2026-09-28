@@ -568,6 +568,7 @@ impl RuntimeManagedPluginHookExecutionRouteV1 {
         request: crate::plugins::ManagedPluginHookExecutionRequestV1,
     ) -> Result<ExecutionReceipt> {
         Self::validate_environment(&request)?;
+        crate::plugins::ensure_hook_not_cancelled(request.cancellation.as_ref())?;
         anyhow::ensure!(
             request.purpose == ExecutionPurposeV1::ExtensionProcess,
             "plugin hook purpose substitution was rejected before spawn"
@@ -656,11 +657,18 @@ impl RuntimeManagedPluginHookExecutionRouteV1 {
                 "resource_plan_hash": admission.resource_plan_hash,
             }),
         )?;
-        let mut process = match self
-            .extension_execution
-            .launch_prepared(prepared, Some(&admission))
-            .await
-        {
+        let launch = async {
+            if let Some(check) = request.pre_spawn_check.clone() {
+                tokio::task::spawn_blocking(move || check.validate_current()).await??;
+            }
+            crate::plugins::ensure_hook_not_cancelled(request.cancellation.as_ref())?;
+            self.extension_execution
+                .launch_prepared(prepared, Some(&admission))
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .await;
+        let mut process = match launch {
             Ok(process) => process,
             Err(error) => {
                 append_plugin_control_record(

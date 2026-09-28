@@ -6,7 +6,11 @@
 //! credential primitives to its renderer.
 
 mod branches;
-pub use branches::*;
+pub use branches::{
+    DesktopBranchKnowledgeImport, DesktopBranchKnowledgePoint, DesktopBranchKnowledgePreview,
+    DesktopBranchKnowledgeReceipt, DesktopBranchKnowledgeSource, DesktopBranchLineage,
+    DesktopBranchLink,
+};
 mod images;
 pub use images::{
     DesktopImageAttachment, DesktopImageContent, MAX_DESKTOP_IMAGE_BYTES,
@@ -20,6 +24,11 @@ pub use sigil_application::{
     ReviewFileState as DesktopReviewFileState, SafeText as DesktopReviewComment,
 };
 
+mod plugins;
+pub use plugins::{
+    DesktopPluginCapabilityView, DesktopPluginCatalog, DesktopPluginCleanupStatus,
+    DesktopPluginReview, DesktopPluginReviewReceipt,
+};
 mod client;
 mod control_log_recovery;
 mod dto;
@@ -85,35 +94,37 @@ pub use dto::{
     DesktopIntentOperationFileSummary, DesktopIntentOperationKind, DesktopIntentOperationPreview,
     DesktopIntentOperationResolution, DesktopIntentSource, DesktopIntentStack,
     DesktopIntentStackState, DesktopIntentVerificationImpact,
-    DesktopIntentVerificationImpactSummary, DesktopIntentVersionRef, DesktopModelSelectionPolicy,
-    DesktopPendingApproval, DesktopPendingApprovalDisplay, DesktopPendingApprovalSubject,
-    DesktopPermissionMode, DesktopPlanAction, DesktopPlanAgentRole, DesktopPlanCheckCommand,
-    DesktopPlanCheckEffect, DesktopPlanDecisionAction, DesktopPlanDecisionCommandReceipt,
-    DesktopPlanDecisionRequest, DesktopPlanIsolationMode, DesktopPlanLineage, DesktopPlanReview,
-    DesktopPlanReviewCandidate, DesktopPlanReviewDetail, DesktopPlanReviewSource,
-    DesktopPlanReviewStatus, DesktopPlanReviewStepDetail, DesktopPlanRevisionStatus,
-    DesktopPlanRevisionSummary, DesktopPlanSourceRef, DesktopPlanSourceTurn, DesktopPlanStepMode,
-    DesktopPlanSuggestedCheck, DesktopProviderConfigMode, DesktopProviderConnectionEntry,
-    DesktopProviderConnectionInventory, DesktopProviderConnectionIssue,
-    DesktopProviderConnectionReadiness, DesktopProviderCredentialSource,
-    DesktopProviderDefaultModelSaveRequest, DesktopProviderDefaultModelSaveResult,
-    DesktopProviderModelRef, DesktopProviderSetupCatalog, DesktopProviderSetupCatalogRequest,
-    DesktopProviderSetupCredentialSource, DesktopProviderSetupModel, DesktopProviderSetupProtocol,
-    DesktopProviderSetupSaveRequest, DesktopProviderSetupSaveResult, DesktopProviderSetupTemplate,
-    DesktopReasoningEffort, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
-    DesktopRunContextView, DesktopRunSnapshot, DesktopRunStartCommandReceipt,
-    DesktopRunStartRequest, DesktopRunStatus, DesktopSessionCatalogBatchAction,
-    DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchItem,
-    DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
-    DesktopSessionCatalogBatchPlanItem, DesktopSessionCatalogBatchPlanRequest,
-    DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
-    DesktopSessionCatalogBatchReceiptItem, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
-    DesktopSessionCatalogSourceDiagnostic, DesktopSessionCatalogState,
-    DesktopSessionContinuityView, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-    DesktopSessionGrantUnavailableReason, DesktopSessionGrantUnavailableReasonCode,
-    DesktopSessionInvalidSourceDeleteReceipt, DesktopSessionInvalidSourceDeleteRequest,
-    DesktopSessionListResponse, DesktopSessionMutationReceipt, DesktopSessionOpenRequest,
-    DesktopSessionQuarantineReceipt, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
+    DesktopIntentVerificationImpactSummary, DesktopIntentVersionRef, DesktopMcpImportApplyRequest,
+    DesktopMcpImportApplyResult, DesktopMcpImportCandidate, DesktopMcpImportPreview,
+    DesktopModelSelectionPolicy, DesktopPendingApproval, DesktopPendingApprovalDisplay,
+    DesktopPendingApprovalSubject, DesktopPermissionMode, DesktopPlanAction, DesktopPlanAgentRole,
+    DesktopPlanCheckCommand, DesktopPlanCheckEffect, DesktopPlanDecisionAction,
+    DesktopPlanDecisionCommandReceipt, DesktopPlanDecisionRequest, DesktopPlanIsolationMode,
+    DesktopPlanLineage, DesktopPlanReview, DesktopPlanReviewCandidate, DesktopPlanReviewDetail,
+    DesktopPlanReviewSource, DesktopPlanReviewStatus, DesktopPlanReviewStepDetail,
+    DesktopPlanRevisionStatus, DesktopPlanRevisionSummary, DesktopPlanSourceRef,
+    DesktopPlanSourceTurn, DesktopPlanStepMode, DesktopPlanSuggestedCheck,
+    DesktopProviderConfigMode, DesktopProviderConnectionEntry, DesktopProviderConnectionInventory,
+    DesktopProviderConnectionIssue, DesktopProviderConnectionReadiness,
+    DesktopProviderCredentialSource, DesktopProviderDefaultModelSaveRequest,
+    DesktopProviderDefaultModelSaveResult, DesktopProviderModelRef, DesktopProviderSetupCatalog,
+    DesktopProviderSetupCatalogRequest, DesktopProviderSetupCredentialSource,
+    DesktopProviderSetupModel, DesktopProviderSetupProtocol, DesktopProviderSetupSaveRequest,
+    DesktopProviderSetupSaveResult, DesktopProviderSetupTemplate, DesktopReasoningEffort,
+    DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunContextView,
+    DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest, DesktopRunStatus,
+    DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchExecuteRequest,
+    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchOutcome,
+    DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanItem,
+    DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchPlanStatus,
+    DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogBatchReceiptItem,
+    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogSourceDiagnostic,
+    DesktopSessionCatalogState, DesktopSessionContinuityView, DesktopSessionCreateRequest,
+    DesktopSessionDeleteRequest, DesktopSessionGrantUnavailableReason,
+    DesktopSessionGrantUnavailableReasonCode, DesktopSessionInvalidSourceDeleteReceipt,
+    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionListResponse,
+    DesktopSessionMutationReceipt, DesktopSessionOpenRequest, DesktopSessionQuarantineReceipt,
+    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
     DesktopSessionRouteRecoveryAction, DesktopSessionRouteRecoveryCode,
     DesktopSessionRouteRecoveryView, DesktopSessionRouteTransitionKind,
     DesktopSessionRouteTransitionView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,

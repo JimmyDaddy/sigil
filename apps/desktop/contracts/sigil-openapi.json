@@ -3868,6 +3868,9 @@
           },
           {
             "$ref": "#/components/schemas/ConversationRecoveryImportBranchKnowledgeAction"
+          },
+          {
+            "$ref": "#/components/schemas/ConversationRecoveryReviewPluginAction"
           }
         ]
       },
@@ -3880,7 +3883,8 @@
               "apply_standalone_tool_output_shrink",
               "restore_checkpoint",
               "fork_conversation",
-              "import_branch_knowledge"
+              "import_branch_knowledge",
+              "review_plugin"
             ],
             "type": "string"
           },
@@ -3930,6 +3934,16 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/ConversationForkReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plugin_review": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PluginReviewReceipt"
               },
               {
                 "type": "null"
@@ -4071,6 +4085,34 @@
           "kind",
           "checkpoint_id",
           "checkpoint_digest"
+        ],
+        "type": "object"
+      },
+      "ConversationRecoveryReviewPluginAction": {
+        "properties": {
+          "capability_digest": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "review_plugin",
+            "type": "string"
+          },
+          "manifest_hash": {
+            "type": "string"
+          },
+          "plugin_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "plugin_id",
+          "manifest_hash",
+          "capability_digest",
+          "enabled"
         ],
         "type": "object"
       },
@@ -5498,6 +5540,65 @@
         ],
         "type": "object"
       },
+      "McpImportCandidate": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "importable": {
+            "type": "boolean"
+          },
+          "index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "description",
+          "importable",
+          "issues"
+        ],
+        "type": "object"
+      },
+      "McpImportPreview": {
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/McpImportCandidate"
+            },
+            "type": "array"
+          },
+          "preview_id": {
+            "type": "string"
+          },
+          "root_fields_ignored": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "preview_id",
+          "candidates",
+          "root_fields_ignored"
+        ],
+        "type": "object"
+      },
       "MessageContentPage": {
         "properties": {
           "content_version": {
@@ -6467,6 +6568,142 @@
           "check_spec_id",
           "command",
           "effect"
+        ],
+        "type": "object"
+      },
+      "PluginCapabilityView": {
+        "properties": {
+          "allow_secrets": {
+            "type": "boolean"
+          },
+          "approval": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "egress_logging": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "approval",
+          "allow_secrets",
+          "egress_logging"
+        ],
+        "type": "object"
+      },
+      "PluginCatalog": {
+        "properties": {
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/PluginReview"
+            },
+            "type": "array"
+          },
+          "warning_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plugins",
+          "warning_count"
+        ],
+        "type": "object"
+      },
+      "PluginCleanupStatus": {
+        "description": "Host-observed cleanup of earlier plugin processes; independent from plugin trust",
+        "enum": [
+          "confirmed",
+          "unknown",
+          "unconfirmed"
+        ],
+        "type": "string"
+      },
+      "PluginReview": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/PluginCapabilityView"
+            },
+            "type": "array"
+          },
+          "capability_digest": {
+            "type": "string"
+          },
+          "manifest_hash": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "plugin_id": {
+            "type": "string"
+          },
+          "process_cleanup": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PluginCleanupStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trust": {
+            "enum": [
+              "trusted",
+              "disabled",
+              "needs_review"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin_id",
+          "name",
+          "version",
+          "manifest_hash",
+          "capability_digest",
+          "trust",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "PluginReviewReceipt": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "plugin_id": {
+            "type": "string"
+          },
+          "process_cleanup": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PluginCleanupStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "plugin_id",
+          "enabled"
         ],
         "type": "object"
       },
@@ -13561,6 +13798,39 @@
         "summary": "View an image attached to an exact durable user message"
       }
     },
+    "/sessions/{session_id}/plugins": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginCatalog"
+                }
+              }
+            },
+            "description": "Bounded session projection"
+          },
+          "404": {
+            "description": "Session missing"
+          },
+          "503": {
+            "description": "Projection unavailable"
+          }
+        },
+        "summary": "Review path-free workspace plugin capabilities without starting extensions"
+      }
+    },
     "/sessions/{session_id}/queue": {
       "get": {
         "description": "Returns a bounded, secret-free queue view. Prompt hashes and process-local exact prompt material are excluded; generation is opaque and must be echoed unchanged.",
@@ -14214,6 +14484,44 @@
           }
         },
         "summary": "Rerun one exact stale-safe recommended verification check"
+      }
+    },
+    "/settings/mcp-import/preview": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "mcpServers": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "mcpServers"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpImportPreview"
+                }
+              }
+            },
+            "description": "Bounded host-owned editing preview"
+          },
+          "422": {
+            "description": "Invalid configuration document"
+          }
+        },
+        "summary": "Preview an explicitly selected MCP document without starting processes"
       }
     },
     "/settings/provider-connections": {

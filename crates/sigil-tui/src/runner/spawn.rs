@@ -522,6 +522,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             };
             let terminal_control = surface.terminal_control.clone();
             let mut registry = surface.registry;
+            let mut startup_cleanup_registry = registry.clone();
             let context_resolver = surface.context_resolver;
             if let Err(error) = sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
                 &mut registry,
@@ -544,7 +545,47 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     ],
                     false,
                 );
+                settle_worker_mcp_generations(&runtime, &mut startup_cleanup_registry, &message_tx, &stop_control);
                 return;
+            }
+            let plugin_trust_source: Arc<dyn sigil_runtime::McpPluginTrustSource> = Arc::new(
+                sigil_runtime::SessionMcpPluginTrustSource::new(effective_session_log_path.clone()),
+            );
+            let plugin_redactor = sigil_runtime::secret_redactor_for_root_config(&root_config);
+            if root_config.skills.enabled && root_config.composition.allows(sigil_kernel::OptionalCapability::Skills) {
+                let user_config_dir = sigil_kernel::default_user_config_dir().ok();
+                match sigil_runtime::register_session_skill_tools(&mut registry, &workspace_root, user_config_dir.as_deref(), &root_config.skills, Arc::clone(&plugin_trust_source)) {
+                    Ok(report) => for warning in report.warnings {
+                        let _ = message_tx.send(WorkerMessage::Notice(warning.message));
+                    },
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!("optional plugin skills unavailable: {}", plugin_redactor.redact_text(&error.to_string()))));
+                    }
+                }
+            }
+            let plugin_startup_context = (mutation_recorder.clone(), extension_network_admission);
+            if let Err(error) = runtime.block_on(sigil_runtime::register_session_plugin_mcp_tools(
+                &mut registry, &root_config, &provider_capabilities, workspace_root.clone(),
+                Arc::clone(&plugin_trust_source), elicitation_handler.clone(), mcp_event_handler.clone(),
+                managed_extension_execution.clone(), Arc::clone(&disclosure_presenter), Some(plugin_startup_context),
+            )) {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "optional plugin MCP discovery unavailable: {}", plugin_redactor.redact_text(&error.to_string()),
+                )));
+            }
+            if let Some(executor) = authority_composition.as_ref().and_then(|composition| composition.plugin_hook_execution.clone()) {
+                match runtime.block_on(sigil_runtime::register_plugin_workflow_tools(
+                    &mut registry, &workspace_root, plugin_trust_source, executor, plugin_redactor.clone(),
+                )) {
+                    Ok(warnings) => for warning in warnings {
+                        let _ = message_tx.send(WorkerMessage::Notice(warning));
+                    },
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "optional plugin hooks unavailable: {}", plugin_redactor.redact_text(&error.to_string()),
+                        )));
+                    }
+                }
             }
             let agent_tools_registration = if root_config.task.enabled
                 && root_config
@@ -572,6 +613,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     ],
                     false,
                 );
+                settle_worker_mcp_generations(&runtime, &mut startup_cleanup_registry, &message_tx, &stop_control);
                 return;
             }
             send_startup_notice(&message_tx, "starting configured MCP servers");
@@ -617,6 +659,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                                 ],
                                 true,
                             );
+                            settle_worker_mcp_generations(&runtime, &mut startup_cleanup_registry, &message_tx, &stop_control);
                             return;
                         }
                     },
@@ -636,6 +679,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                         ],
                         false,
                     );
+                    settle_worker_mcp_generations(&runtime, &mut startup_cleanup_registry, &message_tx, &stop_control);
                     return;
                 }
             };
@@ -661,6 +705,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
+                    plugin_hook_execution: authority_composition.as_ref().and_then(|composition| composition.plugin_hook_execution.clone()).map(|execution| execution as Arc<dyn sigil_runtime::ManagedPluginHookExecutionPortV1>),
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
@@ -684,6 +729,20 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         join_handle,
         projection_owner,
     })
+}
+
+pub(in crate::runner) fn settle_worker_mcp_generations(
+    runtime: &Runtime,
+    registry: &mut sigil_kernel::ToolRegistry,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    stop_control: &super::protocol::WorkerStopControl,
+) {
+    if let Err(error) = runtime.block_on(sigil_runtime::shutdown_mcp_generations(registry)) {
+        stop_control.fail_stage(super::protocol::WorkerShutdownStage::Runtime);
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "MCP process cleanup incomplete: {error:#}"
+        )));
+    }
 }
 
 fn initialize_worker_session_route(
@@ -841,6 +900,7 @@ fn spawn_eager_mcp_startup_tasks(
                     Some(mutation_recorder),
                     network_admission,
                     managed_extension_execution.clone(),
+                    None,
                 )
                 .await
             }

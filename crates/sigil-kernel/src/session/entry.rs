@@ -264,6 +264,7 @@ pub enum ControlEntry {
     SkillLoaded(SkillLoadEntry),
     PluginManifestCaptured(PluginManifestSnapshot),
     PluginTrustDecision(PluginTrustEntry),
+    PluginReviewCompletedV1(crate::PluginReviewCompletedV1),
     PluginHookExecutionStarted(PluginHookExecutionStartedEntry),
     PluginHookExecutionFinished(PluginHookExecutionFinishedEntry),
     ChangeSetProposed(ChangeSet),
@@ -385,6 +386,7 @@ impl ControlEntry {
     /// policy configuration cannot recreate an oversized session record.
     pub(crate) fn validate_durable_contract(&self) -> anyhow::Result<()> {
         match self {
+            Self::PluginReviewCompletedV1(entry) => entry.validate(),
             Self::SessionCompositionBound(entry) => entry.validate(),
             Self::SessionRuntimeTransitionV1(entry) => entry.validate(),
             Self::VerificationPolicyChanged(entry) => entry.validate(),

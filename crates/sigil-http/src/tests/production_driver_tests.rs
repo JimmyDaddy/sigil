@@ -1878,15 +1878,22 @@ impl HttpApplicationRunPreparer for ControlledPreparation {
         _request: ApplicationRunRequest,
         _services: ApplicationRunServices,
     ) -> Result<PreparedApplicationRun> {
-        self.started.add_permits(1);
-        self.release
-            .acquire()
-            .await
-            .map_err(|_| anyhow!("controlled preparation release closed"))?
-            .forget();
-        Err(anyhow!(
-            "controlled preparation released after cancellation"
-        ))
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        let runtime = tokio::runtime::Handle::current();
+        // Model the actual blocking config/session materializer, not an async-only wait.
+        tokio::task::spawn_blocking(move || {
+            started.add_permits(1);
+            runtime
+                .block_on(release.acquire())
+                .map_err(|_| anyhow!("controlled preparation release closed"))?
+                .forget();
+            Err(anyhow!(
+                "controlled preparation released after cancellation"
+            ))
+        })
+        .await
+        .map_err(|error| anyhow!(error))?
     }
 
     async fn prepare_queued(
@@ -4101,6 +4108,12 @@ async fn production_driver_projects_and_executes_real_verification_rerun() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_reaping() {
+    struct ReleasePreparation(Arc<tokio::sync::Semaphore>);
+    impl Drop for ReleasePreparation {
+        fn drop(&mut self) {
+            self.0.add_permits(1);
+        }
+    }
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
     write_production_test_config(&config_path, ".");
@@ -4137,6 +4150,8 @@ async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_r
     let registry = driver
         .build_registry(command_store)
         .expect("production registry should attach");
+    // Release the real blocking worker before owner teardown if an assertion fails.
+    let _release_on_exit = ReleasePreparation(Arc::clone(&release));
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("session should bind");
@@ -9333,4 +9348,209 @@ credential = {{ source = "none" }}
         "cancellation must reopen the original managed child, not a parallel log"
     );
     fixture.abort();
+}
+
+/// Unlike ControlledPreparation, this fixture owns an actual prepared application and a running
+/// stdio child when the cancellation deadline expires. Release must transfer that owner back.
+struct LateSuccessfulPreparation {
+    prepared: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl HttpApplicationRunPreparer for LateSuccessfulPreparation {
+    async fn prepare(
+        &self,
+        request: ApplicationRunRequest,
+        services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun> {
+        let prepared =
+            sigil_runtime::application_run::prepare_application_run(request, &services).await?;
+        self.prepared.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("late prepared fixture release closed"))?
+            .forget();
+        Ok(prepared)
+    }
+
+    async fn prepare_queued(
+        &self,
+        _request: ApplicationQueuedRunRequest,
+        _services: ApplicationRunServices,
+    ) -> Result<PreparedApplicationRun> {
+        Err(anyhow!("queued preparation is not used by this fixture"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn late_successful_preparation_after_cancel_deadline_joins_real_mcp_owner() -> Result<()> {
+    struct Release(Arc<tokio::sync::Semaphore>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.add_permits(1);
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_production_test_config(&config_path, ".");
+    let script = temp.path().join("server.py");
+    let marker = temp.path().join("mcp-started");
+    std::fs::write(
+        &script,
+        r#"import json,sys,pathlib
+pathlib.Path(sys.argv[1]).write_text('started')
+for line in sys.stdin:
+    msg=json.loads(line)
+    if 'id' not in msg: continue
+    method=msg.get('method')
+    if method=='initialize':
+        result={'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'late-preparation','version':'1'}}
+    elif method=='tools/list':
+        result={'tools':[{'name':'read','description':'Read fixture state','inputSchema':{'type':'object','properties':{}}}]}
+    elif method=='tools/call':
+        result={'content':[{'type':'text','text':'fixture'}]}
+    else: result={}
+    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':result}),flush=True)
+"#,
+    )?;
+    let mut config = sigil_kernel::RootConfig::load(&config_path)?;
+    config.permission.mode = sigil_kernel::PermissionMode::DangerFullAccess;
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "late-preparation".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::Stdio {
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            inherit_env: Vec::new(),
+        },
+        startup: sigil_kernel::McpServerStartup::Eager,
+        required: true,
+        ..Default::default()
+    });
+    config.save(&config_path)?;
+    let prepared = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut options = HttpProductionRunDriverOptions::new(&config_path, temp.path());
+    options.cancellation_timeout = Duration::from_millis(40);
+    let events = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol.json"),
+            16,
+        )?),
+    ));
+    let driver = Arc::new(HttpProductionRunDriver::new_with_preparer(
+        options,
+        Arc::new(HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures.json"),
+            8,
+        )?),
+        events,
+        tokio::runtime::Handle::current(),
+        Arc::new(LateSuccessfulPreparation {
+            prepared: Arc::clone(&prepared),
+            release: Arc::clone(&release),
+        }),
+    )?);
+    let registry = driver.build_registry(Arc::new(HttpDurableCommandStore::open(
+        temp.path().join("commands.json"),
+        16,
+    )?))?;
+    let _release_on_failure = Release(Arc::clone(&release));
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let run = registry.start_run(
+        &session.id,
+        HttpRunStartRequest {
+            review_annotations: Vec::new(),
+            image_attachments: Vec::new(),
+            prompt: "do not dispatch the provider before cancellation".to_owned(),
+            permission_mode: Some(HttpPermissionMode::DangerFullAccess),
+            model_ref: None,
+            model_selection_binding: None,
+            route_recovery_binding: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+            task_continuation: None,
+        },
+    )?;
+    tokio::time::timeout(Duration::from_secs(15), prepared.acquire())
+        .await??
+        .forget();
+    assert!(
+        marker.exists(),
+        "the actual managed MCP child must start before cancellation"
+    );
+    let phases = || -> Result<Vec<String>> {
+        let records = JsonlSessionStore::read_event_records(&session.session_log_path)?;
+        let events = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| event.event_type == "extension_process_lifecycle_recorded")
+            .collect::<Vec<_>>();
+        let generation = events.first().context("lifetime start")?.payload["safe_metadata"]["process_generation"].as_str().context("exact generation")?;
+        let mut states = Vec::new();
+        let mut registered = 0;
+        for event in &events {
+            anyhow::ensure!(event.payload["subject"] == events[0].payload["subject"]);
+            if let Some(current) = event.payload["safe_metadata"].get("process_generation") {
+                anyhow::ensure!(
+                    current == generation,
+                    "another generation cannot prove this owner stopped"
+                );
+                states.push(
+                    event.payload["status"]
+                        .as_str()
+                        .context("lifetime status")?
+                        .to_owned(),
+                );
+            } else {
+                anyhow::ensure!(
+                    event.payload["status"] == "registered",
+                    "unexpected non-lifetime audit"
+                );
+                registered += 1;
+            }
+        }
+        anyhow::ensure!(
+            registered == 1,
+            "real MCP registration must be separately audited"
+        );
+        Ok(states)
+    };
+    assert_eq!(phases()?, ["starting", "running"]);
+    let cancel_registry = Arc::clone(&registry);
+    let run_id = run.id.clone();
+    let cancelled = tokio::task::spawn_blocking(move || cancel_registry.cancel_run(&run_id));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled)
+            .await??
+            .is_err()
+    );
+    assert_eq!(
+        registry.get_run(&run.id)?.status,
+        HttpRunStatus::ExecutionUncertain
+    );
+    assert_eq!(
+        driver.active_run_count()?,
+        1,
+        "late preparation still retains its physical owner"
+    );
+    release.add_permits(1);
+    let idle_driver = Arc::clone(&driver);
+    tokio::task::spawn_blocking(move || idle_driver.wait_for_idle(Duration::from_secs(15)))
+        .await??;
+    assert_eq!(
+        phases()?,
+        ["starting", "running", "stopped"],
+        "late success must join its real extension owner before supervisor retirement"
+    );
+    assert_eq!(driver.active_run_count()?, 0);
+    assert_ne!(registry.get_run(&run.id)?.status, HttpRunStatus::Finished);
+    Ok(())
 }

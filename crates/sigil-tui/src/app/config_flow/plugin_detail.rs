@@ -304,11 +304,3 @@ pub(super) fn command_arg_display(arg: &str) -> String {
         arg.to_owned()
     }
 }
-
-pub(super) fn plugin_review_action_label(decision: PluginTrustDecision) -> &'static str {
-    match decision {
-        PluginTrustDecision::Trusted => "approved",
-        PluginTrustDecision::Disabled => "denied",
-        PluginTrustDecision::NeedsReview => "needs review",
-    }
-}

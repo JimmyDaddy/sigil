@@ -2153,6 +2153,7 @@ pub struct DesktopCheckpointRestoreReview {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopConversationRecoveryCommandActionKind {
     ImportBranchKnowledge,
+    ReviewPlugin,
     PrepareCompaction,
     ApplyCompaction,
     ApplyStandaloneToolOutputShrink,
@@ -2165,6 +2166,12 @@ pub enum DesktopConversationRecoveryCommandActionKind {
 pub enum DesktopConversationRecoveryCommandAction {
     ImportBranchKnowledge {
         selection: crate::DesktopBranchKnowledgeImport,
+    },
+    ReviewPlugin {
+        plugin_id: String,
+        manifest_hash: String,
+        capability_digest: String,
+        enabled: bool,
     },
     PrepareCompaction {
         preview_id: String,
@@ -2192,6 +2199,7 @@ impl DesktopConversationRecoveryCommandAction {
             Self::ImportBranchKnowledge { .. } => {
                 DesktopConversationRecoveryCommandActionKind::ImportBranchKnowledge
             }
+            Self::ReviewPlugin { .. } => DesktopConversationRecoveryCommandActionKind::ReviewPlugin,
             Self::PrepareCompaction { .. } => {
                 DesktopConversationRecoveryCommandActionKind::PrepareCompaction
             }
@@ -2254,6 +2262,8 @@ pub struct DesktopConversationForkReceipt {
 pub struct DesktopConversationRecoveryCommandReceipt {
     #[serde(default)]
     pub branch_knowledge: Option<crate::DesktopBranchKnowledgeReceipt>,
+    #[serde(default)]
+    pub plugin_review: Option<crate::DesktopPluginReviewReceipt>,
     pub command_id: String,
     pub client_id: String,
     pub session_id: String,
@@ -3230,4 +3240,36 @@ pub struct DesktopUserInputDecisionCommandReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_run_id: Option<String>,
     pub replayed: bool,
+}
+
+/// Safe preview of a user-selected MCP configuration document, without executable material.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopMcpImportPreview {
+    pub preview_id: String,
+    pub candidates: Vec<DesktopMcpImportCandidate>,
+    pub root_fields_ignored: bool,
+}
+
+/// A bounded display-only import candidate; selecting its index grants no process authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopMcpImportCandidate {
+    pub index: usize,
+    pub name: String,
+    pub transport: Option<String>,
+    pub description: String,
+    pub importable: bool,
+    pub issues: Vec<String>,
+}
+
+/// Selection bound to the current host-private preview and its original configuration revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopMcpImportApplyRequest {
+    pub preview_id: String,
+    pub selected_indices: Vec<usize>,
+}
+
+/// Import acknowledgement. Imported extensions remain lazy and require their usual approval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopMcpImportApplyResult {
+    pub imported_names: Vec<String>,
 }

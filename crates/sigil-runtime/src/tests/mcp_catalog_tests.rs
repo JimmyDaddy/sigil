@@ -2,8 +2,8 @@ use std::{fs, path::Path, sync::Arc};
 
 use anyhow::{Result, anyhow, ensure};
 use sigil_kernel::{
-    CompletionRequest, FrozenProviderRequestMaterial, McpServerTransportConfig, ModelMessage,
-    ToolCall, ToolLifecycleOwner, ToolRegistryScope, ToolResultStatus,
+    CompletionRequest, FrozenProviderRequestMaterial, McpServerStartup, McpServerTransportConfig,
+    ModelMessage, ToolCall, ToolLifecycleOwner, ToolRegistryScope, ToolResultStatus,
 };
 
 use super::*;

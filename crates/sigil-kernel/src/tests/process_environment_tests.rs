@@ -101,3 +101,97 @@ fn extension_environment_reports_missing_grant_without_value_material() {
     );
     assert!(error.message.contains("MISSING_TOKEN"));
 }
+
+#[test]
+fn extension_lifetime_readiness_requires_exact_confirmed_stop() -> anyhow::Result<()> {
+    use crate::{JsonlSessionStore, MutationEventRecorder, VerificationScope};
+    let fixture = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(fixture.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let append = |subject: &str, generation: &str, status, read_only: bool| {
+        recorder.append_extension_process_lifecycle(&ExtensionProcessLifecycleAudit {
+            process_kind: "mcp_stdio".to_owned(),
+            subject: subject.to_owned(),
+            phase: ExtensionProcessLaunchPhase::PostSpawn,
+            status,
+            safe_metadata: BTreeMap::from([
+                ("process_generation".to_owned(), generation.to_owned()),
+                (
+                    "workspace_effect".to_owned(),
+                    if read_only { "read_only" } else { "unknown" }.to_owned(),
+                ),
+            ]),
+        })
+    };
+    let scope = VerificationScope::all_tracked("fixture-scope");
+    append(
+        "records",
+        "old",
+        ExtensionProcessLifecycleStatus::Starting,
+        false,
+    )?;
+    append(
+        "records",
+        "old",
+        ExtensionProcessLifecycleStatus::Running,
+        false,
+    )?;
+    append(
+        "records",
+        "replacement",
+        ExtensionProcessLifecycleStatus::Running,
+        false,
+    )?;
+    append(
+        "records",
+        "old",
+        ExtensionProcessLifecycleStatus::Stopped,
+        false,
+    )?;
+    let evidence =
+        active_extension_mutation_evidence(&store.read_event_records_coordinated()?, &scope);
+    assert_eq!(
+        evidence.len(),
+        1,
+        "old generation stop cannot clear its replacement"
+    );
+    assert!(evidence[0].unknown_dirty);
+    append(
+        "records",
+        "replacement",
+        ExtensionProcessLifecycleStatus::StopUnconfirmed,
+        false,
+    )?;
+    assert_eq!(
+        active_extension_mutation_evidence(&store.read_event_records_coordinated()?, &scope).len(),
+        1
+    );
+    append(
+        "records",
+        "replacement",
+        ExtensionProcessLifecycleStatus::Stopped,
+        false,
+    )?;
+    assert!(
+        active_extension_mutation_evidence(&store.read_event_records_coordinated()?, &scope)
+            .is_empty()
+    );
+    append(
+        "readonly",
+        "sandboxed",
+        ExtensionProcessLifecycleStatus::Starting,
+        false,
+    )?;
+    append(
+        "readonly",
+        "sandboxed",
+        ExtensionProcessLifecycleStatus::Running,
+        true,
+    )?;
+    assert!(
+        active_extension_mutation_evidence(&store.read_event_records_coordinated()?, &scope)
+            .is_empty(),
+        "actual enforced read-only receipt does not dirty the workspace"
+    );
+    Ok(())
+}

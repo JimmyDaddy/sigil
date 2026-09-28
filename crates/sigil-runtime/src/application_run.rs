@@ -769,9 +769,13 @@ impl Drop for ApplicationSessionLease {
     }
 }
 
+/// Non-owning session tool views. The mutex only orders installation and exact trust changes.
+pub type ApplicationExtensionRegistryViews = Arc<Mutex<Vec<sigil_kernel::WeakToolRegistry>>>;
+
 /// Shared dependencies used while preparing application runs.
 #[derive(Clone)]
 pub struct ApplicationRunServices {
+    extension_registry_views: Arc<Mutex<BTreeMap<String, ApplicationExtensionRegistryViews>>>,
     disclosure_presenter: Arc<dyn EgressDisclosurePresenter>,
     session_leases: Arc<ApplicationSessionLeaseManager>,
     supervisor_instance_id: Arc<str>,
@@ -868,6 +872,7 @@ impl ApplicationRunServices {
     #[must_use]
     pub fn new(disclosure_presenter: Arc<dyn EgressDisclosurePresenter>) -> Self {
         Self {
+            extension_registry_views: Arc::new(Mutex::new(BTreeMap::new())),
             disclosure_presenter,
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
             supervisor_instance_id: Arc::from(format!("runtime-{}", uuid::Uuid::new_v4())),
@@ -886,6 +891,7 @@ impl ApplicationRunServices {
         session_leases: Arc<ApplicationSessionLeaseManager>,
     ) -> Self {
         Self {
+            extension_registry_views: Arc::new(Mutex::new(BTreeMap::new())),
             disclosure_presenter,
             session_leases,
             supervisor_instance_id: Arc::from(format!("runtime-{}", uuid::Uuid::new_v4())),
@@ -895,6 +901,26 @@ impl ApplicationRunServices {
             cutover: None,
             authority_composition: None,
         }
+    }
+
+    /// Shares non-owning registry views for one exact session across preparation and execution.
+    /// The short lock orders registry installation with a plugin trust decision. It must not be
+    /// held across network work or process settlement; registries retain their original owners.
+    pub fn extension_registry_views(
+        &self,
+        session_scope_id: &str,
+    ) -> Result<ApplicationExtensionRegistryViews> {
+        anyhow::ensure!(
+            !session_scope_id.is_empty(),
+            "extension registry requires an exact session scope"
+        );
+        let mut sessions = self
+            .extension_registry_views
+            .lock()
+            .map_err(|_| anyhow!("extension registry views unavailable"))?;
+        Ok(Arc::clone(
+            sessions.entry(session_scope_id.to_owned()).or_default(),
+        ))
     }
 
     /// Replaces task role provider construction for an embedded adapter or deterministic test.
@@ -2093,6 +2119,8 @@ impl std::error::Error for ApplicationCancellationRequestError {
 
 /// One prepared provider/session/tool application execution.
 pub struct ApplicationRunExecution {
+    extension_registry: sigil_kernel::ToolRegistry,
+    extension_background_runs: crate::AgentToolBackgroundRuns,
     kind: ApplicationRunExecutionKind,
     task_execution: Option<ApplicationTaskExecutionRuntime>,
     plan_review_runtime: Option<ApplicationPlanReviewRuntime>,
@@ -2326,6 +2354,18 @@ enum ApplicationRunExecutionKind {
     },
 }
 
+/// Physical extension settlement failed after the run had entered its existing owners.
+/// Adapters may distinguish this from an ordinary provider failure without parsing diagnostics.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "application extension cleanup incomplete: {cleanup:#}; preceding run error: {execution:?}"
+)]
+pub struct ApplicationRunCleanupError {
+    #[source]
+    cleanup: anyhow::Error,
+    execution: Option<anyhow::Error>,
+}
+
 /// Successful terminal output from one shared application run.
 #[derive(Debug, Clone)]
 pub struct ApplicationRunOutput {
@@ -2346,6 +2386,27 @@ pub struct ApplicationRunOutput {
 }
 
 impl ApplicationRunExecution {
+    /// Consumes a prepared run that will not execute, joining its idle extension owners before
+    /// releasing the foreground guard. Existing background children retain their generations.
+    /// This records no success or cancellation terminal; that remains the control owner's job.
+    ///
+    /// # Errors
+    /// Returns an error when extension cleanup could not be confirmed.
+    pub async fn settle_without_execution(self) -> Result<()> {
+        crate::verification_lifecycle::settle_idle_mcp(
+            &self.extension_registry,
+            &self.extension_background_runs,
+        )
+        .await
+        .map_err(|cleanup| {
+            ApplicationRunCleanupError {
+                cleanup,
+                execution: None,
+            }
+            .into()
+        })
+    }
+
     /// Executes the prepared run with adapter-provided event and approval handlers.
     ///
     /// Externally interactive approval handlers must run this future under an owned blocking run
@@ -2363,8 +2424,8 @@ impl ApplicationRunExecution {
         H: ApplicationRunEventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        validate_execution_contract(self.interaction, approval_handler, false)?;
-        self.execute_inner(handler, approval_handler).await
+        self.execute_with_settlement(handler, approval_handler, false)
+            .await
     }
 
     /// Executes an externally interactive run on an owned blocking worker.
@@ -2385,13 +2446,68 @@ impl ApplicationRunExecution {
         H: ApplicationRunEventHandler + Send + 'static,
         A: ApprovalHandler + Send + 'static,
     {
-        validate_execution_contract(self.interaction, &approval_handler, true)?;
+        let registry = self.extension_registry.clone();
+        let background_runs = self.extension_background_runs.clone();
         let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            runtime.block_on(self.execute_inner(&mut handler, &mut approval_handler))
+        match tokio::task::spawn_blocking(move || {
+            runtime.block_on(self.execute_with_settlement(
+                &mut handler,
+                &mut approval_handler,
+                true,
+            ))
         })
         .await
-        .context("application run owned blocking worker failed")?
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let settlement =
+                    crate::verification_lifecycle::settle_idle_mcp(&registry, &background_runs)
+                        .await;
+                let error = anyhow!(error).context("application run owned blocking worker failed");
+                match settlement {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(ApplicationRunCleanupError {
+                        cleanup,
+                        execution: Some(error),
+                    }
+                    .into()),
+                }
+            }
+        }
+    }
+
+    async fn execute_with_settlement<H, A>(
+        self,
+        handler: &mut H,
+        approval_handler: &mut A,
+        owned_blocking: bool,
+    ) -> Result<ApplicationRunOutput>
+    where
+        H: ApplicationRunEventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let registry = self.extension_registry.clone();
+        let background_runs = self.extension_background_runs.clone();
+        let result = async {
+            validate_execution_contract(self.interaction, approval_handler, owned_blocking)?;
+            self.execute_inner(handler, approval_handler).await
+        }
+        .await;
+        // Normal terminals settle before publishing below. Join on early errors as well;
+        // registry retirement is idempotent and keeps live child generations intact.
+        if let Err(error) = result {
+            return match crate::verification_lifecycle::settle_idle_mcp(&registry, &background_runs)
+                .await
+            {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(ApplicationRunCleanupError {
+                    cleanup,
+                    execution: Some(error),
+                }
+                .into()),
+            };
+        }
+        result
     }
 
     async fn execute_inner<H, A>(
@@ -2646,6 +2762,24 @@ impl ApplicationRunExecution {
                 }
             }
             (None, run) => run,
+        };
+        let settlement = crate::verification_lifecycle::settle_idle_mcp(
+            &self.extension_registry,
+            &self.extension_background_runs,
+        )
+        .await;
+        let run = match (run, settlement) {
+            (run, Ok(())) => run,
+            (Ok(_), Err(cleanup)) => Err(ApplicationRunCleanupError {
+                cleanup,
+                execution: None,
+            }
+            .into()),
+            (Err(error), Err(cleanup)) => Err(ApplicationRunCleanupError {
+                cleanup,
+                execution: Some(error),
+            }
+            .into()),
         };
         match run {
             Ok(agent_output) => {
@@ -3701,7 +3835,7 @@ async fn assemble_application_tool_surface(
         root_config,
         provider_capabilities,
         workspace_root.to_path_buf(),
-        mutation_recorder,
+        mutation_recorder.clone(),
         workspace_trust,
         sigil_kernel::ExtensionProcessNetworkAdmission::new(
             options.permission_context.network_policy,
@@ -3718,94 +3852,177 @@ async fn assemble_application_tool_surface(
             .map(|composition| std::sync::Arc::clone(&composition.command_execution)),
     )
     .await?;
-    // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
-    // assembly. Leases are in-memory only, so this fresh process cannot hold one; the sweep
-    // reclaims namespaces abandoned by crashed or deleted sessions and never races a live tool.
-    {
-        let scratch_control = surface.scratch_control.clone();
-        tokio::task::spawn_blocking(move || {
-            match scratch_control.gc_scratch_namespaces(
-                &sigil_tools_builtin::ScratchGcConfig::default(),
-                current_unix_time_ms(),
-            ) {
-                Ok(report) if report.deleted > 0 => {
-                    tracing::debug!(
-                        deleted = report.deleted,
-                        reclaimed_bytes = report.deleted_bytes,
-                        "application runtime scratch TTL sweep reclaimed expired namespaces"
-                    );
+    let mut cleanup_registry = surface.registry.clone();
+    let assembled = async {
+        // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
+        // assembly. Leases are in-memory only, so this fresh process cannot hold one; the sweep
+        // reclaims namespaces abandoned by crashed or deleted sessions and never races a live tool.
+        {
+            let scratch_control = surface.scratch_control.clone();
+            tokio::task::spawn_blocking(move || {
+                match scratch_control.gc_scratch_namespaces(
+                    &sigil_tools_builtin::ScratchGcConfig::default(),
+                    current_unix_time_ms(),
+                ) {
+                    Ok(report) if report.deleted > 0 => {
+                        tracing::debug!(
+                            deleted = report.deleted,
+                            reclaimed_bytes = report.deleted_bytes,
+                            "application runtime scratch TTL sweep reclaimed expired namespaces"
+                        );
+                    }
+                    Ok(_report) => {}
+                    Err(error) => {
+                        tracing::debug!(%error, "application runtime scratch TTL sweep failed");
+                    }
                 }
-                Ok(_report) => {}
-                Err(error) => {
-                    tracing::debug!(%error, "application runtime scratch TTL sweep failed");
-                }
-            }
-        });
-    }
-    let crate::RuntimeToolSurface {
-        mut registry,
-        context_resolver,
-        terminal_control,
-        scratch_control,
-    } = surface;
-    if agent_delegation_available {
-        crate::register_agent_tools(&mut registry, root_config)?;
-    }
-    let elicitation_handler = unsupported_mcp_elicitation_handler();
-    let runtime_event_handler = unsupported_mcp_runtime_event_handler();
-    crate::mcp_registry::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
-        &mut registry,
-        root_config,
-        provider_capabilities,
-        workspace_root.to_path_buf(),
-        Arc::clone(&elicitation_handler),
-        runtime_event_handler,
-        Arc::clone(&services.disclosure_presenter),
-        managed_extension_execution,
-    )?;
-    let eager_remote_servers = root_config
-        .mcp_servers
-        .iter()
-        .filter(|server| {
-            server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
-        })
-        .map(|server| (server.name.clone(), server.required))
-        .collect::<Vec<_>>();
-    let mut warnings = Vec::new();
-    for (server_name, required) in eager_remote_servers {
-        let activation = activate_eager_remote_mcp_server(
-            &mut registry,
-            root_config,
-            &server_name,
-            provider_capabilities.tool_name_max_chars,
-            workspace_root.to_path_buf(),
-            session.egress_audit_recorder()?,
-            Arc::clone(&services.disclosure_presenter),
-            Arc::clone(&elicitation_handler),
-        )
-        .await;
-        if let Err(error) = activation {
-            if required {
-                return Err(error);
-            }
-            warnings.push(optional_eager_mcp_warning(redactor, &server_name, &error));
+            });
         }
-    }
-    if let Some(skill_descriptor) = skill_descriptor {
-        registry = crate::build_skill_tool_registry(&registry, skill_descriptor).into_registry();
-    }
-    if let Some(scope) = tool_scope {
-        registry = constrain_application_tool_registry(registry, scope)?;
-    }
-    Ok((
-        crate::RuntimeToolSurface {
-            registry,
+        let crate::RuntimeToolSurface {
+            mut registry,
             context_resolver,
             terminal_control,
             scratch_control,
-        },
-        warnings,
-    ))
+        } = surface;
+        if agent_delegation_available {
+            crate::register_agent_tools(&mut registry, root_config)?;
+        }
+        let elicitation_handler = unsupported_mcp_elicitation_handler();
+        let runtime_event_handler = unsupported_mcp_runtime_event_handler();
+        crate::mcp_registry::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
+            &mut registry,
+            root_config,
+            provider_capabilities,
+            workspace_root.to_path_buf(),
+            Arc::clone(&elicitation_handler),
+            Arc::clone(&runtime_event_handler),
+            Arc::clone(&services.disclosure_presenter),
+            managed_extension_execution.clone(),
+        )?;
+        let eager_remote_servers = root_config
+            .mcp_servers
+            .iter()
+            .filter(|server| {
+                server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
+            })
+            .map(|server| (server.name.clone(), server.required))
+            .collect::<Vec<_>>();
+        let mut warnings = Vec::new();
+        if let Some(session_log_path) = session.store_path() {
+            let source: Arc<dyn crate::McpPluginTrustSource> =
+                Arc::new(crate::SessionMcpPluginTrustSource::new(session_log_path));
+            if root_config.skills.enabled && root_config.composition.allows(sigil_kernel::OptionalCapability::Skills) {
+                let mut skill_registry = registry.clone();
+                let skill_workspace = workspace_root.to_path_buf();
+                let skill_config = root_config.skills.clone();
+                let skill_source = Arc::clone(&source);
+                // Keep discovery/session reads off the async owner, and join them before any
+                // prepare result can retire this registry.
+                let discovery = tokio::task::spawn_blocking(move || {
+                    let user_config_dir = sigil_kernel::default_user_config_dir().ok();
+                    crate::register_session_skill_tools(&mut skill_registry, &skill_workspace, user_config_dir.as_deref(), &skill_config, skill_source)
+                }).await.context("plugin skill discovery worker failed")?;
+                match discovery {
+                    Ok(report) => warnings.extend(report.warnings.into_iter().map(|warning| warning.message)),
+                    Err(error) => warnings.push(format!("optional plugin skills unavailable: {}", redactor.redact_text(&error.to_string()))),
+                }
+            }
+            let startup_context = (
+                mutation_recorder,
+                sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                    options.permission_context.network_policy,
+                    false,
+                ),
+            );
+            let registry_views = services.extension_registry_views(session.session_scope_id())?;
+            if let Err(error) = crate::mcp_registry::register_session_plugin_mcp_tools_with_registry_slot(
+                &mut registry,
+                root_config,
+                provider_capabilities,
+                workspace_root.to_path_buf(),
+                source,
+                Arc::clone(&elicitation_handler),
+                Arc::clone(&runtime_event_handler),
+                managed_extension_execution,
+                Arc::clone(&services.disclosure_presenter),
+                Some(startup_context),
+                Some(registry_views.as_ref()),
+            )
+            .await
+            {
+                warnings.push(format!(
+                    "optional plugin MCP discovery unavailable: {}",
+                    redactor.redact_text(&error.to_string())
+                ));
+            }
+        }
+
+        for (server_name, required) in eager_remote_servers {
+            let activation = activate_eager_remote_mcp_server(
+                &mut registry,
+                root_config,
+                &server_name,
+                provider_capabilities.tool_name_max_chars,
+                workspace_root.to_path_buf(),
+                session.egress_audit_recorder()?,
+                Arc::clone(&services.disclosure_presenter),
+                Arc::clone(&elicitation_handler),
+            )
+            .await;
+            if let Err(error) = activation {
+                if required {
+                    return Err(error);
+                }
+                warnings.push(optional_eager_mcp_warning(redactor, &server_name, &error));
+            }
+        }
+        if let Some(executor) = services
+            .authority_composition()
+            .and_then(|composition| composition.plugin_hook_execution.clone())
+            && let Some(session_log_path) = session.store_path()
+        {
+            let source = Arc::new(crate::mcp_registry::SessionMcpPluginTrustSource::new(
+                session_log_path,
+            ));
+            match crate::plugin_workflow::register_plugin_workflow_tools(
+                &mut registry,
+                workspace_root,
+                source,
+                executor,
+                redactor.clone(),
+            )
+            .await
+            {
+                Ok(plugin_warnings) => warnings.extend(plugin_warnings),
+                Err(error) => warnings.push(format!(
+                    "optional plugin hooks unavailable: {}",
+                    redactor.redact_text(&error.to_string())
+                )),
+            }
+        }
+        if let Some(skill_descriptor) = skill_descriptor {
+            registry = crate::build_skill_tool_registry(&registry, skill_descriptor).into_registry();
+        }
+        if let Some(scope) = tool_scope {
+            registry = constrain_application_tool_registry(registry, scope)?;
+        }
+        Ok((
+            crate::RuntimeToolSurface {
+                registry,
+                context_resolver,
+                terminal_control,
+                scratch_control,
+            },
+            warnings,
+        ))
+    }
+    .await;
+    if assembled.is_err()
+        && let Err(cleanup) = crate::shutdown_mcp_generations(&mut cleanup_registry).await
+    {
+        return assembled.context(format!("MCP preparation cleanup incomplete: {cleanup:#}"));
+    }
+    assembled
 }
 
 /// Prepares the configured provider, durable session, tools, run options, and cancellation scope.
@@ -4054,201 +4271,208 @@ async fn prepare_application_run_internal(
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
-    drop(surface_timer);
-    let context_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::RequestContext);
-    let context_prompt = queued_first_request
-        .as_ref()
-        .map_or(prompt.as_str(), |(exact_prompt, _)| {
-            exact_prompt.expose_secret()
-        });
-    let runtime_context = surface
-        .context_resolver
-        .resolve(context_prompt)
-        .await
-        .unwrap_or_default();
-    drop(context_timer);
-    let pending_input_provider: Arc<dyn sigil_kernel::PendingConversationInputProvider> =
-        Arc::new(crate::pending_input::DurableQueuePendingInputProvider::new(
-            surface.context_resolver.clone(),
-        ));
-    input = input
-        .with_runtime_context(runtime_context.clone())
-        .with_pending_input_provider(Arc::clone(&pending_input_provider));
-    let terminal_control = ApplicationTerminalTaskControl::new(
-        workspace_root.clone(),
-        surface.terminal_control.clone(),
-        session_lease.as_ref(),
-        session.session_scope_id(),
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let registry = surface.registry;
-    let writable_memory_available = options.memory_config.writable
-        && registry
-            .spec_for(sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME)
-            .is_some()
-        && registry
-            .spec_for(sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME)
-            .is_some();
-    // Tool scoping may remove one or both durable-memory tools after configuration was loaded.
-    // Every frozen/live request must consume the same effective capability as the final registry
-    // so the system prompt never advertises an unavailable write path.
-    options.memory_config.writable = writable_memory_available;
-    let parent_session_ref = SessionRef::new_relative(
-        session_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("session.jsonl"),
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let task_execution = if let Some((profile_registry, role_provider_builder)) =
-        task_agent_registry.zip(services.task_role_provider_builder.as_ref())
-    {
-        let agent_supervisor = crate::AgentSupervisor::new(
-            profile_registry,
-            crate::AgentBudgetPolicy::from_root_config(&root_config),
-            provider.capabilities(),
-        )
-        .with_background_runs(agent_background_runs.clone());
-        Some(ApplicationTaskExecutionRuntime {
-            root_config: root_config.clone(),
-            parent_session_ref: parent_session_ref.clone(),
-            options: options.clone(),
-            base_registry: registry.clone(),
-            agent_supervisor,
-            role_provider_builder: Arc::clone(role_provider_builder),
-            verification_execution_port: services.authority_composition().map(|composition| {
-                Arc::clone(&composition.command_execution)
-                    as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
-            }),
-        })
-    } else {
-        None
-    };
-    let conversation_coordinator = orchestration_route_guard.map(|guard| {
-        crate::ConversationCoordinator::new(
-            root_config.task.enabled,
-            root_config.task.routing_policy,
-        )
-        .with_writable_memory_routing(writable_memory_available)
-        .with_orchestration_route_guard(guard)
-        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
-            provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
-            // DirectTask additionally requires an attached task executor; without one the route
-            // stays at the ReviewFirst baseline so plan review remains usable.
-            task_executor_available: task_execution.is_some(),
-        })
-    });
-    if queued_first_request.is_none()
-        && agent_invocation.is_none()
-        && let Some(coordinator) = conversation_coordinator.as_ref()
-    {
-        coordinator
-            .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())
-            .map_err(ApplicationRunPrepareError::execution)?;
-        input = coordinator
-            .bind_conversation_input(
-                &session,
-                input,
-                parent_session_ref.clone(),
-                run_id.clone(),
-                None,
-                current_unix_time_ms(),
-            )
-            .map_err(ApplicationRunPrepareError::execution)?;
-    }
-    let queued_first_assembly =
-        if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
-            let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
-            exact_user_message.id = durable_user_message_id.clone();
-            let routing = conversation_coordinator.as_ref().and_then(|coordinator| {
-                let capability = coordinator.resolve_route_capability(&session);
-                capability
-                    .routes_automatically()
-                    .then_some((coordinator, capability))
+    // Keep the already-created process owners until all fallible preparation is either
+    // transferred into PreparedApplicationRun or explicitly joined on this error path.
+    let mut cleanup_registry = surface.registry.clone();
+    let assembled = async {
+        drop(surface_timer);
+        let context_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::RequestContext);
+        let context_prompt = queued_first_request
+            .as_ref()
+            .map_or(prompt.as_str(), |(exact_prompt, _)| {
+                exact_prompt.expose_secret()
             });
-            let tool_specs = routing.map_or_else(
-                || registry.specs(),
-                |(coordinator, capability)| {
-                    coordinator.conversation_tool_specs_for_session(
-                        &session,
-                        capability,
-                        registry.specs(),
+        let runtime_context = surface
+            .context_resolver
+            .resolve(context_prompt)
+            .await
+            .unwrap_or_default();
+        drop(context_timer);
+        let pending_input_provider: Arc<dyn sigil_kernel::PendingConversationInputProvider> =
+            Arc::new(crate::pending_input::DurableQueuePendingInputProvider::new(
+                surface.context_resolver.clone(),
+            ));
+        input = input
+            .with_runtime_context(runtime_context.clone())
+            .with_pending_input_provider(Arc::clone(&pending_input_provider));
+        let terminal_control = ApplicationTerminalTaskControl::new(
+            workspace_root.clone(),
+            surface.terminal_control.clone(),
+            session_lease.as_ref(),
+            session.session_scope_id(),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let registry = surface.registry;
+        let writable_memory_available = options.memory_config.writable
+            && registry
+                .spec_for(sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME)
+                .is_some()
+            && registry
+                .spec_for(sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME)
+                .is_some();
+        // Tool scoping may remove one or both durable-memory tools after configuration was loaded.
+        // Every frozen/live request must consume the same effective capability as the final registry
+        // so the system prompt never advertises an unavailable write path.
+        options.memory_config.writable = writable_memory_available;
+        let parent_session_ref = SessionRef::new_relative(
+            session_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("session.jsonl"),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let task_execution = if let Some((profile_registry, role_provider_builder)) =
+            task_agent_registry.zip(services.task_role_provider_builder.as_ref())
+        {
+            let agent_supervisor = crate::AgentSupervisor::new(
+                profile_registry,
+                crate::AgentBudgetPolicy::from_root_config(&root_config),
+                provider.capabilities(),
+            )
+            .with_background_runs(agent_background_runs.clone());
+            Some(ApplicationTaskExecutionRuntime {
+                root_config: root_config.clone(),
+                parent_session_ref: parent_session_ref.clone(),
+                options: options.clone(),
+                base_registry: registry.clone(),
+                agent_supervisor,
+                role_provider_builder: Arc::clone(role_provider_builder),
+                verification_execution_port: services.authority_composition().map(|composition| {
+                    crate::verification_with_mcp_settlement(
+                        Arc::clone(&composition.command_execution)
+                            as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
+                        registry.clone(),
+                        agent_background_runs.clone(),
                     )
-                },
-            );
-            let mut transient_messages = vec![exact_user_message];
-            if let Some(contract) = routing.and_then(|(coordinator, capability)| {
-                coordinator.conversation_contract_for_session(&session, capability)
-            }) {
-                transient_messages.insert(0, ModelMessage::system(contract));
-            }
-            let request = session
-                .build_pre_turn_candidate_request(
-                    &workspace_root,
-                    &options.memory_config,
-                    tool_specs,
-                    target_max_tokens,
-                    options.reasoning_effort.clone(),
-                    session.latest_response_handle(provider.name()),
-                    options.traffic_partition_key.clone(),
-                    &transient_messages,
-                    runtime_context.clone(),
-                    &[],
-                )
-                .map_err(ApplicationRunPrepareError::execution)?;
-            let frozen_request =
-                FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)
-                    .map_err(ApplicationRunPrepareError::execution)?;
-            let mut run_input = AgentRunInput::without_persisted_user_message(Vec::new())
-                .with_runtime_context(runtime_context)
-                .with_logical_run_id(run_id.clone())
-                .with_cancellation(cancellation_handle.clone())
-                .with_initial_frozen_provider_request(frozen_request.clone())
-                .with_pending_input_provider(Arc::clone(&pending_input_provider));
-            if let Some(max_output_tokens) = target_max_tokens {
-                run_input = run_input.with_max_output_tokens(max_output_tokens);
-            }
-            Some(ApplicationExactFirstRequestAssembly {
-                frozen_request,
-                run_input,
+                }),
             })
         } else {
             None
         };
-    let explicit_plan_review = agent_invocation
-        .as_ref()
-        .is_some_and(|(_, profile_id)| profile_id.as_str() == "plan");
-    let plan_review_selected = explicit_plan_review
-        || (agent_invocation.is_none()
-            && conversation_coordinator
-                .as_ref()
-                .is_some_and(|coordinator| {
-                    coordinator
-                        .resolve_route_capability(&session)
-                        .routes_automatically()
-                }));
-    let plan_review_workspace_snapshot_id = if plan_review_selected {
-        crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
-            .map_err(ApplicationRunPrepareError::execution)?
-    } else {
-        None
-    };
-    let explicit_plan_review_request = explicit_plan_review
-        .then(|| {
-            crate::PlanReviewCoordinator::prepare_explicit_plan_review(
-                &mut session,
-                &prompt,
-                &run_id,
-                plan_review_workspace_snapshot_id.clone(),
-                current_unix_time_ms(),
+        let conversation_coordinator = orchestration_route_guard.map(|guard| {
+            crate::ConversationCoordinator::new(
+                root_config.task.enabled,
+                root_config.task.routing_policy,
             )
-        })
-        .transpose()
-        .map_err(ApplicationRunPrepareError::execution)?;
-    let pending_session_title =
-        (queued_first_request.is_none() && generate_session_title).then(|| {
-            ApplicationSessionTitleRequest {
+            .with_writable_memory_routing(writable_memory_available)
+            .with_orchestration_route_guard(guard)
+            .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+                provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
+                // DirectTask additionally requires an attached task executor; without one the route
+                // stays at the ReviewFirst baseline so plan review remains usable.
+                task_executor_available: task_execution.is_some(),
+            })
+        });
+        if queued_first_request.is_none()
+            && agent_invocation.is_none()
+            && let Some(coordinator) = conversation_coordinator.as_ref()
+        {
+            coordinator
+                .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())
+                .map_err(ApplicationRunPrepareError::execution)?;
+            input = coordinator
+                .bind_conversation_input(
+                    &session,
+                    input,
+                    parent_session_ref.clone(),
+                    run_id.clone(),
+                    None,
+                    current_unix_time_ms(),
+                )
+                .map_err(ApplicationRunPrepareError::execution)?;
+        }
+        let queued_first_assembly =
+            if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
+                let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
+                exact_user_message.id = durable_user_message_id.clone();
+                let routing = conversation_coordinator.as_ref().and_then(|coordinator| {
+                    let capability = coordinator.resolve_route_capability(&session);
+                    capability
+                        .routes_automatically()
+                        .then_some((coordinator, capability))
+                });
+                let tool_specs = routing.map_or_else(
+                    || registry.specs(),
+                    |(coordinator, capability)| {
+                        coordinator.conversation_tool_specs_for_session(
+                            &session,
+                            capability,
+                            registry.specs(),
+                        )
+                    },
+                );
+                let mut transient_messages = vec![exact_user_message];
+                if let Some(contract) = routing.and_then(|(coordinator, capability)| {
+                    coordinator.conversation_contract_for_session(&session, capability)
+                }) {
+                    transient_messages.insert(0, ModelMessage::system(contract));
+                }
+                let request = session
+                    .build_pre_turn_candidate_request(
+                        &workspace_root,
+                        &options.memory_config,
+                        tool_specs,
+                        target_max_tokens,
+                        options.reasoning_effort.clone(),
+                        session.latest_response_handle(provider.name()),
+                        options.traffic_partition_key.clone(),
+                        &transient_messages,
+                        runtime_context.clone(),
+                        &[],
+                    )
+                    .map_err(ApplicationRunPrepareError::execution)?;
+                let frozen_request =
+                    FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)
+                        .map_err(ApplicationRunPrepareError::execution)?;
+                let mut run_input = AgentRunInput::without_persisted_user_message(Vec::new())
+                    .with_runtime_context(runtime_context)
+                    .with_logical_run_id(run_id.clone())
+                    .with_cancellation(cancellation_handle.clone())
+                    .with_initial_frozen_provider_request(frozen_request.clone())
+                    .with_pending_input_provider(Arc::clone(&pending_input_provider));
+                if let Some(max_output_tokens) = target_max_tokens {
+                    run_input = run_input.with_max_output_tokens(max_output_tokens);
+                }
+                Some(ApplicationExactFirstRequestAssembly {
+                    frozen_request,
+                    run_input,
+                })
+            } else {
+                None
+            };
+        let explicit_plan_review = agent_invocation
+            .as_ref()
+            .is_some_and(|(_, profile_id)| profile_id.as_str() == "plan");
+        let plan_review_selected = explicit_plan_review
+            || (agent_invocation.is_none()
+                && conversation_coordinator
+                    .as_ref()
+                    .is_some_and(|coordinator| {
+                        coordinator
+                            .resolve_route_capability(&session)
+                            .routes_automatically()
+                    }));
+        let plan_review_workspace_snapshot_id = if plan_review_selected {
+            crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+                .map_err(ApplicationRunPrepareError::execution)?
+        } else {
+            None
+        };
+        let explicit_plan_review_request = explicit_plan_review
+            .then(|| {
+                crate::PlanReviewCoordinator::prepare_explicit_plan_review(
+                    &mut session,
+                    &prompt,
+                    &run_id,
+                    plan_review_workspace_snapshot_id.clone(),
+                    current_unix_time_ms(),
+                )
+            })
+            .transpose()
+            .map_err(ApplicationRunPrepareError::execution)?;
+        let pending_session_title = (queued_first_request.is_none() && generate_session_title)
+            .then(|| ApplicationSessionTitleRequest {
                 root_config: root_config.clone(),
                 workspace_root: workspace_root.clone(),
                 model_ref: model_ref.clone(),
@@ -4258,125 +4482,150 @@ async fn prepare_application_run_internal(
                 managed_writer: services
                     .authority_composition()
                     .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
+            });
+        let conversation_lifecycle = session
+            .conversation_run_lifecycle_recorder()
+            .map_err(ApplicationRunPrepareError::execution)?;
+        let kind = if let Some(request) = explicit_plan_review_request {
+            ApplicationRunExecutionKind::ExplicitPlanReview {
+                request: Box::new(request),
             }
-        });
-    let conversation_lifecycle = session
-        .conversation_run_lifecycle_recorder()
-        .map_err(ApplicationRunPrepareError::execution)?;
-    let kind = if let Some(request) = explicit_plan_review_request {
-        ApplicationRunExecutionKind::ExplicitPlanReview {
-            request: Box::new(request),
-        }
-    } else if let Some((registry_snapshot, profile_id)) = agent_invocation {
-        let supervisor = crate::AgentSupervisor::new(
-            registry_snapshot,
-            crate::AgentBudgetPolicy::from_root_config(&root_config),
-            provider.capabilities().clone(),
-        )
-        .with_background_runs(agent_background_runs.clone());
-        let mut runtime =
-            crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry.clone());
-        sigil_kernel::AgentToolDelegate::set_run_cancellation(
-            &mut runtime,
-            Some(cancellation_handle.clone()),
-        );
-        sigil_kernel::AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some(&run_id));
-        ApplicationRunExecutionKind::AgentProfile {
-            runtime: Box::new(runtime),
-            profile_id,
-        }
-    } else {
-        let agent_tool_runtime = task_execution.as_ref().and_then(|task_execution| {
-            (root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None).then(|| {
-                let mut runtime = crate::AgentToolRuntime::new(
-                    task_execution.agent_supervisor.clone(),
-                    root_config.clone(),
-                    registry.clone(),
-                );
-                sigil_kernel::AgentToolDelegate::set_run_cancellation(
-                    &mut runtime,
-                    Some(cancellation_handle.clone()),
-                );
-                Box::new(runtime)
-            })
-        });
-        ApplicationRunExecutionKind::Main {
-            agent: Box::new(
-                crate::configured_agent(&root_config, provider, registry.clone())
-                    .map_err(ApplicationRunPrepareError::execution)?,
-            ),
-            input: Box::new(input),
-            agent_tool_runtime,
-        }
-    };
-    crate::session_composition::bind_session_composition_snapshot(
-        &mut session,
-        selected_composition,
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let prepared = PreparedApplicationRun {
-        execution: ApplicationRunExecution {
-            plan_review_runtime: if plan_review_selected {
-                let tool_registry =
-                    crate::build_plan_review_tool_registry(&registry, &root_config).into_registry();
-                Some(ApplicationPlanReviewRuntime {
-                    options: options.clone(),
-                    workspace_snapshot_id: plan_review_workspace_snapshot_id,
-                    agent: Box::new(
-                        crate::configured_agent(
-                            &root_config,
-                            crate::build_provider_for_model_ref_async(&root_config, &model_ref)
-                                .await
-                                .map_err(ApplicationRunPrepareError::provider_unavailable)?,
-                            tool_registry.clone(),
-                        )
+        } else if let Some((registry_snapshot, profile_id)) = agent_invocation {
+            let supervisor = crate::AgentSupervisor::new(
+                registry_snapshot,
+                crate::AgentBudgetPolicy::from_root_config(&root_config),
+                provider.capabilities().clone(),
+            )
+            .with_background_runs(agent_background_runs.clone());
+            let mut runtime =
+                crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry.clone());
+            sigil_kernel::AgentToolDelegate::set_run_cancellation(
+                &mut runtime,
+                Some(cancellation_handle.clone()),
+            );
+            sigil_kernel::AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some(&run_id));
+            ApplicationRunExecutionKind::AgentProfile {
+                runtime: Box::new(runtime),
+                profile_id,
+            }
+        } else {
+            let agent_tool_runtime = task_execution.as_ref().and_then(|task_execution| {
+                (root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None).then(
+                    || {
+                        let mut runtime = crate::AgentToolRuntime::new(
+                            task_execution.agent_supervisor.clone(),
+                            root_config.clone(),
+                            registry.clone(),
+                        );
+                        sigil_kernel::AgentToolDelegate::set_run_cancellation(
+                            &mut runtime,
+                            Some(cancellation_handle.clone()),
+                        );
+                        Box::new(runtime)
+                    },
+                )
+            });
+            ApplicationRunExecutionKind::Main {
+                agent: Box::new(
+                    crate::configured_agent(&root_config, provider, registry.clone())
                         .map_err(ApplicationRunPrepareError::execution)?,
-                    ),
-                    tool_registry,
-                    child_resource_provisioner: services
-                        .authority_composition()
-                        .map(|composition| composition.plan_review_child_resource_provisioner()),
-                })
-            } else {
-                None
+                ),
+                input: Box::new(input),
+                agent_tool_runtime,
+            }
+        };
+        crate::session_composition::bind_session_composition_snapshot(
+            &mut session,
+            selected_composition,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let prepared = PreparedApplicationRun {
+            execution: ApplicationRunExecution {
+                extension_registry: registry.clone(),
+                extension_background_runs: agent_background_runs.clone(),
+                plan_review_runtime: if plan_review_selected {
+                    let tool_registry =
+                        crate::build_plan_review_tool_registry(&registry, &root_config)
+                            .into_registry();
+                    Some(ApplicationPlanReviewRuntime {
+                        options: options.clone(),
+                        workspace_snapshot_id: plan_review_workspace_snapshot_id,
+                        agent: Box::new(
+                            crate::configured_agent(
+                                &root_config,
+                                crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+                                    .await
+                                    .map_err(ApplicationRunPrepareError::provider_unavailable)?,
+                                tool_registry.clone(),
+                            )
+                            .map_err(ApplicationRunPrepareError::execution)?,
+                        ),
+                        tool_registry,
+                        child_resource_provisioner: services.authority_composition().map(
+                            |composition| composition.plan_review_child_resource_provisioner(),
+                        ),
+                    })
+                } else {
+                    None
+                },
+                kind,
+                task_execution,
+                session,
+                options,
+                session_id,
+                run_id,
+                prompt,
+                session_log_path: session_path,
+                cancellation_handle,
+                root_task_guard,
+                warnings,
+                redactor,
+                interaction,
+                conversation_lifecycle: conversation_lifecycle.clone(),
+                conversation_start: conversation_start.clone(),
+                events: events.clone(),
+                conversation_coordinator,
+                parent_session_ref,
+                pending_session_title,
+                pending_user_input_continuation: None,
+                route_transition,
+                managed_session_log,
+                managed_artifact_store,
+                _session_lease: Arc::clone(&session_lease),
             },
-            kind,
-            task_execution,
-            session,
-            options,
-            session_id,
-            run_id,
-            prompt,
-            session_log_path: session_path,
-            cancellation_handle,
-            root_task_guard,
-            warnings,
-            redactor,
-            interaction,
-            conversation_lifecycle: conversation_lifecycle.clone(),
-            conversation_start: conversation_start.clone(),
-            events: events.clone(),
-            conversation_coordinator,
-            parent_session_ref,
-            pending_session_title,
-            pending_user_input_continuation: None,
-            route_transition,
-            managed_session_log,
-            managed_artifact_store,
-            _session_lease: Arc::clone(&session_lease),
-        },
-        control: ApplicationRunControl {
-            owner: cancellation_owner,
-            recorder: cancellation_recorder,
-            cancellation_target: RunCancellationTarget::Run,
-            conversation_lifecycle,
-            conversation_start,
-            events,
-            _session_lease: session_lease,
-        },
-        terminal_control,
-    };
-    Ok((prepared, queued_first_assembly))
+            control: ApplicationRunControl {
+                owner: cancellation_owner,
+                recorder: cancellation_recorder,
+                cancellation_target: RunCancellationTarget::Run,
+                conversation_lifecycle,
+                conversation_start,
+                events,
+                _session_lease: session_lease,
+            },
+            terminal_control,
+        };
+        Ok((prepared, queued_first_assembly))
+    }
+    .await;
+    if let Err(error) = assembled {
+        let preparation_cleanup = cleanup_registry
+            .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle)
+            .await;
+        let generation_cleanup = crate::shutdown_mcp_generations(&mut cleanup_registry).await;
+        let failures = [preparation_cleanup, generation_cleanup]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| format!("{error:#}"))
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            return Err(ApplicationRunPrepareError::execution(anyhow!(
+                "{error}; extension cleanup incomplete: {}",
+                failures.join("; ")
+            )));
+        }
+        return Err(error);
+    }
+    assembled
 }
 
 /// Creates or reopens the durable V2 session used by an adapter routing handle.
@@ -6463,10 +6712,16 @@ fn admit_application_skill_binding(
         });
     }
     let user_config_dir = sigil_kernel::default_user_config_dir().ok();
-    let report = crate::discover_skill_index_with_user_dir(
+    let entries = match session.store_path() {
+        Some(path) => sigil_kernel::JsonlSessionStore::read_entries(path)
+            .map_err(ApplicationRunPrepareError::execution)?,
+        None => session.entries().to_vec(),
+    };
+    let report = crate::discover_skill_index_with_session_entries(
         workspace_root,
         user_config_dir.as_deref(),
         &root_config.skills,
+        &entries,
     )
     .map_err(ApplicationRunPrepareError::execution)?;
     if report.snapshot.fingerprint != binding.index_fingerprint {

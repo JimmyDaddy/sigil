@@ -1931,6 +1931,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Review path-free workspace plugin capabilities without starting extensions */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Bounded session projection */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PluginCatalog"];
+                    };
+                };
+                /** @description Session missing */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Projection unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/queue": {
         parameters: {
             query?: never;
@@ -2591,6 +2643,55 @@ export interface paths {
                 409: components["responses"]["Conflict"];
                 500: components["responses"]["InternalError"];
                 503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/mcp-import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview an explicitly selected MCP document without starting processes */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        mcpServers: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description Bounded host-owned editing preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["McpImportPreview"];
+                    };
+                };
+                /** @description Invalid configuration document */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -3706,10 +3807,10 @@ export interface components {
         ConversationRecoveryCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["ConversationRecoveryCommandAction"];
         };
-        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryPrepareCompactionAction"] | components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryToolOutputShrinkAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"] | components["schemas"]["ConversationRecoveryImportBranchKnowledgeAction"];
+        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryPrepareCompactionAction"] | components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryToolOutputShrinkAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"] | components["schemas"]["ConversationRecoveryImportBranchKnowledgeAction"] | components["schemas"]["ConversationRecoveryReviewPluginAction"];
         ConversationRecoveryCommandReceipt: {
             /** @enum {string} */
-            action: "prepare_compaction" | "apply_compaction" | "apply_standalone_tool_output_shrink" | "restore_checkpoint" | "fork_conversation" | "import_branch_knowledge";
+            action: "prepare_compaction" | "apply_compaction" | "apply_standalone_tool_output_shrink" | "restore_checkpoint" | "fork_conversation" | "import_branch_knowledge" | "review_plugin";
             branch_knowledge?: components["schemas"]["BranchKnowledgeReceipt"] | null;
             client_id: string;
             command_id: string;
@@ -3717,6 +3818,7 @@ export interface components {
             compaction_review?: components["schemas"]["CompactionReview"] | null;
             correlation_id?: string | null;
             fork?: components["schemas"]["ConversationForkReceipt"] | null;
+            plugin_review?: components["schemas"]["PluginReviewReceipt"] | null;
             recovery: components["schemas"]["ConversationRecoveryView"];
             replayed: boolean;
             restore?: components["schemas"]["CheckpointRestoreReceipt"] | null;
@@ -3749,6 +3851,14 @@ export interface components {
             checkpoint_id: string;
             /** @constant */
             kind: "restore_checkpoint";
+        };
+        ConversationRecoveryReviewPluginAction: {
+            capability_digest: string;
+            enabled: boolean;
+            /** @constant */
+            kind: "review_plugin";
+            manifest_hash: string;
+            plugin_id: string;
         };
         ConversationRecoveryToolOutputShrinkAction: {
             /** @constant */
@@ -4076,6 +4186,19 @@ export interface components {
             };
             truncated?: boolean;
         };
+        McpImportCandidate: {
+            description: string;
+            importable: boolean;
+            index: number;
+            issues: string[];
+            name: string;
+            transport?: string | null;
+        };
+        McpImportPreview: {
+            candidates: components["schemas"]["McpImportCandidate"][];
+            preview_id: string;
+            root_fields_ignored: boolean;
+        };
         MessageContentPage: {
             content_version: string;
             display_id: string;
@@ -4254,6 +4377,38 @@ export interface components {
             /** @enum {string} */
             effect: "read_only" | "workspace_write" | "external_write" | "network" | "unknown";
             source_line?: string | null;
+        };
+        PluginCapabilityView: {
+            allow_secrets: boolean;
+            approval: string | null;
+            egress_logging: boolean;
+            kind: string;
+            label: string;
+        };
+        PluginCatalog: {
+            plugins: components["schemas"]["PluginReview"][];
+            warning_count: number;
+        };
+        /**
+         * @description Host-observed cleanup of earlier plugin processes; independent from plugin trust
+         * @enum {string}
+         */
+        PluginCleanupStatus: "confirmed" | "unknown" | "unconfirmed";
+        PluginReview: {
+            capabilities: components["schemas"]["PluginCapabilityView"][];
+            capability_digest: string;
+            manifest_hash: string;
+            name: string;
+            plugin_id: string;
+            process_cleanup?: components["schemas"]["PluginCleanupStatus"] | null;
+            /** @enum {string} */
+            trust: "trusted" | "disabled" | "needs_review";
+            version: string;
+        };
+        PluginReviewReceipt: {
+            enabled: boolean;
+            plugin_id: string;
+            process_cleanup?: components["schemas"]["PluginCleanupStatus"] | null;
         };
         ProtocolEvent: {
             approval_request?: components["schemas"]["PendingApproval"];

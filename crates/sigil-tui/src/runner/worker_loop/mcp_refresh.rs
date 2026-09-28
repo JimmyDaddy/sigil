@@ -3,6 +3,8 @@ use super::*;
 const MAX_MCP_REFRESHES_PER_PASS: usize = 8;
 
 pub(in crate::runner) struct WorkerLoopMcpHandlers {
+    pub(in crate::runner) plugin_hook_execution:
+        Option<Arc<dyn sigil_runtime::ManagedPluginHookExecutionPortV1>>,
     pub(in crate::runner) elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
@@ -32,6 +34,7 @@ pub(in crate::runner) fn refresh_pending_mcp_servers<P>(
     managed_extension_execution: Option<
         Arc<sigil_runtime::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    plugin_trust_source: Option<Arc<dyn sigil_runtime::McpPluginTrustSource>>,
     pending_mcp_refreshes: &mut BTreeSet<String>,
 ) -> bool
 where
@@ -82,6 +85,7 @@ where
                 egress_recorder.clone(),
                 disclosure_presenter,
                 managed_extension_execution.clone(),
+                plugin_trust_source.clone(),
             ),
         ) {
             Ok(result) if result.matched_servers == 0 => {
@@ -138,3 +142,110 @@ fn take_pending_mcp_refresh_batch(pending_mcp_refreshes: &mut BTreeSet<String>) 
 #[cfg(test)]
 #[path = "../tests/mcp_refresh_tests.rs"]
 mod tests;
+
+/// Rebuilds optional plugin entries only once existing foreground/background users have settled.
+/// Trust publication itself is immediate and never waits for this refresh.
+pub(in crate::runner) fn refresh_reviewed_plugin_surface<P>(
+    context: super::command_dispatch::WorkerCommandContext<'_, P>,
+) where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let super::command_dispatch::WorkerCommandContext {
+        runtime,
+        agent,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        message_tx,
+        elicitation_handler,
+        mcp_event_handler,
+        managed_extension_execution,
+        state,
+        ..
+    } = context;
+    if !state.refresh.pending_plugin_surface
+        || state.run.active.is_some()
+        || !state.run.retired.is_empty()
+        || state.agent.background_runs.has_any()
+    {
+        return;
+    }
+    state.refresh.pending_plugin_surface = false;
+    let mut registry = agent.tool_registry().clone();
+    let source: Arc<dyn sigil_runtime::McpPluginTrustSource> = Arc::new(
+        sigil_runtime::SessionMcpPluginTrustSource::new(state.session.log_path.clone()),
+    );
+    let redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
+    // This function already runs on the owned worker thread, outside the async runtime.
+    if root_config.skills.enabled
+        && root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Skills)
+    {
+        let user_config_dir = sigil_kernel::default_user_config_dir().ok();
+        match sigil_runtime::register_session_skill_tools(
+            &mut registry,
+            workspace_root,
+            user_config_dir.as_deref(),
+            &root_config.skills,
+            Arc::clone(&source),
+        ) {
+            Ok(report) => {
+                for warning in report.warnings {
+                    let _ = message_tx.send(WorkerMessage::Notice(warning.message));
+                }
+            }
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "optional plugin skills unavailable: {}",
+                    redactor.redact_text(&error.to_string())
+                )));
+            }
+        }
+    }
+    let result = runtime.block_on(async {
+        registry
+            .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle)
+            .await?;
+        let presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter> = Arc::new(
+            crate::runner::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
+                message_tx.clone(),
+            ),
+        );
+        sigil_runtime::register_session_plugin_mcp_tools(
+            &mut registry,
+            root_config,
+            provider_capabilities,
+            workspace_root.clone(),
+            Arc::clone(&source),
+            elicitation_handler.clone(),
+            mcp_event_handler.clone(),
+            managed_extension_execution.clone(),
+            presenter,
+            None,
+        )
+        .await?;
+        if let Some(executor) = state.plugin_hook_execution.as_ref() {
+            for warning in sigil_runtime::register_plugin_workflow_tools(
+                &mut registry,
+                workspace_root,
+                source,
+                Arc::clone(executor),
+                redactor.clone(),
+            )
+            .await?
+            {
+                let _ = message_tx.send(WorkerMessage::Notice(warning));
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let notice = match result {
+        Ok(()) => "reviewed plugin tools refreshed".to_owned(),
+        Err(error) => format!(
+            "plugin review was saved; optional tool refresh failed: {}",
+            redactor.redact_text(&error.to_string())
+        ),
+    };
+    let _ = message_tx.send(WorkerMessage::Notice(notice));
+}

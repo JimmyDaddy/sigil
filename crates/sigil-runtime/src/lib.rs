@@ -99,10 +99,13 @@ mod conversation_display_tests;
 mod session_title_tests;
 
 mod mcp_catalog; // bounded, process-free MCP configuration and tool discovery.
+pub mod mcp_import; // explicit, preview-only conversion of third-party MCP configuration.
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod orchestration_guard; // route-local hard-invariant rollback and durable observation.
 mod orchestration_rollout; // release-qualified new-install orchestration defaults.
+pub mod plugin_management; // existing session-owner plugin review and trust publication.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
+mod plugin_workflow;
 mod provider_factory; // provider construction, capabilities, and secrets.
 mod provider_pressure; // task-role provider route cooldown and shared backpressure.
 mod reasoning_effort; // exact provider+model effort admission and stale bindings.
@@ -136,7 +139,7 @@ pub use application_review::{
 };
 pub mod application_reservation_store;
 pub mod application_run;
-pub use application_run::ApplicationRunEventRecorder;
+pub use application_run::{ApplicationRunCleanupError, ApplicationRunEventRecorder};
 pub use application_run::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub mod application_service;
 pub mod command_permission;
@@ -157,6 +160,9 @@ pub mod interactive_session_attachment;
 pub mod isolated_workspace;
 pub mod machine_protocol;
 pub mod managed_artifact_store;
+mod verification_lifecycle;
+pub use verification_lifecycle::verification_with_mcp_settlement;
+
 pub mod managed_resource_adapters;
 pub mod managed_storage_writer;
 pub mod mcp_declaration;
@@ -309,6 +315,7 @@ pub use plan_review_coordinator::{
     application_plan_revision_guidance_decision, now_ms, plan_handoff_workspace_snapshot_id,
     plan_review_context_digest_for_attempt, plan_run_rejection_message,
 };
+pub use plugin_workflow::register_plugin_workflow_tools;
 pub use plugins::{
     ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,
     PluginDiscoveryWarning, PluginDiscoveryWarningKind, PluginHookExecutionAdmissionError,
@@ -400,8 +407,9 @@ pub use session_lifecycle::{
 pub use session_title::generate_and_persist_session_title;
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
-    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
-    load_user_invoked_skill, namespaced_plugin_skill_id, register_skill_tools,
+    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_session_entries,
+    discover_skill_index_with_user_dir, load_user_invoked_skill, namespaced_plugin_skill_id,
+    register_session_skill_tools, register_skill_tools,
 };
 pub use stable_mcp_search::{
     BundledExaAuthorizerFactory, RuntimeStableSearchQueryAttempt,
@@ -445,8 +453,9 @@ pub(crate) use writable_memory::{WritableMemoryStore, register_writable_memory_t
 
 pub use mcp_registry::{
     LazyMcpActivationResult, McpDeclarationRegistrationOptions, McpPluginTrustSource,
-    McpRefreshResult, RuntimeToolSurface, SessionMcpPluginTrustSource, activate_lazy_mcp_tools,
-    activate_lazy_mcp_tools_detailed, activate_lazy_mcp_tools_detailed_with_mcp_elicitation,
+    McpRefreshResult, PreparedPluginMcpRetirement, RuntimeToolSurface, SessionMcpPluginTrustSource,
+    activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
+    activate_lazy_mcp_tools_detailed_with_mcp_elicitation,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission,
@@ -466,14 +475,14 @@ pub use mcp_registry::{
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution,
     build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_extension_execution,
-    mcp_process_receipts_summary, mcp_stdio_boundary_summary,
+    mcp_process_receipts_summary, mcp_stdio_boundary_summary, prepare_plugin_mcp_retirement,
     refresh_mcp_server_tools_from_product_surface,
     refresh_mcp_server_tools_from_product_surface_with_managed_extension_execution,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission_and_managed_extension_execution,
-    register_mcp_server_declarations,
+    register_mcp_server_declarations, register_session_plugin_mcp_tools, shutdown_mcp_generations,
 };
 
 #[cfg(test)]

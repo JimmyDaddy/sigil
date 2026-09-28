@@ -473,6 +473,8 @@ export function createCatalogWorkbenchBridge(
 ): DesktopBridge {
   let currentPreference = preference;
   return {
+    pickMcpImport: async () => null,
+    applyMcpImport: async () => ({ importedNames: [], reloadRequired: false }),
     pickImage: async () => null,
     ingestImage: async () => { throw new Error("Image ingestion is unavailable in the component catalog."); },
     releaseImages: async () => {},
@@ -655,6 +657,7 @@ export function createCatalogWorkbenchBridge(
       },
       replayed: false,
     }),
+    pluginCatalog: async () => ({ plugins: [], warningCount: 0 }),
     conversationRecovery: async () => ({ checkpoints: [], forkPoints: [], throughStreamSequence: 0 }),
     conversationCompactionPreview: async () => ({
       foldedEventCount: 0,

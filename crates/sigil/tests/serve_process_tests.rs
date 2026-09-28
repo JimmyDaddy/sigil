@@ -3512,3 +3512,92 @@ async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independ
     assert!(edited.contains("review-apply-fix") && edited.contains("function_call_output"));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_servers()
+-> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    write_config(&config_path, "http://127.0.0.1:1");
+    let original = fs::read(&config_path)?;
+    let marker = workspace.path().join("import-must-not-start");
+    let import = serde_json::to_vec(&serde_json::json!({
+        "futureField": true,
+        "mcpServers": {
+            "selected": {"command":"/bin/sh", "args":["-c", "printf launched > \"$1\"", "sh", marker], "env":{"PRIVATE_TOKEN":"never-copy-this-value"}},
+            "unselected": {"url":"https://example.test/mcp"}
+        }
+    }))?;
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let result: anyhow::Result<()> = async {
+        let opened = manager
+            .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+                sigil_desktop::DesktopLaunchRequest::new(
+                    env!("CARGO_BIN_EXE_sigil"),
+                    &config_path,
+                    workspace.path(),
+                ),
+                "MCP import",
+            ))
+            .await?;
+        let client = manager.client(&opened.id)?;
+        let preview = client.preview_mcp_import(import.clone()).await?;
+        assert_eq!(preview.candidates.len(), 2);
+        assert!(preview.root_fields_ignored);
+        let public = serde_json::to_string(&preview)?;
+        assert!(!public.contains("never-copy-this-value"));
+        assert!(!public.contains("printf"));
+        assert!(!public.contains(&marker.display().to_string()));
+        assert_eq!(fs::read(&config_path)?, original);
+        let selected = preview
+            .candidates
+            .iter()
+            .find(|item| item.name == "selected")
+            .expect("selected preview");
+        let saved = client
+            .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
+                preview_id: preview.preview_id.clone(),
+                selected_indices: vec![selected.index],
+            })
+            .await?;
+        assert_eq!(saved.imported_names, ["selected"]);
+        assert!(!marker.exists());
+        let config = sigil_kernel::RootConfig::load_persisted(&config_path)?;
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "selected");
+        assert_eq!(
+            config.mcp_servers[0].startup,
+            sigil_kernel::McpServerStartup::Lazy
+        );
+        assert!(!fs::read_to_string(&config_path)?.contains("never-copy-this-value"));
+        assert!(
+            client
+                .apply_mcp_import_host_private(sigil_desktop::DesktopMcpImportApplyRequest {
+                    preview_id: preview.preview_id,
+                    selected_indices: vec![selected.index],
+                })
+                .await
+                .is_err(),
+            "consumed draft must not be applied twice"
+        );
+        manager.restart(&opened.id).await?;
+        let client = manager.client(&opened.id)?;
+        let fresh = client.preview_mcp_import(import).await?;
+        assert_eq!(fresh.candidates.len(), 2);
+        assert!(!marker.exists(), "reload must preserve lazy startup");
+        manager.close(&opened.id).await?;
+        assert!(!marker.exists());
+        Ok(())
+    }
+    .await;
+    let cleanup = manager.close_all().await;
+    result?;
+    anyhow::ensure!(
+        cleanup.iter().all(|(_, result)| result.is_ok()),
+        "owned serve cleanup failed: {cleanup:?}"
+    );
+    Ok(())
+}
+
+#[path = "serve_process/plugin_tests.rs"]
+mod plugin_contract_tests;

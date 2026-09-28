@@ -1838,6 +1838,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::ToolArtifactRead(_) => DurableEventType::ToolArtifactReadRecorded,
         ControlEntry::ToolEgress(_) => DurableEventType::EgressDecisionRecorded,
         ControlEntry::PluginTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+        ControlEntry::PluginReviewCompletedV1(_) => DurableEventType::PluginReviewCompletedV1,
         ControlEntry::PluginHookExecutionStarted(_) => DurableEventType::PluginHookExecutionStarted,
         ControlEntry::PluginHookExecutionFinished(_) => {
             DurableEventType::PluginHookExecutionFinished

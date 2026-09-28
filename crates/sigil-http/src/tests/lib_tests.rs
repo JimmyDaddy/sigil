@@ -3285,6 +3285,7 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
         restore: None,
         fork: None,
         branch_knowledge: None,
+        plugin_review: None,
         recovery,
     });
     let command = HttpCommandEnvelope::new(
@@ -9925,6 +9926,20 @@ impl QueueTestDriver {
 }
 
 impl HttpRunDriver for QueueTestDriver {
+    fn queued_review_context(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        annotations: &[sigil_application::ReviewAnnotation],
+    ) -> Result<String, crate::HttpConversationRecoveryDriverError> {
+        if annotations.len() != 1 || annotations[0].diff_digest != "known-diff" {
+            return Err(crate::HttpConversationRecoveryDriverError::StaleBinding);
+        }
+        Ok(format!(
+            "\nRecorded source: +original line\nComment: {}\nCurrent content unknown at execution.",
+            annotations[0].comment.as_str()
+        ))
+    }
+
     fn requires_run_release_barrier(&self) -> bool {
         self.release_barrier
     }
@@ -11302,4 +11317,85 @@ fn http_artifact_search_defaults_and_large_requests_match_kernel_contract() -> a
     }))?;
     assert!(zero.validate().is_err());
     Ok(())
+}
+
+#[test]
+fn review_queue_materializes_before_command_identity_and_preserves_exact_retry() {
+    let driver = Arc::new(QueueTestDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    registry
+        .start_run(
+            &session.id,
+            run_start("keep active", HttpPermissionMode::Manual),
+        )
+        .expect("active run");
+    let annotation = sigil_application::ReviewAnnotation {
+        checkpoint_id: "cp".to_owned(),
+        checkpoint_digest: "cp-digest".to_owned(),
+        source_call_id: "call".to_owned(),
+        diff_digest: "known-diff".to_owned(),
+        path: "a.rs".to_owned(),
+        side: sigil_application::ReviewDiffSide::New,
+        start_line: 1,
+        end_line: 1,
+        comment: sigil_application::SafeText::new("Clarify this line").expect("comment"),
+    };
+    let command = conversation_queue_command(
+        "review-queue",
+        "desktop-client",
+        &session.id,
+        0,
+        HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: vec![annotation.clone()],
+            prompt: "Clarify this line".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: None,
+        },
+    );
+    let first = registry
+        .command_conversation_queue(&session.id, command.clone())
+        .expect("comment admitted while active");
+    let replay = registry
+        .command_conversation_queue(&session.id, command)
+        .expect("same request replays");
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    let delivered = driver.queue_commands();
+    assert_eq!(delivered.len(), 1);
+    let HttpConversationQueueCommandAction::Enqueue {
+        prompt,
+        review_annotations,
+        ..
+    } = &delivered[0].request.action
+    else {
+        panic!("enqueue");
+    };
+    assert!(
+        review_annotations.is_empty(),
+        "the existing queue owner receives a complete prompt"
+    );
+    assert!(prompt.contains("+original line"));
+    assert!(prompt.contains("unknown at execution"));
+    let mut forged = annotation;
+    forged.diff_digest = "forged".to_owned();
+    let command = conversation_queue_command(
+        "review-queue-forged",
+        "desktop-client",
+        &session.id,
+        1,
+        HttpConversationQueueCommandAction::Enqueue {
+            review_annotations: vec![forged],
+            prompt: "Clarify".to_owned(),
+            kind: HttpConversationQueueItemKind::Chat,
+            reasoning_effort: None,
+        },
+    );
+    assert!(
+        registry
+            .command_conversation_queue(&session.id, command)
+            .is_err()
+    );
+    assert_eq!(driver.queue_commands().len(), 1);
+    assert!(driver.cancels().is_empty());
 }

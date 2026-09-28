@@ -9,7 +9,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     if config_state.draft.mcp_servers.is_empty() {
         lines.push(render_config_hint_row("No MCP servers configured"));
         lines.push(render_config_hint_row(
-            "Use `sigil mcp add`, or edit ~/.sigil/sigil.toml / your explicit config file",
+            "Ctrl-N imports selected servers from an MCP JSON file into this draft",
         ));
     } else {
         lines.push(render_config_value_row(config_state, ConfigField::McpName));
@@ -26,9 +26,11 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         }
     }
     lines.push(String::new());
-    lines.push("Enter next server · Down actions · footer activate/refresh".to_owned());
+    lines.push(
+        "Ctrl-N import · Enter next server · Down actions · footer activate/refresh".to_owned(),
+    );
     lines.push(render_config_hint_row(
-        "Manage entries with `sigil mcp add/remove`; advanced transport fields stay in config, and resolved secrets never appear here",
+        "Import does not start servers; Ctrl-S saves. Advanced transport fields stay in config; resolved secrets never appear here",
     ));
     lines.extend(render_config_selection_details(config_state));
 }

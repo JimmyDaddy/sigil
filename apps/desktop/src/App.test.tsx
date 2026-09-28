@@ -129,6 +129,8 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
   } = overrides;
   let simulatedOwner: ConversationContinuity["foregroundOwner"];
   return {
+    pickMcpImport: vi.fn(async () => null),
+    applyMcpImport: vi.fn(async () => ({ importedNames: [], reloadRequired: false })),
     pickImage: vi.fn(async () => null),
     ingestImage: vi.fn(async () => { throw new Error("no fixture image"); }),
     releaseImages: vi.fn(async () => {}),
@@ -363,6 +365,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       },
       replayed: false,
     }),
+    pluginCatalog: async () => ({ plugins: [], warningCount: 0 }),
     conversationRecovery: async () => ({ checkpoints: [], forkPoints: [], throughStreamSequence: 0 }),
     conversationCompactionPreview: async () => ({
       previewId: "compaction-preview-test",

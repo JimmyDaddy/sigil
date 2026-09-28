@@ -333,6 +333,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.decision.as_str(),
             truncate_session_view_text(&entry.manifest_hash, 16)
         ),
+        ControlEntry::PluginReviewCompletedV1(entry) => format!(
+            "[ctl] plugin {} review={} cleanup={:?} trust_event={}",
+            truncate_session_view_text(&entry.plugin_id, 48),
+            entry.decision.as_str(),
+            entry.process_cleanup,
+            truncate_session_view_text(&entry.trust_event_id, 36)
+        ),
         ControlEntry::PluginHookExecutionStarted(entry) => format!(
             "[ctl] plugin hook {}:{} started kind={} effect={} backend={} profile={} coverage={} env={}",
             truncate_session_view_text(&entry.plugin_id, 32),

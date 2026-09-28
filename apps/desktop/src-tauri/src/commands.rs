@@ -775,6 +775,24 @@ pub(crate) async fn desktop_conversation_recovery(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_plugin_catalog(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<crate::ipc::DesktopPluginCatalog, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?
+        .plugin_catalog(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_checkpoint_review(
     workspace_id: String,
     input: DesktopCheckpointRestorePreviewInput,
@@ -2594,6 +2612,17 @@ fn validate_recovery_action(
             validate_recovery_token(checkpoint_id)?;
             validate_recovery_token(checkpoint_digest)
         }
+        crate::ipc::DesktopConversationRecoveryActionInput::ReviewPlugin {
+            plugin_id,
+            manifest_hash,
+            capability_digest,
+            ..
+        } => {
+            for value in [plugin_id, manifest_hash, capability_digest] {
+                validate_recovery_token(value)?;
+            }
+            Ok(())
+        }
         crate::ipc::DesktopConversationRecoveryActionInput::ForkConversation {
             source_turn_digest,
             model_ref,
@@ -2906,7 +2935,7 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
     }
 }
 
-async fn configuration_change_client(
+pub(crate) async fn configuration_change_client(
     manager: &sigil_desktop::DesktopWorkspaceManager,
     workspace_id: &str,
 ) -> Result<DesktopHttpClient, DesktopCommandError> {
@@ -2923,7 +2952,7 @@ async fn configuration_change_client(
     }
 }
 
-async fn ensure_workspace_restart_safe(
+pub(crate) async fn ensure_workspace_restart_safe(
     client: &DesktopHttpClient,
 ) -> Result<(), DesktopCommandError> {
     let sessions = match client.list_sessions().await {

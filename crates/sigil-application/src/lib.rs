@@ -450,6 +450,7 @@ pub enum ApplicationQueueAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryActionKind {
+    ReviewPlugin,
     StartCompaction,
     PreviewCompaction,
     PrepareCompaction,
@@ -469,6 +470,12 @@ pub enum ApplicationRecoveryActionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryAction {
+    ReviewPlugin {
+        plugin_id: SafeText,
+        manifest_hash: SafeText,
+        capability_digest: SafeText,
+        enabled: bool,
+    },
     StartCompaction,
     PreviewCompaction,
     PrepareCompaction {
@@ -538,6 +545,7 @@ impl ApplicationRecoveryAction {
     #[must_use]
     pub const fn kind(&self) -> ApplicationRecoveryActionKind {
         match self {
+            Self::ReviewPlugin { .. } => ApplicationRecoveryActionKind::ReviewPlugin,
             Self::StartCompaction => ApplicationRecoveryActionKind::StartCompaction,
             Self::PreviewCompaction => ApplicationRecoveryActionKind::PreviewCompaction,
             Self::PrepareCompaction { .. } => ApplicationRecoveryActionKind::PrepareCompaction,
@@ -567,8 +575,22 @@ impl ApplicationRecoveryAction {
     }
 }
 
+/// Process cleanup is independent from enabling or disabling trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCleanupStatus {
+    Confirmed,
+    Unknown,
+    Unconfirmed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationRecoveryOutcome {
+    PluginReview {
+        plugin_id: SafeText,
+        enabled: bool,
+        process_cleanup: Option<PluginCleanupStatus>,
+    },
     BranchKnowledge {
         import_id: SafeText,
         already_imported: bool,

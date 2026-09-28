@@ -131,6 +131,11 @@ pub(super) struct McpClient {
     terminal_record: std::sync::Mutex<Option<McpTerminalRecord>>,
     cleanup_outcome: Mutex<Option<McpProcessCleanupSummary>>,
     lifecycle_owner: ToolLifecycleOwner,
+    lifetime: Option<Arc<super::process_lifetime::McpProcessLifetime>>,
+    pre_request_check: Option<Arc<dyn McpPreRequestCheck>>,
+    declaration_check: Mutex<Option<JoinHandle<Result<()>>>>,
+    startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    startup_complete: std::sync::atomic::AtomicBool,
 }
 
 pub(super) enum McpConnectionState {
@@ -196,27 +201,61 @@ impl McpClient {
 
     pub(super) async fn spawn(
         config: McpServerConfig,
-        roots: Vec<PathBuf>,
-        working_dir: Option<PathBuf>,
-        mut secret_redactor: SecretRedactor,
-        elicitation_handler: Arc<dyn McpElicitationHandler>,
-        runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
-        process_launcher: Arc<dyn McpProcessLauncher>,
-        expected_process_subject: Option<&ToolSubject>,
-        network_admission: ExtensionProcessNetworkAdmission,
+        options: &McpToolRegistrationOptions,
+        lifetime: Option<Arc<super::process_lifetime::McpProcessLifetime>>,
     ) -> Result<Arc<Self>> {
+        let mut secret_redactor = options.secret_redactor.clone();
+        let elicitation_handler = Arc::clone(&options.elicitation_handler);
+        let runtime_event_handler = Arc::clone(&options.runtime_event_handler);
+        let process_launcher = Arc::clone(&options.process_launcher);
+        let pre_request_check = options.pre_request_check.clone();
+        let startup_cancellation = options.startup_cancellation.clone();
         let startup_deadline = McpOperationDeadline::from_secs(config.startup_timeout_secs);
         let launch_request = process_launcher
-            .resolve_launch_request(&config, working_dir)?
-            .with_network_admission(network_admission);
-        validate_expected_process_subject(&config, &launch_request, expected_process_subject)?;
+            .resolve_launch_request(&config, options.working_dir.clone())?
+            .with_network_admission(options.network_admission);
+        validate_expected_process_subject(
+            &config,
+            &launch_request,
+            options.expected_process_subject.as_ref(),
+        )?;
         validate_mcp_static_pin(&config, &launch_request.launch_static_fingerprint)?;
         for name in launch_request.environment.grant_names() {
             if let Some(secret) = launch_request.environment.variable(name) {
                 secret_redactor.add_secret_carrier(secret.clone());
             }
         }
-        let launch = process_launcher.launch_async(launch_request).await?;
+        if let Some(lifetime) = &lifetime {
+            lifetime.starting().await?;
+        }
+        if startup_cancellation
+            .as_ref()
+            .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+        {
+            if let Some(lifetime) = &lifetime {
+                lifetime.rejected_before_spawn().await?;
+            }
+            return Err(anyhow!("MCP startup cancelled before process launch")
+                .context(McpPreSpawnRejection));
+        }
+        let launch = match process_launcher.launch_async(launch_request).await {
+            Ok(launch) => launch,
+            Err(error) => {
+                if let Some(lifetime) = &lifetime {
+                    let audit_result = if error.is::<McpPreSpawnRejection>() {
+                        lifetime.rejected_before_spawn().await
+                    } else {
+                        lifetime.finish(None, false).await
+                    };
+                    if let Err(audit_error) = audit_result {
+                        return Err(error
+                            .context(format!("MCP launch outcome audit failed: {audit_error:#}")));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let lifetime_after_failure = lifetime.clone();
         let startup_receipt = launch.receipt.clone();
         let startup = async move {
             let McpProcessLaunch {
@@ -280,6 +319,27 @@ impl McpClient {
                 Arc::clone(&stderr_fault),
             ));
 
+            let mut lifecycle_owner = lifetime
+                .as_ref()
+                .map(|audit| audit.owner.clone())
+                .unwrap_or_else(|| {
+                    ToolLifecycleOwner::new(
+                        MCP_TOOL_LIFECYCLE_NAMESPACE,
+                        config.name.clone(),
+                        Uuid::new_v4().to_string(),
+                    )
+                });
+            if let Some(declaration) = &receipt.declaration
+                && declaration.origin_kind == "plugin_manifest"
+                && let (Some(plugin_id), Some(manifest_hash)) =
+                    (&declaration.origin_id, &declaration.manifest_hash)
+            {
+                lifecycle_owner = lifecycle_owner.with_origin(sigil_kernel::ToolLifecycleOrigin {
+                    namespace: "plugin".to_owned(),
+                    subject: plugin_id.clone(),
+                    revision: manifest_hash.clone(),
+                });
+            }
             let client = Arc::new(Self {
                 _child: Mutex::new(legacy_child),
                 _process_owner: process_owner,
@@ -300,20 +360,33 @@ impl McpClient {
                 secret_redactor,
                 elicitation_handler,
                 runtime_event_handler,
-                roots,
+                roots: options.roots.clone(),
                 identity: std::sync::OnceLock::new(),
                 server_capabilities: std::sync::OnceLock::new(),
                 startup_deadline,
                 terminal_state: std::sync::atomic::AtomicU8::new(0),
                 terminal_record: std::sync::Mutex::new(None),
                 cleanup_outcome: Mutex::new(None),
-                lifecycle_owner: ToolLifecycleOwner::new(
-                    MCP_TOOL_LIFECYCLE_NAMESPACE,
-                    config.name.clone(),
-                    Uuid::new_v4().to_string(),
-                ),
+                lifecycle_owner,
+                lifetime,
+                pre_request_check,
+                declaration_check: Mutex::new(None),
+                startup_cancellation,
+                startup_complete: std::sync::atomic::AtomicBool::new(false),
             });
             client.start_stderr_monitor().await;
+            if let Some(lifetime) = &client.lifetime
+                && let Err(error) = lifetime.running(client.process_receipt()).await
+            {
+                let cleanup = client
+                    .close_connection("MCP running lifetime audit failed".to_owned())
+                    .await;
+                return Err(McpPostSpawnStartupError::new(
+                    startup_receipt.clone(),
+                    error,
+                    cleanup,
+                ));
+            }
             let outcome = match client.initialize(&config, startup_deadline).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -366,7 +439,21 @@ impl McpClient {
             Ok(client)
         }
         .await;
-        startup.map_err(Into::into)
+        match startup {
+            Ok(client) => Ok(client),
+            Err(error) => {
+                if let Some(lifetime) = lifetime_after_failure
+                    && let Err(audit_error) = lifetime
+                        .finish(Some(error.receipt()), error.cleanup_completed())
+                        .await
+                {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "MCP startup lifecycle settlement failed: {audit_error:#}"
+                    )));
+                }
+                Err(error.into())
+            }
+        }
     }
 
     pub(super) async fn initialize(
@@ -534,11 +621,13 @@ impl McpClient {
             "params": params,
         });
         let operation = method.to_owned();
-        let outcome = tokio::time::timeout_at(
-            deadline.at,
-            self.send_notification_inner(&operation, &message),
-        )
-        .await;
+        let outcome = tokio::select! {
+            biased;
+            _ = self.startup_cancelled() => Ok(Err(McpClientError::Inbound {
+                operation: operation.clone(), source: anyhow!("MCP startup cancelled"),
+            })),
+            outcome = tokio::time::timeout_at(deadline.at, self.send_notification_inner(&operation, &message)) => outcome,
+        };
         self.finish_deadlined_operation(operation, deadline, outcome)
             .await
     }
@@ -580,11 +669,13 @@ impl McpClient {
             "method": method,
             "params": params,
         });
-        let outcome = tokio::time::timeout_at(
-            deadline.at,
-            self.send_request_response_inner(&operation, message),
-        )
-        .await;
+        let outcome = tokio::select! {
+            biased;
+            _ = self.startup_cancelled() => Ok(Err(McpClientError::Inbound {
+                operation: operation.clone(), source: anyhow!("MCP startup cancelled"),
+            })),
+            outcome = tokio::time::timeout_at(deadline.at, self.send_request_response_inner(&operation, message)) => outcome,
+        };
         self.finish_deadlined_operation(operation, deadline, outcome)
             .await
     }
@@ -596,6 +687,12 @@ impl McpClient {
     ) -> std::result::Result<(), McpClientError> {
         let mut state = self.connection.lock().await;
         let connection = self.ready_connection(&mut state)?;
+        self.ensure_declaration_current()
+            .await
+            .map_err(|source| McpClientError::Inbound {
+                operation: operation.to_owned(),
+                source,
+            })?;
         self.ensure_environment_binding_current()
             .await
             .map_err(|source| McpClientError::Inbound {
@@ -618,6 +715,12 @@ impl McpClient {
     ) -> std::result::Result<Value, McpClientError> {
         let mut state = self.connection.lock().await;
         let connection = self.ready_connection(&mut state)?;
+        self.ensure_declaration_current()
+            .await
+            .map_err(|source| McpClientError::Inbound {
+                operation: operation.to_owned(),
+                source,
+            })?;
         self.ensure_environment_binding_current()
             .await
             .map_err(|source| McpClientError::Inbound {
@@ -923,6 +1026,11 @@ impl McpClient {
     }
 
     async fn cleanup_evidence(&self) -> McpCleanupEvidence {
+        // A timeout can drop the request future, but a running filesystem/trust check is not
+        // abortable. Its handle stays on this client until every completion path has joined it.
+        if let Err(error) = self.join_declaration_check().await {
+            tracing::warn!(%error, "MCP declaration check worker failed during cleanup");
+        }
         const SHUTDOWN_COMPLETION_GRACE: Duration = Duration::from_secs(4);
         const MAX_CLEANUP_REASON_CHARS: usize = 512;
         let deadline = tokio::time::Instant::now() + SHUTDOWN_COMPLETION_GRACE;
@@ -1012,6 +1120,17 @@ impl McpClient {
 
         let stderr = self.finish_stderr_capture().await;
         merge_stderr_capture_into_cleanup(&mut cleanup, &stderr);
+        if let Err(error) = self.join_declaration_check().await {
+            tracing::warn!(%error, "MCP declaration check worker failed during cleanup");
+        }
+        if let Some(lifetime) = &self.lifetime
+            && let Err(error) = lifetime
+                .finish(Some(self.process_receipt()), cleanup.completed)
+                .await
+        {
+            cleanup.completed = false;
+            cleanup.reason = format!("{}; lifetime audit failed: {error:#}", cleanup.reason);
+        }
         *self.cleanup_outcome.lock().await = Some(cleanup.clone());
         let closed_reason = if cleanup.completed {
             reason
@@ -1051,12 +1170,8 @@ impl McpClient {
     }
 
     async fn ensure_environment_binding_current(&self) -> Result<()> {
-        let current = match resolve_extension_process_environment(
-            &self._process_receipt.environment_grant_names,
-        ) {
-            Ok(current) => current,
-            Err(error) => return Err(error.into()),
-        };
+        let current =
+            resolve_extension_process_environment(&self._process_receipt.environment_grant_names)?;
         if environment_binding_matches(&self._process_receipt, &current) {
             return Ok(());
         }
@@ -1068,6 +1183,60 @@ impl McpClient {
             ),
         )
         .into())
+    }
+
+    pub(super) fn complete_startup(&self) {
+        self.startup_complete
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn arm_final_scan(&self, baseline: Option<WorkspaceMutationScan>) {
+        if let Some(lifetime) = &self.lifetime {
+            lifetime.arm_final_scan(baseline);
+        }
+    }
+
+    async fn startup_cancelled(&self) {
+        if !self
+            .startup_complete
+            .load(std::sync::atomic::Ordering::Acquire)
+            && let Some(cancellation) = &self.startup_cancellation
+        {
+            cancellation.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    async fn ensure_declaration_current(&self) -> Result<()> {
+        let Some(check) = &self.pre_request_check else {
+            return Ok(());
+        };
+        let check = Arc::clone(check);
+        let receipt = self._process_receipt.clone();
+        let owner = self.lifecycle_owner.clone();
+        let mut slot = self.declaration_check.lock().await;
+        *slot = Some(tokio::task::spawn_blocking(move || {
+            check.validate_current(&receipt, &owner)
+        }));
+        let outcome = match slot.as_mut() {
+            Some(task) => task.await,
+            None => bail!("MCP declaration check owner is unavailable"),
+        };
+        slot.take();
+        outcome.context("MCP current declaration check worker failed")?
+    }
+
+    async fn join_declaration_check(&self) -> Result<()> {
+        let mut slot = self.declaration_check.lock().await;
+        if let Some(task) = slot.as_mut() {
+            let outcome = task.await;
+            slot.take();
+            // The operation reports a validation rejection. Cleanup only needs the owned task's
+            // physical completion and must not turn that rejection into an unconfirmed process.
+            let _validation = outcome.context("MCP declaration check worker join failed")?;
+        }
+        Ok(())
     }
 
     pub(super) async fn handle_inbound_message(

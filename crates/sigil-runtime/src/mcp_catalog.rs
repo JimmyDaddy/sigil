@@ -7,10 +7,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    McpServerConfig, McpServerStartup, RootConfig, SecretRedactor, Tool, ToolAccess,
-    ToolCatalogEntry, ToolCategory, ToolConcurrencyClass, ToolContext, ToolErrorKind,
-    ToolMutationTracking, ToolPreviewCapability, ToolRegistry, ToolReplayContractV1, ToolResult,
-    ToolResultMeta, ToolSpec,
+    McpServerConfig, RootConfig, SecretRedactor, Tool, ToolAccess, ToolCatalogEntry, ToolCategory,
+    ToolConcurrencyClass, ToolContext, ToolErrorKind, ToolMutationTracking, ToolPreviewCapability,
+    ToolRegistry, ToolReplayContractV1, ToolResult, ToolResultMeta, ToolSpec,
 };
 
 const TOOL_NAME: &str = "mcp_catalog";
@@ -118,20 +117,24 @@ impl Tool for McpCatalogTool {
                     .any(|entry| entry.spec.name == "mcp_activate_server");
                 let mut servers = self.servers.iter().collect::<Vec<_>>();
                 servers.sort_by(|left, right| left.name.cmp(&right.name));
-                let summaries = servers.into_iter().map(|server| {
-                    let (description, description_truncated) = bounded_description(&server.description);
-                    let visible_tools = mcp_entries(&entries, Some(&server.name)).count();
-                    json!({
-                        "server_name": server.name,
-                        "description": description,
-                        "description_truncated": description_truncated,
-                        "transport": server.transport_name(),
-                        "startup": server.startup.as_str(),
-                        "trust_class": server.trust.trust_class.as_str(),
-                        "visible_tools": visible_tools,
-                        "activation_available": activation_visible && (server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()),
+                let summaries = servers
+                    .into_iter()
+                    .map(|server| {
+                        let (description, description_truncated) =
+                            bounded_description(&server.description);
+                        let visible_tools = mcp_entries(&entries, Some(&server.name)).count();
+                        json!({
+                            "server_name": server.name,
+                            "description": description,
+                            "description_truncated": description_truncated,
+                            "transport": server.transport_name(),
+                            "startup": server.startup.as_str(),
+                            "trust_class": server.trust.trust_class.as_str(),
+                            "visible_tools": visible_tools,
+                            "activation_available": activation_visible,
+                        })
                     })
-                }).collect();
+                    .collect();
                 paged_result(&call_id, "servers", summaries, cursor, limit)
             }
             CatalogRequest::ListTools {
@@ -190,6 +193,7 @@ fn tool_summary(entry: &ToolCatalogEntry) -> Value {
         "description": description,
         "description_truncated": description_truncated,
         "revision": entry.revision,
+        "generation": entry.lifecycle_owner.as_ref().map(|owner| owner.generation()),
         "access": entry.spec.access,
     })
 }

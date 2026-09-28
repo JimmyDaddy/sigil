@@ -26,6 +26,8 @@ pub struct McpToolRegistrationOptions {
     pub mutation_recorder: Option<MutationEventRecorder>,
     pub mutation_workspace_root: Option<PathBuf>,
     pub process_launcher: Arc<dyn McpProcessLauncher>,
+    pub pre_request_check: Option<Arc<dyn McpPreRequestCheck>>,
+    pub startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
     pub network_admission: ExtensionProcessNetworkAdmission,
     pub expected_process_subject: Option<ToolSubject>,
     pub pre_spawn_safe_metadata: BTreeMap<String, BTreeMap<String, String>>,
@@ -59,6 +61,8 @@ impl McpToolRegistrationOptions {
             mutation_recorder: None,
             mutation_workspace_root: None,
             process_launcher: default_process_launcher(),
+            pre_request_check: None,
+            startup_cancellation: None,
             network_admission: ExtensionProcessNetworkAdmission::default(),
             expected_process_subject: None,
             pre_spawn_safe_metadata: BTreeMap::new(),
@@ -114,6 +118,22 @@ impl McpToolRegistrationOptions {
 
     pub fn with_process_launcher(mut self, process_launcher: Arc<dyn McpProcessLauncher>) -> Self {
         self.process_launcher = process_launcher;
+        self
+    }
+
+    #[must_use]
+    pub fn with_pre_request_check(mut self, check: Arc<dyn McpPreRequestCheck>) -> Self {
+        self.pre_request_check = Some(check);
+        self
+    }
+
+    /// Cancels owned initialization without abandoning a process that has already started.
+    #[must_use]
+    pub fn with_startup_cancellation(
+        mut self,
+        cancellation: sigil_kernel::RunCancellationHandle,
+    ) -> Self {
+        self.startup_cancellation = Some(cancellation);
         self
     }
 
@@ -309,14 +329,8 @@ async fn prepare_mcp_server<'a>(
     let lifecycle_scan = capture_mcp_server_lifecycle_scan_async(options, &server.name).await?;
     let client = match McpClient::spawn(
         server.clone(),
-        options.roots.clone(),
-        options.working_dir.clone(),
-        options.secret_redactor.clone(),
-        Arc::clone(&options.elicitation_handler),
-        Arc::clone(&options.runtime_event_handler),
-        Arc::clone(&options.process_launcher),
-        options.expected_process_subject.as_ref(),
-        options.network_admission,
+        options,
+        super::process_lifetime::McpProcessLifetime::new(options, &server.name),
     )
     .await
     {
@@ -328,14 +342,19 @@ async fn prepare_mcp_server<'a>(
             let cleanup_incomplete = error
                 .downcast_ref::<super::client::McpPostSpawnStartupError>()
                 .is_some_and(|error| !error.cleanup_completed());
-            record_mcp_server_lifecycle_scan_result_async(
+            if let Err(audit_error) = record_mcp_server_lifecycle_scan_result_async(
                 options,
                 &server.name,
                 lifecycle_scan.as_ref(),
                 receipt,
                 "startup_failed",
             )
-            .await?;
+            .await
+            {
+                return Err(error.context(format!(
+                    "optional MCP startup result audit failed: {audit_error:#}"
+                )));
+            }
             if cleanup_incomplete {
                 return Err(error.context(format!(
                     "optional MCP server {} startup cleanup was incomplete",
@@ -354,14 +373,19 @@ async fn prepare_mcp_server<'a>(
             let receipt = error
                 .downcast_ref::<super::client::McpPostSpawnStartupError>()
                 .map(super::client::McpPostSpawnStartupError::receipt);
-            record_mcp_server_lifecycle_scan_result_async(
+            if let Err(audit_error) = record_mcp_server_lifecycle_scan_result_async(
                 options,
                 &server.name,
                 lifecycle_scan.as_ref(),
                 receipt,
                 "startup_failed",
             )
-            .await?;
+            .await
+            {
+                return Err(
+                    error.context(format!("MCP startup result audit failed: {audit_error:#}"))
+                );
+            }
             return Err(error);
         }
     };
@@ -563,7 +587,7 @@ async fn register_prepared_mcp_server(
     } else {
         let owner = client.lifecycle_owner();
         registered_owners.push(owner.clone());
-        if let Err(error) = record_mcp_server_lifecycle_scan_result_async(
+        let final_scan_baseline = match record_mcp_server_lifecycle_scan_result_async(
             options,
             &server.name,
             lifecycle_scan.as_ref(),
@@ -572,16 +596,21 @@ async fn register_prepared_mcp_server(
         )
         .await
         {
-            let cleanup = client
-                .close_connection(format!("registered lifecycle evidence failed: {error:#}"))
-                .await;
-            return Err(error.context(format!(
-                "MCP server {} lifecycle evidence failed after spawn and callable owner registration; transport cleanup: {}",
-                server.name,
-                cleanup.summary()
-            )));
-        }
+            Ok(baseline) => baseline,
+            Err(error) => {
+                let cleanup = client
+                    .close_connection(format!("registered lifecycle evidence failed: {error:#}"))
+                    .await;
+                return Err(error.context(format!(
+                    "MCP server {} lifecycle evidence failed after spawn and callable owner registration; transport cleanup: {}",
+                    server.name,
+                    cleanup.summary()
+                )));
+            }
+        };
         report.process_launch_receipts.push(process_receipt);
+        client.arm_final_scan(final_scan_baseline);
+        client.complete_startup();
         report.lifecycle_owners.push(owner);
     }
     Ok(())
@@ -604,7 +633,7 @@ async fn record_mcp_server_lifecycle_scan_result_async(
     before: Option<&WorkspaceMutationScan>,
     receipt: Option<&McpProcessLaunchReceipt>,
     startup_result: &'static str,
-) -> Result<()> {
+) -> Result<Option<WorkspaceMutationScan>> {
     let options = options.clone();
     let server_name = server_name.to_owned();
     let before = before.cloned();
@@ -695,11 +724,11 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
     before: Option<&WorkspaceMutationScan>,
     receipt: Option<&McpProcessLaunchReceipt>,
     startup_result: &'static str,
-) -> Result<()> {
+) -> Result<Option<WorkspaceMutationScan>> {
     let (Some(recorder), Some(workspace_root)) =
         (&options.mutation_recorder, &options.mutation_workspace_root)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let metadata = mcp_lifecycle_metadata(
         receipt,
@@ -745,7 +774,7 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
                     "failed to record MCP server {server_name} lifecycle receipt after the pre-start scan was unavailable"
                 )
             })?;
-        return Ok(());
+        return Ok(None);
     };
     match recorder.capture_workspace_scan(workspace_root, &before.scope) {
         Ok(after) => {
@@ -756,6 +785,7 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
                 ToolEffect::Unknown,
                 metadata,
             )?;
+            Ok(Some(after))
         }
         Err(error) => {
             recorder
@@ -773,9 +803,9 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
                 error = %error,
                 "failed to capture MCP server lifecycle workspace scan after startup"
             );
+            Ok(None)
         }
     }
-    Ok(())
 }
 
 pub(super) fn mcp_lifecycle_metadata(

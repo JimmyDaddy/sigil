@@ -190,6 +190,8 @@ pub struct PluginHookExecutionRequest {
     pub artifact_refs: Vec<PluginHookOutputArtifactRef>,
     pub mutation_recorder: Option<MutationEventRecorder>,
     pub cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    /// Read-only attestation recheck; never issues admission or substitutes the execution owner.
+    pub pre_spawn_check: Option<Arc<dyn PluginHookPreSpawnCheck>>,
 }
 
 impl PluginHookExecutionRequest {
@@ -203,6 +205,7 @@ impl PluginHookExecutionRequest {
             artifact_refs: Vec::new(),
             mutation_recorder: None,
             cancellation: None,
+            pre_spawn_check: None,
         }
     }
 
@@ -293,6 +296,13 @@ pub struct ManagedPluginHookExecutionRequestV1 {
     pub timeout_ms: u64,
     pub output_limit_bytes: usize,
     pub cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    /// Read-only attestation recheck; never issues admission or substitutes the execution owner.
+    pub pre_spawn_check: Option<Arc<dyn PluginHookPreSpawnCheck>>,
+}
+
+/// A read-only manifest/trust recheck at the existing process launch seam.
+pub trait PluginHookPreSpawnCheck: Send + Sync + std::fmt::Debug {
+    fn validate_current(&self) -> Result<()>;
 }
 
 /// Purpose-specific production port for plugin hook execution.
@@ -422,6 +432,36 @@ impl PluginHookExecutionRunner {
         &self,
         request: PluginHookExecutionRequest,
     ) -> Result<PluginHookExecutionOutcome> {
+        self.execute_inner(request, false).await
+    }
+
+    pub(crate) async fn execute_after_tool_approval(
+        &self,
+        request: PluginHookExecutionRequest,
+        context: &sigil_kernel::ToolContext,
+        expected_subject: &sigil_kernel::ToolSubject,
+    ) -> Result<PluginHookExecutionOutcome> {
+        anyhow::ensure!(
+            context.approved_subjects().contains(expected_subject),
+            "plugin hook approval subject changed before execution"
+        );
+        anyhow::ensure!(
+            request.pre_spawn_check.is_some(),
+            "plugin hook requires current manifest and trust attestation"
+        );
+        self.execute_inner(request, true).await
+    }
+
+    async fn execute_inner(
+        &self,
+        request: PluginHookExecutionRequest,
+        subject_approved: bool,
+    ) -> Result<PluginHookExecutionOutcome> {
+        ensure_hook_not_cancelled(request.cancellation.as_ref())?;
+        if let Some(check) = request.pre_spawn_check.clone() {
+            tokio::task::spawn_blocking(move || check.validate_current()).await??;
+        }
+        ensure_hook_not_cancelled(request.cancellation.as_ref())?;
         let registration = request.registration;
         if registration.trust != PluginTrustDecision::Trusted {
             bail!(
@@ -434,6 +474,7 @@ impl PluginHookExecutionRunner {
         let hook_id = registration.hook.stable_id();
         match registration.hook.approval {
             ApprovalMode::Allow => {}
+            ApprovalMode::Ask if subject_approved => {}
             ApprovalMode::Ask => {
                 return Err(PluginHookExecutionAdmissionError {
                     code: PluginHookExecutionAdmissionErrorCode::ApprovalRequired,
@@ -559,6 +600,7 @@ impl PluginHookExecutionRunner {
                 timeout_ms: registration.hook.timeout_ms,
                 output_limit_bytes,
                 cancellation: request.cancellation,
+                pre_spawn_check: request.pre_spawn_check,
             })
             .await
         {
@@ -730,6 +772,16 @@ fn finish_plugin_hook_mutation_scan(
             Ok(Some(event.event_id))
         }
     }
+}
+
+pub(crate) fn ensure_hook_not_cancelled(
+    cancellation: Option<&sigil_kernel::RunCancellationHandle>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !cancellation.is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested),
+        "plugin hook was cancelled before process launch"
+    );
+    Ok(())
 }
 
 fn plugin_hook_tool_name(plugin_id: &str, hook_id: &str) -> String {

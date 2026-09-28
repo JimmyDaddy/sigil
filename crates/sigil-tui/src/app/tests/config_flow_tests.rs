@@ -1805,7 +1805,7 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("- Configured"));
     assert!(detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
-    assert!(detail.contains("i Use `sigil mcp add`"));
+    assert!(detail.contains("i Ctrl-N imports selected servers"));
     assert!(detail.contains("controls: Tab section · Down actions"));
     assert!(detail.contains("mcp: no configured server to inspect"));
     assert!(!detail.contains("servers:"));
@@ -3544,7 +3544,7 @@ fn config_plugins_page_keys_cycle_discovered_plugins() -> Result<()> {
 }
 
 #[test]
-fn config_plugins_footer_writes_append_only_trust_entry() -> Result<()> {
+fn config_plugins_footer_queues_exact_owned_review_before_success() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -3552,58 +3552,69 @@ fn config_plugins_footer_writes_append_only_trust_entry() -> Result<()> {
     let config = config_for_workspace(&workspace);
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.open_config_panel();
-    let session_log_path = app.session_log_path.clone();
-    let state = app
-        .config_state
-        .as_mut()
-        .expect("config state should exist");
+    let state = app.config_state.as_mut().expect("config state");
     state.set_section(ConfigSection::Plugins);
     state.focus_footer(ConfigFooterAction::ApprovePlugin);
-
+    let manifest = state.selected_plugin().expect("plugin").clone();
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("plugin repo-review approved"));
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should exist");
+    assert!(
+        matches!(action, Some(AppAction::ReviewPlugin { plugin_id, manifest_hash, capability_digest, enabled: true })
+        if plugin_id == manifest.plugin_id && manifest_hash == manifest.manifest_hash && capability_digest == manifest.capability_digest()?)
+    );
+    assert!(
+        !app.session_log_path.exists(),
+        "UI cannot create a competing session writer"
+    );
     assert_eq!(
-        state.selected_plugin().map(|plugin| plugin.trust),
+        app.config_state
+            .as_ref()
+            .and_then(|state| state.selected_plugin())
+            .map(|plugin| plugin.trust),
+        Some(sigil_kernel::PluginTrustDecision::NeedsReview)
+    );
+    let receipt = sigil_runtime::plugin_management::ApplicationPluginDecisionReceipt {
+        plugin_id: manifest.plugin_id.clone(),
+        manifest_hash: manifest.manifest_hash.clone(),
+        capability_digest: manifest.capability_digest()?,
+        decision: sigil_kernel::PluginTrustDecision::Trusted,
+        reviewed_at_ms: 1,
+        trust_event_id: "review-event".to_owned(),
+        process_cleanup: None,
+    };
+    let store = sigil_kernel::JsonlSessionStore::new(&app.session_log_path)?;
+    store.append_session_entry_event(&sigil_kernel::SessionLogEntry::Control(
+        sigil_kernel::ControlEntry::PluginTrustDecision(
+            sigil_kernel::PluginTrustEntry::for_snapshot(
+                &manifest,
+                sigil_kernel::PluginTrustDecision::Trusted,
+                1,
+            )?,
+        ),
+    ))?;
+    app.runtime.is_busy = true;
+    app.handle_worker_message(WorkerMessage::PluginReviewCompleted {
+        session_id: app.session_id.clone(),
+        receipt,
+        controls: Vec::new(),
+        cleanup_error: None,
+    })?;
+    assert!(
+        app.runtime.is_busy,
+        "review completion must not end the active run"
+    );
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .and_then(|state| state.selected_plugin())
+            .map(|plugin| plugin.trust),
         Some(sigil_kernel::PluginTrustDecision::Trusted)
     );
-    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
-    assert_eq!(entries.len(), 3);
-    assert!(matches!(
-        entries[0],
-        SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
-    ));
-    let manifest = match &entries[1] {
-        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(manifest)) => manifest,
-        other => panic!("expected manifest capture, got {other:?}"),
-    };
-    assert_eq!(manifest.plugin_id, "repo-review");
-    assert_eq!(
-        manifest.trust,
-        sigil_kernel::PluginTrustDecision::NeedsReview
-    );
-    assert!(manifest.capabilities.iter().any(|capability| matches!(
-        capability,
-        sigil_kernel::PluginCapability::Hook { args, .. }
-            if args == &vec!["--policy".to_owned(), "strict".to_owned()]
-    )));
-    let trust = match &entries[2] {
-        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trust)) => trust,
-        other => panic!("expected trust decision, got {other:?}"),
-    };
-    assert_eq!(trust.plugin_id, "repo-review");
-    assert_eq!(trust.manifest_hash, manifest.manifest_hash);
-    assert_eq!(trust.decision, sigil_kernel::PluginTrustDecision::Trusted);
     Ok(())
 }
 
 #[test]
-fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selection() -> Result<()> {
+fn config_plugins_footer_allows_busy_disable_and_guards_wrong_section_and_empty_selection()
+-> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -3621,8 +3632,11 @@ fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selectio
         state.focus_footer(ConfigFooterAction::DenyPlugin);
     }
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; review plugin later"));
+    assert!(matches!(
+        action,
+        Some(AppAction::ReviewPlugin { enabled: false, .. })
+    ));
+    assert!(app.runtime.is_busy);
 
     app.runtime.is_busy = false;
     {
@@ -3671,14 +3685,11 @@ fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selectio
     state.set_section(ConfigSection::Plugins);
     state.focus_footer(ConfigFooterAction::DenyPlugin);
     let action = deny_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
-    assert_eq!(deny_app.last_notice(), Some("plugin repo-review denied"));
-    let entries = JsonlSessionStore::read_entries(&deny_app.session_log_path)?;
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trust))
-            if trust.decision == sigil_kernel::PluginTrustDecision::Disabled
-    )));
+    assert!(matches!(
+        action,
+        Some(AppAction::ReviewPlugin { enabled: false, .. })
+    ));
+    assert!(!deny_app.session_log_path.exists());
     Ok(())
 }
 
@@ -3972,7 +3983,7 @@ fn config_verification_auto_run_persists_to_config() -> Result<()> {
 }
 
 #[test]
-fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
+fn config_mcp_server_creation_opens_import_preview_path() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     {
@@ -3985,10 +3996,7 @@ fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("use `sigil mcp add` or edit sigil.toml")
-    );
+    assert_eq!(app.modal_title(), Some("Import MCP Configuration"));
     let state = app
         .config_state
         .as_ref()
@@ -3997,8 +4005,8 @@ fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
 
     let detail = app.config_detail_lines().join("\n");
     assert!(detail.contains("No MCP servers configured"));
-    assert!(detail.contains("Use `sigil mcp add`"));
-    assert!(detail.contains("advanced transport fields stay in config"));
+    assert!(detail.contains("Ctrl-N imports selected servers"));
+    assert!(detail.contains("Advanced transport fields stay in config"));
     assert!(!detail.contains("Command"));
     assert!(!detail.contains("Arguments"));
     assert!(!detail.contains("args_csv:"));
@@ -5313,7 +5321,7 @@ fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert_eq!(
         app.last_notice(),
-        Some("MCP server add uses `sigil mcp add`")
+        Some("open MCP settings and press Ctrl-N to import servers")
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
@@ -5340,10 +5348,8 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert_eq!(
-        app.last_notice(),
-        Some("use `sigil mcp add` or edit sigil.toml")
-    );
+    assert_eq!(app.modal_title(), Some("Import MCP Configuration"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert_eq!(
         app.last_notice(),
@@ -5404,5 +5410,79 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         app.handle_config_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn reviewed_plugin_skills_share_tui_settings_and_slash_discovery() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let plugin = root.path().join(".sigil/plugins/workflow");
+    std::fs::create_dir_all(plugin.join("check"))?;
+    std::fs::write(
+        plugin.join("plugin.toml"),
+        "id = 'workflow'\nname = 'Workflow'\nversion = '1.0.0'\n[[skills]]\npath = 'check/SKILL.md'\n",
+    )?;
+    std::fs::write(
+        plugin.join("check/SKILL.md"),
+        "---\nname: check\ndescription: Plugin check.\n---\n\nWorkflow.\n",
+    )?;
+    let mut config = config_for_workspace(root.path());
+    config.skills.user_skills = false;
+    config.skills.user_agents = false;
+    config.skills.compatibility_auto_discover = false;
+    config
+        .composition
+        .enhancements
+        .insert(sigil_kernel::OptionalCapability::Skills);
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("opened settings")
+            .skill_descriptors
+            .is_empty()
+    );
+    let snapshot = sigil_runtime::discover_workspace_plugins(root.path(), &[])?
+        .manifests
+        .remove(0);
+    let trust = sigil_kernel::PluginTrustEntry::for_snapshot(
+        &snapshot,
+        sigil_kernel::PluginTrustDecision::Trusted,
+        1,
+    )?;
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::Control(ControlEntry::PluginTrustDecision(
+            trust.clone(),
+        )));
+    app.open_config_panel();
+    let settings = &app
+        .config_state
+        .as_ref()
+        .expect("opened settings")
+        .skill_descriptors;
+    let slash = app
+        .exact_skill_descriptor("workflow/check")
+        .expect("trusted slash skill");
+    assert_eq!(settings, &vec![slash]);
+    assert_eq!(settings[0].id, "workflow/check");
+    assert_eq!(settings[0].trust, sigil_kernel::SkillTrustState::Trusted);
+    let mut disabled = trust;
+    disabled.decision = sigil_kernel::PluginTrustDecision::Disabled;
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::Control(ControlEntry::PluginTrustDecision(
+            disabled,
+        )));
+    app.open_config_panel();
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("opened settings")
+            .skill_descriptors
+            .is_empty()
+    );
+    assert!(app.exact_skill_descriptor("workflow/check").is_none());
     Ok(())
 }

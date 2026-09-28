@@ -18,6 +18,8 @@ import { useNotifications } from "../../ui/feedback";
 import { Button, Checkbox, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ProviderSetup } from "./ProviderSetup";
+import { PluginReviewCard } from "./PluginReviewCard";
+import { McpImportCard } from "./McpImportCard";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
 import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
 
@@ -36,6 +38,7 @@ export function SettingsPage({
   bridge,
   supportAvailable,
   workspaceId,
+  sessionId,
   isWorkspaceActive,
   providerInventory,
   onProviderInventoryChange,
@@ -49,6 +52,7 @@ export function SettingsPage({
   readonly bridge: DesktopBridge;
   readonly supportAvailable: boolean;
   readonly workspaceId?: string;
+  readonly sessionId?: string;
   readonly isWorkspaceActive: () => boolean;
   readonly providerInventory?: ProviderConnectionInventory;
   readonly onProviderInventoryChange: (inventory: ProviderConnectionInventory) => boolean;
@@ -306,6 +310,14 @@ export function SettingsPage({
               </div>
             ) : null}
         </section>
+
+        {workspaceId !== undefined && sessionId !== undefined && <PluginReviewCard key={`${workspaceId}:${sessionId}`} bridge={bridge} workspaceId={workspaceId} sessionId={sessionId} />}
+
+        {workspaceId !== undefined && <McpImportCard key={workspaceId}
+          bridge={bridge} workspaceId={workspaceId}
+          onImported={async () => {
+            if (isWorkspaceActive()) await onProviderConfigurationReloaded(workspaceId);
+          }} />}
 
         <section className="settings-section" aria-labelledby="settings-model">
           <div className="settings-section-heading">

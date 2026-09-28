@@ -50,6 +50,7 @@ mod output; // bounded MCP tool output and egress summaries.
 mod permission; // annotation-aware V2 permission classification and safe identity binding.
 mod process; // local process launch contracts and stderr handling.
 mod process_group; // direct Unix process-group signalling and liveness checks.
+mod process_lifetime; // exact client lifetime mutation evidence.
 mod prompts; // prompt-backed MCP tool adapter.
 mod resources; // resource-backed MCP tool adapter.
 mod roots; // workspace root URI/name helpers.
@@ -128,8 +129,9 @@ pub use permission::{
 #[cfg(test)]
 pub use process::LocalMcpProcessLauncher;
 pub use process::{
-    McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage, McpProcessLaunch,
-    McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
+    McpDeclarationLaunchMetadata, McpPreRequestCheck, McpPreSpawnRejection, McpProcessClass,
+    McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest,
+    McpProcessLauncher,
 };
 pub use search_binding::{
     KnownMcpSearchAdapter, McpSearchAdapterKind, McpSearchIncompatibility,

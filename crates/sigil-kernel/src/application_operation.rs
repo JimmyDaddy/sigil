@@ -15,6 +15,12 @@ pub enum ApplicationOperationTargetV1 {
         connection_id: String,
         model_id: String,
     },
+    ReviewPlugin {
+        plugin_id: String,
+        manifest_hash: String,
+        capability_digest: String,
+        decision: crate::PluginTrustDecision,
+    },
     ImportBranchKnowledge {
         source_session_id: String,
         source_turn_digest: String,
@@ -85,6 +91,20 @@ impl ApplicationOperationTargetV1 {
                 &entry.source_turn_digest == source_turn_digest
                     && entry.target_model_ref.connection_id.as_str() == connection_id
                     && &entry.target_model_ref.model_id == model_id
+            }
+            (
+                Self::ReviewPlugin {
+                    plugin_id,
+                    manifest_hash,
+                    capability_digest,
+                    decision,
+                },
+                ControlEntry::PluginReviewCompletedV1(entry),
+            ) => {
+                entry.plugin_id == *plugin_id
+                    && crate::plugin_manifest_digests_match(&entry.manifest_hash, manifest_hash)
+                    && &entry.capability_digest == capability_digest
+                    && entry.decision == *decision
             }
             (
                 Self::ImportBranchKnowledge {

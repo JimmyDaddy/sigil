@@ -445,6 +445,7 @@ impl AgentToolRuntime {
             let run_thread = thread_record.clone();
             let child_session_ref = child_thread.child_session_ref.clone();
             let event_sink = self.background_runs.event_sink();
+            let tool_registry = child_agent.tool_registry().downgrade();
             let (start_tx, start_rx) = tokio::sync::oneshot::channel();
             let handle =
                 BackgroundChatAgentTask::spawn(thread_id.clone(), event_sink.clone(), async move {
@@ -468,6 +469,7 @@ impl AgentToolRuntime {
             if let Err(error) = self.background_runs.insert(
                 thread_id.clone(),
                 BackgroundChatAgentHandle {
+                    tool_registry,
                     thread: thread_record,
                     handle,
                     collection_supervisor: self
@@ -925,6 +927,7 @@ impl AgentToolRuntime {
         let run_thread = thread_record.clone();
         let child_session_ref = child_thread.child_session_ref.clone();
         let event_sink = self.background_runs.event_sink();
+        let tool_registry = child_agent.tool_registry().downgrade();
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         let handle =
             BackgroundChatAgentTask::spawn(thread_id.clone(), event_sink.clone(), async move {
@@ -948,6 +951,7 @@ impl AgentToolRuntime {
         if let Err(error) = self.background_runs.insert(
             thread_id.clone(),
             BackgroundChatAgentHandle {
+                tool_registry,
                 thread: thread_record,
                 handle,
                 collection_supervisor: self

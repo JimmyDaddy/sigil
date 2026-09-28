@@ -68,7 +68,11 @@ impl SkillFrontmatter {
             .or(self.string_list("tools")?)
             .unwrap_or_default();
         let trust = self.trust_state()?.unwrap_or_else(|| {
-            if kind.is_foreign_compatibility() {
+            // Plugin descriptors enter production indexes only after the enclosing exact
+            // manifest review. Explicit per-skill restrictions above still take precedence.
+            if kind.is_foreign_compatibility()
+                || matches!(kind, SkillCandidateKind::PluginSkill { .. })
+            {
                 SkillTrustState::Trusted
             } else {
                 SkillTrustState::default()

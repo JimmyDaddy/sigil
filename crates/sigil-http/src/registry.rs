@@ -1409,6 +1409,20 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    /// Reads exact workspace plugin declarations without starting extensions.
+    pub fn plugin_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::HttpPluginCatalog, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| self.driver.plugin_catalog(&session)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "plugin catalog",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(recovery_driver_registry_error)
+    }
+
     /// Reads exact branch lineage without blocking an active run.
     pub fn branch_lineage(
         &self,
@@ -1618,9 +1632,12 @@ impl HttpSessionRunRegistry {
         application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
         let session = self.get_session(session_id)?;
+        // Selected knowledge is append-only context. It neither restores files nor changes
+        // execution authority, so an unrelated foreground run is not an import gate.
         let guard = if matches!(
             action,
             HttpConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
+                | HttpConversationRecoveryCommandAction::ReviewPlugin { .. }
         ) {
             None
         } else {
@@ -1656,6 +1673,7 @@ impl HttpSessionRunRegistry {
             restore: output.restore,
             fork: output.fork,
             branch_knowledge: output.branch_knowledge,
+            plugin_review: output.plugin_review,
             recovery: output.recovery,
             correlation_id: correlation_id.map(str::to_owned),
             replayed: false,
@@ -6935,6 +6953,14 @@ fn validate_conversation_recovery_command(
     action: &HttpConversationRecoveryCommandAction,
 ) -> Result<(), HttpRegistryError> {
     let valid = match action {
+        HttpConversationRecoveryCommandAction::ReviewPlugin {
+            plugin_id,
+            manifest_hash,
+            capability_digest,
+            ..
+        } => [plugin_id, manifest_hash, capability_digest]
+            .into_iter()
+            .all(|value| is_bounded_recovery_token(value)),
         HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => [
             &selection.source_session_ref,
             &selection.source_session_id,

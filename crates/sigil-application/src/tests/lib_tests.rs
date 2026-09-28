@@ -44,6 +44,43 @@ fn branch_knowledge_recovery_contract_requires_complete_source_binding() {
     );
 }
 
+#[test]
+fn plugin_review_contract_keeps_exact_capability_and_cleanup_state_independent() {
+    let text = |value| SafeText::new(value).expect("safe plugin binding");
+    let action = ApplicationRecoveryAction::ReviewPlugin {
+        plugin_id: text("plugin-id"),
+        manifest_hash: text("manifest-hash"),
+        capability_digest: text("capability-digest"),
+        enabled: false,
+    };
+    assert_eq!(action.kind(), ApplicationRecoveryActionKind::ReviewPlugin);
+    let encoded = serde_json::to_value(&action).expect("encode exact review");
+    assert_eq!(
+        serde_json::from_value::<ApplicationRecoveryAction>(encoded.clone())
+            .expect("decode exact review"),
+        action
+    );
+    let mut missing_capability = encoded;
+    missing_capability
+        .get_mut("ReviewPlugin")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("review binding object")
+        .remove("capability_digest");
+    assert!(serde_json::from_value::<ApplicationRecoveryAction>(missing_capability).is_err());
+
+    let outcome = ApplicationRecoveryOutcome::PluginReview {
+        plugin_id: text("plugin-id"),
+        enabled: false,
+        process_cleanup: Some(PluginCleanupStatus::Unknown),
+    };
+    let encoded = serde_json::to_value(&outcome).expect("encode cleanup observation");
+    assert_eq!(
+        serde_json::from_value::<ApplicationRecoveryOutcome>(encoded)
+            .expect("decode cleanup observation"),
+        outcome
+    );
+}
+
 #[path = "client_overflow_tests.rs"]
 mod client_overflow_tests;
 

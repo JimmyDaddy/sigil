@@ -1082,12 +1082,16 @@ pub(in crate::runner) fn load_worker_skill(
     options: &AgentRunOptions,
     skill_id: &str,
     run_id: Option<u64>,
+    session_log_path: &Path,
 ) -> std::result::Result<sigil_runtime::LoadedSkillContext, String> {
     let user_config_dir = default_user_config_dir().ok();
-    let report = sigil_runtime::discover_skill_index_with_user_dir(
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(session_log_path)
+        .map_err(|error| format!("{error:#}"))?;
+    let report = sigil_runtime::discover_skill_index_with_session_entries(
         &options.workspace_root,
         user_config_dir.as_deref(),
         &root_config.skills,
+        &entries,
     )
     .map_err(|error| format!("{error:#}"))?;
     sigil_runtime::load_user_invoked_skill(

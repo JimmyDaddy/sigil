@@ -76,6 +76,8 @@ the queue explains that result. A failed queue change keeps the current Task and
 
 `/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. The per-model context-window field cycles through Automatic, 64K, 128K, 256K, and 1M instead of requiring a raw number; an existing custom value remains intact until you cycle the field. **Max output tokens** is an optional default for normal conversations: leave it Automatic or choose a preset / enter a positive value such as `8K`. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
 
+In **MCP** settings, press `Ctrl-N` to choose a JSON file with `mcpServers`. Review the safe summaries, select entries with Space, and press Enter to add them to the draft. `Ctrl-S` saves through the normal configuration transaction. Import does not start servers or overwrite existing names. Inline environment/header values are omitted; command arguments are saved, so check them for secrets before selecting. Missing model credentials do not prevent saving this draft.
+
 For a Streamable HTTP MCP server configured with OAuth, open its detail view and choose **Authentication**. The modal can show status, start sign-in, open or copy the authorization URL, accept a transient callback URL, refresh, sign out, or clear a retained local credential. See [MCP](mcp.md) before connecting a server.
 
 ## Web Search And Fetch

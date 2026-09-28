@@ -478,6 +478,7 @@ export interface CheckpointRestoreReview {
 
 export type ConversationRecoveryAction =
   | { kind: "import_branch_knowledge"; selection: import("./features/conversation/branchTypes").BranchKnowledgeImport }
+  | { kind: "review_plugin"; pluginId: string; manifestHash: string; capabilityDigest: string; enabled: boolean }
   | { kind: "prepare_compaction"; previewId: string }
   | { kind: "apply_compaction"; previewId: string }
   | { kind: "apply_standalone_tool_output_shrink"; previewId: string }
@@ -526,6 +527,7 @@ export interface ConversationForkReceipt {
 
 export interface ConversationRecoveryCommandReceipt {
   branchKnowledge?: { importId: string; alreadyImported: boolean };
+  pluginReview?: { pluginId: string; enabled: boolean; processCleanup?: PluginCleanupStatus | null };
   commandId: string;
   clientId: string;
   sessionId: string;
@@ -2089,3 +2091,32 @@ export interface ImageReference {
   byteLen: number;
 }
 export interface DraftImage extends ImageReference { previewDataUrl: string; }
+
+/** Host-owned MCP import preview. No executable arguments, local paths or credentials. */
+export interface McpImportPreview {
+  readonly previewId: string;
+  readonly rootFieldsIgnored: boolean;
+  readonly candidates: readonly {
+    readonly index: number;
+    readonly name: string;
+    readonly transport?: string | null;
+    readonly description: string;
+    readonly importable: boolean;
+    readonly issues: readonly string[];
+  }[];
+}
+
+export interface McpImportSaveResult {
+  readonly importedNames: readonly string[];
+  readonly reloadRequired: boolean;
+}
+
+export type PluginCleanupStatus = "confirmed" | "unknown" | "unconfirmed";
+
+export interface PluginReview {
+  pluginId: string; name: string; version: string; manifestHash: string; capabilityDigest: string;
+  trust: "trusted" | "disabled" | "needs_review";
+  processCleanup?: PluginCleanupStatus | null;
+  capabilities: {kind: string; label: string; approval?: string; allowSecrets: boolean; egressLogging: boolean}[];
+}
+export interface PluginCatalog { plugins: PluginReview[]; warningCount: number; }

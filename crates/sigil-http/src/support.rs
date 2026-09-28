@@ -1,3 +1,7 @@
+mod mcp_import;
+
+pub(crate) use mcp_import::HttpMcpImportFailure;
+
 use std::{
     collections::BTreeMap,
     env, fmt, fs,
@@ -50,6 +54,7 @@ pub struct HttpSupportContext {
     launch_cwd: PathBuf,
     build: SupportBuildInfo,
     catalog_service: Arc<OnceLock<ProviderModelCatalogService>>,
+    mcp_import: Arc<Mutex<Option<mcp_import::PreparedMcpImport>>>,
     borrowed_configuration_service:
         Option<Arc<dyn sigil_resource_authority::configuration::BorrowedConfigurationServiceV1>>,
 }
@@ -97,6 +102,7 @@ impl HttpSupportContext {
             launch_cwd: launch_cwd.into(),
             build,
             catalog_service: Arc::new(OnceLock::new()),
+            mcp_import: Arc::default(),
         }
     }
 

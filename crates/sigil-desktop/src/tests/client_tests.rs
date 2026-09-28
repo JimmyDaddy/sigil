@@ -2743,3 +2743,51 @@ async fn image_ingest_binds_admitted_metadata_to_the_exact_uploaded_bytes() {
         assert_eq!(result.is_ok(), !tampered);
     }
 }
+
+#[tokio::test]
+async fn plugin_catalog_http_preserves_cleanup_independently_of_trust() {
+    for cleanup in [
+        Some("confirmed"),
+        Some("unknown"),
+        Some("unconfirmed"),
+        None,
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.expect("request");
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("read");
+                assert_ne!(read, 0, "request must include its header terminator");
+                bytes.extend_from_slice(&chunk[..read]);
+                if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(bytes.starts_with(b"GET /sessions/session-1/plugins "));
+            let body = serde_json::json!({"plugins":[{
+                "plugin_id":"review", "name":"Review", "version":"1", "manifest_hash":"manifest",
+                "capability_digest":"capabilities", "trust":"trusted", "capabilities":[], "process_cleanup":cleanup
+            }], "warning_count":0}).to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("response");
+        });
+        let client = DesktopHttpClient::new(
+            Client::new(),
+            address,
+            Arc::new(DesktopBearerToken::generate().expect("token")),
+        );
+        let result = client.plugin_catalog("session-1").await;
+        server.await.expect("server joined");
+        let catalog = result.expect("catalog");
+        assert_eq!(catalog.plugins[0].trust, "trusted");
+        assert_eq!(
+            serde_json::to_value(catalog.plugins[0].process_cleanup).expect("cleanup serializes"),
+            serde_json::json!(cleanup)
+        );
+    }
+}

@@ -1070,6 +1070,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               bridge={bridge}
               supportAvailable={activeWorkspace !== undefined}
               workspaceId={activeWorkspace?.id}
+              sessionId={selectedSession?.id}
               isWorkspaceActive={() =>
                 activeWorkspace !== undefined
                 && activeWorkspace.id === activeWorkspaceIdRef.current}

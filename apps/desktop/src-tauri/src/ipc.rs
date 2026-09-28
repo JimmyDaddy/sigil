@@ -1,5 +1,7 @@
 mod branches;
 pub(crate) use branches::*;
+mod plugins;
+pub(crate) use plugins::*;
 mod change_review;
 pub(crate) use change_review::*;
 use serde::{Deserialize, Serialize};
@@ -1260,6 +1262,12 @@ pub(crate) enum DesktopConversationRecoveryActionInput {
     ImportBranchKnowledge {
         selection: DesktopBranchKnowledgeImport,
     },
+    ReviewPlugin {
+        plugin_id: String,
+        manifest_hash: String,
+        capability_digest: String,
+        enabled: bool,
+    },
     ApplyCompaction {
         preview_id: String,
     },
@@ -1281,6 +1289,17 @@ impl DesktopConversationRecoveryActionInput {
                     selection: selection.into(),
                 }
             }
+            Self::ReviewPlugin {
+                plugin_id,
+                manifest_hash,
+                capability_digest,
+                enabled,
+            } => NativeConversationRecoveryCommandAction::ReviewPlugin {
+                plugin_id,
+                manifest_hash,
+                capability_digest,
+                enabled,
+            },
             Self::ApplyCompaction { preview_id } => {
                 NativeConversationRecoveryCommandAction::ApplyCompaction { preview_id }
             }
@@ -1310,6 +1329,8 @@ impl DesktopConversationRecoveryActionInput {
 pub(crate) struct DesktopConversationRecoveryCommandReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) branch_knowledge: Option<DesktopBranchKnowledgeReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plugin_review: Option<DesktopPluginReviewReceipt>,
     pub(crate) command_id: String,
     pub(crate) client_id: String,
     pub(crate) session_id: String,
@@ -2895,6 +2916,7 @@ impl From<NativeConversationRecoveryCommandReceipt> for DesktopConversationRecov
     fn from(value: NativeConversationRecoveryCommandReceipt) -> Self {
         Self {
             branch_knowledge: value.branch_knowledge.map(Into::into),
+            plugin_review: value.plugin_review.map(Into::into),
             command_id: value.command_id,
             client_id: value.client_id,
             session_id: value.session_id,
@@ -2982,6 +3004,7 @@ fn conversation_recovery_action_kind_label(
         NativeConversationRecoveryCommandActionKind::ImportBranchKnowledge => {
             "import_branch_knowledge"
         }
+        NativeConversationRecoveryCommandActionKind::ReviewPlugin => "review_plugin",
         NativeConversationRecoveryCommandActionKind::PrepareCompaction => "prepare_compaction",
         NativeConversationRecoveryCommandActionKind::ApplyCompaction => "apply_compaction",
         NativeConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink => {

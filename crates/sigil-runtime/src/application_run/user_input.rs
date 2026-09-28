@@ -544,6 +544,10 @@ pub async fn prepare_application_user_input_decision(
         services.terminal_lifecycle_handler.clone(),
         events.clone(),
     );
+    let extension_background_runs = session_lease
+        .attachment
+        .agent_tool_background_runs()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -561,121 +565,136 @@ pub async fn prepare_application_user_input_decision(
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
-    let runtime_context = surface
-        .context_resolver
-        .resolve(&preview.request.prompt)
-        .await
-        .unwrap_or_default();
-    let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
-        surface.context_resolver.clone(),
-    );
-    let continuation_logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
-        &request.identity,
-        &request.request_hash,
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
-    let input = AgentRunInput::without_persisted_user_message(Vec::new())
-        .with_runtime_context(runtime_context)
-        .with_logical_run_id(continuation_logical_run_id.as_str())
-        .with_user_input_continuation_context(
-            request.identity.root_logical_run_id.as_str(),
-            request.identity.source_thread_id.clone(),
+    let mut cleanup_registry = surface.registry.clone();
+    let assembled = async {
+        let runtime_context = surface
+            .context_resolver
+            .resolve(&preview.request.prompt)
+            .await
+            .unwrap_or_default();
+        let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
+            surface.context_resolver.clone(),
+        );
+        let continuation_logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
+            &request.identity,
+            &request.request_hash,
         )
-        .with_initial_provider_physical_attempt_id(physical_attempt_id.clone())
-        .with_cancellation(cancellation_handle.clone())
-        .with_pending_input_provider(Arc::new(pending_input_provider));
-    let parent_session_ref = SessionRef::new_relative(
-        session_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("session.jsonl"),
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let conversation_coordinator = orchestration_route_guard.map(|guard| {
-        crate::ConversationCoordinator::new(
-            root_config.task.enabled,
-            root_config.task.routing_policy,
-        )
-        .with_orchestration_route_guard(guard)
-    });
-    let conversation_lifecycle = session
-        .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let terminal_control = ApplicationTerminalTaskControl::new(
-        workspace_root,
-        surface.terminal_control,
-        session_lease.as_ref(),
-        session.session_scope_id(),
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    // This is deliberately the final fallible construction step. Once the answer is durable, the
-    // returned value already owns a complete supervised continuation and requires no further
-    // provider/config/tool preparation.
-    let receipt = sigil_kernel::accept_user_input_decision(
-        &mut session,
-        decision_command,
-        accepted_at_unix_ms,
-    )
-    .map_err(ApplicationRunPrepareError::execution)?;
-    let continuation = PreparedApplicationRun {
-        execution: ApplicationRunExecution {
-            kind: ApplicationRunExecutionKind::Main {
-                agent: Box::new(
-                    crate::configured_agent(&root_config, provider, surface.registry)
-                        .map_err(ApplicationRunPrepareError::execution)?,
-                ),
-                input: Box::new(input),
-                agent_tool_runtime: None,
+        let physical_attempt_id = sigil_kernel::new_provider_physical_attempt_id();
+        let input = AgentRunInput::without_persisted_user_message(Vec::new())
+            .with_runtime_context(runtime_context)
+            .with_logical_run_id(continuation_logical_run_id.as_str())
+            .with_user_input_continuation_context(
+                request.identity.root_logical_run_id.as_str(),
+                request.identity.source_thread_id.clone(),
+            )
+            .with_initial_provider_physical_attempt_id(physical_attempt_id.clone())
+            .with_cancellation(cancellation_handle.clone())
+            .with_pending_input_provider(Arc::new(pending_input_provider));
+        let parent_session_ref = SessionRef::new_relative(
+            session_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("session.jsonl"),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let conversation_coordinator = orchestration_route_guard.map(|guard| {
+            crate::ConversationCoordinator::new(
+                root_config.task.enabled,
+                root_config.task.routing_policy,
+            )
+            .with_orchestration_route_guard(guard)
+        });
+        let conversation_lifecycle = session
+            .conversation_run_lifecycle_recorder()
+            .map_err(ApplicationRunPrepareError::execution)?;
+        let terminal_control = ApplicationTerminalTaskControl::new(
+            workspace_root,
+            surface.terminal_control,
+            session_lease.as_ref(),
+            session.session_scope_id(),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        // This is deliberately the final fallible construction step. Once the answer is durable, the
+        // returned value already owns a complete supervised continuation and requires no further
+        // provider/config/tool preparation.
+        let receipt = sigil_kernel::accept_user_input_decision(
+            &mut session,
+            decision_command,
+            accepted_at_unix_ms,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        let continuation = PreparedApplicationRun {
+            execution: ApplicationRunExecution {
+                extension_registry: surface.registry.clone(),
+                extension_background_runs,
+                kind: ApplicationRunExecutionKind::Main {
+                    agent: Box::new(
+                        crate::configured_agent(&root_config, provider, surface.registry)
+                            .map_err(ApplicationRunPrepareError::execution)?,
+                    ),
+                    input: Box::new(input),
+                    agent_tool_runtime: None,
+                },
+                task_execution: None,
+                plan_review_runtime: None,
+                session,
+                options,
+                session_id,
+                run_id,
+                prompt: public_prompt,
+                session_log_path: session_path,
+                cancellation_handle,
+                root_task_guard,
+                warnings,
+                redactor,
+                interaction,
+                conversation_lifecycle: conversation_lifecycle.clone(),
+                conversation_start: conversation_start.clone(),
+                events: events.clone(),
+                conversation_coordinator,
+                parent_session_ref,
+                pending_session_title: None,
+                pending_user_input_continuation: Some(ApplicationUserInputContinuationContext {
+                    identity: request.identity,
+                    request_hash: request.request_hash,
+                    supervisor_instance_id: services.supervisor_instance_id.to_string(),
+                    physical_attempt_id,
+                }),
+                route_transition,
+                managed_session_log,
+                managed_artifact_store,
+                _session_lease: Arc::clone(&session_lease),
             },
-            task_execution: None,
-            plan_review_runtime: None,
-            session,
-            options,
-            session_id,
-            run_id,
-            prompt: public_prompt,
-            session_log_path: session_path,
-            cancellation_handle,
-            root_task_guard,
-            warnings,
-            redactor,
-            interaction,
-            conversation_lifecycle: conversation_lifecycle.clone(),
-            conversation_start: conversation_start.clone(),
-            events: events.clone(),
-            conversation_coordinator,
-            parent_session_ref,
-            pending_session_title: None,
-            pending_user_input_continuation: Some(ApplicationUserInputContinuationContext {
-                identity: request.identity,
-                request_hash: request.request_hash,
-                supervisor_instance_id: services.supervisor_instance_id.to_string(),
-                physical_attempt_id,
-            }),
-            route_transition,
-            managed_session_log,
-            managed_artifact_store,
-            _session_lease: Arc::clone(&session_lease),
-        },
-        control: ApplicationRunControl {
-            owner: cancellation_owner,
-            recorder: cancellation_recorder,
-            cancellation_target: RunCancellationTarget::Run,
-            conversation_lifecycle,
-            conversation_start,
-            events,
-            _session_lease: session_lease,
-        },
-        terminal_control,
-    };
-    Ok(PreparedApplicationUserInputDecision {
-        receipt,
-        continuation: Some(continuation),
-        revision_request: None,
-        revision_terminal_outbox: None,
-    })
+            control: ApplicationRunControl {
+                owner: cancellation_owner,
+                recorder: cancellation_recorder,
+                cancellation_target: RunCancellationTarget::Run,
+                conversation_lifecycle,
+                conversation_start,
+                events,
+                _session_lease: session_lease,
+            },
+            terminal_control,
+        };
+        Ok(PreparedApplicationUserInputDecision {
+            receipt,
+            continuation: Some(continuation),
+            revision_request: None,
+            revision_terminal_outbox: None,
+        })
+    }
+    .await;
+    if let Err(error) = assembled {
+        return match crate::shutdown_mcp_generations(&mut cleanup_registry).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(ApplicationRunPrepareError::execution(anyhow!(
+                "{error}; extension cleanup incomplete: {cleanup:#}"
+            ))),
+        };
+    }
+    assembled
 }
 
 pub(super) fn start_application_user_input_continuation(

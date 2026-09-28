@@ -173,6 +173,10 @@ pub(in crate::runner) enum RunPlanCommand {
 
 #[derive(Debug)]
 pub(in crate::runner) enum SessionCommand {
+    ReviewPlugin {
+        session_id: String,
+        request: sigil_runtime::plugin_management::ApplicationPluginDecisionRequest,
+    },
     LoadBranchKnowledge {
         request_id: u64,
         target_session_id: String,
@@ -548,6 +552,13 @@ pub(in crate::runner) fn classify_worker_command(
             request_id,
             generation,
             expected_request_hash,
+        }),
+        WorkerCommand::ReviewPlugin {
+            session_id,
+            request,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::ReviewPlugin {
+            session_id,
+            request,
         }),
         WorkerCommand::LoadBranchKnowledge {
             request_id,

@@ -652,7 +652,8 @@ impl TuiApplicationSession {
     pub(crate) fn supports_action(action: &AppAction) -> bool {
         matches!(
             action,
-            AppAction::SubmitPrompt(_)
+            AppAction::ReviewPlugin { .. }
+                | AppAction::SubmitPrompt(_)
                 | AppAction::SubmitPromptWithAttachments { .. }
                 | AppAction::CancelRun
                 | AppAction::CancelTerminalTask { .. }
@@ -1067,6 +1068,23 @@ impl TuiApplicationSession {
                     prompt: sigil_application::SafeText::new(prompt.clone())?,
                 }))
             }
+            AppAction::ReviewPlugin {
+                plugin_id,
+                manifest_hash,
+                capability_digest,
+                enabled,
+            } => Some(ApplicationCommand::Conversation(
+                ConversationCommand::Recovery {
+                    action: ApplicationRecoveryAction::ReviewPlugin {
+                        plugin_id: sigil_application::SafeText::new(plugin_id.clone())?,
+                        manifest_hash: sigil_application::SafeText::new(manifest_hash.clone())?,
+                        capability_digest: sigil_application::SafeText::new(
+                            capability_digest.clone(),
+                        )?,
+                        enabled: *enabled,
+                    },
+                },
+            )),
             AppAction::StartV2Compaction => Some(ApplicationCommand::Conversation(
                 ConversationCommand::Recovery {
                     action: ApplicationRecoveryAction::StartCompaction,
@@ -2024,14 +2042,9 @@ impl TuiWorkerCommandExecutor {
                 prompt,
                 options: Some(options),
             }) if !options.review_annotations.is_empty() => WorkerCommand::SubmitReviewedPrompt {
-                prompt: prompt
-                    .as_ref()
-                    .map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
+                prompt: prompt.as_ref().map_or_else(String::new, |prompt| prompt.as_str().to_owned()),
                 attachments: Vec::new(),
-                reasoning_effort: options
-                    .reasoning_effort
-                    .map(tui_reasoning_effort)
-                    .unwrap_or_else(|| self.reasoning_effort.clone()),
+                reasoning_effort: options.reasoning_effort.map(tui_reasoning_effort).unwrap_or_else(|| self.reasoning_effort.clone()),
                 expected_session_id: self.session_id.clone(),
                 annotations: options.review_annotations.clone(),
             },
@@ -2075,25 +2088,15 @@ impl TuiWorkerCommandExecutor {
                     .map(tui_reasoning_effort)
                     .unwrap_or_else(|| self.reasoning_effort.clone());
                 let prompt = prompt
-                    .as_ref()
-                    .map_or_else(String::new, |text| text.as_str().to_owned());
-                if let Some(options) = options
-                    .as_ref()
-                    .filter(|options| !options.review_annotations.is_empty())
-                {
+                        .as_ref()
+                        .map_or_else(String::new, |text| text.as_str().to_owned());
+                if let Some(options) = options.as_ref().filter(|options| !options.review_annotations.is_empty()) {
                     WorkerCommand::SubmitReviewedPrompt {
-                        prompt,
-                        attachments: attachments.clone(),
-                        reasoning_effort,
-                        expected_session_id: self.session_id.clone(),
-                        annotations: options.review_annotations.clone(),
+                        prompt, attachments: attachments.clone(), reasoning_effort,
+                        expected_session_id: self.session_id.clone(), annotations: options.review_annotations.clone(),
                     }
                 } else {
-                    WorkerCommand::SubmitPromptWithAttachments {
-                        prompt,
-                        attachments: attachments.clone(),
-                        reasoning_effort,
-                    }
+                    WorkerCommand::SubmitPromptWithAttachments { prompt, attachments: attachments.clone(), reasoning_effort }
                 }
             }
             ApplicationCommand::Run(RunCommand::Cancel { .. }) => WorkerCommand::CancelRun,
@@ -2470,6 +2473,15 @@ impl TuiWorkerCommandExecutor {
             },
             ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
                 match action {
+                    ApplicationRecoveryAction::ReviewPlugin { plugin_id, manifest_hash, capability_digest, enabled } => WorkerCommand::ReviewPlugin {
+                        session_id: self.session_id.clone(),
+                        request: sigil_runtime::plugin_management::ApplicationPluginDecisionRequest {
+                            plugin_id: plugin_id.as_str().to_owned(),
+                            expected_manifest_hash: manifest_hash.as_str().to_owned(),
+                            expected_capability_digest: capability_digest.as_str().to_owned(),
+                            decision: if *enabled { sigil_kernel::PluginTrustDecision::Trusted } else { sigil_kernel::PluginTrustDecision::Disabled },
+                        },
+                    },
                     ApplicationRecoveryAction::StartCompaction => WorkerCommand::StartV2Compaction,
                     ApplicationRecoveryAction::PreviewCompaction => {
                         WorkerCommand::PreviewV2Compaction

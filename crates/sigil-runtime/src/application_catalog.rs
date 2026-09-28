@@ -6,7 +6,7 @@ use sigil_kernel::{
     SessionLogEntry, SkillRunMode, SkillTrustState, default_user_config_dir, safe_persistence_text,
 };
 
-use crate::{AgentProfileRegistry, discover_skill_index_with_user_dir};
+use crate::AgentProfileRegistry;
 
 const MAX_CATALOG_ENTRIES_PER_KIND: usize = 80;
 const MAX_CATALOG_TEXT_BYTES: usize = 512;
@@ -304,10 +304,11 @@ pub fn application_extension_catalog_view(
 
     let skills = if selected.contains(&OptionalCapability::Skills) {
         let user_config_dir = default_user_config_dir().ok();
-        let skill_report = discover_skill_index_with_user_dir(
+        let skill_report = crate::discover_skill_index_with_session_entries(
             workspace_root,
             user_config_dir.as_deref(),
             &root_config.skills,
+            entries,
         )?;
         let fingerprint = skill_report.snapshot.fingerprint.clone();
         skill_report

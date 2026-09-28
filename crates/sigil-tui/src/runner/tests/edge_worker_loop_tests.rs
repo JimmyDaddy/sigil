@@ -1759,6 +1759,7 @@ fn spawn_loop_with_shared_agent(
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
+                    plugin_hook_execution: None,
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
@@ -2009,6 +2010,100 @@ fn refresh_mcp_server_keeps_pending_intent_when_agent_registry_is_shared() -> Re
 }
 
 #[test]
+fn worker_initial_session_failure_joins_owned_extension_startup_before_return() -> Result<()> {
+    struct StartupSettlementProbe {
+        owner: std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::task::JoinHandle<()>,
+            )>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl sigil_kernel::Tool for StartupSettlementProbe {
+        fn spec(&self) -> sigil_kernel::ToolSpec {
+            sigil_kernel::ToolSpec {
+                name: "startup_settlement_probe".to_owned(),
+                description: "owned startup cleanup fixture".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                category: sigil_kernel::ToolCategory::Mcp,
+                access: sigil_kernel::ToolAccess::Read,
+                network_effect: None,
+                preview: sigil_kernel::ToolPreviewCapability::None,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            _call_id: String,
+            _args: serde_json::Value,
+        ) -> Result<sigil_kernel::ToolResult> {
+            anyhow::bail!("startup fixture cannot be called")
+        }
+
+        async fn quiesce_background_work(
+            &self,
+            mode: &sigil_kernel::ToolBackgroundWorkSettlement,
+        ) -> Result<()> {
+            assert!(matches!(
+                mode,
+                sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle
+            ));
+            let owner = self.owner.lock().expect("startup fixture lock").take();
+            if let Some((cancel, task)) = owner {
+                let _ = cancel.send(());
+                task.await?;
+            }
+            Ok(())
+        }
+    }
+
+    let temp = tempdir()?;
+    let session_log_path = temp.path().join(".sigil/sessions/invalid-startup.jsonl");
+    fs::create_dir_all(session_log_path.parent().expect("session directory"))?;
+    fs::write(
+        &session_log_path,
+        format!(
+            "{{not-json}}\n{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("valid tail")))?
+        ),
+    )?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (cancel, cancellation) = tokio::sync::oneshot::channel();
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_settled = Arc::clone(&settled);
+    let task = runtime.spawn(async move {
+        if cancellation.await.is_ok() {
+            task_settled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(StartupSettlementProbe {
+        owner: std::sync::Mutex::new(Some((cancel, task))),
+    }));
+    let (provider, started) = PlannedProvider::new_with_stream_start_signal(Vec::new());
+    let worker = spawn_loop_with_shared_agent(
+        test_root_config(temp.path(), "planned", "planned-model"),
+        session_log_path,
+        temp.path().to_path_buf(),
+        Arc::new(Agent::new(provider, registry)),
+    )?;
+    let failure = worker.recv_until_with_timeout(Duration::from_secs(3), |message| {
+        matches!(message, WorkerMessage::RunFailed(_))
+    });
+    worker.join()?;
+    failure?;
+    assert!(settled.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        started.try_recv().is_err(),
+        "invalid session must not start a provider"
+    );
+    Ok(())
+}
+
+#[test]
 fn cancel_run_reports_load_error_if_session_log_cannot_be_reloaded() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -2166,5 +2261,82 @@ fn managed_records_leaf_keeps_its_logical_session_reference() -> Result<()> {
         session_ref_for_log_path(direct).map_err(anyhow::Error::msg)?,
         SessionRef::new_relative("records.jsonl")?
     );
+    Ok(())
+}
+
+#[test]
+fn plugin_review_publishes_through_live_worker_owner_without_ending_run() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let plugin = workspace.join(".sigil/plugins/review");
+    fs::create_dir_all(&plugin)?;
+    fs::write(
+        plugin.join("plugin.toml"),
+        "id = 'review'\nname = 'Review'\nversion = '1.0.0'\n",
+    )?;
+    let manifest = sigil_runtime::discover_workspace_plugins(&workspace, &[])?
+        .manifests
+        .remove(0);
+    let session_path = workspace.join(".sigil/sessions/plugin-live.jsonl");
+    let mut session =
+        Session::new("planned", "planned-model").with_store(JsonlSessionStore::new(&session_path)?);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    let scope = session.session_scope_id().to_owned();
+    drop(session);
+    let (provider, started) =
+        PlannedProvider::new_with_stream_start_signal(vec![StreamPlan::Pending]);
+    let worker = spawn_test_worker(
+        test_root_config(&workspace, "planned", "planned-model"),
+        session_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace,
+    )?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "keep the provider active".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    started.recv_timeout(Duration::from_secs(5))?;
+    worker.send(WorkerCommand::ReviewPlugin {
+        session_id: scope.clone(),
+        request: sigil_runtime::plugin_management::ApplicationPluginDecisionRequest {
+            plugin_id: manifest.plugin_id.clone(),
+            expected_manifest_hash: manifest.manifest_hash.clone(),
+            expected_capability_digest: manifest.capability_digest()?,
+            decision: sigil_kernel::PluginTrustDecision::Disabled,
+        },
+    })?;
+    let result = worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
+        matches!(
+            message,
+            WorkerMessage::PluginReviewCompleted { .. } | WorkerMessage::PluginReviewFailed { .. }
+        )
+    })?;
+    assert!(
+        matches!(result, WorkerMessage::PluginReviewCompleted { session_id, receipt, cleanup_error: None, .. }
+        if session_id == scope && receipt.decision == sigil_kernel::PluginTrustDecision::Disabled)
+    );
+    let entries = JsonlSessionStore::read_entries(&session_path)?;
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PluginTrustDecision(_))
+            ))
+            .count(),
+        1
+    );
+    worker.send(WorkerCommand::CancelRun)?;
+    worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
+        matches!(
+            message,
+            WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+        )
+    })?;
+    worker.shutdown()?;
     Ok(())
 }

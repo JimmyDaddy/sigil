@@ -223,6 +223,8 @@ fn agent_run_workspace_mutation_evidence(
         })
         .collect::<Vec<_>>();
     evidence.extend(active_terminal_mutation_evidence(&records, scope));
+    evidence
+        .extend(crate::process_environment::active_extension_mutation_evidence(&records, scope));
     evidence.sort_by_key(|entry| entry.recorded_at_stream_sequence);
     Ok(evidence)
 }

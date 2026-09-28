@@ -823,6 +823,120 @@ async fn pre_spawn_failure_records_lifecycle_without_launch_receipt() -> Result<
     Ok(())
 }
 
+// This launcher models an adapter error without claiming that an unclassified adapter error
+// proves zero process starts. The runtime network-admission test covers the real zero-start seam.
+struct RejectedLaunchFixture {
+    known_pre_spawn: bool,
+}
+
+impl McpProcessLauncher for RejectedLaunchFixture {
+    fn launch(&self, _request: McpProcessLaunchRequest) -> Result<super::McpProcessLaunch> {
+        let error = anyhow::anyhow!("fixture launch rejection");
+        Err(if self.known_pre_spawn {
+            error.context(super::McpPreSpawnRejection)
+        } else {
+            error
+        })
+    }
+}
+
+#[tokio::test]
+async fn launch_failure_closes_pending_only_with_proven_pre_spawn_rejection() -> Result<()> {
+    for known_pre_spawn in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let mut registry = ToolRegistry::new();
+        let error = register_mcp_tools_with_options(
+            &mut registry,
+            &[mcp_server_config! {
+                name: "rejected-launch".to_owned(),
+                command: "python3".to_owned(),
+                ..McpServerConfig::default()
+            }],
+            McpToolRegistrationOptions::eager()?
+                .with_process_launcher(Arc::new(RejectedLaunchFixture { known_pre_spawn }))
+                .with_mutation_recorder(workspace, MutationEventRecorder::new(store.clone())),
+        )
+        .await
+        .expect_err("launch rejection must remain an error");
+        assert_eq!(error.is::<super::McpPreSpawnRejection>(), known_pre_spawn);
+        assert!(registry.specs().is_empty());
+        let records = store.read_event_records_coordinated()?;
+        let lifetime = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| {
+                event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+                    && event.payload["safe_metadata"]
+                        .get("process_generation")
+                        .is_some()
+            })
+            .map(|event| {
+                serde_json::from_value::<ExtensionProcessLifecycleAudit>(event.payload.clone())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(lifetime.len(), 2);
+        assert_eq!(
+            lifetime[0].status,
+            ExtensionProcessLifecycleStatus::Starting
+        );
+        assert_eq!(
+            lifetime[1].status,
+            if known_pre_spawn {
+                ExtensionProcessLifecycleStatus::Stopped
+            } else {
+                ExtensionProcessLifecycleStatus::StopUnconfirmed
+            }
+        );
+        assert_eq!(
+            lifetime[0].safe_metadata["process_generation"],
+            lifetime[1].safe_metadata["process_generation"]
+        );
+        assert!(
+            lifetime
+                .iter()
+                .all(|audit| audit.phase == ExtensionProcessLaunchPhase::PreSpawn)
+        );
+        let mutations = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| {
+                event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+            })
+            .collect::<Vec<_>>();
+        if known_pre_spawn {
+            assert!(
+                mutations.is_empty(),
+                "proven zero-start rejection must not invent an unknown writer"
+            );
+        } else {
+            assert_eq!(mutations.len(), 1);
+            assert_eq!(
+                mutations[0].payload["unknown_dirty"], true,
+                "an unclassified failure cannot manufacture process quiescence"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn exact_mcp_lifetime(store: &JsonlSessionStore) -> Result<Vec<ExtensionProcessLifecycleAudit>> {
+    store
+        .read_event_records_coordinated()?
+        .iter()
+        .map(|record| record.stored_event())
+        .filter(|event| {
+            event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+                && event.payload["safe_metadata"]
+                    .get("process_generation")
+                    .is_some()
+        })
+        .map(|event| serde_json::from_value(event.payload.clone()).map_err(Into::into))
+        .collect()
+}
+
 #[test]
 fn changed_live_environment_fingerprint_invalidates_process_binding() -> Result<()> {
     let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
@@ -1070,6 +1184,11 @@ async fn stale_environment_binding_rejects_inbound_notification_before_handler()
     write_identity_server_script(&script, "binding", "1.0.0")?;
     let handler = Arc::new(RecordingMcpRuntimeEventHandler::default());
     let runtime_handler: Arc<dyn McpRuntimeEventHandler> = handler.clone();
+    let mut options = McpToolRegistrationOptions::eager()?;
+    options.roots = vec![temp.path().to_path_buf()];
+    options.working_dir = Some(temp.path().to_path_buf());
+    options.runtime_event_handler = runtime_handler;
+    options.process_launcher = Arc::new(LocalMcpProcessLauncher);
     let mut client = super::client::McpClient::spawn(
         mcp_server_config! {
             name: "binding".to_owned(),
@@ -1078,14 +1197,8 @@ async fn stale_environment_binding_rejects_inbound_notification_before_handler()
             startup_timeout_secs: 5,
             ..McpServerConfig::default()
         },
-        vec![temp.path().to_path_buf()],
-        Some(temp.path().to_path_buf()),
-        SecretRedactor::empty(),
-        super::unsupported_mcp_elicitation_handler(),
-        runtime_handler,
-        Arc::new(LocalMcpProcessLauncher),
+        &options,
         None,
-        ExtensionProcessNetworkAdmission::default(),
     )
     .await?;
     let monitor = client
@@ -1347,6 +1460,37 @@ while True:
     .await?;
 
     assert!(registry.spec_for("mcp__lifecycle__echo").is_some());
+    let active = exact_mcp_lifetime(&session_store)?;
+    assert_eq!(
+        active.iter().map(|audit| audit.status).collect::<Vec<_>>(),
+        [
+            ExtensionProcessLifecycleStatus::Starting,
+            ExtensionProcessLifecycleStatus::Running,
+        ]
+    );
+    let owners = registry.lifecycle_owners_by_namespace(super::MCP_TOOL_LIFECYCLE_NAMESPACE);
+    assert_eq!(owners.len(), 1);
+    registry
+        .retire_by_lifecycle_owner(&owners[0])
+        .dispose_and_quiesce()
+        .await?;
+    let lifetime = exact_mcp_lifetime(&session_store)?;
+    assert_eq!(
+        lifetime
+            .iter()
+            .map(|audit| audit.status)
+            .collect::<Vec<_>>(),
+        [
+            ExtensionProcessLifecycleStatus::Starting,
+            ExtensionProcessLifecycleStatus::Running,
+            ExtensionProcessLifecycleStatus::Stopped,
+        ]
+    );
+    assert!(
+        lifetime
+            .iter()
+            .all(|audit| audit.safe_metadata["process_generation"] == owners[0].generation())
+    );
     let events = JsonlSessionStore::read_event_records(session_store.path())?
         .into_iter()
         .map(|record| match record {
@@ -1363,6 +1507,7 @@ while True:
         .iter()
         .find(|event| {
             event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+                && event.payload["status"] == "registered"
         })
         .expect("clean startup should record neutral durable lifecycle evidence");
     let payload: ExtensionProcessLifecycleAudit =
@@ -1454,6 +1599,31 @@ while True:
         })
         .map(|event| serde_json::from_value::<ExtensionProcessLifecycleAudit>(event.payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let exact_lifetime = lifecycle
+        .iter()
+        .filter(|audit| audit.safe_metadata.contains_key("process_generation"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        exact_lifetime
+            .iter()
+            .map(|audit| audit.status)
+            .collect::<Vec<_>>(),
+        [
+            ExtensionProcessLifecycleStatus::Starting,
+            ExtensionProcessLifecycleStatus::Running,
+            ExtensionProcessLifecycleStatus::Stopped
+        ]
+    );
+    assert!(
+        exact_lifetime
+            .iter()
+            .all(|audit| audit.safe_metadata["process_generation"]
+                == exact_lifetime[0].safe_metadata["process_generation"])
+    );
+    let lifecycle = lifecycle
+        .iter()
+        .filter(|audit| audit.status == ExtensionProcessLifecycleStatus::StartupFailed)
+        .collect::<Vec<_>>();
     assert_eq!(lifecycle.len(), 1);
     assert_eq!(lifecycle[0].subject, "zero-surface");
     assert_eq!(lifecycle[0].phase, ExtensionProcessLaunchPhase::PostSpawn);
@@ -1554,7 +1724,13 @@ while True:
     .expect_err("post-spawn lifecycle append failure must fail registration");
     let error_text = format!("{error:#}");
     assert!(error_text.contains("lifecycle evidence failed after spawn"));
-    assert!(error_text.contains("cleanup_completed=true"));
+    // The process is reaped below, but the failed durable append keeps the combined cleanup
+    // outcome unconfirmed instead of pretending its audit completed.
+    assert!(
+        error_text.contains("cleanup_completed=false"),
+        "{error_text}"
+    );
+    assert!(error_text.contains("lifetime audit failed"), "{error_text}");
 
     let descendant_pid = fs::read_to_string(descendant_pid_path)?
         .trim()
@@ -1669,6 +1845,24 @@ sys.exit(7)
     .expect_err("startup failure should still surface");
 
     assert!(registry.specs().is_empty());
+    let lifetime = exact_mcp_lifetime(&session_store)?;
+    assert_eq!(
+        lifetime
+            .iter()
+            .map(|audit| audit.status)
+            .collect::<Vec<_>>(),
+        [
+            ExtensionProcessLifecycleStatus::Starting,
+            ExtensionProcessLifecycleStatus::Running,
+            ExtensionProcessLifecycleStatus::Stopped,
+        ]
+    );
+    assert!(
+        lifetime
+            .iter()
+            .all(|audit| audit.safe_metadata["process_generation"]
+                == lifetime[0].safe_metadata["process_generation"])
+    );
     let events = JsonlSessionStore::read_event_records(session_store.path())?
         .into_iter()
         .map(|record| match record {
@@ -1685,6 +1879,7 @@ sys.exit(7)
         .iter()
         .find(|event| {
             event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+                && event.payload["status"] == "startup_failed"
         })
         .expect("post-spawn failure should retain a neutral durable launch receipt");
     let payload: ExtensionProcessLifecycleAudit =
@@ -1791,6 +1986,77 @@ sys.exit(7)
             .get("mcp_process_network")
             .map(String::as_str),
         Some("unknown")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn successful_mcp_startup_mutation_is_not_repeated_at_generation_stop() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let marker = workspace.join("started.txt");
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let script = temp.path().join("startup_mutation_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text("started", encoding="utf-8")
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    if message.get("method") == "initialize":
+        result = {"capabilities": {}}
+    elif message.get("method") == "tools/list":
+        result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+"#,
+    )?;
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[mcp_server_config! {
+            name: "startup-mutation".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.display().to_string(), marker.display().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await?;
+    assert!(marker.exists());
+    let mutation_count =
+        || -> Result<usize> {
+            Ok(JsonlSessionStore::read_event_records(session_store.path())?
+            .into_iter()
+            .filter(|record| matches!(
+                record,
+                sigil_kernel::SessionStreamRecord::Stored(event)
+                    if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+            ))
+            .count())
+        };
+    assert_eq!(
+        mutation_count()?,
+        1,
+        "startup mutation must be recorded once"
+    );
+    let owners = registry.lifecycle_owners_by_namespace(super::MCP_TOOL_LIFECYCLE_NAMESPACE);
+    assert_eq!(owners.len(), 1);
+    registry
+        .retire_by_lifecycle_owner(&owners[0])
+        .dispose_and_quiesce()
+        .await?;
+    assert_eq!(
+        mutation_count()?,
+        1,
+        "stopping an unchanged generation must not replay its startup mutation"
     );
     Ok(())
 }
@@ -5653,5 +5919,100 @@ async fn concurrent_mcp_startup_failure_joins_and_reaps_successful_siblings() ->
             server.name
         );
     }
+    Ok(())
+}
+
+struct GatedMcpDeclarationCheck {
+    armed: std::sync::atomic::AtomicBool,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl super::McpPreRequestCheck for GatedMcpDeclarationCheck {
+    fn validate_current(
+        &self,
+        _receipt: &super::McpProcessLaunchReceipt,
+        _owner: &sigil_kernel::ToolLifecycleOwner,
+    ) -> Result<()> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(sender) = self.entered.lock().expect("entered fixture lock").take() {
+                let _ = sender.send(());
+            }
+            // Dropping the sole sender also releases the fixture on early test failure.
+            let _ = self.release.lock().expect("release fixture lock").recv();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn timed_out_mcp_declaration_check_is_joined_before_completion_without_late_send()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("guarded.py");
+    let marker = temp.path().join("called.txt");
+    write_identity_server_script(&script, "guarded", "1.0.0")?;
+    let body = fs::read_to_string(&script)?.replace(
+        "    elif method == \"tools/call\":\n",
+        &format!(
+            "    elif method == \"tools/call\":\n        open({:?}, \"w\").write(\"called\")\n",
+            marker.to_string_lossy()
+        ),
+    );
+    fs::write(&script, body)?;
+    let (release, wait_for_release) = std::sync::mpsc::channel();
+    let (entered, wait_for_entered) = tokio::sync::oneshot::channel();
+    let guard = Arc::new(GatedMcpDeclarationCheck {
+        armed: std::sync::atomic::AtomicBool::new(false),
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(wait_for_release),
+    });
+    let mut options = McpToolRegistrationOptions::eager()?;
+    options.roots = vec![temp.path().to_path_buf()];
+    options.working_dir = Some(temp.path().to_path_buf());
+    options.process_launcher = Arc::new(LocalMcpProcessLauncher);
+    options.pre_request_check = Some(guard.clone());
+    let client = super::client::McpClient::spawn(
+        mcp_server_config! {
+            name: "guarded".to_owned(), command: "python3".to_owned(),
+            args: vec![script.display().to_string()], startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        },
+        &options,
+        None,
+    )
+    .await?;
+    guard.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let caller = Arc::clone(&client);
+    let mut operation = tokio::spawn(async move {
+        caller
+            .call_tool_response(
+                "echo",
+                json!({"value":"must-not-send"}),
+                super::client::McpOperationDeadline::from_secs(1),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), wait_for_entered).await??;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut operation)
+            .await
+            .is_err(),
+        "request completion must retain and join its timed-out blocking check"
+    );
+    assert!(!marker.exists());
+    release.send(()).expect("owned check must still be waiting");
+    let result = tokio::time::timeout(Duration::from_secs(5), operation).await??;
+    assert!(
+        result.is_err(),
+        "joining the check must not turn timeout into success"
+    );
+    assert!(
+        !marker.exists(),
+        "no stdin write may occur after deadline expiry"
+    );
+    let cleanup = client.close_connection("fixture finished".to_owned()).await;
+    assert!(cleanup.completed, "{}", cleanup.reason);
     Ok(())
 }

@@ -26,7 +26,9 @@ pub(super) fn durable_workspace_mutation_evidence(
             prepared_tool_calls.insert(payload.operation_id, payload.tool_call_id);
         }
     }
-    let running_evidence = running_execution_mutation_evidence(&records, scope);
+    let mut running_evidence = running_execution_mutation_evidence(&records, scope);
+    running_evidence
+        .extend(crate::process_environment::active_extension_mutation_evidence(&records, scope));
     let mut evidence = records
         .into_iter()
         .filter_map(|record| {

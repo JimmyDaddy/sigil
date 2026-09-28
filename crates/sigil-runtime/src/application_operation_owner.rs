@@ -37,6 +37,24 @@ pub fn application_operation_binding(
         },
         ApplicationCommand::Conversation(sigil_application::ConversationCommand::Recovery {
             action:
+                sigil_application::ApplicationRecoveryAction::ReviewPlugin {
+                    plugin_id,
+                    manifest_hash,
+                    capability_digest,
+                    enabled,
+                },
+        }) => Target::ReviewPlugin {
+            plugin_id: plugin_id.as_str().to_owned(),
+            manifest_hash: manifest_hash.as_str().to_owned(),
+            capability_digest: capability_digest.as_str().to_owned(),
+            decision: if *enabled {
+                sigil_kernel::PluginTrustDecision::Trusted
+            } else {
+                sigil_kernel::PluginTrustDecision::Disabled
+            },
+        },
+        ApplicationCommand::Conversation(sigil_application::ConversationCommand::Recovery {
+            action:
                 sigil_application::ApplicationRecoveryAction::ImportBranchKnowledge {
                     source_session_id,
                     source_turn_digest,
@@ -353,6 +371,11 @@ fn recovery_outcome_from_proof(
         })
     };
     Ok(match proof.matched_control() {
+        sigil_kernel::ControlEntry::PluginReviewCompletedV1(entry) => Some(Outcome::PluginReview {
+            plugin_id: SafeText::new(entry.plugin_id.clone())?,
+            enabled: entry.decision == sigil_kernel::PluginTrustDecision::Trusted,
+            process_cleanup: entry.process_cleanup.map(plugin_cleanup_status),
+        }),
         sigil_kernel::ControlEntry::BranchKnowledgeImportedV1(entry) => {
             Some(Outcome::BranchKnowledge {
                 import_id: SafeText::new(entry.import_id.clone())?,
@@ -373,4 +396,21 @@ fn recovery_outcome_from_proof(
         }),
         _ => None,
     })
+}
+
+/// Narrows the kernel-owned result to the application contract without a reverse dependency.
+pub fn plugin_cleanup_status(
+    status: sigil_kernel::PluginCleanupStatus,
+) -> sigil_application::PluginCleanupStatus {
+    match status {
+        sigil_kernel::PluginCleanupStatus::Confirmed => {
+            sigil_application::PluginCleanupStatus::Confirmed
+        }
+        sigil_kernel::PluginCleanupStatus::Unknown => {
+            sigil_application::PluginCleanupStatus::Unknown
+        }
+        sigil_kernel::PluginCleanupStatus::Unconfirmed => {
+            sigil_application::PluginCleanupStatus::Unconfirmed
+        }
+    }
 }

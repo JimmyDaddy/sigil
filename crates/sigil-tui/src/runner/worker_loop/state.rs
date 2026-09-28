@@ -5,6 +5,8 @@ const MAX_APPROVAL_COMMAND_RECEIPTS: usize = 256;
 const MAX_ARTIFACT_GC_DEFERRED_NOTICES: usize = 32;
 
 pub(in crate::runner) struct WorkerLoopState {
+    pub(in crate::runner) plugin_hook_execution:
+        Option<Arc<dyn sigil_runtime::ManagedPluginHookExecutionPortV1>>,
     pub(in crate::runner) stop_control: super::super::protocol::WorkerStopControl,
     pub(in crate::runner) event_tx: mpsc::Sender<WorkerEvent>,
     pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
@@ -120,6 +122,7 @@ impl WorkerLoopState {
             })
             .unwrap_or_default();
         Self {
+            plugin_hook_execution: None,
             stop_control: Default::default(),
             event_tx: event_tx.clone(),
             wake_coalescer,
@@ -193,6 +196,7 @@ impl WorkerLoopState {
                 seen_deferred_notices: BTreeSet::new(),
             },
             refresh: RefreshWorkerState {
+                pending_plugin_surface: false,
                 provider_status_tasks: ProviderStatusTaskManager::new(),
                 pending_mcp_servers: BTreeSet::new(),
                 next_mcp_retry_at: Instant::now(),
@@ -508,6 +512,7 @@ impl ArtifactGcWorkerState {
 }
 
 pub(in crate::runner) struct RefreshWorkerState {
+    pub(in crate::runner) pending_plugin_surface: bool,
     pub(in crate::runner) provider_status_tasks: ProviderStatusTaskManager,
     pub(in crate::runner) pending_mcp_servers: BTreeSet<String>,
     pub(in crate::runner) next_mcp_retry_at: Instant,

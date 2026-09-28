@@ -30,6 +30,7 @@ impl AppState {
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
         if self.change_review_modal_open()
+            || self.mcp_import_modal_open()
             || self.conversation_fork_modal_open()
             || self.branch_knowledge_modal_open()
         {

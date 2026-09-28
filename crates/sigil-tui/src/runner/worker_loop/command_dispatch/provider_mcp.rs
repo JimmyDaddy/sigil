@@ -135,6 +135,7 @@ where
                     egress_recorder,
                     disclosure_presenter,
                     managed_extension_execution.as_ref().map(Arc::clone),
+                    state.session.current.as_ref().and_then(Session::store_path).map(|path| Arc::new(sigil_runtime::SessionMcpPluginTrustSource::new(path)) as Arc<dyn sigil_runtime::McpPluginTrustSource>),
                 )) {
                     Ok(result) if result.matched_servers == 0 => {
                         let _ = message_tx.send(WorkerMessage::McpActivationStatus {

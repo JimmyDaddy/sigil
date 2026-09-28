@@ -257,6 +257,24 @@ impl AppState {
                 request_id,
                 request,
             },
+            AppAction::ReviewPlugin {
+                plugin_id,
+                manifest_hash,
+                capability_digest,
+                enabled,
+            } => WorkerCommand::ReviewPlugin {
+                session_id: self.session_id.clone(),
+                request: sigil_runtime::plugin_management::ApplicationPluginDecisionRequest {
+                    plugin_id,
+                    expected_manifest_hash: manifest_hash,
+                    expected_capability_digest: capability_digest,
+                    decision: if enabled {
+                        sigil_kernel::PluginTrustDecision::Trusted
+                    } else {
+                        sigil_kernel::PluginTrustDecision::Disabled
+                    },
+                },
+            },
             AppAction::LoadIntentStack { request_id } => {
                 WorkerCommand::LoadIntentStack { request_id }
             }

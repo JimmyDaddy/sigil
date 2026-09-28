@@ -303,6 +303,10 @@ impl AppState {
             self.should_quit = true;
             return Ok(None);
         }
+        if self.mcp_import_modal_open() {
+            self.handle_mcp_import_key_event(key);
+            return Ok(None);
+        }
         let info_rail_command = match command_for_key_event(key) {
             Some(
                 command @ (UiCommand::ToggleInfoRailVisibility | UiCommand::ToggleInfoRailDetail),
@@ -383,9 +387,10 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|config_state| config_state.selected_section == ConfigSection::Mcp)
                 {
-                    self.last_notice = Some("use `sigil mcp add` or edit sigil.toml".to_owned());
+                    self.open_mcp_import_path();
                 } else {
-                    self.last_notice = Some("MCP server add uses `sigil mcp add`".to_owned());
+                    self.last_notice =
+                        Some("open MCP settings and press Ctrl-N to import servers".to_owned());
                 }
             }
             KeyCode::Char('a' | 'A')
@@ -1420,10 +1425,11 @@ impl AppState {
             return (Vec::new(), Vec::new());
         }
         let user_config_dir = default_user_config_dir().ok();
-        match sigil_runtime::discover_skill_index_with_user_dir(
+        match sigil_runtime::discover_skill_index_with_session_entries(
             &self.workspace_root,
             user_config_dir.as_deref(),
             &root_config.skills,
+            &self.session_browser.current_entries,
         ) {
             Ok(report) => {
                 let warnings = report
@@ -1458,7 +1464,7 @@ impl AppState {
         }
     }
 
-    fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
+    pub(super) fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
         let selected = self.config_snapshot.as_ref().is_some_and(|config| {
             config.selected_capabilities().iter().any(|capability| {
                 matches!(
@@ -1472,14 +1478,34 @@ impl AppState {
         if !selected {
             return (Vec::new(), Vec::new());
         }
-        let projection = PluginStateProjection::from_entries(&self.session_browser.current_entries);
+        let records = if self.session_log_path.exists() {
+            JsonlSessionStore::read_event_records(&self.session_log_path)
+        } else {
+            Ok(Vec::new())
+        };
+        let canonical_entries = records.as_ref().ok().and_then(|records| {
+            records
+                .iter()
+                .map(|record| record.session_log_entry())
+                .collect::<Result<Vec<_>>>()
+                .ok()
+                .map(|entries| entries.into_iter().flatten().collect::<Vec<_>>())
+        });
+        let projection = PluginStateProjection::from_entries(
+            canonical_entries
+                .as_deref()
+                .unwrap_or(&self.session_browser.current_entries),
+        );
+        let cleanup = records.and_then(|records| {
+            sigil_runtime::plugin_management::application_plugin_cleanup_projection(&records)
+        });
         let trust_entries = projection
             .trust_entries
             .into_values()
             .collect::<Vec<PluginTrustEntry>>();
         match sigil_runtime::discover_workspace_plugins(&self.workspace_root, &trust_entries) {
             Ok(report) => {
-                let warnings = report
+                let mut warnings: Vec<String> = report
                     .warnings
                     .into_iter()
                     .map(|warning| {
@@ -1497,6 +1523,18 @@ impl AppState {
                         )
                     })
                     .collect();
+                match cleanup {
+                    Ok(statuses) => {
+                        for (plugin_id, status) in statuses {
+                            if status != sigil_kernel::PluginCleanupStatus::Confirmed {
+                                warnings.push(format!("plugin {plugin_id}: process cleanup {status:?}; disable again to retry"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warnings.push(format!("plugin cleanup status unavailable: {error}"))
+                    }
+                }
                 (report.manifests, warnings)
             }
             Err(error) => (
@@ -1821,33 +1859,26 @@ impl AppState {
         &mut self,
         decision: PluginTrustDecision,
     ) -> Result<Option<AppAction>> {
-        if self.runtime.is_busy {
-            self.last_notice = Some("busy; review plugin later".to_owned());
-            return Ok(None);
-        }
         let Some(plugin) = self.selected_config_plugin() else {
             return Ok(None);
         };
         let Some(plugin) = self.refresh_selected_plugin_for_review(&plugin) else {
             return Ok(None);
         };
-
         plugin.validate()?;
-        let trust = PluginTrustEntry::for_snapshot(&plugin, decision, unix_time_ms())?;
-        trust.validate()?;
-
-        self.ensure_current_session_identity()?;
-        self.append_plugin_review_entries(plugin.clone(), trust)?;
-        if let Some(config_state) = self.config_state.as_mut()
-            && let Some(selected) = config_state.selected_plugin_mut()
-        {
-            selected.trust = decision;
-        }
-
-        let action = plugin_review_action_label(decision);
-        self.last_notice = Some(format!("plugin {} {action}", plugin.plugin_id));
-        self.push_event("plugin", format!("{} {action}", plugin.plugin_id));
-        Ok(None)
+        let enabled = match decision {
+            PluginTrustDecision::Trusted => true,
+            PluginTrustDecision::Disabled => false,
+            PluginTrustDecision::NeedsReview => return Ok(None),
+        };
+        let capability_digest = plugin.capability_digest()?;
+        self.last_notice = Some(format!("saving plugin {} review", plugin.plugin_id));
+        Ok(Some(AppAction::ReviewPlugin {
+            plugin_id: plugin.plugin_id,
+            manifest_hash: plugin.manifest_hash,
+            capability_digest,
+            enabled,
+        }))
     }
 
     fn selected_config_plugin(&mut self) -> Option<PluginManifestSnapshot> {
@@ -1917,16 +1948,6 @@ impl AppState {
             model_name: self.runtime.model_name.clone(),
             resolved_model_route: self.runtime.model_route.clone(),
         })
-    }
-
-    fn append_plugin_review_entries(
-        &mut self,
-        snapshot: PluginManifestSnapshot,
-        trust: PluginTrustEntry,
-    ) -> Result<()> {
-        self.append_control_to_current_session(ControlEntry::PluginManifestCaptured(snapshot))?;
-        self.append_control_to_current_session(ControlEntry::PluginTrustDecision(trust))?;
-        Ok(())
     }
 
     pub(super) fn append_control_to_current_session(

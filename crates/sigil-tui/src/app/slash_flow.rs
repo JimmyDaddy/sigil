@@ -368,10 +368,11 @@ impl AppState {
             return Vec::new();
         };
         let user_config_dir = default_user_config_dir().ok();
-        sigil_runtime::discover_skill_index_with_user_dir(
+        sigil_runtime::discover_skill_index_with_session_entries(
             &self.workspace_root,
             user_config_dir.as_deref(),
             &root_config.skills,
+            &self.session_browser.current_entries,
         )
         .map(|report| report.snapshot.descriptors)
         .unwrap_or_default()

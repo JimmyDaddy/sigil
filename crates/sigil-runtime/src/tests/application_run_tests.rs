@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
@@ -7120,5 +7120,776 @@ async fn r71_application_prepare_rejects_legacy_composition() -> Result<()> {
     ));
     assert!(!requested_path.exists());
     assert!(!managed_path.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ApplicationPluginFixture {
+    root: tempfile::TempDir,
+    config_path: std::path::PathBuf,
+    plugin_root: std::path::PathBuf,
+    session_path: std::path::PathBuf,
+    services: ApplicationRunServices,
+}
+
+#[cfg(unix)]
+impl ApplicationPluginFixture {
+    fn new(eager_with_later_refusal: bool) -> Result<Self> {
+        struct RefuseAfterLocalStartup(std::path::PathBuf);
+        #[async_trait]
+        impl EgressDisclosurePresenter for RefuseAfterLocalStartup {
+            async fn present(
+                &self,
+                _disclosure: PreEgressDisclosure,
+            ) -> std::result::Result<DisclosurePresentationReceipt, DisclosurePresentationError>
+            {
+                let _observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !self.0.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                // A closed real disclosure sink must fail before any remote request is sent.
+                Err(DisclosurePresentationError::SinkClosed)
+            }
+        }
+
+        let root = tempfile::tempdir()?;
+        let config_path = root.path().join("sigil.toml");
+        write_unauthenticated_application_test_config(&config_path)?;
+        let plugin_root = root.path().join(".sigil/plugins/review");
+        std::fs::create_dir_all(&plugin_root)?;
+        let startup = if eager_with_later_refusal {
+            "eager"
+        } else {
+            "lazy"
+        };
+        std::fs::write(
+            plugin_root.join("plugin.toml"),
+            format!(
+                r#"id = "review"
+name = "Reviewed application workflow"
+version = "1.0.0"
+[[hooks]]
+id = "check"
+event = "verification"
+kind = "verification"
+command = "/bin/sh"
+args = ["-c", "printf actual-application-hook"]
+declared_effect = "read_only"
+approval = "ask"
+timeout_ms = 5000
+[[mcp_servers]]
+name = "echo"
+transport = "stdio"
+command = "python3"
+args = ["server.py"]
+startup = "{startup}"
+startup_timeout_secs = 30
+"#
+            ),
+        )?;
+        std::fs::write(
+            plugin_root.join("server.py"),
+            r#"import json, pathlib, sys, time
+pathlib.Path("launches.txt").write_text("launched")
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        deadline = time.monotonic() + 10
+        while pathlib.Path("hold-initialize").exists():
+            if time.monotonic() >= deadline:
+                sys.exit(3)
+            time.sleep(0.01)
+        result = {"protocolVersion":"2025-06-18", "serverInfo":{"name":"review","version":"1"}, "capabilities":{"tools":{}}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"echo", "inputSchema":{"type":"object"}}]}
+    else:
+        with pathlib.Path("calls.txt").open("a") as marker:
+            marker.write("called\n")
+        result = {"content":[{"type":"text","text":"actual-application-mcp"}]}
+    print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}), flush=True)
+"#,
+        )?;
+        let mut config = RootConfig::load(&config_path)?;
+        config.task.enabled = false;
+        config.memory.enabled = false;
+        if eager_with_later_refusal {
+            std::fs::write(plugin_root.join("hold-initialize"), "hold")?;
+            config.web.enabled = true;
+            config.web.network_mode = sigil_kernel::NetworkPolicy::Allow;
+            config.web.allow_http = true;
+            config.web.proxy_mode = sigil_kernel::WebProxyMode::Direct;
+            config.web.allowed_ports = vec![443];
+            config.mcp_servers.push(sigil_kernel::McpServerConfig {
+                name: "refused-remote".to_owned(),
+                transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+                    sigil_kernel::McpStreamableHttpConfig {
+                        url: "https://mcp.example.invalid/mcp".to_owned(),
+                        http_headers: Default::default(),
+                        env_http_headers: Default::default(),
+                        bearer_token_env_var: None,
+                        oauth: None,
+                        client_capabilities: Default::default(),
+                    },
+                ),
+                startup: sigil_kernel::McpServerStartup::Eager,
+                required: true,
+                ..Default::default()
+            });
+        }
+        config.save(&config_path)?;
+        let presenter: Arc<dyn EgressDisclosurePresenter> = if eager_with_later_refusal {
+            Arc::new(RefuseAfterLocalStartup(plugin_root.join("launches.txt")))
+        } else {
+            Arc::new(RejectingDisclosurePresenter)
+        };
+        let services = with_application_test_managed_authority(
+            root.path(),
+            ApplicationRunServices::new(presenter),
+        )?;
+        let binding = bind_application_test_managed_session(
+            &config_path,
+            root.path(),
+            &root.path().join("plugin-flow.jsonl"),
+            &services,
+        )?;
+        let discovered = crate::discover_workspace_plugins(root.path(), &[])?;
+        let trust = sigil_kernel::PluginTrustEntry::for_snapshot(
+            &discovered.manifests[0],
+            sigil_kernel::PluginTrustDecision::Trusted,
+            1,
+        )?;
+        JsonlSessionStore::new(&binding.session_log_path)?.append(&SessionLogEntry::Control(
+            ControlEntry::PluginTrustDecision(trust),
+        ))?;
+        Ok(Self {
+            root,
+            config_path,
+            plugin_root,
+            session_path: binding.session_log_path,
+            services,
+        })
+    }
+
+    async fn execute_audited(
+        &self,
+        registry: &ToolRegistry,
+        context: ToolContext,
+        call: ToolCall,
+    ) -> Result<ToolResult> {
+        let mut started = sigil_kernel::durable_tool_execution_entry(
+            &call,
+            context.approved_subjects(),
+            ToolExecutionStatus::Started,
+            None,
+            None,
+        )?;
+        if let Some(profile) = registry.execution_mutation_profile(&context, &call)? {
+            started.metadata.details["execution_mutation_profile"] = serde_json::to_value(profile)?;
+        }
+        let store = JsonlSessionStore::new(&self.session_path)?;
+        store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+            Box::new(started),
+        )))?;
+        let result = registry
+            .execute_after_started_audit(context.clone(), call.clone())
+            .await?;
+        let finished = sigil_kernel::durable_tool_execution_entry(
+            &call,
+            context.approved_subjects(),
+            if result.is_error() {
+                ToolExecutionStatus::Failed
+            } else {
+                ToolExecutionStatus::Completed
+            },
+            Some(0),
+            Some(&result),
+        )?;
+        store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+            Box::new(finished),
+        )))?;
+        Ok(result)
+    }
+
+    fn request(&self) -> ApplicationRunRequest {
+        let mut request = ApplicationRunRequest::non_interactive(
+            &self.config_path,
+            self.root.path(),
+            "inspect the reviewed workflow",
+            "plugin-application-flow",
+        );
+        request.session_path = Some(self.session_path.clone());
+        request
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction shares the isolated CA environment lock.
+async fn application_plugin_surface_discovers_calls_and_revokes_reviewed_workflow() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let fixture = ApplicationPluginFixture::new(false)?;
+    let prepared = prepare_application_run(fixture.request(), &fixture.services).await?;
+    let ApplicationRunExecutionKind::Main { agent, .. } = &prepared.execution.kind else {
+        anyhow::bail!("ordinary application preparation must retain its main agent");
+    };
+    let mut registry = agent.tool_registry().clone();
+    let observation = async {
+        anyhow::ensure!(
+            !fixture.plugin_root.join("launches.txt").exists(),
+            "lazy discovery spawned a process"
+        );
+        anyhow::ensure!(
+            registry.spec_for("mcp_catalog").is_some(),
+            "application catalog missing"
+        );
+        let hook = registry
+            .specs()
+            .into_iter()
+            .find(|spec| spec.name.starts_with("plugin__review__check__"))
+            .ok_or_else(|| anyhow::anyhow!("application hook registration missing"))?;
+        let context = ToolContext::new(fixture.root.path(), 5).with_mutation_recorder(
+            MutationEventRecorder::new(JsonlSessionStore::new(&fixture.session_path)?),
+        );
+        let hook_call = ToolCall {
+            id: "application-hook".to_owned(),
+            name: hook.name,
+            args_json: "{}".to_owned(),
+        };
+        let hook_context = context
+            .clone()
+            .with_approved_subjects(registry.permission_plan(&context, &hook_call)?.subjects);
+        let hook_result = fixture
+            .execute_audited(&registry, hook_context.clone(), hook_call.clone())
+            .await?;
+        anyhow::ensure!(
+            !hook_result.is_error() && hook_result.content.contains("actual-application-hook")
+        );
+        let activation = ToolCall {
+            id: "application-activate".to_owned(),
+            name: "mcp_activate_server".to_owned(),
+            args_json: serde_json::json!({"server_name":"review.echo"}).to_string(),
+        };
+        let approval = registry.permission_plan(&context, &activation)?.subjects;
+        let activated = fixture
+            .execute_audited(
+                &registry,
+                context.clone().with_approved_subjects(approval),
+                activation,
+            )
+            .await?;
+        anyhow::ensure!(!activated.is_error(), "{}", activated.content);
+        let owner = registry
+            .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, "review.echo")
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("application activation must expose its exact owner"))?;
+        let origin = owner
+            .origin()
+            .ok_or_else(|| anyhow::anyhow!("launched plugin owner lost its attested origin"))?;
+        anyhow::ensure!(origin.namespace == "plugin" && origin.subject == "review");
+        let current = crate::discover_workspace_plugins(fixture.root.path(), &[])?
+            .manifests
+            .remove(0);
+        anyhow::ensure!(sigil_kernel::plugin_manifest_digests_match(
+            &origin.revision,
+            &current.manifest_hash
+        ));
+        let call = ToolCall {
+            id: "application-echo".to_owned(),
+            name: registry.tool_names_by_lifecycle_owner(&owner)[0].clone(),
+            args_json: "{}".to_owned(),
+        };
+        let authorized = context
+            .clone()
+            .with_approved_subjects(registry.permission_plan(&context, &call)?.subjects);
+        let result = fixture
+            .execute_audited(&registry, authorized.clone(), call.clone())
+            .await?;
+        anyhow::ensure!(!result.is_error() && result.content == "actual-application-mcp");
+        let snapshot = crate::discover_workspace_plugins(fixture.root.path(), &[])?
+            .manifests
+            .remove(0);
+        let disabled = sigil_kernel::PluginTrustEntry::for_snapshot(
+            &snapshot,
+            sigil_kernel::PluginTrustDecision::Disabled,
+            2,
+        )?;
+        JsonlSessionStore::new(&fixture.session_path)?.append(&SessionLogEntry::Control(
+            ControlEntry::PluginTrustDecision(disabled),
+        ))?;
+        anyhow::ensure!(
+            fixture
+                .execute_audited(&registry, hook_context, hook_call)
+                .await
+                .is_err(),
+            "old hook must observe current disable"
+        );
+        anyhow::ensure!(
+            fixture
+                .execute_audited(&registry, authorized, call)
+                .await?
+                .is_error(),
+            "old MCP request must observe current disable"
+        );
+        anyhow::ensure!(
+            std::fs::read_to_string(fixture.plugin_root.join("calls.txt"))? == "called\n"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let cleanup = crate::shutdown_mcp_generations(&mut registry).await;
+    observation?;
+    cleanup?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction shares the isolated CA environment lock.
+async fn application_plugin_preparation_refusal_joins_started_prewarm_before_error() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let fixture = ApplicationPluginFixture::new(true)?;
+    let result = prepare_application_run(fixture.request(), &fixture.services).await;
+    anyhow::ensure!(
+        result.is_err(),
+        "required remote disclosure rejection must fail preparation"
+    );
+    assert!(
+        fixture.plugin_root.join("launches.txt").exists(),
+        "the refusal must follow an actual local process launch; preparation: {:?}",
+        result.as_ref().err()
+    );
+    let statuses = JsonlSessionStore::read_event_records(&fixture.session_path)?
+        .into_iter()
+        .map(|record| record.stored_event().clone())
+        .filter(|event| {
+            event.event_type == "extension_process_lifecycle_recorded"
+                && event.payload["safe_metadata"]
+                    .get("process_generation")
+                    .is_some()
+        })
+        .map(|event| {
+            event.payload["status"]
+                .as_str()
+                .expect("lifecycle status")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        ["starting", "running", "stopped"],
+        "preparation must join actual process cleanup before returning its error"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction shares the isolated CA environment lock.
+async fn application_plugin_disable_sees_and_joins_registry_before_prepare_is_ready() -> Result<()>
+{
+    struct HeldDisclosure {
+        entered: Arc<tokio::sync::Notify>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait]
+    impl EgressDisclosurePresenter for HeldDisclosure {
+        async fn present(
+            &self,
+            _: PreEgressDisclosure,
+        ) -> std::result::Result<DisclosurePresentationReceipt, DisclosurePresentationError>
+        {
+            self.entered.notify_one();
+            if let Some(release) = self.release.lock().await.take() {
+                let _released = release.await;
+            }
+            Err(DisclosurePresentationError::SinkClosed)
+        }
+    }
+    let _environment_guard = crate::test_env::lock();
+    let mut fixture = ApplicationPluginFixture::new(true)?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = tokio::sync::oneshot::channel();
+    fixture.services.disclosure_presenter = Arc::new(HeldDisclosure {
+        entered: Arc::clone(&entered),
+        release: tokio::sync::Mutex::new(Some(gate)),
+    });
+    let (binding, attachment) =
+        crate::application_run::bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+            &fixture.config_path,
+            fixture.root.path(),
+            Some(&fixture.session_path),
+            None,
+            None,
+            fixture
+                .services
+                .authority_composition()
+                .map(|composition| Arc::clone(&composition.storage_writer)),
+        )?;
+    let snapshot = crate::discover_workspace_plugins(fixture.root.path(), &[])?
+        .manifests
+        .remove(0);
+    let decision = crate::plugin_management::ApplicationPluginDecisionRequest {
+        plugin_id: snapshot.plugin_id.clone(),
+        expected_manifest_hash: snapshot.manifest_hash.clone(),
+        expected_capability_digest: snapshot.capability_digest()?,
+        decision: sigil_kernel::PluginTrustDecision::Disabled,
+    };
+    let mut request = fixture.request();
+    request.session_attachment = Some(Arc::clone(&attachment));
+    let preparation = prepare_application_run(request, &fixture.services);
+    tokio::pin!(preparation);
+    let mut early_prepared = None;
+    let observation = async {
+        let wait_for_started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            entered.notified().await;
+            while !fixture.plugin_root.join("launches.txt").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        tokio::select! {
+            result = preparation.as_mut() => {
+                let message = format!("preparation completed before held disclosure: {:?}", result.as_ref().err());
+                early_prepared = Some(result);
+                anyhow::bail!(message);
+            },
+            started = wait_for_started => started?,
+        }
+        let views = fixture.services.extension_registry_views(&binding.session_scope_id)?;
+        let retirements = {
+            let views = views.lock().map_err(|_| anyhow::anyhow!("registry views poisoned"))?;
+            let registries = views.iter().filter_map(sigil_kernel::WeakToolRegistry::upgrade).collect::<Vec<_>>();
+            anyhow::ensure!(!registries.is_empty(), "preparation has not published its existing owner observation");
+            anyhow::ensure!(registries.iter().all(|registry| registry.lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE).is_empty()), "fixture must still be in initialize, before public tool registration");
+            let retirements = registries.iter().map(|registry| crate::prepare_plugin_mcp_retirement(registry, &decision.plugin_id)).collect::<Vec<_>>();
+            crate::plugin_management::apply_application_plugin_decision(&attachment, &binding.session_scope_id, fixture.root.path(), &decision)?;
+            retirements
+        };
+        for retirement in retirements {
+            tokio::time::timeout(std::time::Duration::from_secs(5), retirement.settle()).await??;
+        }
+        if let std::task::Poll::Ready(result) = futures::poll!(preparation.as_mut()) {
+            early_prepared = Some(result);
+            anyhow::bail!("disable must be independent of the still-held prepare operation");
+        }
+        let events = JsonlSessionStore::read_event_records(&fixture.session_path)?.into_iter()
+            .map(|record| record.stored_event().clone())
+            .filter(|event| event.event_type == "extension_process_lifecycle_recorded").collect::<Vec<_>>();
+        anyhow::ensure!(events.len() == 4, "unexpected lifecycle evidence: {events:?}");
+        let generation = events[0].payload["safe_metadata"]["process_generation"].as_str().context("exact generation")?;
+        anyhow::ensure!(!generation.is_empty());
+        for (event, status) in events[..3].iter().zip(["starting", "running", "stopped"]) {
+            anyhow::ensure!(event.payload["status"] == status && event.payload["safe_metadata"]["process_generation"] == generation && event.payload["subject"] == events[0].payload["subject"], "disable returned before exact startup cleanup: {events:?}");
+        }
+        anyhow::ensure!(events[3].payload["status"] == "startup_failed" && events[3].payload["safe_metadata"].get("process_generation").is_none() && events[3].payload["subject"] == events[0].payload["subject"], "late startup outcome must not revive the stopped generation");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    // Always release and join the real prepare operation, including observation failures.
+    let _released = release.send(());
+    let prepared = match early_prepared {
+        Some(result) => result,
+        None => preparation.await,
+    };
+    if let Ok(prepared) = &prepared {
+        crate::shutdown_mcp_generations(&mut prepared.execution.extension_registry.clone()).await?;
+    }
+    observation?;
+    anyhow::ensure!(
+        prepared.is_err(),
+        "held disclosure should refuse remote preparation"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction shares the isolated CA environment lock.
+async fn application_extension_settlement_precedes_terminal_and_joins_contract_refusal()
+-> Result<()> {
+    struct CheckTerminalSettlement {
+        session_path: std::path::PathBuf,
+        terminal_observed: bool,
+        terminal_read_error: Option<String>,
+        terminal_statuses: Vec<String>,
+    }
+    impl ApplicationRunEventHandler for CheckTerminalSettlement {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            if matches!(event.event, PublicRunEventKind::RunFinished { .. }) {
+                let read = sigil_kernel::SessionRecordReadHandle::open_existing_observer(
+                    &self.session_path,
+                )
+                .and_then(|reader| reader.read_event_records());
+                match read {
+                    Ok(records) => {
+                        self.terminal_statuses = records
+                            .iter()
+                            .map(|record| record.stored_event())
+                            .filter(|event| {
+                                event.event_type == "extension_process_lifecycle_recorded"
+                            })
+                            .map(|event| {
+                                event.payload["status"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            })
+                            .collect()
+                    }
+                    Err(error) => self.terminal_read_error = Some(format!("{error:#}")),
+                }
+                self.terminal_observed = true;
+            }
+            Ok(())
+        }
+    }
+    let _environment_guard = crate::test_env::lock();
+    for invalid_contract in [false, true] {
+        let fixture = ApplicationPluginFixture::new(false)?;
+        let mut prepared = prepare_application_run(fixture.request(), &fixture.services).await?;
+        let registry = prepared.execution.extension_registry.clone();
+        let context = ToolContext::new(fixture.root.path(), 5).with_mutation_recorder(
+            MutationEventRecorder::new(JsonlSessionStore::new(&fixture.session_path)?),
+        );
+        let activation = ToolCall {
+            id: "settlement-activate".to_owned(),
+            name: "mcp_activate_server".to_owned(),
+            args_json: serde_json::json!({"server_name":"review.echo"}).to_string(),
+        };
+        let approved = registry.permission_plan(&context, &activation)?.subjects;
+        let activated = registry
+            .execute(context.with_approved_subjects(approved), activation)
+            .await?;
+        anyhow::ensure!(!activated.is_error(), "{}", activated.content);
+        let ApplicationRunExecutionKind::Main { agent, .. } = &mut prepared.execution.kind else {
+            anyhow::bail!("ordinary run expected");
+        };
+        **agent = sigil_kernel::Agent::new(
+            Box::new(ApplicationTaskRoleProvider {
+                role: AgentRole::Planner,
+            }),
+            registry.clone(),
+        );
+        if invalid_contract {
+            prepared.execution.interaction = ApplicationRunInteraction::ExternallyInteractive;
+        }
+        let mut recorder = CheckTerminalSettlement {
+            session_path: fixture.session_path.clone(),
+            terminal_observed: false,
+            terminal_read_error: None,
+            terminal_statuses: Vec::new(),
+        };
+        let result = prepared
+            .execution
+            .execute(&mut recorder, &mut AutoApproveHandler)
+            .await;
+        if invalid_contract {
+            let error = result.expect_err("explicit approval contract remains necessary");
+            anyhow::ensure!(error.to_string().contains("owned blocking"));
+        } else {
+            let output = result?;
+            assert_eq!(
+                output.terminal_status,
+                ApplicationRunTerminalStatus::Succeeded
+            );
+            assert!(recorder.terminal_observed);
+            assert!(
+                recorder.terminal_read_error.is_none(),
+                "{:?}",
+                recorder.terminal_read_error
+            );
+            assert_eq!(
+                recorder.terminal_statuses,
+                ["starting", "running", "registered", "stopped"]
+            );
+        }
+        assert!(
+            registry
+                .lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE)
+                .is_empty()
+        );
+        let statuses =
+            sigil_kernel::SessionRecordReadHandle::open_existing_observer(&fixture.session_path)?
+                .read_event_records()?
+                .into_iter()
+                .map(|record| record.stored_event().clone())
+                .filter(|event| event.event_type == "extension_process_lifecycle_recorded")
+                .map(|event| {
+                    event.payload["status"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+        assert_eq!(statuses, ["starting", "running", "registered", "stopped"]);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction shares the isolated CA environment lock.
+async fn application_cleanup_error_is_typed_without_reclassifying_ordinary_run_errors() -> Result<()>
+{
+    struct FailingCleanup(Arc<AtomicUsize>);
+    #[async_trait]
+    impl Tool for FailingCleanup {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "cleanup_failure".to_owned(),
+                description: "owner settlement fault injection".to_owned(),
+                input_schema: serde_json::json!({"type":"object"}),
+                category: ToolCategory::Mcp,
+                access: ToolAccess::Read,
+                network_effect: None,
+                preview: ToolPreviewCapability::None,
+            }
+        }
+        fn lifecycle_owner(&self) -> Option<sigil_kernel::ToolLifecycleOwner> {
+            Some(sigil_kernel::ToolLifecycleOwner::new(
+                sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+                "cleanup-fixture",
+                "exact-fixture-generation",
+            ))
+        }
+        async fn execute(
+            &self,
+            _: ToolContext,
+            _: String,
+            _: serde_json::Value,
+        ) -> Result<ToolResult> {
+            anyhow::bail!("settlement fixture must not be dispatched")
+        }
+        async fn shutdown(&self) -> Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("owned process stop could not be confirmed").into())
+        }
+    }
+    let _environment_guard = crate::test_env::lock();
+    for cleanup_fails in [false, true] {
+        let fixture = ApplicationPluginFixture::new(false)?;
+        let mut prepared = prepare_application_run(fixture.request(), &fixture.services).await?;
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        if cleanup_fails {
+            prepared
+                .execution
+                .extension_registry
+                .register(Arc::new(FailingCleanup(Arc::clone(&shutdowns))));
+        }
+        prepared.execution.interaction = ApplicationRunInteraction::ExternallyInteractive;
+        let error = prepared
+            .execution
+            .execute(
+                &mut RecordingApplicationRunEvents::default(),
+                &mut AutoApproveHandler,
+            )
+            .await
+            .expect_err("the explicit interaction contract remains enforced");
+        assert_eq!(
+            error.is::<crate::ApplicationRunCleanupError>(),
+            cleanup_fails
+        );
+        assert_eq!(shutdowns.load(Ordering::SeqCst), usize::from(cleanup_fails));
+        assert!(
+            format!("{error:#}").contains("owned blocking"),
+            "the preceding run error is retained"
+        );
+        if cleanup_fails {
+            assert!(format!("{error:#}").contains("owned process stop could not be confirmed"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn trusted_plugin_skill_catalog_binding_loads_and_rejects_revocation_or_manifest_drift()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    let plugin = root.path().join(".sigil/plugins/workflow");
+    std::fs::create_dir_all(plugin.join("skills/check"))?;
+    let manifest = "id = 'workflow'\nname = 'Workflow'\nversion = '1.0.0'\n[[skills]]\npath = 'skills/check/SKILL.md'\n";
+    std::fs::write(plugin.join("plugin.toml"), manifest)?;
+    std::fs::write(
+        plugin.join("skills/check/SKILL.md"),
+        "---\nname: check\ndescription: Check the chosen feature.\nrun-as: inline\n---\n\nPlugin acceptance instructions.\n",
+    )?;
+    let mut config = crate::provider_connections::default_setup_root_config();
+    config
+        .composition
+        .enhancements
+        .insert(sigil_kernel::OptionalCapability::Skills);
+    config.skills.user_skills = false;
+    config.skills.user_agents = false;
+    config.skills.compatibility_auto_discover = false;
+    let mut session = Session::new("fixture", "fixture")
+        .with_store(JsonlSessionStore::new(root.path().join("session.jsonl"))?);
+    assert!(
+        crate::application_extension_catalog_view(&config, root.path(), session.entries())?
+            .skills
+            .is_empty()
+    );
+    let snapshot = crate::discover_workspace_plugins(root.path(), &[])?
+        .manifests
+        .remove(0);
+    let trust = sigil_kernel::PluginTrustEntry::for_snapshot(
+        &snapshot,
+        sigil_kernel::PluginTrustDecision::Trusted,
+        1,
+    )?;
+    session.append_control(ControlEntry::PluginTrustDecision(trust.clone()))?;
+    let catalog =
+        crate::application_extension_catalog_view(&config, root.path(), session.entries())?;
+    let binding = catalog
+        .skills
+        .iter()
+        .find(|skill| skill.id == "workflow/check")
+        .and_then(|skill| skill.binding.clone())
+        .context("trusted plugin catalog binding")?;
+    let mut request = ApplicationRunRequest::non_interactive(
+        root.path().join("config.toml"),
+        root.path(),
+        "check feature",
+        "plugin-skill-run",
+    );
+    request.skill_binding = Some(binding);
+    let loaded = admit_application_skill_binding(&request, &config, root.path(), &mut session)?
+        .context("plugin skill admission")?;
+    assert!(
+        loaded
+            .transient_context
+            .content
+            .as_deref()
+            .is_some_and(|body| body.contains("Plugin acceptance instructions"))
+    );
+    let mut disabled = trust.clone();
+    disabled.decision = sigil_kernel::PluginTrustDecision::Disabled;
+    session.append_control(ControlEntry::PluginTrustDecision(disabled))?;
+    assert!(
+        crate::application_extension_catalog_view(&config, root.path(), session.entries())?
+            .skills
+            .is_empty()
+    );
+    assert!(matches!(
+        admit_application_skill_binding(&request, &config, root.path(), &mut session),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
+    session.append_control(ControlEntry::PluginTrustDecision(trust))?;
+    std::fs::write(
+        plugin.join("plugin.toml"),
+        manifest.replace("1.0.0", "1.1.0"),
+    )?;
+    assert!(
+        crate::application_extension_catalog_view(&config, root.path(), session.entries())?
+            .skills
+            .is_empty()
+    );
+    assert!(matches!(
+        admit_application_skill_binding(&request, &config, root.path(), &mut session),
+        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
+    ));
     Ok(())
 }

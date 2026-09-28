@@ -4600,6 +4600,34 @@ pub fn http_openapi_document() -> Value {
             }
         }
     });
+    document["paths"]["/settings/mcp-import/preview"] = json!({
+        "post": {
+            "summary": "Preview an explicitly selected MCP document without starting processes",
+            "requestBody": { "required": true, "content": { "application/json": {
+                "schema": { "type": "object", "required": ["mcpServers"], "properties": {
+                    "mcpServers": { "type": "object" }
+                } }
+            } } },
+            "responses": { "200": { "description": "Bounded host-owned editing preview", "content": {
+                "application/json": { "schema": { "$ref": "#/components/schemas/McpImportPreview" } }
+            } }, "422": { "description": "Invalid configuration document" } }
+        }
+    });
+    document["components"]["schemas"]["McpImportPreview"] = json!({
+        "type": "object", "required": ["preview_id", "candidates", "root_fields_ignored"],
+        "properties": {
+            "preview_id": { "type": "string" }, "root_fields_ignored": { "type": "boolean" },
+            "candidates": { "type": "array", "items": { "$ref": "#/components/schemas/McpImportCandidate" } }
+        }
+    });
+    document["components"]["schemas"]["McpImportCandidate"] = json!({
+        "type": "object", "required": ["index", "name", "description", "importable", "issues"],
+        "properties": {
+            "index": { "type": "integer", "minimum": 0 }, "name": { "type": "string" },
+            "transport": { "type": ["string", "null"] }, "description": { "type": "string" },
+            "importable": { "type": "boolean" }, "issues": { "type": "array", "items": { "type": "string" } }
+        }
+    });
     document["components"]["schemas"]["BranchLink"] = json!({"type": "object", "properties": {"session_ref": {"type": "string"}, "session_id": {"type": "string"}, "source_turn_digest": {"type": "string"}, "title": {"type": ["string", "null"]}, "source_turn_index": {"type": "integer", "minimum": 0}}, "required": ["session_ref", "session_id", "source_turn_digest", "title", "source_turn_index"]});
     document["components"]["schemas"]["BranchLineage"] = json!({"type": "object", "properties": {"session_id": {"type": "string"}, "parent": {"oneOf": [{"$ref": "#/components/schemas/BranchLink"}, {"type": "null"}]}, "children": {"type": "array", "items": {"$ref": "#/components/schemas/BranchLink"}}, "unavailable_count": {"type": "integer", "minimum": 0}}, "required": ["session_id", "parent", "children", "unavailable_count"]});
     document["components"]["schemas"]["BranchKnowledgeSource"] = json!({"type": "object", "properties": {"source_session_ref": {"type": "string"}, "source_session_id": {"type": "string"}}, "required": ["source_session_ref", "source_session_id"]});
@@ -4608,20 +4636,41 @@ pub fn http_openapi_document() -> Value {
     document["components"]["schemas"]["BranchKnowledgeImport"] = json!({"type": "object", "properties": {"source_session_ref": {"type": "string"}, "source_session_id": {"type": "string"}, "source_turn_digest": {"type": "string"}, "source_message_id": {"type": "string"}, "source_text_sha256": {"type": "string"}, "summary_sha256": {"type": "string"}}, "required": ["source_session_ref", "source_session_id", "source_turn_digest", "source_message_id", "source_text_sha256", "summary_sha256"]});
     document["components"]["schemas"]["BranchKnowledgeReceipt"] = json!({"type": "object", "properties": {"import_id": {"type": "string"}, "already_imported": {"type": "boolean"}}, "required": ["import_id", "already_imported"]});
     document["components"]["schemas"]["ConversationRecoveryImportBranchKnowledgeAction"] = json!({"type": "object", "properties": {"kind": {"type": "string", "const": "import_branch_knowledge"}, "selection": {"$ref": "#/components/schemas/BranchKnowledgeImport"}}, "required": ["kind", "selection"]});
+    document["components"]["schemas"]["PluginCapabilityView"] = json!({"type": "object", "properties": {"kind": {"type": "string"}, "label": {"type": "string"}, "approval": {"type": ["string", "null"]}, "allow_secrets": {"type": "boolean"}, "egress_logging": {"type": "boolean"}}, "required": ["kind", "label", "approval", "allow_secrets", "egress_logging"]});
+    document["components"]["schemas"]["PluginReview"] = json!({"type": "object", "properties": {"plugin_id": {"type": "string"}, "name": {"type": "string"}, "version": {"type": "string"}, "manifest_hash": {"type": "string"}, "capability_digest": {"type": "string"}, "trust": {"type": "string", "enum": ["trusted", "disabled", "needs_review"]}, "capabilities": {"type": "array", "items": {"$ref": "#/components/schemas/PluginCapabilityView"}}}, "required": ["plugin_id", "name", "version", "manifest_hash", "capability_digest", "trust", "capabilities"]});
+    document["components"]["schemas"]["PluginCatalog"] = json!({"type": "object", "properties": {"plugins": {"type": "array", "items": {"$ref": "#/components/schemas/PluginReview"}}, "warning_count": {"type": "integer", "minimum": 0}}, "required": ["plugins", "warning_count"]});
+    document["components"]["schemas"]["PluginReviewReceipt"] = json!({"type": "object", "properties": {"plugin_id": {"type": "string"}, "enabled": {"type": "boolean"}}, "required": ["plugin_id", "enabled"]});
+    document["components"]["schemas"]["ConversationRecoveryReviewPluginAction"] = json!({"type": "object", "properties": {"kind": {"type": "string", "const": "review_plugin"}, "plugin_id": {"type": "string"}, "manifest_hash": {"type": "string"}, "capability_digest": {"type": "string"}, "enabled": {"type": "boolean"}}, "required": ["kind", "plugin_id", "manifest_hash", "capability_digest", "enabled"]});
+    document["components"]["schemas"]["PluginCleanupStatus"] = json!({"type": "string", "enum": ["confirmed", "unknown", "unconfirmed"], "description": "Host-observed cleanup of earlier plugin processes; independent from plugin trust"});
+    for schema in ["PluginReview", "PluginReviewReceipt"] {
+        document["components"]["schemas"][schema]["properties"]["process_cleanup"] = json!({"oneOf": [{"$ref": "#/components/schemas/PluginCleanupStatus"}, {"type": "null"}]});
+    }
     document["paths"]["/sessions/{session_id}/branches"] = json!({"get": {"summary": "Read parent and child branch identities", "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Bounded session projection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchLineage"}}}}, "404": {"description": "Session missing"}, "503": {"description": "Projection unavailable"}}}});
     document["paths"]["/sessions/{session_id}/branches/knowledge-preview"] = json!({"post": {"summary": "Preview selected finalized source conclusions", "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Bounded session projection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchKnowledgePreview"}}}}, "404": {"description": "Session missing"}, "503": {"description": "Projection unavailable"}}, "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BranchKnowledgeSource"}}}}}});
-    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["branch_knowledge"] = json!({"oneOf": [{"$ref": "#/components/schemas/BranchKnowledgeReceipt"}, {"type": "null"}]});
+    document["paths"]["/sessions/{session_id}/plugins"] = json!({"get": {"summary": "Review path-free workspace plugin capabilities without starting extensions", "parameters": [{"name": "session_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Bounded session projection", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PluginCatalog"}}}}, "404": {"description": "Session missing"}, "503": {"description": "Projection unavailable"}}}});
     document["components"]["schemas"]["ConversationRecoveryCommandAction"]["oneOf"]
         .as_array_mut()
         .expect("recovery variants")
         .push(
             json!({"$ref": "#/components/schemas/ConversationRecoveryImportBranchKnowledgeAction"}),
         );
+    document["components"]["schemas"]["ConversationRecoveryCommandAction"]["oneOf"]
+        .as_array_mut()
+        .expect("recovery variants")
+        .push(json!({"$ref": "#/components/schemas/ConversationRecoveryReviewPluginAction"}));
     document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["action"]
         ["enum"]
         .as_array_mut()
         .expect("recovery action kinds")
         .push(json!("import_branch_knowledge"));
+    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["action"]
+        ["enum"]
+        .as_array_mut()
+        .expect("recovery action kinds")
+        .push(json!("review_plugin"));
+    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["branch_knowledge"] = json!({"oneOf": [{"$ref": "#/components/schemas/BranchKnowledgeReceipt"}, {"type": "null"}]});
+    document["components"]["schemas"]["ConversationRecoveryCommandReceipt"]["properties"]["plugin_review"] =
+        json!({"oneOf": [{"$ref": "#/components/schemas/PluginReviewReceipt"}, {"type": "null"}]});
     document["components"]["schemas"]
         .as_object_mut()
         .expect("OpenAPI schemas must be an object")

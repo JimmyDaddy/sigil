@@ -1527,6 +1527,8 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
             sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable,
         ),
     ] {
+        let event_root = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(event_root.path().join("session.jsonl"))?;
         let marker = temp.path().join(format!("refresh-{label}-spawned"));
         let mut config = test_root_config("deepseek");
         config.mcp_servers.push(mcp_server_config! {
@@ -1556,7 +1558,7 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
                 &format!("refresh-{label}"),
                 sigil_mcp::unsupported_mcp_elicitation_handler(),
                 sigil_mcp::unsupported_mcp_runtime_event_handler(),
-                None,
+                Some(MutationEventRecorder::new(store.clone())),
                 admission,
             )
             .await
@@ -1571,6 +1573,31 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
         assert!(
             !marker.exists(),
             "{label} rejection must not be authorized by source defaults or secret policy"
+        );
+        assert!(error.is::<sigil_mcp::McpPreSpawnRejection>());
+        let records = store.read_event_records_coordinated()?;
+        let lifetime = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| event.payload["safe_metadata"]["process_generation"].is_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lifetime
+                .iter()
+                .map(|event| event.payload["status"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("starting"), Some("stopped")],
+            "a proven zero-spawn rejection must not leave an uncloseable generation"
+        );
+        assert!(
+            lifetime
+                .iter()
+                .all(|event| event.payload["phase"] == "pre_spawn")
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.stored_event().payload["unknown_dirty"] == true)
         );
     }
     Ok(())
@@ -3842,4 +3869,251 @@ impl Drop for EnvScope {
             }
         }
     }
+}
+
+struct McpLifetimeFixture {
+    root: tempfile::TempDir,
+    workspace: PathBuf,
+    store: JsonlSessionStore,
+    config: RootConfig,
+}
+
+impl McpLifetimeFixture {
+    fn new() -> Result<Self> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace)?;
+        let script = root.path().join("lifetime.py");
+        std::fs::write(
+            &script,
+            r#"
+import json, pathlib, sys, threading, time
+trigger, changed = map(pathlib.Path, sys.argv[1:3])
+def later_write():
+    while not trigger.exists():
+        time.sleep(0.01)
+    changed.write_text("written after tools/list")
+threading.Thread(target=later_write, daemon=True).start()
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2025-06-18", "serverInfo":{"name":"lifetime","version":"1.0.0"}, "capabilities":{"tools":{}}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"echo", "inputSchema":{"type":"object"}, "annotations":{"readOnlyHint":True}}]}
+    elif method == "tools/call":
+        result = {"content":[{"type":"text","text":"alive"}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}), flush=True)
+"#,
+        )?;
+        let mut config = test_root_config("deepseek");
+        config.mcp_servers.push(mcp_server_config! {
+            name: "lifetime".to_owned(), command: "python3".to_owned(),
+            args: vec![script.display().to_string(), root.path().join("trigger").display().to_string(), workspace.join("late.txt").display().to_string()],
+            startup_timeout_secs: 5, ..McpServerConfig::default()
+        });
+        let store = JsonlSessionStore::new(root.path().join("session.jsonl"))?;
+        Ok(Self {
+            root,
+            workspace,
+            store,
+            config,
+        })
+    }
+
+    async fn register(&self, registry: &mut ToolRegistry) -> Result<ToolLifecycleOwner> {
+        let options = managed_mcp_registration_options(&self.workspace)?.with_mutation_recorder(
+            self.workspace.clone(),
+            MutationEventRecorder::new(self.store.clone()),
+        );
+        let report =
+            sigil_mcp::register_mcp_tools_with_report(registry, &self.config.mcp_servers, options)
+                .await?;
+        Ok(report.lifecycle_owners[0].clone())
+    }
+}
+
+#[tokio::test]
+async fn mcp_lifetime_shutdown_accounts_for_writes_after_startup() -> Result<()> {
+    let fixture = McpLifetimeFixture::new()?;
+    let mut registry = ToolRegistry::new();
+    let owner = fixture.register(&mut registry).await?;
+    std::fs::write(fixture.root.path().join("trigger"), b"go")?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !fixture.workspace.join("late.txt").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    super::shutdown_mcp_generations(&mut registry).await?;
+    assert!(
+        registry
+            .lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE)
+            .is_empty()
+    );
+    let records = fixture.store.read_event_records_coordinated()?;
+    let lifetime = records
+        .iter()
+        .map(|record| record.stored_event())
+        .filter(|event| {
+            event.event_type == "extension_process_lifecycle_recorded"
+                && event.payload["safe_metadata"]["process_generation"] == owner.generation()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifetime
+            .iter()
+            .map(|event| event.payload["status"].as_str().expect("status"))
+            .collect::<Vec<_>>(),
+        ["starting", "running", "stopped"]
+    );
+    let mutation = records
+        .iter()
+        .map(|record| record.stored_event())
+        .find(|event| {
+            event.event_type == "workspace_mutation_detected"
+                && event.payload["metadata"]["process_generation"] == owner.generation()
+        })
+        .expect("whole lifetime scan must account for post-startup write");
+    assert!(
+        mutation.payload["changed_paths"]
+            .as_array()
+            .expect("changed paths")
+            .iter()
+            .any(|path| path == "late.txt")
+    );
+    assert!(
+        mutation.stream_sequence < lifetime[2].stream_sequence,
+        "stop becomes visible only after durable mutation accounting"
+    );
+    Ok(())
+}
+
+struct SettlementOnlyVerificationPort;
+
+#[async_trait]
+impl sigil_kernel::verification::VerificationExecutionPortV1 for SettlementOnlyVerificationPort {
+    async fn execute_check(
+        &self,
+        _request: sigil_kernel::ExecutionRequest,
+    ) -> Result<sigil_kernel::ExecutionReceipt> {
+        anyhow::bail!("fixture does not execute checks")
+    }
+}
+
+#[tokio::test]
+async fn mcp_verification_settlement_joins_idle_process_before_readiness() -> Result<()> {
+    let fixture = McpLifetimeFixture::new()?;
+    let mut registry = ToolRegistry::new();
+    let owner = fixture.register(&mut registry).await?;
+    let before = fixture.store.read_event_records_coordinated()?;
+    assert!(before.iter().any(|record| record.stored_event().event_type
+        == "extension_process_lifecycle_recorded"
+        && record.stored_event().payload["status"] == "running"));
+    let verification = super::verification_with_mcp_settlement(
+        Arc::new(SettlementOnlyVerificationPort),
+        registry.clone(),
+        super::AgentToolBackgroundRuns::default(),
+    );
+    verification.prepare_verification().await?;
+    let after = fixture.store.read_event_records_coordinated()?;
+    let terminal = after
+        .iter()
+        .map(|record| record.stored_event())
+        .rfind(|event| {
+            event.event_type == "extension_process_lifecycle_recorded"
+                && event.payload["safe_metadata"]["process_generation"] == owner.generation()
+        })
+        .expect("real process lifecycle");
+    assert_eq!(terminal.payload["status"], "stopped");
+    assert!(registry.tool_names_by_lifecycle_owner(&owner).is_empty());
+    verification.prepare_verification().await?;
+    assert_eq!(
+        fixture.store.read_event_records_coordinated()?.len(),
+        after.len(),
+        "a second preparation cannot invent another stop"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_deactivation_is_scope_approval_and_exact_generation_bound() -> Result<()> {
+    let fixture = McpLifetimeFixture::new()?;
+    let mut registry = ToolRegistry::new();
+    let first = fixture.register(&mut registry).await?;
+    let capabilities = provider_capabilities_for_name("deepseek").expect("provider fixture");
+    register_lazy_mcp_activation_tool(
+        &mut registry,
+        &fixture.config,
+        &capabilities,
+        fixture.workspace.clone(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        None,
+    );
+    let call = ToolCall { id:"stop-exact-generation".to_owned(), name:"mcp_activate_server".to_owned(), args_json:json!({"operation":"deactivate", "server_name":"lifetime", "generation":first.generation()}).to_string() };
+    let context = ToolContext::new(&fixture.workspace, 5);
+    let approved = registry.permission_plan(&context, &call)?.subjects;
+    assert!(
+        registry
+            .execute(context.clone(), call.clone())
+            .await
+            .is_err(),
+        "unapproved stop must fail"
+    );
+    let hidden = registry.scoped(ToolRegistryScope::from_names_and_prefixes(
+        ["mcp_activate_server"],
+        std::iter::empty::<&str>(),
+    ));
+    assert!(
+        hidden
+            .execute(
+                context.clone().with_approved_subjects(approved.clone()),
+                call.clone()
+            )
+            .await
+            .is_err(),
+        "a hidden process generation cannot be guessed"
+    );
+    let stopped = registry
+        .execute(
+            context.clone().with_approved_subjects(approved.clone()),
+            call.clone(),
+        )
+        .await?;
+    assert!(!stopped.is_error());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stopped.content)?["status"],
+        "deactivated"
+    );
+    let replacement = fixture.register(&mut registry).await?;
+    assert_ne!(first.generation(), replacement.generation());
+    assert!(
+        registry
+            .execute(context.with_approved_subjects(approved), call)
+            .await
+            .is_err(),
+        "old preparation cannot stop a replacement"
+    );
+    assert_eq!(
+        registry.lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE),
+        vec![replacement]
+    );
+    let alive = registry
+        .execute(
+            ToolContext::new(&fixture.workspace, 5),
+            ToolCall {
+                id: "still-alive".to_owned(),
+                name: "mcp__lifetime__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(alive.content, "alive");
+    super::shutdown_mcp_generations(&mut registry).await?;
+    Ok(())
 }

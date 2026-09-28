@@ -2185,3 +2185,28 @@ async fn resolved_tool_catalog_is_bound_to_current_invocation_scope() -> Result<
     );
     Ok(())
 }
+
+#[test]
+fn tool_registry_vacant_batch_never_partially_publishes_or_replaces_existing_registration()
+-> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("existing")));
+    let before = registry.contract_fingerprint()?;
+    let conflicting: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(NamedRegistryTool("new")),
+        Arc::new(NamedRegistryTool("existing")),
+    ];
+    assert!(registry.register_batch_if_vacant(&conflicting).is_err());
+    assert!(registry.spec_for("new").is_none());
+    assert_eq!(registry.contract_fingerprint()?, before);
+    let duplicated: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(NamedRegistryTool("new")),
+        Arc::new(NamedRegistryTool("new")),
+    ];
+    assert!(registry.register_batch_if_vacant(&duplicated).is_err());
+    let incoming: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedRegistryTool("new"))];
+    registry.register_batch_if_vacant(&incoming)?;
+    assert!(registry.spec_for("new").is_some());
+    assert!(registry.spec_for("existing").is_some());
+    Ok(())
+}

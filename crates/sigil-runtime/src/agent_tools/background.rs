@@ -57,6 +57,8 @@ pub(super) struct BackgroundChatAgentHandle {
     pub(super) collection_supervisor: AgentSupervisor,
     pub(super) cancellation_owner: RunCancellationOwner,
     pub(super) write_owner: Option<BackgroundChatAgentWriteOwner>,
+    /// Current child scope, including generations activated after the child started.
+    pub(super) tool_registry: sigil_kernel::WeakToolRegistry,
 }
 
 /// Process-local owner for an isolated write result until its durable merge proposal is recorded.
@@ -356,6 +358,24 @@ impl AgentToolBackgroundRuns {
             .lock()
             .map(|handles| handles.keys().cloned().collect())
             .map_err(|_| anyhow!("agent background run lock poisoned"))
+    }
+
+    /// Observes whether an unfinished child can still invoke this exact resource generation.
+    /// The weak handle preserves the child's scope without extending its registry lifetime.
+    pub(crate) fn uses_tool_generation(
+        &self,
+        owner: &sigil_kernel::ToolLifecycleOwner,
+    ) -> Result<bool> {
+        let handles = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        Ok(handles.values().any(|background| {
+            !background.handle.is_finished()
+                && background.tool_registry.upgrade().is_some_and(|registry| {
+                    !registry.tool_names_by_lifecycle_owner(owner).is_empty()
+                })
+        }))
     }
 
     /// Returns durable isolated-workspace IDs that must stay alive with this attachment.

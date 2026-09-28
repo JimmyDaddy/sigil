@@ -48,6 +48,14 @@ pub struct ToolSpec {
     pub preview: ToolPreviewCapability,
 }
 
+/// Host-only settlement selection. Joining a scope observes an existing owner; it does not
+/// authorize creation, execution, or publication of a tool or process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolBackgroundWorkSettlement {
+    CancelIdle,
+    JoinScope { namespace: String, scope: String },
+}
+
 /// Read-only description of one currently visible tool registration.
 ///
 /// The revision identifies this registration and its exact specification. It is discovery data,
@@ -2705,11 +2713,20 @@ fn value_is_empty(value: &Value) -> bool {
 /// `generation` distinguishes concurrent or replacement lifecycles inside that scope.
 /// Provider-visible tool names must not be used as lifecycle identities because they may be
 /// sanitized, truncated, or hashed.
+/// Immutable host-attested source of a lifecycle. It is a cleanup observation, never a grant.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ToolLifecycleOrigin {
+    pub namespace: String,
+    pub subject: String,
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ToolLifecycleOwner {
     namespace: String,
     scope: String,
     generation: String,
+    origin: Option<ToolLifecycleOrigin>,
 }
 
 impl ToolLifecycleOwner {
@@ -2723,7 +2740,19 @@ impl ToolLifecycleOwner {
             namespace: namespace.into(),
             scope: scope.into(),
             generation: generation.into(),
+            origin: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_origin(mut self, origin: ToolLifecycleOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> Option<&ToolLifecycleOrigin> {
+        self.origin.as_ref()
     }
 
     #[must_use]
@@ -2899,6 +2928,28 @@ pub trait Tool: Send + Sync {
             capabilities.insert(ToolCapability::NetworkRead);
         }
         capabilities
+    }
+
+    /// Settles speculative background preparation while retaining this tool for later calls.
+    /// Implementations must join work they cancel and must not cancel an admitted user or child
+    /// invocation. This cleanup hook grants no permission to begin a new forward effect.
+    ///
+    /// # Errors
+    /// Returns an error when owned preparation cannot be settled.
+    async fn quiesce_background_work(&self, _mode: &ToolBackgroundWorkSettlement) -> Result<()> {
+        Ok(())
+    }
+
+    /// Captures existing background work belonging to an immutable origin, without stopping it.
+    /// The returned cleanup futures may cancel only those captured owners, including admitted
+    /// calls whose declaration the host has subsequently revoked. They must join that work and
+    /// must not select later generations by name. Capturing grants no execution permission.
+    fn prepare_background_work_retirement(
+        &self,
+        _origin_namespace: &str,
+        _origin_subject: &str,
+    ) -> Vec<futures::future::BoxFuture<'static, Result<()>>> {
+        Vec::new()
     }
 
     /// Shuts down lifecycle resources owned by this registered tool generation.
@@ -3388,6 +3439,36 @@ impl ToolRegistry {
         tools.insert(name, RegisteredTool::new(tool));
     }
 
+    /// Publishes a prepared set only if every stable name is still vacant.
+    /// Existing registrations and their invocation gates are never replaced on conflict.
+    pub fn register_batch_if_vacant(&mut self, incoming: &[Arc<dyn Tool>]) -> Result<()> {
+        let named = incoming
+            .iter()
+            .map(|tool| (tool.spec().name, Arc::clone(tool)))
+            .collect::<Vec<_>>();
+        let mut names = BTreeSet::new();
+        for (name, _) in &named {
+            anyhow::ensure!(
+                names.insert(name.clone()),
+                "duplicate prepared tool name {name}"
+            );
+        }
+        let mut tools = self
+            .tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (name, _) in &named {
+            anyhow::ensure!(
+                !tools.contains_key(name),
+                "tool registration changed while preparing {name}"
+            );
+        }
+        for (name, tool) in named {
+            tools.insert(name, RegisteredTool::new(tool));
+        }
+        Ok(())
+    }
+
     /// Attaches one runtime-owned per-run input resolver shared by every scoped registry view.
     pub fn set_run_input_preparer(&mut self, preparer: Arc<dyn crate::AgentRunInputPreparer>) {
         let mut slot = match self.run_input_preparer.write() {
@@ -3554,6 +3635,75 @@ impl ToolRegistry {
             .inspect(|registration| registration.invocation_gate.retire())
             .collect();
         ToolLifecycleRetirement { registrations }
+    }
+
+    /// Settles registered tools' speculative preparation without retiring their registrations.
+    /// The host calls this before selecting process generations for verification or shutdown.
+    /// All selected tools are joined even when one cleanup fails.
+    ///
+    /// # Errors
+    /// Returns an aggregate error when any tool cannot settle its owned preparation.
+    pub async fn quiesce_background_work(&self, mode: &ToolBackgroundWorkSettlement) -> Result<()> {
+        let tools = {
+            let registered = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            registered
+                .values()
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+        };
+        let mut errors = Vec::new();
+        for tool in tools {
+            if let Err(error) = tool.quiesce_background_work(mode).await {
+                errors.push(format!("{}: {error:#}", tool.spec().name));
+            }
+        }
+        if !errors.is_empty() {
+            bail!(
+                "tool background settlement incomplete: {}",
+                errors.join("; ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Captures exact background owners before a host publishes an origin revocation.
+    /// Cleanup runs only when the caller subsequently awaits the returned futures.
+    pub fn prepare_background_work_retirement(
+        &self,
+        origin_namespace: &str,
+        origin_subject: &str,
+    ) -> Vec<futures::future::BoxFuture<'static, Result<()>>> {
+        let tools = self
+            .tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>();
+        tools
+            .into_iter()
+            .flat_map(|tool| {
+                tool.prepare_background_work_retirement(origin_namespace, origin_subject)
+            })
+            .collect()
+    }
+
+    /// Returns distinct resource generations for host-owned shutdown of one namespace.
+    pub fn lifecycle_owners_by_namespace(&self, namespace: &str) -> Vec<ToolLifecycleOwner> {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools
+            .values()
+            .filter_map(|registration| registration.tool.lifecycle_owner())
+            .filter(|owner| owner.namespace() == namespace)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Returns distinct lifecycle generations registered for one exact opaque scope.

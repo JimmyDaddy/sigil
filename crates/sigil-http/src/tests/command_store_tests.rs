@@ -240,6 +240,7 @@ fn recovery_receipt(command_id: &str) -> HttpConversationRecoveryCommandReceipt 
         restore: None,
         fork: None,
         branch_knowledge: None,
+        plugin_review: None,
         recovery: HttpConversationRecoveryView {
             checkpoints: Vec::new(),
             fork_points: Vec::new(),

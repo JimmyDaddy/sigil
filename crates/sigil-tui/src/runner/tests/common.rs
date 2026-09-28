@@ -567,6 +567,7 @@ where
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
+                    plugin_hook_execution: authority_composition.plugin_hook_execution.clone().map(|execution| execution as std::sync::Arc<dyn sigil_runtime::ManagedPluginHookExecutionPortV1>),
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     role_provider_builder,

@@ -19,6 +19,8 @@ mod input_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod intent_stack_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod mcp_import_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod modal_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod mouse_flow_tests;

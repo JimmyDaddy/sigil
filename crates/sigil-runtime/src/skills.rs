@@ -19,7 +19,9 @@ use frontmatter::{clean_scalar, parse_inline_list};
 use frontmatter::{descriptor_from_entrypoint, fallback_skill_id};
 #[cfg(test)]
 use load::{LoadSkillTool, model_visible_skill_index_description, resolved_descriptor_path};
-pub use load::{LoadedSkillContext, load_user_invoked_skill, register_skill_tools};
+pub use load::{
+    LoadedSkillContext, load_user_invoked_skill, register_session_skill_tools, register_skill_tools,
+};
 
 /// Result of skill discovery, including the deterministic index and non-fatal warnings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,62 @@ pub enum SkillDiscoveryWarningKind {
     InvalidFrontmatter,
     ReadFailed,
     Shadowed,
+}
+
+/// Discovers ordinary skills and merges only currently trusted plugin declarations from the
+/// same session projection used by application catalogs and explicit skill admission.
+///
+/// # Errors
+/// Returns an error when ordinary discovery or deterministic index construction fails.
+pub fn discover_skill_index_with_session_entries(
+    workspace_root: &Path,
+    user_config_dir: Option<&Path>,
+    config: &sigil_kernel::SkillConfig,
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> Result<SkillDiscoveryReport> {
+    let trust = sigil_kernel::PluginStateProjection::from_entries(entries)
+        .trust_entries
+        .into_values()
+        .collect::<Vec<_>>();
+    discover_skill_index_with_plugin_trust(workspace_root, user_config_dir, config, &trust)
+}
+
+pub(crate) fn discover_skill_index_with_plugin_trust(
+    workspace_root: &Path,
+    user_config_dir: Option<&Path>,
+    config: &sigil_kernel::SkillConfig,
+    trust: &[sigil_kernel::PluginTrustEntry],
+) -> Result<SkillDiscoveryReport> {
+    let mut report = discover_skill_index_with_user_dir(workspace_root, user_config_dir, config)?;
+    if !config.enabled {
+        return Ok(report);
+    }
+    match crate::discover_workspace_plugins(workspace_root, trust) {
+        Ok(plugins) => {
+            report.snapshot = crate::merge_plugin_skill_descriptors(
+                &report.snapshot,
+                &plugins.registrations.skills,
+            )?;
+            report
+                .warnings
+                .extend(
+                    plugins
+                        .warnings
+                        .into_iter()
+                        .map(|warning| SkillDiscoveryWarning {
+                            kind: SkillDiscoveryWarningKind::ReadFailed,
+                            path: warning.path,
+                            message: warning.message,
+                        }),
+                );
+        }
+        Err(error) => report.warnings.push(SkillDiscoveryWarning {
+            kind: SkillDiscoveryWarningKind::ReadFailed,
+            path: workspace_root.join(".sigil/plugins"),
+            message: format!("optional plugin skill discovery unavailable: {error:#}"),
+        }),
+    }
+    Ok(report)
 }
 
 /// Builds the stable runtime id for a plugin-provided skill.

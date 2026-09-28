@@ -385,6 +385,23 @@ pub async fn prepare_application_task_continuation(
 }
 
 impl ApplicationTaskContinuationExecution {
+    /// Joins an unexecuted continuation's idle extensions through the existing attachment.
+    /// No Task or cancellation terminal is synthesized by resource cleanup.
+    ///
+    /// # Errors
+    /// Returns an error when extension cleanup could not be confirmed.
+    pub async fn settle_without_execution(self) -> Result<()> {
+        let background = self
+            ._session_lease
+            .attachment
+            .agent_tool_background_runs()?;
+        crate::verification_lifecycle::settle_idle_mcp(
+            &self.task_execution.base_registry,
+            &background,
+        )
+        .await
+    }
+
     /// Executes the prepared Task continuation with adapter-provided event and approval handlers.
     ///
     /// # Errors

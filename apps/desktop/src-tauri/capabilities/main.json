@@ -32,6 +32,9 @@
     "allow-desktop-update",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "allow-desktop-images"
+    "allow-desktop-pick-mcp-import",
+    "allow-desktop-apply-mcp-import",
+    "allow-desktop-images",
+    "allow-desktop-plugin-catalog"
   ]
 }

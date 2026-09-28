@@ -157,6 +157,7 @@ fn completion_ready_background_handle(
     task: BackgroundChatAgentTask,
 ) -> Result<BackgroundChatAgentHandle> {
     Ok(BackgroundChatAgentHandle {
+        tool_registry: ToolRegistry::new().downgrade(),
         thread: BackgroundChatAgentThreadRecord {
             thread_id,
             attempt_id: AgentRunAttemptId::new("attempt-completion-ready")?,
@@ -173,6 +174,99 @@ fn completion_ready_background_handle(
         cancellation_owner: RunCancellationOwner::new(),
         write_owner: None,
     })
+}
+
+struct BackgroundGenerationTool {
+    name: &'static str,
+    owner: sigil_kernel::ToolLifecycleOwner,
+}
+
+#[async_trait]
+impl Tool for BackgroundGenerationTool {
+    fn spec(&self) -> ToolSpec {
+        contract_test_spec(self.name, ToolAccess::Read)
+    }
+
+    fn lifecycle_owner(&self) -> Option<sigil_kernel::ToolLifecycleOwner> {
+        Some(self.owner.clone())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.name,
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn background_generation_use_tracks_late_activation_scope_and_joined_completion() -> Result<()>
+{
+    let mut registry = ToolRegistry::new();
+    let child_registry = registry
+        .scoped(sigil_kernel::ToolRegistryScope::from_names_and_prefixes(
+            ["mcp__child__echo"],
+            std::iter::empty::<String>(),
+        ))
+        .into_registry();
+    let owner = sigil_kernel::ToolLifecycleOwner::new(
+        sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+        "child",
+        "generation-1",
+    );
+    let excluded = sigil_kernel::ToolLifecycleOwner::new(
+        sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+        "other",
+        "generation-2",
+    );
+    let thread_id = AgentThreadId::new("agent-generation-owner")?;
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    let task = BackgroundChatAgentTask::spawn(thread_id.clone(), None, async move {
+        wait.await?;
+        Err(anyhow!("expected fixture completion"))
+    });
+    let mut handle = completion_ready_background_handle(thread_id.clone(), task)?;
+    handle.tool_registry = child_registry.downgrade();
+    let background_runs = AgentToolBackgroundRuns::default();
+    background_runs.insert(thread_id.clone(), handle)?;
+    assert!(!background_runs.uses_tool_generation(&owner)?);
+    // A frozen generation list from spawn time would miss this activation.
+    registry.register(Arc::new(BackgroundGenerationTool {
+        name: "mcp__child__echo",
+        owner: owner.clone(),
+    }));
+    registry.register(Arc::new(BackgroundGenerationTool {
+        name: "mcp__other__echo",
+        owner: excluded.clone(),
+    }));
+    assert!(background_runs.uses_tool_generation(&owner)?);
+    assert!(
+        !background_runs.uses_tool_generation(&excluded)?,
+        "a scope-excluded tool is not child-owned"
+    );
+    release.send(()).expect("live child");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !background_runs.has_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(
+        !background_runs.uses_tool_generation(&owner)?,
+        "retained weak handles are not liveness proof"
+    );
+    let handle = background_runs
+        .remove_if_finished(&thread_id)
+        .expect("joined child result");
+    assert!(handle.handle.finish().await?.is_err());
+    Ok(())
 }
 
 #[tokio::test]
@@ -4386,6 +4480,7 @@ async fn spawn_agents_background_registration_failure_dispatches_no_provider() -
     background_runs.insert(
         existing_thread_id.clone(),
         BackgroundChatAgentHandle {
+            tool_registry: ToolRegistry::new().downgrade(),
             thread: BackgroundChatAgentThreadRecord {
                 thread_id: existing_thread_id.clone(),
                 attempt_id: AgentRunAttemptId::new("attempt-existing-background")?,
@@ -5774,6 +5869,7 @@ async fn cancelling_direct_task_durably_stops_its_owned_background_child() -> Re
     background_runs.insert(
         thread_id.clone(),
         BackgroundChatAgentHandle {
+            tool_registry: ToolRegistry::new().downgrade(),
             thread: BackgroundChatAgentThreadRecord {
                 thread_id: thread_id.clone(),
                 attempt_id: AgentRunAttemptId::new("attempt_cancel_owned_child")?,
@@ -6090,6 +6186,7 @@ async fn cancel_direct_task_user_input(
         background_runs.insert(
             thread_id.clone(),
             BackgroundChatAgentHandle {
+                tool_registry: ToolRegistry::new().downgrade(),
                 thread: BackgroundChatAgentThreadRecord {
                     thread_id: thread_id.clone(),
                     attempt_id,

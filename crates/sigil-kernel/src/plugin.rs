@@ -800,6 +800,45 @@ impl PluginTrustDecision {
     }
 }
 
+/// Observed cleanup result; trust revocation alone never confirms physical process exit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCleanupStatus {
+    Confirmed,
+    Unknown,
+    Unconfirmed,
+}
+
+/// Post-review result bound to the exact durable trust event, not a timestamp or current state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginReviewCompletedV1 {
+    pub plugin_id: String,
+    pub manifest_hash: String,
+    pub capability_digest: String,
+    pub decision: PluginTrustDecision,
+    pub trust_event_id: String,
+    pub process_cleanup: Option<PluginCleanupStatus>,
+}
+
+impl PluginReviewCompletedV1 {
+    /// Validates the secret-free identity and result shape before durable publication.
+    ///
+    /// # Errors
+    /// Rejects malformed identities or a disable result that omits its cleanup status.
+    pub fn validate(&self) -> Result<()> {
+        validate_plugin_id(&self.plugin_id)?;
+        validate_plugin_manifest_digest(&self.plugin_id, &self.manifest_hash)?;
+        validate_plugin_capability_digest(&self.plugin_id, &self.capability_digest)?;
+        if self.trust_event_id.trim().is_empty()
+            || self.decision == PluginTrustDecision::NeedsReview
+            || (self.decision == PluginTrustDecision::Disabled && self.process_cleanup.is_none())
+        {
+            bail!("plugin review result has an invalid trust event or cleanup result");
+        }
+        Ok(())
+    }
+}
+
 /// Durable snapshot of one discovered plugin manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

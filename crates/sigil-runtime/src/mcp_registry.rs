@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 
 use crate::mcp_declaration::declarations_by_effective_name;
 
+#[path = "mcp_startup.rs"]
+mod startup;
+use startup::McpActivationStartups;
+
 fn require_mcp_composition(root_config: &RootConfig) -> Result<()> {
     if !root_config
         .composition
@@ -68,6 +72,158 @@ impl McpPluginTrustSource for SessionMcpPluginTrustSource {
     }
 }
 
+async fn resolve_runtime_mcp_declarations(
+    root_config: &RootConfig,
+    workspace: &std::path::Path,
+    source: Option<Arc<dyn McpPluginTrustSource>>,
+) -> Result<Vec<ResolvedMcpServerDeclaration>> {
+    let servers = root_config.mcp_servers.clone();
+    let workspace = workspace.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut declarations = resolve_user_root_mcp_declarations(&servers, &workspace)?;
+        if let Some(source) = source {
+            let trust = source.current_plugin_trust()?;
+            let report = crate::discover_workspace_plugins(&workspace, &trust)?;
+            for warning in report.warnings {
+                tracing::warn!(
+                    code = warning.kind.code(),
+                    "optional plugin discovery warning"
+                );
+            }
+            for registration in report.registrations.mcp_servers {
+                match crate::merge_mcp_server_declarations(&declarations, &[registration]) {
+                    Ok(merged) => declarations = merged,
+                    Err(error) => tracing::warn!(
+                        code = error.code(),
+                        "optional plugin MCP declaration unavailable"
+                    ),
+                }
+            }
+        }
+        Ok(declarations)
+    })
+    .await
+    .context("MCP declaration discovery worker failed")?
+}
+
+/// Adds reviewed plugin MCP declarations to the existing explicit activation/catalog surface.
+/// Without `startup_context`, discovery is process-free. With it, the activation tool owns eager
+/// prewarming without waiting here; hosts must settle the registry on preparation failure or
+/// shutdown. Plugin origin remains separate from the user configuration passed to activation.
+#[allow(clippy::too_many_arguments)]
+pub async fn register_session_plugin_mcp_tools(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    source: Arc<dyn McpPluginTrustSource>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+    startup_context: Option<(MutationEventRecorder, ExtensionProcessNetworkAdmission)>,
+) -> Result<Vec<McpServerConfig>> {
+    register_session_plugin_mcp_tools_with_registry_slot(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        source,
+        elicitation_handler,
+        runtime_event_handler,
+        managed_extension_execution,
+        presenter,
+        startup_context,
+        None,
+    )
+    .await
+}
+
+/// The session host's weak observation slot serializes registration with a trust decision.
+/// Declaration I/O happens first; no slot lock crosses an await or owns physical resources.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn register_session_plugin_mcp_tools_with_registry_slot(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    source: Arc<dyn McpPluginTrustSource>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    managed_extension_execution: Option<
+        Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
+    >,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+    startup_context: Option<(MutationEventRecorder, ExtensionProcessNetworkAdmission)>,
+    registry_slot: Option<&std::sync::Mutex<Vec<sigil_kernel::WeakToolRegistry>>>,
+) -> Result<Vec<McpServerConfig>> {
+    if !root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+    {
+        return Ok(Vec::new());
+    }
+    let declarations =
+        resolve_runtime_mcp_declarations(root_config, &workspace_root, Some(Arc::clone(&source)))
+            .await?;
+    let plugin_declarations = declarations
+        .into_iter()
+        .filter(|declaration| {
+            !root_config
+                .mcp_servers
+                .iter()
+                .any(|server| server.name == declaration.effective_name())
+        })
+        .collect::<Vec<_>>();
+    let plugin_servers = plugin_declarations
+        .iter()
+        .map(|declaration| declaration.config().clone())
+        .collect::<Vec<_>>();
+    if plugin_servers.is_empty() {
+        return Ok(plugin_servers);
+    }
+    let mut registry_slot = registry_slot.map(|slot| {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
+    let mut catalog_config = root_config.clone();
+    catalog_config.mcp_servers.extend(plugin_servers.clone());
+    crate::mcp_catalog::register_mcp_catalog(registry, &catalog_config);
+    let activation = Arc::new(McpActivateServerTool {
+        registry: registry.downgrade(),
+        root_config: root_config.clone(),
+        provider_capabilities: provider_capabilities.clone(),
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        managed_extension_execution,
+        remote_presenter: Some(presenter),
+        plugin_declarations,
+        plugin_trust_source: Some(source),
+        startups: Arc::new(McpActivationStartups::default()),
+    });
+    registry.register(activation.clone());
+    if let Some(slot) = registry_slot.as_mut() {
+        slot.retain(|registry| registry.upgrade().is_some());
+        slot.push(registry.downgrade());
+    }
+    if let Some((recorder, network_admission)) = startup_context {
+        for server in &plugin_servers {
+            if server.startup == McpServerStartup::Eager {
+                activation.startups.prewarm(
+                    &activation,
+                    &server.name,
+                    recorder.clone(),
+                    network_admission,
+                )?;
+            }
+        }
+    }
+    Ok(plugin_servers)
+}
+
 /// Runtime controls for registering already-resolved MCP declarations.
 pub struct McpDeclarationRegistrationOptions {
     startup: McpServerStartup,
@@ -80,6 +236,7 @@ pub struct McpDeclarationRegistrationOptions {
     managed_extension_execution:
         Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     strict_registration: bool,
+    startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
 }
 
 impl McpDeclarationRegistrationOptions {
@@ -95,6 +252,7 @@ impl McpDeclarationRegistrationOptions {
             plugin_trust_source: None,
             managed_extension_execution: None,
             strict_registration: false,
+            startup_cancellation: None,
         }
     }
 
@@ -124,6 +282,15 @@ impl McpDeclarationRegistrationOptions {
     #[must_use]
     pub fn with_expected_process_subject(mut self, subject: ToolSubject) -> Self {
         self.expected_process_subject = Some(subject);
+        self
+    }
+
+    #[must_use]
+    pub fn with_startup_cancellation(
+        mut self,
+        cancellation: sigil_kernel::RunCancellationHandle,
+    ) -> Self {
+        self.startup_cancellation = Some(cancellation);
         self
     }
 
@@ -192,6 +359,22 @@ pub async fn register_mcp_server_declarations(
         .iter()
         .map(|declaration| declaration.config().clone())
         .collect::<Vec<_>>();
+    let launcher = declaration_mcp_process_launcher(
+        root_config,
+        &stdio_declarations,
+        options.plugin_trust_source,
+        options.managed_extension_execution,
+    )?;
+    let plugin_servers = stdio_declarations
+        .iter()
+        .filter(|declaration| declaration.plugin_attestation().is_some())
+        .map(|declaration| {
+            (
+                declaration.effective_name().to_owned(),
+                declaration.config().clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut registration_options =
         sigil_mcp::McpToolRegistrationOptions::for_startup(options.startup)?
             .with_capabilities(provider_capabilities)
@@ -201,13 +384,18 @@ pub async fn register_mcp_server_declarations(
             .with_elicitation_handler(options.elicitation_handler)
             .with_runtime_event_handler(options.runtime_event_handler)
             .with_pre_spawn_safe_metadata(declaration_pre_spawn_safe_metadata(&stdio_declarations))
-            .with_process_launcher(declaration_mcp_process_launcher(
-                root_config,
-                &stdio_declarations,
-                options.plugin_trust_source,
-                options.managed_extension_execution,
-            )?)
+            .with_process_launcher(Arc::clone(&launcher))
             .with_network_admission(options.network_admission);
+    if !plugin_servers.is_empty() {
+        registration_options =
+            registration_options.with_pre_request_check(Arc::new(DeclarationMcpPreRequestCheck {
+                launcher,
+                plugin_servers,
+            }));
+    }
+    if let Some(cancellation) = options.startup_cancellation {
+        registration_options = registration_options.with_startup_cancellation(cancellation);
+    }
     if let Some(recorder) = options.mutation_recorder {
         registration_options =
             registration_options.with_mutation_recorder(workspace_root, recorder);
@@ -219,6 +407,38 @@ pub async fn register_mcp_server_declarations(
         registration_options = registration_options.with_strict_registration();
     }
     sigil_mcp::register_mcp_tools_with_report(registry, &servers, registration_options).await
+}
+
+struct DeclarationMcpPreRequestCheck {
+    launcher: Arc<dyn McpProcessLauncher>,
+    plugin_servers: BTreeMap<String, McpServerConfig>,
+}
+
+impl sigil_mcp::McpPreRequestCheck for DeclarationMcpPreRequestCheck {
+    fn validate_current(
+        &self,
+        receipt: &McpProcessLaunchReceipt,
+        owner: &sigil_kernel::ToolLifecycleOwner,
+    ) -> Result<()> {
+        let Some(server) = self.plugin_servers.get(&receipt.server_name) else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            owner.belongs_to(
+                sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+                &receipt.server_name
+            ) && !owner.generation().is_empty(),
+            "MCP request owner does not match its launched declaration"
+        );
+        let current = self.launcher.resolve_launch_request(server, None)?;
+        anyhow::ensure!(
+            current.declaration == receipt.declaration
+                && current.launch_static_fingerprint == receipt.launch_static_fingerprint
+                && current.environment.live_fingerprint() == receipt.environment_live_fingerprint,
+            "plugin MCP declaration changed after launch; review and activate its current declaration"
+        );
+        Ok(())
+    }
 }
 
 fn declaration_pre_spawn_safe_metadata(
@@ -1128,6 +1348,8 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
         None,
         None,
         network_admission,
+        None,
+        None,
     )
     .await
 }
@@ -1165,6 +1387,7 @@ pub async fn activate_mcp_tools_from_product_surface(
         egress_recorder,
         presenter,
         None,
+        None,
     )
     .await
 }
@@ -1186,10 +1409,27 @@ pub async fn activate_mcp_tools_from_product_surface_with_managed_extension_exec
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
 ) -> Result<LazyMcpActivationResult> {
     require_mcp_composition(root_config)?;
     let effective_config = root_config.with_effective_composition()?;
     let root_config = &effective_config;
+    let selected =
+        resolve_runtime_mcp_declarations(root_config, &workspace_root, plugin_trust_source.clone())
+            .await?;
+    for declaration in selected.iter().filter(|declaration| {
+        server_name.map_or(
+            declaration.config().startup == McpServerStartup::Lazy,
+            |name| declaration.effective_name() == name,
+        )
+    }) {
+        registry
+            .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::JoinScope {
+                namespace: sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE.to_owned(),
+                scope: declaration.effective_name().to_owned(),
+            })
+            .await?;
+    }
     let remote_servers = root_config
         .mcp_servers
         .iter()
@@ -1220,6 +1460,8 @@ pub async fn activate_mcp_tools_from_product_surface_with_managed_extension_exec
         None,
         managed_extension_execution,
         network_admission,
+        plugin_trust_source,
+        None,
     )
     .await?;
     for remote_server_name in remote_servers {
@@ -1258,30 +1500,57 @@ async fn activate_lazy_mcp_tools_detailed_inner(
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
     network_admission: ExtensionProcessNetworkAdmission,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
+    startup_cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<LazyMcpActivationResult> {
     require_mcp_composition(root_config)?;
     let effective_config = root_config.with_effective_composition()?;
     let root_config = &effective_config;
     let declarations =
-        resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
-    let selected_declarations = declarations
+        resolve_runtime_mcp_declarations(root_config, &workspace_root, plugin_trust_source.clone())
+            .await?;
+    let mut selected_declarations = declarations
         .iter()
         .filter(|declaration| declaration.config().stdio().is_some())
-        .filter(|declaration| declaration.config().startup == McpServerStartup::Lazy)
-        .filter(|declaration| server_name.is_none_or(|name| declaration.effective_name() == name))
+        .filter(|declaration| {
+            server_name.map_or(
+                declaration.config().startup == McpServerStartup::Lazy,
+                |name| declaration.effective_name() == name,
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
+    let matched_servers = selected_declarations.len();
+    selected_declarations.retain(|declaration| {
+        registry
+            .lifecycle_owners_by_scope(
+                sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+                declaration.effective_name(),
+            )
+            .is_empty()
+    });
     if selected_declarations.is_empty() {
         return Ok(LazyMcpActivationResult {
-            matched_servers: 0,
+            matched_servers,
             added_tools: 0,
             process_launch_receipts: Vec::new(),
         });
     }
     let before = registry.specs().len();
-    let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Lazy)
+    let startup = selected_declarations
+        .first()
+        .map_or(McpServerStartup::Lazy, |declaration| {
+            declaration.config().startup
+        });
+    let mut registration_options = McpDeclarationRegistrationOptions::new(startup)
         .with_handlers(elicitation_handler, runtime_event_handler)
         .with_network_admission(network_admission);
+    if let Some(cancellation) = startup_cancellation {
+        registration_options = registration_options.with_startup_cancellation(cancellation);
+    }
+    if let Some(source) = plugin_trust_source {
+        registration_options = registration_options.with_plugin_trust_source(source);
+    }
     if let Some(route) = managed_extension_execution {
         registration_options = registration_options.with_managed_extension_execution(route);
     }
@@ -1304,7 +1573,7 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     )
     .await?;
     Ok(LazyMcpActivationResult {
-        matched_servers: selected_declarations.len(),
+        matched_servers,
         added_tools: registry.specs().len().saturating_sub(before),
         process_launch_receipts: report.process_launch_receipts,
     })
@@ -1667,13 +1936,18 @@ impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
     }
 
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
-        self.configured
-            .launch(self.validate_and_prepare_request(request)?)
+        self.configured.launch(
+            self.validate_and_prepare_request(request)
+                .context(sigil_mcp::McpPreSpawnRejection)?,
+        )
     }
 
     async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
         self.configured
-            .launch_async(self.validate_and_prepare_request(request)?)
+            .launch_async(
+                self.validate_and_prepare_request(request)
+                    .context(sigil_mcp::McpPreSpawnRejection)?,
+            )
             .await
     }
 }
@@ -1690,19 +1964,27 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
         #[cfg(test)]
         {
-            let plan = self.build_plan(&request)?;
+            let plan = self
+                .build_plan(&request)
+                .context(sigil_mcp::McpPreSpawnRejection)?;
             launch_planned_mcp_process(request, plan)
         }
         #[cfg(not(test))]
         {
             let _ = (&self.execution, &self.managed_extension_execution, request);
-            bail!("MCP extension launch requires the composed managed async lifecycle")
+            Err(
+                anyhow!("MCP extension launch requires the composed managed async lifecycle")
+                    .context(sigil_mcp::McpPreSpawnRejection),
+            )
         }
     }
 
     async fn launch_async(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
-        let plan = self.build_plan(&request)?;
-        validate_planned_mcp_process_network(&request, &plan)?;
+        let plan = self
+            .build_plan(&request)
+            .context(sigil_mcp::McpPreSpawnRejection)?;
+        validate_planned_mcp_process_network(&request, &plan)
+            .context(sigil_mcp::McpPreSpawnRejection)?;
         if let Some(route) = &self.managed_extension_execution {
             let handle = route
                 .start_persistent(&request.server_name, plan.clone())
@@ -1717,7 +1999,10 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
         #[cfg(not(test))]
         {
             let _ = (request, plan);
-            bail!("MCP extension launch requires the composed managed execution route")
+            Err(
+                anyhow!("MCP extension launch requires the composed managed execution route")
+                    .context(sigil_mcp::McpPreSpawnRejection),
+            )
         }
     }
 }
@@ -1746,7 +2031,8 @@ pub(super) fn launch_planned_mcp_process(
     request: McpProcessLaunchRequest,
     plan: sigil_tools_builtin::LongLivedStdioProcessPlan,
 ) -> Result<McpProcessLaunch> {
-    validate_planned_mcp_process_network(&request, &plan)?;
+    validate_planned_mcp_process_network(&request, &plan)
+        .context(sigil_mcp::McpPreSpawnRejection)?;
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -1899,6 +2185,7 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
         mutation_recorder,
         network_admission,
         None,
+        None,
     )
     .await
 }
@@ -1918,6 +2205,7 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
 ) -> Result<McpRefreshResult> {
     refresh_mcp_server_tools_inner(
         registry,
@@ -1930,6 +2218,7 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
         mutation_recorder,
         network_admission,
         managed_extension_execution,
+        plugin_trust_source,
     )
     .await
 }
@@ -1963,6 +2252,7 @@ pub async fn refresh_mcp_server_tools_from_product_surface(
         egress_recorder,
         presenter,
         None,
+        None,
     )
     .await
 }
@@ -1984,6 +2274,7 @@ pub async fn refresh_mcp_server_tools_from_product_surface_with_managed_extensio
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
 ) -> Result<McpRefreshResult> {
     require_mcp_composition(root_config)?;
     let effective_config = root_config.with_effective_composition()?;
@@ -2018,6 +2309,7 @@ pub async fn refresh_mcp_server_tools_from_product_surface_with_managed_extensio
         mutation_recorder,
         network_admission,
         managed_extension_execution,
+        plugin_trust_source,
     )
     .await
 }
@@ -2036,12 +2328,20 @@ async fn refresh_mcp_server_tools_inner(
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
 ) -> Result<McpRefreshResult> {
     require_mcp_composition(root_config)?;
+    registry
+        .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::JoinScope {
+            namespace: sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE.to_owned(),
+            scope: server_name.to_owned(),
+        })
+        .await?;
     let effective_config = root_config.with_effective_composition()?;
     let root_config = &effective_config;
     let declarations =
-        resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+        resolve_runtime_mcp_declarations(root_config, &workspace_root, plugin_trust_source.clone())
+            .await?;
     let selected_declarations = declarations
         .iter()
         .filter(|declaration| declaration.effective_name() == server_name)
@@ -2072,6 +2372,9 @@ async fn refresh_mcp_server_tools_inner(
         .with_handlers(elicitation_handler, runtime_event_handler)
         .with_network_admission(network_admission)
         .with_strict_registration();
+    if let Some(source) = plugin_trust_source {
+        registration_options = registration_options.with_plugin_trust_source(source);
+    }
     if let Some(route) = managed_extension_execution {
         registration_options = registration_options.with_managed_extension_execution(route);
     }
@@ -2132,7 +2435,96 @@ async fn refresh_mcp_server_tools_inner(
     })
 }
 
-#[cfg(test)]
+/// Exact, already-observed plugin generations. Preparing this value does not start or retire work.
+/// It deliberately keeps effective declaration scopes separate from user-root server names.
+pub struct PreparedPluginMcpRetirement {
+    registry: ToolRegistry,
+    owners: Vec<sigil_kernel::ToolLifecycleOwner>,
+    startups: Vec<futures::future::BoxFuture<'static, Result<()>>>,
+}
+
+impl PreparedPluginMcpRetirement {
+    /// Retires only the captured generations, including when a newer generation now exists.
+    ///
+    /// # Errors
+    /// Reports all cleanup failures after attempting every captured owner.
+    pub async fn settle(mut self) -> Result<()> {
+        let retirements = self
+            .owners
+            .iter()
+            .map(|owner| self.registry.retire_by_lifecycle_owner(owner))
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for startup in self.startups {
+            if let Err(error) = startup.await {
+                failures.push(format!("{error:#}"));
+            }
+        }
+        for retirement in retirements {
+            if let Err(error) = retirement.dispose_and_quiesce().await {
+                failures.push(format!("{error:#}"));
+            }
+        }
+        if !failures.is_empty() {
+            bail!("plugin MCP cleanup incomplete: {}", failures.join("; "));
+        }
+        Ok(())
+    }
+}
+
+/// Captures exact generations whose immutable launch origin belongs to this plugin.
+/// This remains valid when the declaration file changed or disappeared after launch. The caller
+/// must validate and publish the reviewed decision before settling; observation grants nothing.
+#[must_use]
+pub fn prepare_plugin_mcp_retirement(
+    registry: &ToolRegistry,
+    plugin_id: &str,
+) -> PreparedPluginMcpRetirement {
+    // Capture initialization first. A startup removed before this observation has already
+    // published; one captured here retains its exact publication result until joined.
+    let startups = registry.prepare_background_work_retirement("plugin", plugin_id);
+    let owners = registry
+        .lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE)
+        .into_iter()
+        .filter(|owner| {
+            owner
+                .origin()
+                .is_some_and(|origin| origin.namespace == "plugin" && origin.subject == plugin_id)
+        })
+        .collect();
+    PreparedPluginMcpRetirement {
+        registry: registry.clone(),
+        owners,
+        startups,
+    }
+}
+
+/// Closes the host-owned MCP generations after that host has joined its active runs.
+/// Every generation is retired before waiting; failures are aggregated after all owners settle.
+pub async fn shutdown_mcp_generations(registry: &mut ToolRegistry) -> Result<()> {
+    let mut failures = Vec::new();
+    if let Err(error) = registry
+        .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle)
+        .await
+    {
+        failures.push(format!("MCP initialization cleanup incomplete: {error:#}"));
+    }
+    let retirements = registry
+        .lifecycle_owners_by_namespace(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE)
+        .iter()
+        .map(|owner| registry.retire_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
+    for retirement in retirements {
+        if let Err(error) = retirement.dispose_and_quiesce().await {
+            failures.push(format!("{error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!("MCP generation cleanup incomplete: {}", failures.join("; "));
+    }
+    Ok(())
+}
+
 pub(crate) async fn shutdown_registered_tools(tools: &[Arc<dyn Tool>]) -> Result<()> {
     let mut attempted_owners = Vec::new();
     let mut failures = Vec::new();
@@ -2171,9 +2563,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
     if !root_config
         .composition
         .allows(sigil_kernel::OptionalCapability::Mcp)
-        || !root_config.mcp_servers.iter().any(|server| {
-            server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()
-        })
+        || root_config.mcp_servers.is_empty()
     {
         return;
     }
@@ -2186,6 +2576,9 @@ pub(super) fn register_lazy_mcp_activation_tool(
         runtime_event_handler,
         managed_extension_execution,
         remote_presenter: None,
+        plugin_declarations: Vec::new(),
+        plugin_trust_source: None,
+        startups: Arc::new(McpActivationStartups::default()),
     }));
 }
 
@@ -2281,6 +2674,9 @@ pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
         runtime_event_handler,
         managed_extension_execution,
         remote_presenter: Some(presenter),
+        plugin_declarations: Vec::new(),
+        plugin_trust_source: None,
+        startups: Arc::new(McpActivationStartups::default()),
     }));
     Ok(())
 }
@@ -2296,20 +2692,25 @@ struct McpActivateServerTool {
     managed_extension_execution:
         Option<Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>>,
     remote_presenter: Option<Arc<dyn sigil_kernel::EgressDisclosurePresenter>>,
+    plugin_declarations: Vec<ResolvedMcpServerDeclaration>,
+    plugin_trust_source: Option<Arc<dyn McpPluginTrustSource>>,
+    startups: Arc<McpActivationStartups>,
 }
 
 fn mcp_activation_tool_spec() -> ToolSpec {
     ToolSpec {
         name: "mcp_activate_server".to_owned(),
-        description: "Activate a configured lazy MCP server so its real tools become available on the next model turn. Use mcp_catalog list_servers if its exact configured name or purpose is unknown; discovery does not start a process or grant approval."
+        description: "Activate a configured MCP server, or explicitly deactivate an exact running generation. Activation is the default operation. The host settles unused local generations automatically before final verification. Explicit deactivation retires that generation, waits for in-flight calls, and confirms process cleanup before returning. Use mcp_catalog for exact names and generation IDs; discovery never grants approval."
             .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "server_name": {
                     "type": "string",
-                    "description": "Name of the configured MCP server with startup = lazy."
-                }
+                    "description": "Exact configured MCP server name."
+                },
+                "operation": {"type":"string", "enum":["activate", "deactivate"], "default":"activate"},
+                "generation": {"type":"string", "description":"Required for deactivate: exact generation from mcp_catalog list_tools. A changed generation must be reviewed again."}
             },
             "required": ["server_name"]
         }),
@@ -2322,6 +2723,36 @@ fn mcp_activation_tool_spec() -> ToolSpec {
 
 #[async_trait]
 impl Tool for McpActivateServerTool {
+    fn prepare_background_work_retirement(
+        &self,
+        origin_namespace: &str,
+        origin_subject: &str,
+    ) -> Vec<futures::future::BoxFuture<'static, Result<()>>> {
+        self.startups
+            .prepare_retirement(origin_namespace, origin_subject, self.registry.clone())
+    }
+
+    async fn quiesce_background_work(
+        &self,
+        mode: &sigil_kernel::ToolBackgroundWorkSettlement,
+    ) -> Result<()> {
+        match mode {
+            sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle => {
+                self.startups.quiesce(false).await
+            }
+            sigil_kernel::ToolBackgroundWorkSettlement::JoinScope { namespace, scope }
+                if namespace == sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE =>
+            {
+                self.startups.join_scope(scope).await
+            }
+            sigil_kernel::ToolBackgroundWorkSettlement::JoinScope { .. } => Ok(()),
+        }
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        self.startups.quiesce(true).await
+    }
+
     fn spec(&self) -> ToolSpec {
         mcp_activation_tool_spec()
     }
@@ -2340,21 +2771,36 @@ impl Tool for McpActivateServerTool {
         args: &Value,
     ) -> Result<sigil_kernel::ToolPermissionPlanDraft> {
         let server_name = required_server_name(args)?;
+        if mcp_control_operation(args)? == McpControlOperation::Deactivate {
+            let generation = required_mcp_generation(args)?;
+            let registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| anyhow!("MCP registry is unavailable"))?;
+            exact_mcp_owner(&registry, server_name, generation)?;
+            return sigil_kernel::declared_tool_permission_plan(
+                &self.spec(),
+                args,
+                sigil_kernel::DeclaredToolPermissionFacts {
+                    access: ToolAccess::Execute,
+                    operation: ToolOperation::ExecuteUnknownCommand,
+                    network_effect: None,
+                    subjects: vec![mcp_deactivation_subject(server_name, generation)],
+                    tool_default_mode: Some(sigil_kernel::ApprovalMode::Ask),
+                    managed_file_access: None,
+                },
+            );
+        }
         let (access, network_effect, subjects, tool_default_mode) =
-            if let Some(server) = self.lazy_server(server_name) {
+            if let Some(server) = self.configured_server(server_name) {
                 (
                     if server.streamable_http().is_some() {
                         ToolAccess::Read
                     } else {
                         ToolAccess::Execute
                     },
-                    mcp_server_process_network_effect(
-                        &self.root_config.execution,
-                        &self.workspace_root,
-                        server,
-                        ctx.network_policy(),
-                    ),
-                    mcp_server_process_subjects(server, &self.workspace_root)?,
+                    self.process_network_effect(server, ctx.network_policy())?,
+                    self.process_subjects(server)?,
                     Some(server.trust.approval_default),
                 )
             } else {
@@ -2380,14 +2826,17 @@ impl Tool for McpActivateServerTool {
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
+        if mcp_control_operation(args)? == McpControlOperation::Deactivate {
+            return Ok(None);
+        }
         let server_name = required_server_name(args)?;
-        let Some(server) = self.lazy_server(server_name) else {
+        let Some(server) = self.configured_server(server_name) else {
             return Ok(None);
         };
         if !server.trust.egress_logging {
             return Ok(None);
         }
-        let Some((_, _, inherit_env)) = server.stdio() else {
+        let Some(_) = server.stdio() else {
             let remote = server
                 .streamable_http()
                 .expect("non-stdio MCP server is streamable HTTP");
@@ -2418,8 +2867,8 @@ impl Tool for McpActivateServerTool {
                 redacted: true,
             }));
         };
-        let environment = sigil_kernel::resolve_extension_process_environment(inherit_env)?;
-        let (_, declaration) = user_root_mcp_launch_binding(server, &self.workspace_root)?;
+        let request = self.stdio_launch_request(server)?;
+        let environment = &request.environment;
         Ok(Some(ToolEgressAudit {
             destination: format!("mcp:{server_name}"),
             operation: "server/activate".to_owned(),
@@ -2428,11 +2877,10 @@ impl Tool for McpActivateServerTool {
                 "trust_class": server.trust.trust_class.as_str(),
                 "startup": server.startup.as_str(),
                 "environment_grant_names": environment.grant_names(),
-                "environment_grant_source": "parent_environment",
                 "environment_static_fingerprint": environment.static_fingerprint(),
                 "environment_live_fingerprint": environment.live_fingerprint(),
-                "launch_static_fingerprint": declaration.transport_static_fingerprint,
-                "declaration": declaration.metadata,
+                "launch_static_fingerprint": request.launch_static_fingerprint,
+                "declaration": request.declaration,
             }),
             redacted: false,
         }))
@@ -2440,7 +2888,39 @@ impl Tool for McpActivateServerTool {
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let server_name = required_server_name(&args)?;
-        if self.lazy_server(server_name).is_none() {
+        if mcp_control_operation(&args)? == McpControlOperation::Deactivate {
+            let generation = required_mcp_generation(&args)?;
+            let owner = ctx
+                .visible_tool_catalog()?
+                .into_iter()
+                .filter_map(|entry| entry.lifecycle_owner)
+                .find(|owner| {
+                    owner.belongs_to(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name)
+                        && owner.generation() == generation
+                })
+                .ok_or_else(|| {
+                    anyhow!("MCP generation is not visible in this scope or has changed")
+                })?;
+            anyhow::ensure!(
+                ctx.approved_subjects()
+                    .contains(&mcp_deactivation_subject(server_name, generation)),
+                "MCP deactivation approval no longer matches this generation"
+            );
+            let mut registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| anyhow!("MCP registry is unavailable"))?;
+            exact_mcp_owner(&registry, server_name, generation)?;
+            let retirement = registry.retire_by_lifecycle_owner(&owner);
+            anyhow::ensure!(
+                !retirement.is_empty(),
+                "MCP generation changed before deactivation"
+            );
+            let removed = retirement.len();
+            retirement.dispose_and_quiesce().await?;
+            return Ok(ToolResult::ok(call_id, "mcp_activate_server", json!({"status":"deactivated", "server_name":server_name, "generation":generation, "removed_tools":removed}).to_string(), sigil_kernel::ToolResultMeta::default()));
+        }
+        if self.configured_server(server_name).is_none() {
             return Ok(ToolResult::error(
                 call_id,
                 "mcp_activate_server",
@@ -2463,7 +2943,7 @@ impl Tool for McpActivateServerTool {
             .registry
             .upgrade()
             .ok_or_else(|| anyhow!("MCP tool registry is no longer available"))?;
-        if let Some(server) = self.lazy_server(server_name)
+        if let Some(server) = self.configured_server(server_name)
             && server.streamable_http().is_some()
         {
             let presenter = self.remote_presenter.clone().ok_or_else(|| {
@@ -2488,28 +2968,11 @@ impl Tool for McpActivateServerTool {
                 &[],
             ));
         }
-        let expected_process_subject = ctx
-            .approved_subjects()
-            .iter()
-            .find(|subject| subject.kind == ToolSubjectKind::McpTrustClass)
-            .cloned();
-        let result = activate_lazy_mcp_tools_detailed_inner(
-            &mut registry,
-            &self.root_config,
-            &self.provider_capabilities,
-            self.workspace_root.clone(),
-            Some(server_name),
-            Arc::clone(&self.elicitation_handler),
-            Arc::clone(&self.runtime_event_handler),
-            ctx.mutation_recorder.clone(),
-            expected_process_subject,
-            self.managed_extension_execution.clone(),
-            ExtensionProcessNetworkAdmission::new(
-                ctx.network_policy(),
-                ctx.explicit_network_approval(),
-            ),
-        )
-        .await?;
+        let result = self.startups.activate(self, server_name, ctx).await?;
+        anyhow::ensure!(
+            result.matched_servers > 0,
+            "MCP declaration is no longer available; rediscover the configured extensions"
+        );
         Ok(activation_result(
             call_id,
             server_name,
@@ -2522,11 +2985,103 @@ impl Tool for McpActivateServerTool {
 }
 
 impl McpActivateServerTool {
-    fn lazy_server(&self, server_name: &str) -> Option<&McpServerConfig> {
-        self.root_config.mcp_servers.iter().find(|server| {
-            server.name == server_name
-                && (server.startup == McpServerStartup::Lazy || server.streamable_http().is_some())
-        })
+    fn configured_server(&self, server_name: &str) -> Option<&McpServerConfig> {
+        self.root_config
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == server_name)
+            .or_else(|| {
+                self.plugin_declarations
+                    .iter()
+                    .map(ResolvedMcpServerDeclaration::config)
+                    .find(|server| server.name == server_name)
+            })
+    }
+
+    fn stdio_launch_request(&self, server: &McpServerConfig) -> Result<McpProcessLaunchRequest> {
+        let declaration = self
+            .plugin_declarations
+            .iter()
+            .find(|declaration| declaration.effective_name() == server.name)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                ResolvedMcpServerDeclaration::user_root(server.clone(), &self.workspace_root)
+            })?;
+        declaration_mcp_process_launcher(
+            &self.root_config,
+            &[declaration],
+            self.plugin_trust_source.clone(),
+            self.managed_extension_execution.clone(),
+        )?
+        .resolve_launch_request(server, Some(self.workspace_root.clone()))
+    }
+
+    fn process_subjects(&self, server: &McpServerConfig) -> Result<Vec<ToolSubject>> {
+        if server.stdio().is_none() {
+            return Ok(vec![
+                mcp_server_subject(&server.name),
+                ToolSubject::mcp_trust_class(
+                    server.name.clone(),
+                    server.trust.trust_class.as_str(),
+                ),
+            ]);
+        }
+        let request = self.stdio_launch_request(server)?;
+        let binding = request
+            .declaration
+            .as_ref()
+            .ok_or_else(|| anyhow!("resolved MCP declaration lacks process binding"))?;
+        Ok(vec![
+            mcp_server_subject(&server.name),
+            ToolSubject::mcp_trust_class_with_process_binding(
+                server.name.clone(),
+                server.trust.trust_class.as_str(),
+                &binding.authorization_fingerprint,
+                request.environment.live_fingerprint(),
+            ),
+        ])
+    }
+
+    fn process_network_effect(
+        &self,
+        server: &McpServerConfig,
+        policy: NetworkPolicy,
+    ) -> Result<Option<NetworkEffect>> {
+        if self
+            .plugin_declarations
+            .iter()
+            .all(|declaration| declaration.effective_name() != server.name)
+        {
+            return Ok(mcp_server_process_network_effect(
+                &self.root_config.execution,
+                &self.workspace_root,
+                server,
+                policy,
+            ));
+        }
+        let request = self.stdio_launch_request(server)?;
+        let plan = ConfiguredMcpProcessLauncher {
+            execution: self.root_config.execution.clone(),
+            managed_extension_execution: self.managed_extension_execution.clone(),
+        }
+        .build_plan(&request)?;
+        Ok(
+            if sigil_kernel::validate_extension_process_isolation_with_network_policy(
+                plan.sandbox_profile,
+                Some(NetworkEffect::Unknown),
+                NetworkPolicy::Deny,
+                plan.backend_capabilities,
+                &plan.network,
+                format!("mcp_server:{}", server.name),
+            )
+            .is_ok()
+            {
+                None
+            } else {
+                Some(NetworkEffect::Unknown)
+            },
+        )
     }
 
     fn registered_tool_count(&self, server_name: &str) -> usize {
@@ -2579,55 +3134,6 @@ fn mcp_server_process_network_effect(
     } else {
         Some(NetworkEffect::Unknown)
     }
-}
-
-fn mcp_server_process_subjects(
-    server: &McpServerConfig,
-    workspace_root: &std::path::Path,
-) -> Result<Vec<ToolSubject>> {
-    let Some((_, _, inherit_env)) = server.stdio() else {
-        return Ok(vec![
-            mcp_server_subject(&server.name),
-            ToolSubject::mcp_trust_class(server.name.clone(), server.trust.trust_class.as_str()),
-        ]);
-    };
-    let environment = sigil_kernel::resolve_extension_process_environment(inherit_env)?;
-    let (_, binding) = user_root_mcp_launch_binding(server, workspace_root)?;
-    Ok(vec![
-        mcp_server_subject(&server.name),
-        ToolSubject::mcp_trust_class_with_process_binding(
-            server.name.clone(),
-            server.trust.trust_class.as_str(),
-            binding.metadata.authorization_fingerprint,
-            environment.live_fingerprint(),
-        ),
-    ])
-}
-
-struct UserRootMcpLaunchBinding {
-    transport_static_fingerprint: String,
-    metadata: McpDeclarationLaunchMetadata,
-}
-
-fn user_root_mcp_launch_binding(
-    server: &McpServerConfig,
-    workspace_root: &std::path::Path,
-) -> Result<(ResolvedMcpStdioLaunch, UserRootMcpLaunchBinding)> {
-    let declaration = ResolvedMcpServerDeclaration::user_root(server.clone(), workspace_root)?;
-    let launch = declaration.resolve_stdio_launch(&[])?;
-    let request = McpProcessLaunchRequest::from_config(server, Some(launch.cwd.clone()))?;
-    let metadata = declaration.launch_metadata(
-        &launch,
-        &request.launch_static_fingerprint,
-        request.environment.live_fingerprint(),
-    );
-    Ok((
-        launch,
-        UserRootMcpLaunchBinding {
-            transport_static_fingerprint: request.launch_static_fingerprint,
-            metadata,
-        },
-    ))
 }
 
 fn activation_result(
@@ -2733,6 +3239,49 @@ fn mcp_sandbox_profile_label(profile: sigil_kernel::ExecutionSandboxProfile) -> 
         sigil_kernel::ExecutionSandboxProfile::BuildOffline => "build_offline",
         sigil_kernel::ExecutionSandboxProfile::BuildNetworked => "build_networked",
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum McpControlOperation {
+    Activate,
+    Deactivate,
+}
+
+fn mcp_control_operation(args: &Value) -> Result<McpControlOperation> {
+    match args.get("operation").map(Value::as_str) {
+        None | Some(Some("activate")) => Ok(McpControlOperation::Activate),
+        Some(Some("deactivate")) => Ok(McpControlOperation::Deactivate),
+        _ => bail!("MCP operation must be activate or deactivate"),
+    }
+}
+
+fn required_mcp_generation(args: &Value) -> Result<&str> {
+    args.get("generation")
+        .and_then(Value::as_str)
+        .filter(|generation| !generation.is_empty())
+        .ok_or_else(|| anyhow!("deactivate requires an exact MCP generation from mcp_catalog"))
+}
+
+fn mcp_deactivation_subject(server_name: &str, generation: &str) -> ToolSubject {
+    ToolSubject::command(
+        format!("deactivate MCP server {server_name}"),
+        format!(
+            "mcp-deactivate:{}:{server_name}{generation}",
+            server_name.len()
+        ),
+    )
+}
+
+fn exact_mcp_owner(
+    registry: &ToolRegistry,
+    server_name: &str,
+    generation: &str,
+) -> Result<sigil_kernel::ToolLifecycleOwner> {
+    registry
+        .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name)
+        .into_iter()
+        .find(|owner| owner.generation() == generation)
+        .ok_or_else(|| anyhow!("MCP generation changed; refresh the catalog before deactivation"))
 }
 
 fn required_server_name(args: &Value) -> Result<&str> {

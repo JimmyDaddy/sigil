@@ -14,6 +14,22 @@ const MCP_STDERR_TAIL_LIMIT_BYTES: usize = 48 * 1024;
 const MCP_STDERR_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const MCP_PROCESS_EXIT_GRACE: Duration = Duration::from_millis(500);
 
+/// Marks a rejection proven to occur before invoking a physical process-start operation.
+/// Attach this context only at that boundary; an unclassified launch failure remains uncertain.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("MCP launch rejected before process start")]
+pub struct McpPreSpawnRejection;
+
+/// Read-only declaration/trust validation at the serialized request boundary. This cannot issue
+/// grants or select another process; the client supplies its immutable receipt and exact owner.
+pub trait McpPreRequestCheck: Send + Sync {
+    fn validate_current(
+        &self,
+        receipt: &McpProcessLaunchReceipt,
+        owner: &ToolLifecycleOwner,
+    ) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpProcessClass {
@@ -606,10 +622,11 @@ pub(crate) struct ManagedProcessRequiredMcpProcessLauncher;
 #[cfg(not(test))]
 impl McpProcessLauncher for ManagedProcessRequiredMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
-        bail!(
+        Err(anyhow!(
             "MCP server {} requires the composed managed execution launcher",
             request.server_name
         )
+        .context(McpPreSpawnRejection))
     }
 }
 
@@ -630,7 +647,8 @@ impl McpProcessLauncher for LocalMcpProcessLauncher {
             ExecutionBackendCapabilities::default(),
             &planned_network,
             format!("mcp_server:{}", request.server_name),
-        )?;
+        )
+        .context(McpPreSpawnRejection)?;
         let mut command = Command::new(&request.command);
         command
             .args(&request.args)

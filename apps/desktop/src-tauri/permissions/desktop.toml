@@ -117,3 +117,18 @@ commands.allow = ["desktop_update_state", "desktop_check_for_update", "desktop_d
 identifier = "allow-desktop-images"
 description = "Allows selected or pasted image bytes, bounded native draft handles and exact durable message image reads; no arbitrary filesystem paths."
 commands.allow = ["desktop_ingest_image", "desktop_pick_image", "desktop_release_images", "desktop_message_image"]
+
+[[permission]]
+identifier = "allow-desktop-pick-mcp-import"
+description = "Preview a user-selected MCP configuration document without starting servers."
+commands.allow = ["desktop_pick_mcp_import"]
+
+[[permission]]
+identifier = "allow-desktop-apply-mcp-import"
+description = "Publish selected MCP entries against the exact preview configuration revision."
+commands.allow = ["desktop_apply_mcp_import"]
+
+[[permission]]
+identifier = "allow-desktop-plugin-catalog"
+description = "Inspect path-free workspace plugin capabilities for an exact session trust decision."
+commands.allow = ["desktop_plugin_catalog"]

@@ -578,6 +578,54 @@ fn route_http_request(
         };
     }
 
+    if request.method == "POST" && request.path == "/settings/mcp-import/preview" {
+        let Some(context) = support_context else {
+            return http_error_response(
+                503,
+                "mcp_import_unavailable",
+                "MCP configuration import is unavailable",
+            );
+        };
+        return match context.preview_mcp_import(&request.body) {
+            Ok(preview) => json_response(200, json!(preview)),
+            Err(error) => mcp_import_error_response(error),
+        };
+    }
+
+    if request.method == "POST" && request.path == "/v1/private/borrowed/configuration/mcp-import" {
+        let Some(context) = support_context else {
+            return http_error_response(
+                503,
+                "mcp_import_unavailable",
+                "MCP configuration import is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<
+            PrivateBorrowedConfigurationRequest<crate::dto::HttpMcpImportApplyRequest>,
+        >(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_mcp_import_selection",
+                "Select servers from the current import preview",
+            );
+        };
+        if body.schema_version
+            != sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION
+        {
+            return http_error_response(
+                400,
+                "invalid_mcp_import_selection",
+                "Unsupported configuration schema",
+            );
+        }
+        return match context.apply_mcp_import(body.request, body.capsule_id) {
+            Ok((result, receipt)) => {
+                json_response(200, json!({ "result": result, "receipt": receipt }))
+            }
+            Err(error) => mcp_import_error_response(error),
+        };
+    }
+
     if request.method == "POST"
         && request.path == "/v1/private/borrowed/configuration/provider-setup"
     {
@@ -1447,6 +1495,18 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/plugins"))
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return match registry.plugin_catalog(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/branches"))
             .filter(|id| !id.is_empty() && !id.contains('/'))
     {
@@ -1910,6 +1970,27 @@ fn route_http_request(
     }
 
     http_error_response(404, "not_found", "http route not found")
+}
+
+fn mcp_import_error_response(error: crate::support::HttpMcpImportFailure) -> HttpResponse {
+    use crate::support::HttpMcpImportFailure;
+    match error {
+        HttpMcpImportFailure::Invalid => http_error_response(
+            422,
+            "invalid_mcp_import_selection",
+            "Review the MCP document and selected servers; existing names cannot be replaced by import",
+        ),
+        HttpMcpImportFailure::Stale => http_error_response(
+            409,
+            "mcp_import_stale",
+            "Configuration or preview changed; preview the document again before importing",
+        ),
+        HttpMcpImportFailure::Unavailable => http_error_response(
+            503,
+            "mcp_import_unavailable",
+            "MCP configuration could not be published; the selection remains available to retry",
+        ),
+    }
 }
 
 fn provider_setup_error_response(

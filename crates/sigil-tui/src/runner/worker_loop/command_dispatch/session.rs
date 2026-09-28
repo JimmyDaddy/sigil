@@ -43,6 +43,71 @@ where
             | SessionCommand::ImportBranchKnowledge { .. } => {
                 unreachable!("branch commands were dispatched above")
             }
+            SessionCommand::ReviewPlugin {
+                session_id,
+                request,
+            } => {
+                let result = (|| -> anyhow::Result<_> {
+                    let owner = state
+                        .session
+                        .application_operation_owner
+                        .as_ref()
+                        .context("plugin review requires the existing session writer")?;
+                    let retirement =
+                        if request.decision == sigil_kernel::PluginTrustDecision::Disabled {
+                            Some(sigil_runtime::prepare_plugin_mcp_retirement(
+                                agent.tool_registry(),
+                                &request.plugin_id,
+                            ))
+                        } else {
+                            None
+                        };
+                    let mut attached;
+                    let detached = state.session.current.is_none();
+                    let session = if let Some(session) = state.session.current.as_mut() {
+                        session
+                    } else {
+                        attached = owner.attach_for_control()?;
+                        &mut attached
+                    };
+                    let publication = sigil_runtime::plugin_management::apply_application_plugin_decision_to_session(
+                        session, &session_id, workspace_root, &request,
+                    );
+                    let (receipt, controls, cleanup_error) = runtime.block_on(
+                        sigil_runtime::plugin_management::settle_application_plugin_decision(
+                            session,
+                            publication,
+                            retirement.into_iter().collect(),
+                        ),
+                    )?;
+                    if detached {
+                        state
+                            .session
+                            .detached_durable_controls
+                            .extend(controls.clone());
+                    }
+                    if receipt.decision == sigil_kernel::PluginTrustDecision::Trusted {
+                        state.refresh.pending_plugin_surface = true;
+                    }
+                    Ok((receipt, controls, cleanup_error))
+                })();
+                match result {
+                    Ok((receipt, controls, cleanup_error)) => {
+                        let _ = message_tx.send(WorkerMessage::PluginReviewCompleted {
+                            session_id,
+                            receipt,
+                            controls,
+                            cleanup_error,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::PluginReviewFailed {
+                            session_id,
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
             SessionCommand::LoadConversationForkPoints {
                 request_id,
                 source_session_id,

@@ -2926,6 +2926,20 @@ fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
     }
     match (left, right) {
         (
+            AppAction::ReviewPlugin {
+                plugin_id: a,
+                manifest_hash: b,
+                capability_digest: c,
+                enabled: d,
+            },
+            AppAction::ReviewPlugin {
+                plugin_id: e,
+                manifest_hash: f,
+                capability_digest: g,
+                enabled: h,
+            },
+        ) => a == e && b == f && c == g && d == h,
+        (
             AppAction::StartNewSession {
                 session_log_path: a,
             },

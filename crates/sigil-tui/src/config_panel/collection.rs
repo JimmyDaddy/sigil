@@ -218,10 +218,6 @@ impl ConfigState {
         self.plugin_manifests.get(self.selected_plugin_index)
     }
 
-    pub(crate) fn selected_plugin_mut(&mut self) -> Option<&mut PluginManifestSnapshot> {
-        self.plugin_manifests.get_mut(self.selected_plugin_index)
-    }
-
     pub(crate) fn cycle_plugin(&mut self, forward: bool) -> bool {
         if self.plugin_manifests.is_empty() {
             return false;

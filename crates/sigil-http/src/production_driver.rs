@@ -259,6 +259,18 @@ enum HttpPreparedApplicationRun {
 }
 
 impl HttpPreparedApplicationRun {
+    async fn settle_after_rejection(self, error: HttpRunDriverError) -> HttpRunDriverError {
+        let (execution, control) = self.into_parts();
+        let cleanup = execution.settle_without_execution().await;
+        drop(control);
+        match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => HttpRunDriverError::new(format!(
+                "{error}; prepared resource cleanup incomplete: {cleanup:#}"
+            )),
+        }
+    }
+
     fn session_projection_owner(&self) -> sigil_runtime::RuntimeSessionProjectionOwner {
         match self {
             Self::Conversation(prepared) => prepared.session_projection_owner(),
@@ -320,6 +332,13 @@ enum HttpApplicationRunExecution {
 }
 
 impl HttpApplicationRunExecution {
+    async fn settle_without_execution(self) -> Result<()> {
+        match self {
+            Self::Conversation(execution) => (*execution).settle_without_execution().await,
+            Self::Task(execution) => (*execution).settle_without_execution().await,
+        }
+    }
+
     async fn execute_on_owned_blocking(
         self,
         event_handler: HttpProductionEventHandler,
@@ -4260,6 +4279,27 @@ impl HttpRunDriver for HttpProductionRunDriver {
         ))
     }
 
+    fn plugin_catalog(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<crate::HttpPluginCatalog, HttpConversationRecoveryDriverError> {
+        let attachment = self
+            .acquire_session_attachment(session)
+            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        let workspace = application_recovery_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        sigil_runtime::plugin_management::application_plugin_catalog(
+            &attachment,
+            &session.durable_session_scope_id,
+            &workspace,
+        )
+        .and_then(crate::HttpPluginCatalog::try_from)
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)
+    }
+
     fn branch_lineage(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -4424,7 +4464,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
         let mut mutation_session = if matches!(
             command.action,
-            HttpConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
+            HttpConversationRecoveryCommandAction::ReviewPlugin { .. }
+                | HttpConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
                 | HttpConversationRecoveryCommandAction::ForkConversation { .. }
         ) {
             let owner = session_attachment
@@ -4445,6 +4486,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         } else {
             None
         };
+        let mut plugin_review = None;
         let mut branch_knowledge = None;
         let mut compaction_receipt = None;
         let mut compaction_review = None;
@@ -4452,6 +4494,82 @@ impl HttpRunDriver for HttpProductionRunDriver {
         let mut restore_receipt = None;
         let mut fork_receipt = None;
         match &command.action {
+            HttpConversationRecoveryCommandAction::ReviewPlugin {
+                plugin_id,
+                manifest_hash,
+                capability_digest,
+                enabled,
+            } => {
+                let workspace = application_recovery_workspace_root(
+                    &self.options.config_path,
+                    &self.options.launch_cwd,
+                )
+                .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let registry_views = self
+                    .services
+                    .extension_registry_views(&session.durable_session_scope_id)
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                let mut registry_views = registry_views
+                    .lock()
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+                registry_views.retain(|view| view.upgrade().is_some());
+                let retirements = if *enabled {
+                    Vec::new()
+                } else {
+                    registry_views
+                        .iter()
+                        .filter_map(sigil_kernel::WeakToolRegistry::upgrade)
+                        .map(|registry| {
+                            sigil_runtime::prepare_plugin_mcp_retirement(&registry, plugin_id)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let publication =
+                    sigil_runtime::plugin_management::apply_application_plugin_decision_to_session(
+                        mutation_session
+                            .as_mut()
+                            .ok_or(HttpConversationRecoveryDriverError::Unavailable)?,
+                        &session.durable_session_scope_id,
+                        &workspace,
+                        &sigil_runtime::plugin_management::ApplicationPluginDecisionRequest {
+                            plugin_id: plugin_id.clone(),
+                            expected_manifest_hash: manifest_hash.clone(),
+                            expected_capability_digest: capability_digest.clone(),
+                            decision: if *enabled {
+                                sigil_kernel::PluginTrustDecision::Trusted
+                            } else {
+                                sigil_kernel::PluginTrustDecision::Disabled
+                            },
+                        },
+                    );
+                drop(registry_views);
+                let (reviewed, _, cleanup_error) = self
+                    .runtime
+                    .block_on(
+                        sigil_runtime::plugin_management::settle_application_plugin_decision(
+                            mutation_session
+                                .as_mut()
+                                .ok_or(HttpConversationRecoveryDriverError::Unavailable)?,
+                            publication,
+                            retirements,
+                        ),
+                    )
+                    .map_err(application_publication_driver_error)?;
+                if let Some(error) = cleanup_error {
+                    tracing::warn!(
+                        plugin_id,
+                        error,
+                        "plugin disabled with unconfirmed process cleanup"
+                    );
+                }
+                plugin_review = Some(crate::HttpPluginReviewReceipt {
+                    plugin_id: plugin_id.clone(),
+                    enabled: *enabled,
+                    process_cleanup: reviewed
+                        .process_cleanup
+                        .map(sigil_runtime::application_operation_owner::plugin_cleanup_status),
+                });
+            }
             HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
                 let lifecycle = self
                     .options
@@ -4699,6 +4817,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
         Ok(HttpConversationRecoveryDriverOutput {
             branch_knowledge,
+            plugin_review,
             compaction: compaction_receipt,
             compaction_review,
             tool_output_shrink,
@@ -6401,13 +6520,35 @@ impl HttpRunSupervisor {
                             &cancellation.acknowledgement,
                             error,
                         );
-                        let _ = preparation.await;
+                        let cleanup = match preparation.await {
+                            Ok(prepared) => {
+                                self.cancel_prepared_before_execution(
+                                    &registry,
+                                    cancellation,
+                                    prepared,
+                                    deadline,
+                                    true,
+                                )
+                                .await
+                            }
+                            Err(_) => Ok(()),
+                        };
                         self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
-                        return Err(error);
+                        return Err(match cleanup {
+                            Ok(()) => error,
+                            Err(cleanup) => HttpRunDriverError::new(format!(
+                                "{error}; late preparation cleanup: {cleanup}"
+                            )),
+                        });
                     }
                 };
                 drop(preparation);
-                self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
+                if let Err(error) = self.evict_promoted_exact_prompt(queued_terminal.as_ref()) {
+                    return Err(match preparation_result {
+                        Ok(prepared) => prepared.settle_after_rejection(error).await,
+                        Err(_) => error,
+                    });
+                }
                 return match preparation_result {
                     Ok(prepared) => {
                         self.cancel_prepared_before_execution(
@@ -6415,6 +6556,7 @@ impl HttpRunSupervisor {
                             cancellation,
                             prepared,
                             deadline,
+                            false,
                         )
                         .await
                     }
@@ -6425,13 +6567,22 @@ impl HttpRunSupervisor {
                 };
             }
             Err(None) => {
-                let _ = preparation.await;
-                return Err(HttpRunDriverError::new(
+                // Losing the control channel cannot detach an in-flight blocking read or prepare.
+                let error = HttpRunDriverError::new(
                     "production cancellation owner closed during run preparation",
-                ));
+                );
+                return Err(match preparation.await {
+                    Ok(prepared) => prepared.settle_after_rejection(error).await,
+                    Err(_) => error,
+                });
             }
         };
-        self.evict_promoted_exact_prompt(queued_terminal.as_ref())?;
+        if let Err(error) = self.evict_promoted_exact_prompt(queued_terminal.as_ref()) {
+            return Err(match preparation_result {
+                Ok(prepared) => prepared.settle_after_rejection(error).await,
+                Err(_) => error,
+            });
+        }
         let prepared = match preparation_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -6454,33 +6605,40 @@ impl HttpRunSupervisor {
                 return Ok(());
             }
         };
-        if prepared.session_id() != self.start.session.durable_session_scope_id
-            || prepared.session_log_path()
-                != PathBuf::from(&self.start.session.session_log_path).as_path()
-        {
-            return Err(HttpRunDriverError::new(
-                "prepared application run does not match its durable HTTP session binding",
-            ));
-        }
-        self.retain_prepared_projection_owner(&prepared)?;
-        if let Some(control) = prepared.terminal_control() {
-            self.terminal_owners
-                .lock()
-                .map_err(|_| {
-                    HttpRunDriverError::new("production terminal-owner state unavailable")
-                })?
-                .insert(
-                    self.start.run.id.clone(),
-                    HttpProductionTerminalOwner {
-                        session_id: self.start.session.id.clone(),
-                        durable_session_scope_id: self
-                            .start
-                            .session
-                            .durable_session_scope_id
-                            .clone(),
-                        control,
-                    },
-                );
+        let publication = (|| -> Result<(), HttpRunDriverError> {
+            if prepared.session_id() != self.start.session.durable_session_scope_id
+                || prepared.session_log_path()
+                    != PathBuf::from(&self.start.session.session_log_path).as_path()
+            {
+                return Err(HttpRunDriverError::new(
+                    "prepared application run does not match its durable HTTP session binding",
+                ));
+            }
+
+            self.retain_prepared_projection_owner(&prepared)?;
+            if let Some(control) = prepared.terminal_control() {
+                self.terminal_owners
+                    .lock()
+                    .map_err(|_| {
+                        HttpRunDriverError::new("production terminal-owner state unavailable")
+                    })?
+                    .insert(
+                        self.start.run.id.clone(),
+                        HttpProductionTerminalOwner {
+                            session_id: self.start.session.id.clone(),
+                            durable_session_scope_id: self
+                                .start
+                                .session
+                                .durable_session_scope_id
+                                .clone(),
+                            control,
+                        },
+                    );
+            }
+            Ok(())
+        })();
+        if let Err(error) = publication {
+            return Err(prepared.settle_after_rejection(error).await);
         }
         if let Some(store) = prepared.tool_artifact_store()
             && let Ok(mut stores) = self.active_artifact_stores.lock()
@@ -7122,6 +7280,7 @@ impl HttpRunSupervisor {
         cancellation: HttpProductionCancellationCommand,
         prepared: HttpPreparedApplicationRun,
         deadline: Instant,
+        mut acknowledgement_sent: bool,
     ) -> Result<(), HttpRunDriverError> {
         let terminal_io = HttpRunTerminalIo::new(
             registry,
@@ -7137,84 +7296,112 @@ impl HttpRunSupervisor {
             let error = HttpRunDriverError::new(
                 "prepared cancellation does not match its durable HTTP session binding",
             );
-            return Err(quarantine_cancellation_failure(
-                registry,
-                &self.start.run.id,
-                &acknowledgement,
-                error,
-            ));
-        }
-        self.retain_prepared_projection_owner(&prepared)
-            .map_err(|error| {
+            let error = prepared.settle_after_rejection(error).await;
+            return Err(if acknowledgement_sent {
+                error
+            } else {
                 quarantine_cancellation_failure(
                     registry,
                     &self.start.run.id,
                     &acknowledgement,
                     error,
                 )
-            })?;
-        let (execution, control) = prepared.into_parts();
-        let control = Arc::new(control);
-        let request_control = Arc::clone(&control);
-        let request_broker = Arc::clone(&self.broker);
-        let request_timeout = remaining_until(deadline);
-        let mut request_worker = tokio::task::spawn_blocking(move || {
-            request_control.request_cancellation(cancellation.reason, Some(request_timeout), || {
-                request_broker.cancel_all()
-            })
-        });
-        let mut acknowledgement_sent = false;
-        let request = match tokio::time::timeout(remaining_until(deadline), &mut request_worker)
-            .await
-        {
-            Ok(Ok(request)) => request,
-            Ok(Err(_)) => {
-                let error =
-                    HttpRunDriverError::new("pre-execution cancellation activation worker failed");
-                return Err(quarantine_cancellation_failure(
+            });
+        }
+        if let Err(error) = self.retain_prepared_projection_owner(&prepared) {
+            let error = prepared.settle_after_rejection(error).await;
+            return Err(if acknowledgement_sent {
+                error
+            } else {
+                quarantine_cancellation_failure(
                     registry,
                     &self.start.run.id,
                     &acknowledgement,
                     error,
-                ));
-            }
-            Err(_) => {
-                let _ = quarantine_cancellation_failure(
-                    registry,
-                    &self.start.run.id,
-                    &acknowledgement,
-                    HttpRunDriverError::new(
-                        "pre-execution cancellation activation missed its shared deadline",
-                    ),
-                );
-                acknowledgement_sent = true;
-                request_worker.await.map_err(|_| {
-                    HttpRunDriverError::new("pre-execution cancellation activation worker failed")
-                })?
-            }
-        };
-        let ticket = match request {
-            Ok(ticket) => ticket,
-            Err(error) => match error.into_ticket() {
-                Some(ticket) => ticket,
-                None => {
-                    let error = HttpRunDriverError::new(
-                        "pre-execution cancellation could not be durably activated",
-                    );
-                    return Err(if acknowledgement_sent {
-                        error
-                    } else {
-                        quarantine_cancellation_failure(
+                )
+            });
+        }
+        let (execution, control) = prepared.into_parts();
+        let control = Arc::new(control);
+        let request_attempt = async {
+            let request_control = Arc::clone(&control);
+            let request_broker = Arc::clone(&self.broker);
+            let request_timeout = remaining_until(deadline);
+            let mut request_worker = tokio::task::spawn_blocking(move || {
+                request_control.request_cancellation(
+                    cancellation.reason,
+                    Some(request_timeout),
+                    || request_broker.cancel_all(),
+                )
+            });
+            let request =
+                match tokio::time::timeout(remaining_until(deadline), &mut request_worker).await {
+                    Ok(Ok(request)) => request,
+                    Ok(Err(_)) => {
+                        let error = HttpRunDriverError::new(
+                            "pre-execution cancellation activation worker failed",
+                        );
+                        return Err(quarantine_cancellation_failure(
                             registry,
                             &self.start.run.id,
                             &acknowledgement,
                             error,
-                        )
-                    });
-                }
-            },
+                        ));
+                    }
+                    Err(_) => {
+                        let _ = quarantine_cancellation_failure(
+                            registry,
+                            &self.start.run.id,
+                            &acknowledgement,
+                            HttpRunDriverError::new(
+                                "pre-execution cancellation activation missed its shared deadline",
+                            ),
+                        );
+                        acknowledgement_sent = true;
+                        request_worker.await.map_err(|_| {
+                            HttpRunDriverError::new(
+                                "pre-execution cancellation activation worker failed",
+                            )
+                        })?
+                    }
+                };
+            let ticket = match request {
+                Ok(ticket) => ticket,
+                Err(error) => match error.into_ticket() {
+                    Some(ticket) => ticket,
+                    None => {
+                        let error = HttpRunDriverError::new(
+                            "pre-execution cancellation could not be durably activated",
+                        );
+                        return Err(if acknowledgement_sent {
+                            error
+                        } else {
+                            quarantine_cancellation_failure(
+                                registry,
+                                &self.start.run.id,
+                                &acknowledgement,
+                                error,
+                            )
+                        });
+                    }
+                },
+            };
+            Ok::<_, HttpRunDriverError>(ticket)
+        }
+        .await;
+        let cleanup = execution.settle_without_execution().await;
+        let ticket = match request_attempt {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup) => HttpRunDriverError::new(format!(
+                        "{error}; prepared resource cleanup incomplete: {cleanup:#}"
+                    )),
+                });
+            }
         };
-        drop(execution);
+        let execution_joined = cleanup.is_ok();
         let finalize_control = Arc::clone(&control);
         let runtime = tokio::runtime::Handle::current();
         let mut event_handler = HttpProductionEventHandler {
@@ -7227,7 +7414,7 @@ impl HttpRunSupervisor {
         let mut finalize_worker = tokio::task::spawn_blocking(move || {
             runtime.block_on(finalize_control.finalize_cancellation(
                 ticket,
-                true,
+                execution_joined,
                 &mut event_handler,
             ))
         });
@@ -7280,7 +7467,8 @@ impl HttpRunSupervisor {
                 ));
             }
             terminal_io.replay().await?;
-            terminal_io.record(terminal).await.map(|_| ())
+            terminal_io.record(terminal).await?;
+            cleanup.map_err(|error| HttpRunDriverError::new(format!("prepared resource cleanup incomplete: {error:#}")))
         }.await;
         match result {
             Ok(()) => {

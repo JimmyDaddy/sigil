@@ -1779,3 +1779,154 @@ fn write_bytes(path: impl AsRef<Path>, content: &[u8]) {
     }
     fs::write(path, content).expect("skill should write");
 }
+
+#[tokio::test]
+async fn session_plugin_load_skill_rechecks_live_trust_and_manifest_without_blocking_other_skills()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let plugin = workspace.path().join(".sigil/plugins/workflow");
+    fs::create_dir_all(plugin.join("skills/check"))?;
+    let manifest = "id = 'workflow'\nname = 'Workflow'\nversion = '1.0.0'\n[[skills]]\npath = 'skills/check/SKILL.md'\n";
+    fs::write(plugin.join("plugin.toml"), manifest)?;
+    write_skill(
+        plugin.join("skills/check/SKILL.md"),
+        "---\nname: check\ndescription: Plugin check.\n---\n\nPlugin body canary.\n",
+    );
+    write_skill(
+        workspace.path().join(".sigil/skills/ordinary/SKILL.md"),
+        "---\nname: ordinary\ndescription: Ordinary check.\ntrust: trusted\n---\n\nOrdinary body.\n",
+    );
+    let snapshot = crate::discover_workspace_plugins(workspace.path(), &[])?
+        .manifests
+        .remove(0);
+    let trust = sigil_kernel::PluginTrustEntry::for_snapshot(
+        &snapshot,
+        sigil_kernel::PluginTrustDecision::Trusted,
+        1,
+    )?;
+    let session_path = workspace.path().join("session.jsonl");
+    let mut session = Session::new("fixture", "fixture")
+        .with_store(sigil_kernel::JsonlSessionStore::new(&session_path)?);
+    session.append_control(ControlEntry::PluginTrustDecision(trust.clone()))?;
+    let mut registry = ToolRegistry::new();
+    super::register_session_skill_tools(
+        &mut registry,
+        workspace.path(),
+        None,
+        &SkillConfig::default(),
+        Arc::new(crate::SessionMcpPluginTrustSource::new(&session_path)),
+    )?;
+    let call = || tool_call("plugin-load", r#"{"id":"workflow/check"}"#);
+    let context = || ToolContext::new(workspace.path(), 5);
+    let loaded = registry.execute(context(), call()).await?;
+    assert!(!loaded.is_error());
+    assert!(
+        loaded.transient_context[0]
+            .content
+            .as_deref()
+            .is_some_and(|body| body.contains("Plugin body canary"))
+    );
+    let mut disabled = trust.clone();
+    disabled.decision = sigil_kernel::PluginTrustDecision::Disabled;
+    session.append_control(ControlEntry::PluginTrustDecision(disabled))?;
+    let denied = registry.execute(context(), call()).await?;
+    assert!(denied.is_error());
+    assert!(denied.transient_context.is_empty());
+    assert!(denied.to_model_content().contains("no longer trusted"));
+    let ordinary = registry
+        .execute(
+            context(),
+            tool_call("ordinary-load", r#"{"id":"ordinary"}"#),
+        )
+        .await?;
+    assert!(
+        !ordinary.is_error(),
+        "plugin revocation must not gate unrelated skills"
+    );
+    session.append_control(ControlEntry::PluginTrustDecision(trust))?;
+    fs::write(
+        plugin.join("plugin.toml"),
+        manifest.replace("1.0.0", "1.1.0"),
+    )?;
+    let stale = registry.execute(context(), call()).await?;
+    assert!(stale.is_error());
+    assert!(stale.transient_context.is_empty());
+    assert!(stale.to_model_content().contains("no longer trusted"));
+    Ok(())
+}
+
+#[test]
+fn plugin_skill_default_inherits_only_exact_manifest_trust_and_preserves_explicit_restrictions()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let plugin = workspace.path().join(".sigil/plugins/workflow");
+    fs::create_dir_all(&plugin)?;
+    let manifest = "id = 'workflow'\nname = 'Workflow'\nversion = '1.0.0'\n[[skills]]\npath = 'implicit/SKILL.md'\n[[skills]]\npath = 'disabled/SKILL.md'\n[[skills]]\npath = 'review/SKILL.md'\n";
+    fs::write(plugin.join("plugin.toml"), manifest)?;
+    for (id, restriction) in [
+        ("implicit", ""),
+        ("disabled", "trust: disabled\n"),
+        ("review", "trust: needs_review\n"),
+    ] {
+        write_skill(
+            plugin.join(id).join("SKILL.md"),
+            &format!("---\nname: {id}\n{restriction}---\n\nWorkflow body.\n"),
+        );
+    }
+    write_skill(
+        workspace.path().join(".sigil/skills/ordinary/SKILL.md"),
+        "---\nname: ordinary\n---\n\nOrdinary body.\n",
+    );
+    let pending = crate::discover_workspace_plugins(workspace.path(), &[])?;
+    assert!(pending.registrations.skills.is_empty());
+    let trust = sigil_kernel::PluginTrustEntry::for_snapshot(
+        &pending.manifests[0],
+        sigil_kernel::PluginTrustDecision::Trusted,
+        1,
+    )?;
+    let mut unrelated = trust.clone();
+    unrelated.plugin_id = "unrelated".to_owned();
+    assert!(
+        crate::discover_workspace_plugins(workspace.path(), &[unrelated])?
+            .registrations
+            .skills
+            .is_empty()
+    );
+    let entries = vec![SessionLogEntry::Control(ControlEntry::PluginTrustDecision(
+        trust.clone(),
+    ))];
+    let report = super::discover_skill_index_with_session_entries(
+        workspace.path(),
+        None,
+        &SkillConfig::default(),
+        &entries,
+    )?;
+    for (id, expected) in [
+        ("workflow/implicit", SkillTrustState::Trusted),
+        ("workflow/disabled", SkillTrustState::Disabled),
+        ("workflow/review", SkillTrustState::NeedsReview),
+        ("ordinary", SkillTrustState::NeedsReview),
+    ] {
+        assert_eq!(
+            report
+                .snapshot
+                .descriptors
+                .iter()
+                .find(|item| item.id == id)
+                .expect("descriptor")
+                .trust,
+            expected
+        );
+    }
+    fs::write(
+        plugin.join("plugin.toml"),
+        manifest.replace("1.0.0", "1.1.0"),
+    )?;
+    assert!(
+        crate::discover_workspace_plugins(workspace.path(), &[trust])?
+            .registrations
+            .skills
+            .is_empty()
+    );
+    Ok(())
+}

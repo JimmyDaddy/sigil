@@ -234,8 +234,13 @@ where
                 }
 
                 let run_id = state.run.next_id;
-                let loaded = match load_worker_skill(root_config, options, &skill_id, Some(run_id))
-                {
+                let loaded = match load_worker_skill(
+                    root_config,
+                    options,
+                    &skill_id,
+                    Some(run_id),
+                    &state.session.log_path,
+                ) {
                     Ok(loaded) => loaded,
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));

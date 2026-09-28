@@ -212,6 +212,7 @@ pub(super) enum TextInputTarget {
     ConfigField(ConfigField),
     SkillArguments,
     ToolArtifactSearch,
+    McpImportPath,
 }
 
 impl TextInputTarget {
@@ -225,6 +226,7 @@ impl TextInputTarget {
             Self::ConfigField(field) => field.display_label(),
             Self::SkillArguments => "Use Skill",
             Self::ToolArtifactSearch => "Search Full Tool Output",
+            Self::McpImportPath => "Import MCP Configuration",
         }
     }
 
@@ -245,6 +247,9 @@ impl TextInputTarget {
             }
             Self::ConfigField(field) => field.help_text(),
             Self::SkillArguments => "Optional instructions for how to use the selected skill.",
+            Self::McpImportPath => {
+                "Choose a JSON file with mcpServers. Relative paths use the workspace folder. The preview does not start servers."
+            }
             Self::ToolArtifactSearch => {
                 "Enter one exact literal. Regex, glob, shell expressions and paths are not accepted."
             }
@@ -259,6 +264,7 @@ impl TextInputTarget {
             Self::ConfigField(_) => "value",
             Self::SkillArguments => "instructions",
             Self::ToolArtifactSearch => "literal",
+            Self::McpImportPath => "file path",
         }
     }
 
@@ -270,7 +276,7 @@ impl TextInputTarget {
             | Self::SetupMaxOutputTokens => None,
             Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
             Self::ConfigField(field) => Some(field.label()),
-            Self::SkillArguments | Self::ToolArtifactSearch => None,
+            Self::SkillArguments | Self::ToolArtifactSearch | Self::McpImportPath => None,
         }
     }
 }
@@ -288,6 +294,7 @@ pub(super) enum ModalState {
     SecretInput(SecretInputState),
     TextInput(TextInputState),
     McpOAuth(super::mcp_oauth_flow::McpOAuthModalState),
+    McpImport(Box<super::mcp_import_flow::McpImportModalState>),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     IntentStack(Box<super::intent_stack_flow::IntentStackModalState>),
     ConversationFork(Box<super::conversation_fork_flow::ConversationForkModalState>),
@@ -351,6 +358,7 @@ impl AppState {
             ModalState::ConversationFork(_) => Some("Branch Conversation"),
             ModalState::BranchKnowledge(_) => Some("Bring Back a Conclusion"),
             ModalState::ChangeReview(_) => Some("Review Recorded Changes"),
+            ModalState::McpImport(_) => Some("Import MCP Servers"),
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::SessionActions(_) => Some("Session Actions"),
             ModalState::SessionRetention(_) => Some("Storage Maintenance"),
@@ -472,6 +480,7 @@ impl AppState {
             Some(ModalState::ConversationFork(state)) => state.lines(),
             Some(ModalState::BranchKnowledge(state)) => state.lines(),
             Some(ModalState::ChangeReview(state)) => state.lines(),
+            Some(ModalState::McpImport(state)) => state.lines(),
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
             Some(ModalState::SessionRetention(state)) => state.lines(),
@@ -534,9 +543,10 @@ impl AppState {
             ModalState::ConnectionPicker(_) | ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
             ModalState::IntentStack(_) => None,
-            ModalState::BranchKnowledge(_)
-            | ModalState::ConversationFork(_)
-            | ModalState::ChangeReview(_) => None,
+            ModalState::ConversationFork(_)
+            | ModalState::McpImport(_)
+            | ModalState::ChangeReview(_)
+            | ModalState::BranchKnowledge(_) => None,
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::Feedback(_) => None,
@@ -1435,9 +1445,10 @@ impl AppState {
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
-            ModalState::BranchKnowledge(_)
-            | ModalState::ConversationFork(_)
-            | ModalState::ChangeReview(_) => ModalOutcome::None,
+            ModalState::ConversationFork(_)
+            | ModalState::McpImport(_)
+            | ModalState::ChangeReview(_)
+            | ModalState::BranchKnowledge(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => match key.code {
                 KeyCode::Esc => {
                     let request_id = state.request_id();
@@ -1532,8 +1543,9 @@ impl AppState {
             | ModalState::CheckpointRestore(_)
             | ModalState::IntentStack(_)
             | ModalState::ConversationFork(_)
-            | ModalState::BranchKnowledge(_)
+            | ModalState::McpImport(_)
             | ModalState::ChangeReview(_)
+            | ModalState::BranchKnowledge(_)
             | ModalState::V2CompactionPreview(_)
             | ModalState::SessionActions(_)
             | ModalState::SessionRetention(_)
@@ -1593,9 +1605,10 @@ impl AppState {
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
-            ModalState::BranchKnowledge(_)
-            | ModalState::ConversationFork(_)
-            | ModalState::ChangeReview(_) => ModalOutcome::None,
+            ModalState::ConversationFork(_)
+            | ModalState::McpImport(_)
+            | ModalState::ChangeReview(_)
+            | ModalState::BranchKnowledge(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => {
                 if state.is_admitted() || state.is_locally_prepared() {
                     let request_id = state.request_id();
@@ -1807,6 +1820,7 @@ impl AppState {
                     }
                     self.last_notice = Some(format!("updated {}", field.label()));
                 }
+                TextInputTarget::McpImportPath => self.start_mcp_import_preview(value),
                 TextInputTarget::SkillArguments => {
                     self.last_notice = Some("skill arguments submitted".to_owned());
                 }
@@ -1854,9 +1868,9 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
             is_token_count_character(character)
         }
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
-        TextInputTarget::SkillArguments | TextInputTarget::ToolArtifactSearch => {
-            !character.is_control()
-        }
+        TextInputTarget::SkillArguments
+        | TextInputTarget::ToolArtifactSearch
+        | TextInputTarget::McpImportPath => !character.is_control(),
     }
 }
 

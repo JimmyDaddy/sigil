@@ -144,6 +144,7 @@ impl AppState {
             | self.poll_connection_inventory()
             | self.reload_active_agent_child_transcript()
             | self.poll_update_task()
+            | self.poll_mcp_import()
             | self.poll_change_review()
     }
 
@@ -161,6 +162,7 @@ impl AppState {
             || self.runtime.connection_inventory_rx.is_some()
             || self.active_agent_child_entry().is_some()
             || self.has_pending_update_task()
+            || self.mcp_import_task.is_some()
             || self.change_review_task.is_some()
     }
 
@@ -193,6 +195,28 @@ impl AppState {
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         self.observe_change_review_run_message(&message);
         match message {
+            WorkerMessage::PluginReviewCompleted { session_id, receipt, controls, cleanup_error } => {
+                if session_id != self.session_id { return Ok(()); }
+                for control in controls { self.append_current_session_control(control); }
+                let (manifests, warnings) = self.discover_config_plugins();
+                if let Some(state) = self.config_state.as_mut() {
+                    state.set_plugin_discovery(manifests, warnings);
+                }
+                let status = if receipt.decision == sigil_kernel::PluginTrustDecision::Trusted {
+                    "enabled; tools become available after runtime refresh"
+                } else { "disabled" };
+                let cleanup_notice = cleanup_error.map(|error| format!("; process cleanup incomplete: {error}"))
+                    .or_else(|| receipt.process_cleanup.filter(|status| *status != sigil_kernel::PluginCleanupStatus::Confirmed)
+                        .map(|status| format!("; process cleanup {status:?}; disable again to retry")))
+                    .unwrap_or_default();
+                self.last_notice = Some(format!("plugin {} {status}{cleanup_notice}", receipt.plugin_id));
+                self.push_event("plugin", format!("{} {status}", receipt.plugin_id));
+            }
+            WorkerMessage::PluginReviewFailed { session_id, error } => {
+                if session_id == self.session_id {
+                    self.last_notice = Some(format!("plugin review failed: {error}"));
+                }
+            }
             WorkerMessage::LivePreviewSource { source } => self.attach_live_preview(source),
             WorkerMessage::LivePreviewDurableFrontier {
                 session_id,
@@ -1405,7 +1429,8 @@ impl AppState {
             }
             WorkerMessage::LocalSessionLifecycleFailed { request_id, error } => {
                 let summary = summarize_error(&error);
-                if self.apply_branch_knowledge_error(request_id, &summary) || self.apply_conversation_fork_failure(request_id, &summary)
+                if self.apply_branch_knowledge_error(request_id, &summary)
+                    || self.apply_conversation_fork_failure(request_id, &summary)
                     || self.apply_local_session_lifecycle_failed(request_id, summary.clone())
                 {
                     self.last_notice = Some(summary);

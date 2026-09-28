@@ -1353,6 +1353,17 @@ pub(crate) fn application_recovery_action(
 ) -> Result<ApplicationRecoveryAction, ApplicationError> {
     let safe = |value: &str| sigil_application::SafeText::new(value.to_owned());
     Ok(match action {
+        crate::HttpConversationRecoveryCommandAction::ReviewPlugin {
+            plugin_id,
+            manifest_hash,
+            capability_digest,
+            enabled,
+        } => ApplicationRecoveryAction::ReviewPlugin {
+            plugin_id: safe(plugin_id)?,
+            manifest_hash: safe(manifest_hash)?,
+            capability_digest: safe(capability_digest)?,
+            enabled: *enabled,
+        },
         crate::HttpConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
             ApplicationRecoveryAction::ImportBranchKnowledge {
                 source_session_ref: safe(&selection.source_session_ref)?,
@@ -1404,6 +1415,17 @@ fn http_recovery_action(
 ) -> Result<crate::HttpConversationRecoveryCommandAction, ApplicationError> {
     let text = |value: &sigil_application::SafeText| value.as_str().to_owned();
     Ok(match action {
+        ApplicationRecoveryAction::ReviewPlugin {
+            plugin_id,
+            manifest_hash,
+            capability_digest,
+            enabled,
+        } => crate::HttpConversationRecoveryCommandAction::ReviewPlugin {
+            plugin_id: text(plugin_id),
+            manifest_hash: text(manifest_hash),
+            capability_digest: text(capability_digest),
+            enabled: *enabled,
+        },
         ApplicationRecoveryAction::ImportBranchKnowledge {
             source_session_ref,
             source_session_id,
@@ -1482,6 +1504,13 @@ pub(crate) fn application_recovery_outcome(
             ApplicationError::InvalidRequest("recovery count exceeds application bounds".to_owned())
         })
     };
+    if let Some(reviewed) = &receipt.plugin_review {
+        return Ok(ApplicationRecoveryOutcome::PluginReview {
+            plugin_id: safe(reviewed.plugin_id.clone())?,
+            enabled: reviewed.enabled,
+            process_cleanup: reviewed.process_cleanup,
+        });
+    }
     if let Some(imported) = &receipt.branch_knowledge {
         return Ok(ApplicationRecoveryOutcome::BranchKnowledge {
             import_id: safe(imported.import_id.clone())?,
@@ -1556,11 +1585,28 @@ pub(crate) fn http_recovery_receipt(
         restore: None,
         fork: None,
         branch_knowledge: None,
+        plugin_review: None,
         recovery,
         correlation_id,
         replayed,
     };
     match outcome {
+        ApplicationRecoveryOutcome::PluginReview {
+            plugin_id,
+            enabled,
+            process_cleanup,
+        } => {
+            if action != crate::HttpConversationRecoveryCommandActionKind::ReviewPlugin {
+                return Err(ApplicationError::InvalidRequest(
+                    "recovery outcome does not match action".to_owned(),
+                ));
+            }
+            receipt.plugin_review = Some(crate::HttpPluginReviewReceipt {
+                plugin_id: plugin_id.as_str().to_owned(),
+                enabled,
+                process_cleanup,
+            });
+        }
         ApplicationRecoveryOutcome::BranchKnowledge {
             import_id,
             already_imported,

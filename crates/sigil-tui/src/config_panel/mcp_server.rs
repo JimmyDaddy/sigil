@@ -21,7 +21,7 @@ pub(crate) struct McpServerDraft {
 }
 
 impl McpServerDraft {
-    pub(super) fn from_config(config: &McpServerConfig) -> Self {
+    pub(crate) fn from_config(config: &McpServerConfig) -> Self {
         let (transport, command, args_csv, inherit_env) = match &config.transport {
             McpServerTransportConfig::Stdio {
                 command,

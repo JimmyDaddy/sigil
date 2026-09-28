@@ -3,9 +3,11 @@ mod commands;
 mod history_queries;
 mod image_attachments;
 mod ipc;
+mod mcp_import;
 mod recent;
 mod run_streams;
 mod run_timings;
+mod selected_file;
 mod startup;
 mod state;
 mod update;
@@ -19,6 +21,8 @@ use std::sync::{
 };
 
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+use crate::mcp_import::{desktop_apply_mcp_import, desktop_pick_mcp_import};
 
 use crate::image_attachments::{
     desktop_ingest_image, desktop_message_image, desktop_pick_image, desktop_release_images,
@@ -43,7 +47,7 @@ use crate::{
         desktop_export_support_bundle, desktop_intent_stack, desktop_message_content,
         desktop_open_external_url, desktop_open_recent_workspace, desktop_open_session,
         desktop_pause_task, desktop_pick_workspace, desktop_plan_decision, desktop_plan_detail,
-        desktop_plan_session_catalog_batch, desktop_prepare_history_query,
+        desktop_plan_session_catalog_batch, desktop_plugin_catalog, desktop_prepare_history_query,
         desktop_preview_intent_drop, desktop_provider_connections, desktop_provider_setup_catalog,
         desktop_quarantine_session, desktop_read_tool_artifact, desktop_recover_control_log,
         desktop_rename_session, desktop_rerun_verification, desktop_resolve_approval,
@@ -182,6 +186,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .invoke_handler(tauri::generate_handler![
             desktop_ingest_image,
             desktop_pick_image,
+            desktop_pick_mcp_import,
+            desktop_apply_mcp_import,
             desktop_release_images,
             desktop_message_image,
             desktop_bootstrap,
@@ -217,6 +223,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_conversation_recovery,
             desktop_branch_lineage,
             desktop_branch_knowledge_preview,
+            desktop_plugin_catalog,
             desktop_conversation_compaction_preview,
             desktop_compact_conversation,
             desktop_checkpoint_restore_preview,

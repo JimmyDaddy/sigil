@@ -31,6 +31,7 @@ mod input_history;
 mod intent_stack_flow;
 mod key_router;
 mod live_preview_flow;
+mod mcp_import_flow;
 mod mcp_oauth_flow;
 mod modal_flow;
 mod mouse_flow;
@@ -619,6 +620,7 @@ pub struct AppState {
     >,
     support_build_info: SupportBuildInfo,
     update_state: update_flow::UpdateUiState,
+    mcp_import_task: Option<mcp_import_flow::McpImportTask>,
     change_review_task: Option<change_review_flow::ChangeReviewTask>,
     pub(crate) runtime: RuntimeStatusState,
     pub(crate) composer: ComposerState,
@@ -681,6 +683,12 @@ pub struct AppState {
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
+    ReviewPlugin {
+        plugin_id: String,
+        manifest_hash: String,
+        capability_digest: String,
+        enabled: bool,
+    },
     RecoverControlLog(sigil_application::ControlLogRecoveryAction),
     SubmitPrompt(String),
     SubmitPromptWithAttachments {
@@ -1295,6 +1303,7 @@ impl AppState {
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
+            mcp_import_task: None,
             change_review_task: None,
             runtime: RuntimeStatusState {
                 provider_name: configured_provider_name,
@@ -1460,6 +1469,7 @@ impl AppState {
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
+            mcp_import_task: None,
             change_review_task: None,
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),

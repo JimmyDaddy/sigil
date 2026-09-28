@@ -353,6 +353,51 @@ impl DesktopHttpClient {
         Ok(response.result)
     }
 
+    /// Previews a bounded, explicitly selected MCP document without executing its declarations.
+    ///
+    /// # Errors
+    /// Returns an error for an oversized/invalid document or an unavailable workspace server.
+    pub async fn preview_mcp_import(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<crate::DesktopMcpImportPreview, DesktopClientError> {
+        if bytes.len() > 1024 * 1024 {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        self.send_json(
+            self.client
+                .post(self.route(["settings", "mcp-import", "preview"])?)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(bytes),
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Publishes selected entries through the existing host-private configuration authority.
+    ///
+    /// # Errors
+    /// Returns an error if the preview/configuration is stale, selection conflicts, or publication fails.
+    pub async fn apply_mcp_import_host_private(
+        &self,
+        request: crate::DesktopMcpImportApplyRequest,
+    ) -> Result<crate::DesktopMcpImportApplyResult, DesktopClientError> {
+        let capsule_id = format!("desktop-configuration-{}", Uuid::new_v4());
+        let response: DesktopBorrowedConfigurationResponse<crate::DesktopMcpImportApplyResult> =
+            self.post_json(
+                self.route(["v1", "private", "borrowed", "configuration", "mcp-import"])?,
+                &DesktopBorrowedConfigurationRequest {
+                    schema_version: BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id: capsule_id.clone(),
+                    request,
+                },
+                StatusCode::OK,
+            )
+            .await?;
+        validate_configuration_receipt(&response.receipt, &capsule_id)?;
+        Ok(response.result)
+    }
+
     /// Creates a new durable session through the server-owned runtime path.
     pub async fn create_session(
         &self,
@@ -680,6 +725,36 @@ impl DesktopHttpClient {
         Ok(receipt)
     }
 
+    /// Reads session-bound workspace plugin declarations without launching them.
+    pub async fn plugin_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::DesktopPluginCatalog, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let catalog: crate::DesktopPluginCatalog = self
+            .get_json(
+                self.route(["sessions", session_id, "plugins"])?,
+                StatusCode::OK,
+            )
+            .await?;
+        for plugin in &catalog.plugins {
+            for value in [
+                &plugin.plugin_id,
+                &plugin.manifest_hash,
+                &plugin.capability_digest,
+            ] {
+                validate_recovery_token(value).map_err(|_| DesktopClientError::InvalidResponse)?;
+            }
+            if !matches!(
+                plugin.trust.as_str(),
+                "trusted" | "disabled" | "needs_review"
+            ) {
+                return Err(DesktopClientError::InvalidResponse);
+            }
+        }
+        Ok(catalog)
+    }
+
     /// Reads exact durable checkpoint and conversation-fork choices.
     pub async fn conversation_recovery(
         &self,
@@ -771,11 +846,17 @@ impl DesktopHttpClient {
     ) -> Result<DesktopConversationRecoveryCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_conversation_recovery_action(&action)?;
+        let expected_action = action.kind();
         let expects_branch_knowledge = matches!(
             action,
             DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { .. }
         );
-        let expected_action = action.kind();
+        let expected_plugin = match &action {
+            DesktopConversationRecoveryCommandAction::ReviewPlugin {
+                plugin_id, enabled, ..
+            } => Some((plugin_id.clone(), *enabled)),
+            _ => None,
+        };
         let command = self.command(session_id, None, action).await?;
         let expected_command_id = command.command_id.clone();
         let expected_client_id = command.client_id.clone();
@@ -793,6 +874,7 @@ impl DesktopHttpClient {
         {
             return Err(DesktopClientError::InvalidResponse);
         }
+        validate_conversation_recovery_view(&receipt.recovery)?;
         if expects_branch_knowledge != receipt.branch_knowledge.is_some() {
             return Err(DesktopClientError::InvalidResponse);
         }
@@ -800,7 +882,15 @@ impl DesktopHttpClient {
             validate_recovery_token(&import.import_id)
                 .map_err(|_| DesktopClientError::InvalidResponse)?;
         }
-        validate_conversation_recovery_view(&receipt.recovery)?;
+        if match (expected_plugin.as_ref(), receipt.plugin_review.as_ref()) {
+            (Some((id, enabled)), Some(review)) => {
+                review.plugin_id != *id || review.enabled != *enabled
+            }
+            (None, None) => false,
+            _ => true,
+        } {
+            return Err(DesktopClientError::InvalidResponse);
+        }
         Ok(receipt)
     }
 
@@ -2674,6 +2764,17 @@ fn validate_conversation_recovery_action(
     action: &DesktopConversationRecoveryCommandAction,
 ) -> Result<(), DesktopClientError> {
     match action {
+        DesktopConversationRecoveryCommandAction::ReviewPlugin {
+            plugin_id,
+            manifest_hash,
+            capability_digest,
+            ..
+        } => {
+            for value in [plugin_id, manifest_hash, capability_digest] {
+                validate_recovery_token(value)?;
+            }
+            Ok(())
+        }
         DesktopConversationRecoveryCommandAction::ImportBranchKnowledge { selection } => {
             for value in [
                 &selection.source_session_ref,

@@ -92,6 +92,8 @@ import type {
 } from "./types";
 
 export interface DesktopBridge {
+  pickMcpImport(workspaceId: string): Promise<import("./types").McpImportPreview | null>;
+  applyMcpImport(workspaceId: string, previewId: string, selectedIndices: number[]): Promise<import("./types").McpImportSaveResult>;
   bootstrap(): Promise<DesktopBootstrap>;
   updateState(): Promise<DesktopUpdateSnapshot>;
   checkForUpdate(): Promise<DesktopUpdateSnapshot>;
@@ -189,6 +191,7 @@ export interface DesktopBridge {
     workspaceId: string,
     input: CheckpointRestorePreviewInput,
   ): Promise<CheckpointRestoreReview>;
+  pluginCatalog(workspaceId: string, sessionId: string): Promise<import("./types").PluginCatalog>;
   commandConversationRecovery(
     workspaceId: string,
     input: ConversationRecoveryCommandInput,
@@ -463,6 +466,7 @@ export const desktopBridge: DesktopBridge = {
     invoke<CheckpointReview>("desktop_checkpoint_review", { workspaceId, input }),
   checkpointRestorePreview: (workspaceId, input) =>
     invoke<CheckpointRestoreReview>("desktop_checkpoint_restore_preview", { workspaceId, input }),
+  pluginCatalog: (workspaceId, sessionId) => invoke<import("./types").PluginCatalog>("desktop_plugin_catalog", { workspaceId, sessionId }),
   commandConversationRecovery: (workspaceId, input) =>
     invoke<ConversationRecoveryCommandReceipt>("desktop_command_conversation_recovery", {
       workspaceId,
@@ -473,6 +477,8 @@ export const desktopBridge: DesktopBridge = {
   agentActivity: (workspaceId, sessionId) =>
     invoke<AgentActivitySummary>("desktop_agent_activity", { workspaceId, sessionId }),
   ingestImage: (workspaceId, bytes) => invoke<DraftImage>("desktop_ingest_image", { workspaceId, bytes }),
+  pickMcpImport: (workspaceId) => invoke<import("./types").McpImportPreview | null>("desktop_pick_mcp_import", { workspaceId }),
+  applyMcpImport: (workspaceId, previewId, selectedIndices) => invoke<import("./types").McpImportSaveResult>("desktop_apply_mcp_import", { workspaceId, previewId, selectedIndices }),
   pickImage: (workspaceId) => invoke<DraftImage | null>("desktop_pick_image", { workspaceId }),
   releaseImages: (workspaceId, handles) => invoke<void>("desktop_release_images", { workspaceId, handles }),
   messageImage: (workspaceId, sessionId, displayId, attachmentId) => invoke<string>("desktop_message_image", { workspaceId, sessionId, displayId, attachmentId }),

@@ -2395,6 +2395,7 @@ timeout_ms = 5000
         timeout_ms: 5_000,
         output_limit_bytes: 1024,
         cancellation: None,
+        pre_spawn_check: None,
     };
     let error = super::ManagedPluginHookExecutionPortV1::execute_plugin_hook(
         composition

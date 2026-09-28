@@ -6,15 +6,16 @@ use std::{
 
 use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionEconomicsV2,
-    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
-    DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
-    IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
-    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanDecisionRecordedEntry,
-    PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1, PublicRouteRecoveryAction,
-    PublicRouteRecoveryCode, ReasoningEffort, ResolvedModelRoute, RunEvent, SessionLogEntry,
-    TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus,
-    TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
+    ControlEntry, ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest,
+    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
+    ConversationQueueItemProjection, DisclosurePresentationError, DisclosurePresentationReceipt,
+    ImageAttachment, IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1,
+    IntentVersionRef, MutationArtifactCleanupTarget, PlanApprovalPermission,
+    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1,
+    PublicRouteRecoveryAction, PublicRouteRecoveryCode, ReasoningEffort, ResolvedModelRoute,
+    RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest,
+    TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
+    V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
@@ -324,6 +325,10 @@ pub enum McpOAuthUserAction {
 
 #[derive(Debug)]
 pub enum WorkerCommand {
+    ReviewPlugin {
+        session_id: String,
+        request: sigil_runtime::plugin_management::ApplicationPluginDecisionRequest,
+    },
     ResumeCommittedUserInput {
         original_operation: Box<sigil_kernel::ApplicationOperationBindingV1>,
     },
@@ -1203,6 +1208,16 @@ impl std::error::Error for WorkerCommandSendError {}
 
 #[derive(Debug)]
 pub enum WorkerMessage {
+    PluginReviewCompleted {
+        session_id: String,
+        receipt: sigil_runtime::plugin_management::ApplicationPluginDecisionReceipt,
+        controls: Vec<ControlEntry>,
+        cleanup_error: Option<String>,
+    },
+    PluginReviewFailed {
+        session_id: String,
+        error: String,
+    },
     /// One source attachment per run; provider deltas remain in its bounded latest slots.
     LivePreviewSource {
         source: sigil_runtime::RuntimeLivePreviewSource,

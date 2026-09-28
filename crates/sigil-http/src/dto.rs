@@ -3140,6 +3140,12 @@ impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HttpConversationRecoveryCommandAction {
+    ReviewPlugin {
+        plugin_id: String,
+        manifest_hash: String,
+        capability_digest: String,
+        enabled: bool,
+    },
     ImportBranchKnowledge {
         selection: crate::HttpBranchKnowledgeImport,
     },
@@ -3166,6 +3172,7 @@ pub enum HttpConversationRecoveryCommandAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpConversationRecoveryCommandActionKind {
+    ReviewPlugin,
     ImportBranchKnowledge,
     PrepareCompaction,
     ApplyCompaction,
@@ -3178,6 +3185,7 @@ impl HttpConversationRecoveryCommandAction {
     #[must_use]
     pub fn kind(&self) -> HttpConversationRecoveryCommandActionKind {
         match self {
+            Self::ReviewPlugin { .. } => HttpConversationRecoveryCommandActionKind::ReviewPlugin,
             Self::ImportBranchKnowledge { .. } => {
                 HttpConversationRecoveryCommandActionKind::ImportBranchKnowledge
             }
@@ -3261,6 +3269,8 @@ pub struct HttpConversationRecoveryCommandReceipt {
     pub fork: Option<HttpConversationForkReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_knowledge: Option<crate::HttpBranchKnowledgeReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_review: Option<crate::HttpPluginReviewReceipt>,
     pub recovery: HttpConversationRecoveryView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
@@ -4008,4 +4018,36 @@ impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCom
             replayed: false,
         }
     }
+}
+
+/// Secret-free preview of one explicitly selected third-party MCP configuration document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpMcpImportPreview {
+    pub preview_id: String,
+    pub candidates: Vec<HttpMcpImportCandidate>,
+    pub root_fields_ignored: bool,
+}
+
+/// One display-only import candidate. Commands, arguments, paths, and secrets stay host-private.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpMcpImportCandidate {
+    pub index: usize,
+    pub name: String,
+    pub transport: Option<String>,
+    pub description: String,
+    pub importable: bool,
+    pub issues: Vec<String>,
+}
+
+/// Exact selection from the latest preview; publishing uses the preview's configuration CAS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpMcpImportApplyRequest {
+    pub preview_id: String,
+    pub selected_indices: Vec<usize>,
+}
+
+/// Successfully published server names. Importing does not start an extension process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpMcpImportApplyResult {
+    pub imported_names: Vec<String>,
 }
