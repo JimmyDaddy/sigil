@@ -289,6 +289,95 @@ fn decoder_preserves_existing_kernel_and_cancellation_lifecycle_payloads() -> Re
 }
 
 #[test]
+fn active_admission_checks_the_full_stream_and_exact_start_frontier() -> Result<()> {
+    let first_start = lifecycle_stream_record(
+        DurableEventType::RunStatusChanged,
+        serde_json::to_value(ConversationRunLifecycleRecordV1::ConversationRunStartedV1(
+            started("run-1", 10)?,
+        ))?,
+        1,
+    )?;
+    let first_terminal = lifecycle_stream_record(
+        DurableEventType::RunFinalized,
+        serde_json::to_value(
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(succeeded("run-1", 20)?),
+        )?,
+        2,
+    )?;
+    let second_start = lifecycle_stream_record(
+        DurableEventType::RunStatusChanged,
+        serde_json::to_value(ConversationRunLifecycleRecordV1::ConversationRunStartedV1(
+            started("run-2", 30)?,
+        ))?,
+        3,
+    )?;
+    let valid = vec![
+        first_start.clone(),
+        first_terminal.clone(),
+        second_start.clone(),
+    ];
+    validate_active_conversation_run(&valid, "run-2", 2)?;
+    assert!(
+        validate_active_conversation_run(&valid, "run-2", 3)
+            .expect_err("start at the command frontier must be rejected")
+            .to_string()
+            .contains("preceding its command preparation")
+    );
+    assert!(
+        validate_active_conversation_run(&valid, "run-1", 0)
+            .expect_err("a completed run must not be adopted")
+            .to_string()
+            .contains("exact active durable run")
+    );
+    assert!(
+        validate_active_conversation_run(&[first_start.clone(), first_start.clone()], "run-1", 0)
+            .expect_err("duplicate starts must be rejected")
+            .to_string()
+            .contains("duplicate starts")
+    );
+    assert!(
+        validate_active_conversation_run(&[first_start.clone(), second_start], "run-1", 0)
+            .expect_err("overlapping runs must be rejected")
+            .to_string()
+            .contains("overlapping active runs")
+    );
+    assert!(
+        validate_active_conversation_run(&[first_terminal.clone()], "run-1", 0)
+            .expect_err("a terminal requires a start")
+            .to_string()
+            .contains("terminal without a matching start")
+    );
+    assert!(
+        validate_active_conversation_run(
+            &[first_start.clone(), first_terminal.clone(), first_terminal],
+            "run-1",
+            0,
+        )
+        .expect_err("duplicate terminals must be rejected")
+        .to_string()
+        .contains("duplicate terminals")
+    );
+
+    let unknown = SessionStreamRecord::Stored(StoredEvent::new_raw(
+        "future_recovery_boundary",
+        EventClass::Critical,
+        "future-critical".to_owned(),
+        "session-1".to_owned(),
+        4,
+        json!({"value": true}),
+    )?);
+    assert!(validate_active_conversation_run(&[first_start.clone(), unknown], "run-1", 0).is_err());
+
+    let mut corrupt = first_start.stored_event().clone();
+    corrupt.event_id = "changed-without-checksum".to_owned();
+    assert!(
+        validate_active_conversation_run(&[SessionStreamRecord::Stored(corrupt)], "run-1", 0)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn unknown_critical_envelopes_fail_all_canonical_decoders() -> Result<()> {
     let record = SessionStreamRecord::Stored(StoredEvent::new_raw(
         "future_recovery_boundary",

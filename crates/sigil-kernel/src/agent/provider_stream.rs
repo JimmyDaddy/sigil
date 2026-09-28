@@ -101,17 +101,24 @@ pub(super) async fn collect_provider_turn<H>(
 where
     H: EventHandler + Send,
 {
-    let frozen_request =
-        match FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request) {
-            Ok(request) => request,
-            Err(error) => {
-                finish_undispatched_hosted_turn(
-                    dispatch.hosted_dispatch_lifecycle,
-                    crate::HostedToolTerminalStatus::RequestFailed,
-                )?;
-                return Err(error);
-            }
-        };
+    let freeze_started = Instant::now();
+    let frozen_request_result =
+        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request);
+    crate::run_diagnostics::record_run_timing(
+        dispatch.diagnostic_run_id,
+        crate::run_diagnostics::RunTimingPhase::ProviderRequestFreeze,
+        freeze_started.elapsed(),
+    );
+    let frozen_request = match frozen_request_result {
+        Ok(request) => request,
+        Err(error) => {
+            finish_undispatched_hosted_turn(
+                dispatch.hosted_dispatch_lifecycle,
+                crate::HostedToolTerminalStatus::RequestFailed,
+            )?;
+            return Err(error);
+        }
+    };
     collect_frozen_provider_turn(
         provider,
         recovery_policy,
@@ -188,7 +195,8 @@ where
         return Err(error);
     }
     recovery_policy.validate()?;
-    let mut recovered_attempt = resume_scheduled_provider_turn_recovery(
+    let recovery_started = Instant::now();
+    let recovered_attempt_result = resume_scheduled_provider_turn_recovery(
         provider,
         recovery_policy,
         session,
@@ -197,7 +205,13 @@ where
         handler,
         cancellation,
     )
-    .await?;
+    .await;
+    crate::run_diagnostics::record_run_timing(
+        diagnostic_run_id,
+        crate::run_diagnostics::RunTimingPhase::ProviderRecoveryCheck,
+        recovery_started.elapsed(),
+    );
+    let mut recovered_attempt = recovered_attempt_result?;
     if require_durable_recovery_claim && recovered_attempt.is_none() {
         return Err(ProviderTurnRecoveryTerminalError {
             disposition: ProviderTurnRecoveryTerminalDispositionV1::Blocked,
@@ -214,7 +228,8 @@ where
             provider_name: request.provider_name.clone(),
             model_name: request.model_name.clone(),
         };
-        let mut physical_attempt = match match recovered_attempt.take() {
+        let attempt_started = Instant::now();
+        let attempt_result = match recovered_attempt.take() {
             Some(recovery) => {
                 ProviderPhysicalAttemptAudit::start_recovery(
                     session,
@@ -240,7 +255,13 @@ where
                         .await
                 }
             },
-        } {
+        };
+        crate::run_diagnostics::record_run_timing(
+            diagnostic_run_id,
+            crate::run_diagnostics::RunTimingPhase::ProviderAttemptStart,
+            attempt_started.elapsed(),
+        );
+        let mut physical_attempt = match attempt_result {
             Ok(attempt) => attempt,
             Err(error) => {
                 finish_undispatched_hosted_turn(

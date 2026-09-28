@@ -633,28 +633,51 @@ pub(crate) fn validate_active_conversation_run(
     run_id: &str,
     after_sequence: u64,
 ) -> Result<()> {
-    validate_conversation_run_lifecycle(records)?;
-    if active_conversation_run(records)?
-        .as_ref()
-        .map(|run| run.run_id())
-        != Some(run_id)
-    {
-        bail!("conversation admission requires its exact active durable run");
-    }
+    let mut finalized = BTreeMap::<String, bool>::new();
+    let mut active: Option<(String, u64)> = None;
     for record in records {
-        if let Some(ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started)) =
-            conversation_run_lifecycle_record_from_stream(record)?
-            && started.run_id() == run_id
-        {
-            if record.stream_sequence() <= after_sequence {
-                bail!(
-                    "conversation admission cannot adopt a run preceding its command preparation"
-                );
+        let Some(lifecycle) = conversation_run_lifecycle_record_from_stream(record)? else {
+            continue;
+        };
+        match lifecycle {
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started) => {
+                let started_run_id = started.run_id().to_owned();
+                if finalized.insert(started_run_id.clone(), false).is_some() {
+                    bail!("conversation run stream contains duplicate starts");
+                }
+                if active.is_some() {
+                    bail!("conversation run stream contains overlapping active runs");
+                }
+                active = Some((started_run_id, record.stream_sequence()));
             }
-            return Ok(());
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(terminal) => {
+                let Some(was_finalized) = finalized.get_mut(terminal.run_id()) else {
+                    bail!("conversation run stream contains a terminal without a matching start");
+                };
+                if *was_finalized {
+                    bail!("conversation run stream contains duplicate terminals");
+                }
+                let Some((active_run_id, _)) = active.as_ref() else {
+                    bail!("conversation run stream contains a terminal without an active start");
+                };
+                if active_run_id != terminal.run_id() {
+                    bail!("conversation run terminal belongs to another active run");
+                }
+                *was_finalized = true;
+                active = None;
+            }
         }
     }
-    bail!("conversation admission lost its durable start")
+    let Some((active_run_id, started_sequence)) = active else {
+        bail!("conversation admission requires its exact active durable run");
+    };
+    if active_run_id != run_id {
+        bail!("conversation admission requires its exact active durable run");
+    }
+    if started_sequence <= after_sequence {
+        bail!("conversation admission cannot adopt a run preceding its command preparation");
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_conversation_run_lifecycle(records: &[SessionStreamRecord]) -> Result<()> {

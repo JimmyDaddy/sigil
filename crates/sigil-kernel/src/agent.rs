@@ -1912,6 +1912,7 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let run_setup_started = Instant::now();
         let input = if input.initial_frozen_provider_request.is_some() {
             input
         } else {
@@ -2345,6 +2346,11 @@ where
             .diagnostic_run_id()
             .unwrap_or(&root_logical_run_id)
             .to_owned();
+        crate::run_diagnostics::record_run_timing(
+            &diagnostic_run_id,
+            crate::run_diagnostics::RunTimingPhase::AgentRunSetup,
+            run_setup_started.elapsed(),
+        );
         if let Some(delegate) = agent_delegate.as_deref_mut() {
             delegate.begin_result_context();
             delegate.set_root_logical_run_id(Some(&logical_run_id));
@@ -2556,7 +2562,8 @@ where
                         )
                     }
                     None => {
-                        let mut request = session
+                        let request_started = Instant::now();
+                        let request_result = session
                             .build_request_with_initial_context_and_transient_messages_context_overlays_and_max_tokens(
                                 &options.workspace_root,
                                 &options.memory_config,
@@ -2569,7 +2576,13 @@ where
                                 &transient_context,
                                 runtime_context.clone(),
                                 &current_run_overlays,
-                            )?;
+                            );
+                        crate::run_diagnostics::record_run_timing(
+                            &diagnostic_run_id,
+                            crate::run_diagnostics::RunTimingPhase::ProviderRequestBuild,
+                            request_started.elapsed(),
+                        );
+                        let mut request = request_result?;
                         let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
                             None => None,
                             Some(preparer) => match preparer.prepare_turn().await? {
