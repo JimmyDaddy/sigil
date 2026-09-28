@@ -132,6 +132,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [selectedDurableSessionId, setSelectedDurableSessionId] = useState<string>();
   const [workspaceRunContext, setWorkspaceRunContext] = useState<RunContext>();
   const [providerInventory, setProviderInventory] = useState<ProviderConnectionInventory>();
+  const [providerInventoryWorkspaceId, setProviderInventoryWorkspaceId] = useState<string>();
   const [providerInventoryState, setProviderInventoryState] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
   const [defaultModel, setDefaultModel] = useState<ProviderModelRef>();
@@ -174,6 +175,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
     [activeWorkspaceId, workspaces],
   );
+  const readyProviderInventory = providerInventoryState === "ready"
+    && providerInventoryWorkspaceId === activeWorkspaceId
+    ? providerInventory
+    : undefined;
   useEffect(() => {
     if (activeWorkspace === undefined && DESKTOP_ROUTE_MAP[desktopView].requiresWorkspace) {
       navigate("conversation");
@@ -370,17 +375,21 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const inventory = await bridge.providerConnections(workspaceId);
       if (workspaceId !== activeWorkspaceIdRef.current) return;
       setProviderInventory(inventory);
+      setProviderInventoryWorkspaceId(workspaceId);
       setDefaultModel(inventory.defaultModel);
       setProviderInventoryState("ready");
     } catch {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
       setProviderInventory(undefined);
+      setProviderInventoryWorkspaceId(undefined);
+      setDefaultModel(undefined);
       setProviderInventoryState("error");
     }
   }, [bridge]);
 
   useEffect(() => {
     setProviderInventory(undefined);
+    setProviderInventoryWorkspaceId(undefined);
     if (activeWorkspaceId === undefined) {
       setProviderInventoryState("idle");
       return;
@@ -607,7 +616,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
-    if (!providerInventoryIsUsable(providerInventory)) {
+    if (readyProviderInventory !== undefined && !providerInventoryIsUsable(readyProviderInventory)) {
       navigate("conversation");
       return undefined;
     }
@@ -618,7 +627,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
     try {
-      const selectedDefaultModel = requestedModel ?? defaultModel ?? providerInventory?.defaultModel;
+      const selectedDefaultModel = requestedModel
+        ?? (readyProviderInventory === undefined
+          ? undefined
+          : defaultModel ?? readyProviderInventory.defaultModel);
       const session = await bridge.createSession(
         activeWorkspaceId,
         t("newConversation"),
@@ -1002,7 +1014,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 disabled={
                   sessionActionState === "working"
                   || conversationNavigation !== undefined
-                  || !providerInventoryIsUsable(providerInventory)
+                  || (readyProviderInventory !== undefined
+                    && !providerInventoryIsUsable(readyProviderInventory))
                 }
                 onClick={() => { navigate("conversation"); void createSession(); }}
               />
@@ -1076,8 +1089,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 && activeWorkspace.id === activeWorkspaceIdRef.current}
               providerInventory={providerInventory}
               onProviderInventoryChange={(inventory) => {
-                if (activeWorkspace?.id !== activeWorkspaceIdRef.current) return false;
+                if (activeWorkspace === undefined || activeWorkspace.id !== activeWorkspaceIdRef.current) return false;
                 setProviderInventory(inventory);
+                setProviderInventoryWorkspaceId(activeWorkspace.id);
                 setProviderInventoryState("ready");
                 return true;
               }}
@@ -1202,6 +1216,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 onSaved={(inventory) => {
                   if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
                   setProviderInventory(inventory);
+                  setProviderInventoryWorkspaceId(activeWorkspace.id);
                   setProviderInventoryState("ready");
                   setDefaultModel(inventory.defaultModel);
                   notify({ tone: "success", message: t("providerSetupSaved") });

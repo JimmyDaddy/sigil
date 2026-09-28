@@ -1879,6 +1879,92 @@ describe("desktop workspace and history shell", () => {
     ]);
   });
 
+  it.each(["loading", "error"] as const)(
+    "lets the server decide new-conversation readiness when provider inventory is %s",
+    async (inventoryState) => {
+      const user = userEvent.setup();
+      const createSession = vi.fn(async () => ({
+        id: `created-with-${inventoryState}-inventory`,
+        label: "New conversation",
+        runCount: 0,
+      }));
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        providerConnections: async () => {
+          if (inventoryState === "error") throw new Error("inventory unavailable");
+          return new Promise<ProviderConnectionInventory>(() => undefined);
+        },
+        createSession,
+      })} />);
+
+      if (inventoryState === "error") {
+        await screen.findByRole("heading", { name: "Provider settings are unavailable" });
+      } else {
+        await screen.findByText("Loading provider connections…");
+      }
+      const newConversation = screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement;
+      expect(newConversation.disabled).toBe(false);
+      await user.click(newConversation);
+      await waitFor(() => expect(createSession).toHaveBeenCalledWith(
+        workspace.id, "New conversation", undefined,
+      ));
+      expect(await screen.findByRole("heading", { name: "New conversation" })).toBeTruthy();
+    },
+  );
+
+  it("allows a later server retry after provider inventory and initial session creation fail", async () => {
+    const user = userEvent.setup();
+    const createSession = vi.fn()
+      .mockRejectedValueOnce(new Error("route temporarily unavailable"))
+      .mockResolvedValue({ id: "recovered-session", label: "New conversation", runCount: 0 });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      providerConnections: async () => { throw new Error("inventory unavailable"); },
+      createSession,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Provider settings are unavailable" });
+    const newConversation = screen.getByRole("button", { name: "New conversation" });
+    await user.click(newConversation);
+    expect(await screen.findByText("The conversation could not be created. Try again.")).toBeTruthy();
+    await user.click(newConversation);
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("heading", { name: "New conversation" })).toBeTruthy();
+  });
+
+  it("does not send a previous workspace default model while the next inventory is loading", async () => {
+    const user = userEvent.setup();
+    const betaWorkspace: WorkspaceSummary = {
+      id: "workspace-beta-inventory-loading",
+      displayName: "beta",
+      serverVersion: "0.0.1-alpha.5",
+      state: "ready",
+    };
+    const providerConnections = vi.fn(async (workspaceId: string) => {
+      if (workspaceId === betaWorkspace.id) {
+        return new Promise<ProviderConnectionInventory>(() => undefined);
+      }
+      return bridgeWith().providerConnections(workspaceId);
+    });
+    const createSession = vi.fn(async () => ({ id: "beta-session", label: "New conversation", runCount: 0 }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2, workspaces: [workspace, betaWorkspace], recentWorkspaces: [],
+      }),
+      providerConnections,
+      createSession,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Select a conversation" });
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    await user.click(screen.getByRole("button", { name: "beta" }));
+    await waitFor(() => expect(providerConnections).toHaveBeenCalledWith(betaWorkspace.id));
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledWith(
+      betaWorkspace.id, "New conversation", undefined,
+    ));
+  });
+
   it("restores the most recent workspace after native bootstrap", async () => {
     const openRecentWorkspace = vi.fn(async () => workspace);
     const bridge = bridgeWith({
