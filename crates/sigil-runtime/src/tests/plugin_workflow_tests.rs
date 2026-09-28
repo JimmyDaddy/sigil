@@ -1113,6 +1113,7 @@ fn assert_cancelled_initialization_is_settled(records: &[sigil_kernel::SessionSt
     assert_eq!(events[3].payload["subject"], events[0].payload["subject"]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn application_mcp_explicit_environment_reaches_managed_child_and_binds_request_approval()
 -> Result<()> {
