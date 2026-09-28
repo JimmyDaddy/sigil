@@ -60,6 +60,61 @@ fn pty_environment() -> std::collections::BTreeMap<String, String> {
     environment
 }
 
+#[cfg(windows)]
+#[test]
+fn managed_command_keeps_only_bound_windows_toolchain_inputs() {
+    let source = [
+        ("PATH", r"C:\Tools\Git\usr\bin;C:\VS\VC\Tools\MSVC\bin"),
+        ("VCINSTALLDIR", r"C:\VS\VC"),
+        ("VSINSTALLDIR", r"C:\VS"),
+        ("VSCMD_ARG_TGT_ARCH", "x64"),
+        ("LIB", r"C:\VS\VC\lib"),
+        ("INCLUDE", r"C:\VS\VC\include"),
+        ("LIBPATH", r"C:\VS\VC\libpath"),
+        ("SIGIL_API_KEY", "fixture-secret"),
+        ("RUSTFLAGS", "unbound-flags"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), OsString::from(value)))
+    .collect::<std::collections::BTreeMap<_, _>>();
+    let mut request = sigil_kernel::ExecutionRequest {
+        program: "cargo.exe".to_owned(),
+        args: vec!["test".to_owned()],
+        cwd: PathBuf::from(r"C:\workspace"),
+        env: std::collections::BTreeMap::new(),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+        timeout_ms: None,
+        timeout_secs: 0,
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
+        capture: None,
+    };
+    let environment = RuntimeManagedCommandExecutionRouteV1::environment_with(&request, |name| {
+        source.get(name).cloned()
+    })
+    .into_iter()
+    .collect::<std::collections::BTreeMap<_, _>>();
+    for name in [
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSCMD_ARG_TGT_ARCH",
+        "LIB",
+        "INCLUDE",
+        "LIBPATH",
+    ] {
+        assert_eq!(environment.get(&OsString::from(name)), source.get(name));
+    }
+    assert!(!environment.contains_key(&OsString::from("SIGIL_API_KEY")));
+    assert!(!environment.contains_key(&OsString::from("RUSTFLAGS")));
+
+    request.environment_policy = sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension;
+    let isolated = RuntimeManagedCommandExecutionRouteV1::environment_with(&request, |name| {
+        source.get(name).cloned()
+    });
+    assert!(isolated.is_empty());
+}
+
 #[cfg(unix)]
 fn pty_line_command() -> (String, Vec<String>) {
     (

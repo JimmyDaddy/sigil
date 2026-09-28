@@ -93,6 +93,56 @@ fn controlled_environment_preserves_only_baseline_and_toolchain_roots() {
     assert_eq!(environment, expected);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_msvc_toolchain_inputs_are_bound_without_inheriting_credentials() -> Result<()> {
+    let source = [
+        ("PATH", r"C:\Tools\Git\usr\bin;C:\VS\VC\Tools\MSVC\bin"),
+        ("ProgramFiles", r"C:\Program Files"),
+        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ("VCINSTALLDIR", r"C:\VS\VC"),
+        ("VSINSTALLDIR", r"C:\VS"),
+        ("VSCMD_ARG_TGT_ARCH", "x64"),
+        ("LIB", r"C:\VS\VC\lib"),
+        ("INCLUDE", r"C:\VS\VC\include"),
+        ("LIBPATH", r"C:\VS\VC\libpath"),
+        ("SIGIL_API_KEY", "fixture-secret"),
+        ("RUSTFLAGS", "unbound-flags"),
+    ];
+    let environment = environment_from(&source);
+    for name in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSCMD_ARG_TGT_ARCH",
+        "LIB",
+        "INCLUDE",
+        "LIBPATH",
+    ] {
+        assert_eq!(
+            environment.get(name).map(String::as_str),
+            source
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(*value))
+        );
+    }
+    assert!(!environment.contains_key("SIGIL_API_KEY"));
+    assert!(!environment.contains_key("RUSTFLAGS"));
+
+    let original = shell_environment_binding_for_environment("pwsh.exe", true, &environment)?;
+    for name in ["VCINSTALLDIR", "LIB"] {
+        let mut changed = environment.clone();
+        changed.insert(name.to_owned(), format!("changed-{name}"));
+        assert_ne!(
+            shell_environment_binding_for_environment("pwsh.exe", true, &changed)?,
+            original,
+            "{name} must participate in the permission binding"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn each_toolchain_root_changes_the_v2_environment_binding() -> Result<()> {
     let environment = environment_from(&[

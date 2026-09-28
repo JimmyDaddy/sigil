@@ -136,7 +136,7 @@
 - 模型可见的命令启动入口统一为 `exec_command`；命令族仅用于结构化权限分析，不得重建有限/持久工具分流门禁。PTY、本次等待预算、进程总时限分别建模。命令参数完成后的安全展示不依赖审批或输出；工具调用返回不能替代进程退出与 cleanup receipt。具体见[统一命令执行](../docs/unified-command-execution.md)。
 - `exec_command` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `exec_command` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
-- 受控 `exec_command` 的审批环境哈希与实际执行请求必须使用同一封闭环境映射。`CARGO_HOME`、`RUSTUP_HOME` 优先采用显式父进程值，缺失时从父 `HOME` 派生工具链根；不得继承父 `HOME`、任意凭据环境变量或 shell startup 变量。执行 `HOME` 仍由 authority 的临时资源提供，工具链根变化必须使旧审批绑定失效，不能在审批后由 adapter 静默补入未绑定的环境值。
+- 受控 `exec_command` 的审批环境哈希与实际执行请求必须使用同一封闭环境映射。`CARGO_HOME`、`RUSTUP_HOME` 优先采用显式父进程值，缺失时从父 `HOME` 派生工具链根；Windows 可保留 `ProgramFiles`、`ProgramFiles(x86)` 和显式 MSVC 工具链定位变量（`VCINSTALLDIR`、`VSINSTALLDIR`、`VSCMD_ARG_TGT_ARCH`、`LIB`、`INCLUDE`、`LIBPATH`），它们也必须进入审批绑定。不得继承父 `HOME`、任意凭据环境变量或 shell startup 变量。执行 `HOME` 仍由 authority 的临时资源提供，工具链根变化必须使旧审批绑定失效，不能在审批后由 adapter 静默补入未绑定的环境值。
 - 所有current-schema工具结果必须通过`ToolResultRecordedV3`拆成immutable policy-safe artifact、bounded model view和bounded display view；artifact body不得进入JSONL、control entry、run event或Desktop IPC。V2只保留历史契约说明和旧格式拒绝fixture，被替代的生产legacy decoder随对应整改包删除，不再作为新writer或治理目标；数据影响遵守工程规范§3.4
 - 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt

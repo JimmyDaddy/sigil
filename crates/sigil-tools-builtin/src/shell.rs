@@ -2328,6 +2328,23 @@ fn controlled_shell_environment_with(
             environment.insert(name.to_owned(), value);
         }
     }
+    #[cfg(windows)]
+    // Cargo's MSVC finder uses developer-shell inputs first, then ProgramFiles to locate
+    // vswhere. Keep these in the exact environment binding, not the ambient environment.
+    for name in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSCMD_ARG_TGT_ARCH",
+        "LIB",
+        "INCLUDE",
+        "LIBPATH",
+    ] {
+        if let Some(value) = lookup(name) {
+            environment.insert(name.to_owned(), value);
+        }
+    }
     // Bind the same closed toolchain roots as managed verification before approval
     // and execution. HOME itself remains owned by the fresh ExecutionTemp profile.
     if let Some(parent_home) = lookup("HOME") {

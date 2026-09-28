@@ -299,11 +299,18 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
             _ => None,
         })
         .collect::<Vec<_>>();
+    let windows_linker_environment = [
+        "ProgramFiles(x86)",
+        "VCINSTALLDIR",
+        "VSINSTALLDIR",
+        "VSCMD_ARG_TGT_ARCH",
+    ]
+    .map(|name| (name, std::env::var_os(name).is_some()));
     let history = git(workspace, &["log", "--reverse", "--format=%s"])?;
     assert_eq!(
         history.lines().collect::<Vec<_>>(),
         ["batch 1", "batch 2", "batch 3", "batch 4", "batch 5"],
-        "tool results: {tool_diagnostics:?}"
+        "tool results: {tool_diagnostics:?}; Windows linker environment present: {windows_linker_environment:?}"
     );
     assert!(git(workspace, &["rev-list", "--reverse", "HEAD"])?.starts_with(&original));
     assert!(git(workspace, &["diff", "--cached", "--name-only"])?.is_empty());

@@ -1006,6 +1006,13 @@ impl RuntimeManagedCommandExecutionRouteV1 {
     }
 
     fn environment(request: &ExecutionRequest) -> Vec<(OsString, OsString)> {
+        Self::environment_with(request, |name| std::env::var_os(name))
+    }
+
+    fn environment_with(
+        request: &ExecutionRequest,
+        mut lookup: impl FnMut(&str) -> Option<OsString>,
+    ) -> Vec<(OsString, OsString)> {
         let mut environment = std::collections::BTreeMap::<OsString, OsString>::new();
         if request.environment_policy == sigil_kernel::ProcessEnvironmentPolicy::InheritParent {
             // InheritParent is still an explicit managed environment agreement. Preserve the
@@ -1018,14 +1025,14 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                 "LC_ALL",
                 "LC_CTYPE",
             ] {
-                if let Some(value) = std::env::var_os(name) {
+                if let Some(value) = lookup(name) {
                     environment.insert(OsString::from(name), value);
                 }
             }
             // HOME itself is reserved for the fresh ExecutionTemp profile. Toolchain stores are
             // borrowed, read-only inputs, so materialize their conventional locations as
             // explicit bindings when the parent did not already name them.
-            if let Some(parent_home) = std::env::var_os("HOME") {
+            if let Some(parent_home) = lookup("HOME") {
                 for (name, relative) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
                     environment.entry(OsString::from(name)).or_insert_with(|| {
                         PathBuf::from(&parent_home).join(relative).into_os_string()
@@ -1046,8 +1053,14 @@ impl RuntimeManagedCommandExecutionRouteV1 {
                 "PROGRAMDATA",
                 "ProgramFiles",
                 "ProgramFiles(x86)",
+                "VCINSTALLDIR",
+                "VSINSTALLDIR",
+                "VSCMD_ARG_TGT_ARCH",
+                "LIB",
+                "INCLUDE",
+                "LIBPATH",
             ] {
-                if let Some(value) = std::env::var_os(name) {
+                if let Some(value) = lookup(name) {
                     environment.insert(OsString::from(name), value);
                 }
             }
