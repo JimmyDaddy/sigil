@@ -75,6 +75,8 @@ export async function loadAndCacheProviderCatalog(
       if (oldest === undefined) break;
       cache.delete(oldest);
     }
+  } else if (key !== undefined && catalog.state === "auth_rejected") {
+    cache.delete(key);
   }
   return catalog;
 }

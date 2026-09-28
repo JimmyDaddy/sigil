@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopBridge } from "../../bridge";
-import type { ProviderSetupCatalogInput } from "../../types";
+import type { ProviderSetupCatalog, ProviderSetupCatalogInput } from "../../types";
 import {
   loadAndCacheProviderCatalog,
   readProviderCatalogCache,
@@ -64,6 +64,44 @@ describe("provider catalog view cache", () => {
 
     expect(await readProviderCatalogCache("failed-cache-workspace-test", input))
       .toBeUndefined();
+  });
+
+  it("keeps a stale catalog through an offline error but removes it after authentication is rejected", async () => {
+    let now = 1_784_505_600_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let response: ProviderSetupCatalog = {
+      connectionId: "deepseek-revoked-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "deepseek-coder",
+        displayName: "DeepSeek Coder",
+        availability: "available",
+        recommended: true,
+        provenance: "remote",
+      }],
+      suggestedModel: "deepseek-coder",
+      manualEntryAllowed: true,
+    };
+    const bridge = {
+      providerSetupCatalog: vi.fn(async () => response),
+    } as unknown as DesktopBridge;
+    const input: ProviderSetupCatalogInput = {
+      template: "deep_seek",
+      credentialSource: "environment",
+    };
+    const workspaceId = "revoked-cache-workspace-test";
+
+    const original = await loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    now += 10 * 60 * 1_000 + 1;
+    response = { ...original, state: "offline", models: [] };
+    await loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    expect(await readProviderCatalogCache(workspaceId, input))
+      .toEqual({ catalog: original, stale: true });
+
+    response = { ...original, state: "auth_rejected", models: [] };
+    await loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    expect(await readProviderCatalogCache(workspaceId, input)).toBeUndefined();
   });
 
   it("marks an exact catalog stale after ten minutes while keeping it visible", async () => {
