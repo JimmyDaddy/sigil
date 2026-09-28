@@ -1,0 +1,44 @@
+schema_version = 1
+id = "repo-holdout-diagram-write-recency"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:80f616dcf9779b24c2597c96b0ed0987cb0085bfbf7e76edf35d98a1ca6ea43a"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "checks.mjs"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "apps/desktop/src/markdown/renderCache.ts"
+source = "files/apps/desktop/src/markdown/renderCache.ts"
+sha256 = "sha256:30ff5341c6c9a01d3976fd1caffbc5c987463c1f6090e2de1308a758aae18fd2"
+
+[[files]]
+path = "checks.mjs"
+source = "files/checks.mjs"
+sha256 = "sha256:59b2305579d1a2fc6fd2bb1c77713b9bd8777fedf78089033d6978c09565aaa9"
+
+[[files]]
+path = "package.json"
+source = "files/package.json"
+sha256 = "sha256:1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae"
+
+[[checks]]
+id = "independent-regression"
+command = ["node", "--experimental-strip-types", "checks.mjs"]
+timeout_ms = 30000
+
+[[checks]]
+id = "bounded-write-recency-inline"
+command = ["node", "--experimental-strip-types", "--input-type=module", "-e", "import assert from 'node:assert/strict'; import {clearDiagramCache,readDiagramCache,writeDiagramCache} from './apps/desktop/src/markdown/renderCache.ts'; clearDiagramCache(); writeDiagramCache('hot',{svg:'old',diagramType:'flowchart'}); for(let i=0;i<63;i++) writeDiagramCache(String(i),{svg:String(i),diagramType:'flowchart'}); writeDiagramCache('hot',{svg:'new',diagramType:'flowchart'}); writeDiagramCache('overflow',{svg:'overflow',diagramType:'flowchart'}); assert.equal(readDiagramCache('hot')?.svg,'new'); assert.equal(readDiagramCache('0'),undefined); assert.equal(readDiagramCache('62')?.svg,'62');"]
+timeout_ms = 30000

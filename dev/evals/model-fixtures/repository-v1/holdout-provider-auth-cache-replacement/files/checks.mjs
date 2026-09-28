@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {loadAndCacheProviderCatalog as load,readProviderCatalogCache as read} from './apps/desktop/src/features/settings/providerCatalogCache.ts';
+const input={template:'open_ai_compatible',protocol:'chat_completions',endpoint:'http://localhost/v1',credentialSource:'environment',apiKey:'fixture-A'};
+const result={state:'remote',models:[],manualEntryAllowed:true};
+await load({providerSetupCatalog:async()=>result},'workspace-a',input);
+assert.deepEqual(await read('workspace-a',input),{catalog:result,stale:false});
+assert.equal(await read('workspace-b',input),undefined);
+assert.equal(await read('workspace-a',{...input,apiKey:'fixture-B'}),undefined);
+await load({providerSetupCatalog:async()=>({state:'auth_rejected',models:[]})},'failed',input);
+assert.equal(await read('failed',input),undefined);

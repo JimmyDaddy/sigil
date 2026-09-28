@@ -1,0 +1,2 @@
+A failed provider authentication result persists in the model chooser cache. Keep successful catalog caching but do not reuse failure results.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.

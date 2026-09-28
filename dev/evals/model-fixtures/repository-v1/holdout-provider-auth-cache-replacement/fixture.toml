@@ -1,0 +1,44 @@
+schema_version = 1
+id = "repo-holdout-provider-auth-cache-replacement"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:7a100bf978cea08682b324058842cd1cb197f5a92cc1b973d8e694346ec58102"
+allowed_tools = ["read_file", "edit_file", "write_file", "glob", "grep", "exec_command", "exec_read", "exec_wait", "exec_cancel"]
+max_turns = 16
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[assertions]]
+id = "independent-check-unchanged"
+kind = "file_unchanged"
+path = "checks.mjs"
+
+[[files]]
+path = "TASK.md"
+source = "files/TASK.md"
+sha256 = "sha256:dd6e34a1a024c3afce2175786d13c9239c8ba518a6796f9855b3e941a4e5fced"
+
+[[files]]
+path = "apps/desktop/src/features/settings/providerCatalogCache.ts"
+source = "files/apps/desktop/src/features/settings/providerCatalogCache.ts"
+sha256 = "sha256:dc616809bf75ac26950448ffb2c8b27b77d31597f98d369ec2b54fdca29452a0"
+
+[[files]]
+path = "checks.mjs"
+source = "files/checks.mjs"
+sha256 = "sha256:d35486add0242e2b3fdbde9ca4512662b32f5eff44e92b0b7f7ff57bacca5026"
+
+[[files]]
+path = "package.json"
+source = "files/package.json"
+sha256 = "sha256:1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae"
+
+[[checks]]
+id = "independent-regression"
+command = ["node", "--experimental-strip-types", "checks.mjs"]
+timeout_ms = 30000
+
+[[checks]]
+id = "prior-success-invalidated-after-auth-failure"
+command = ["node", "--experimental-strip-types", "--input-type=module", "-e", "import assert from 'node:assert/strict'; import {loadAndCacheProviderCatalog as load,readProviderCatalogCache as read} from './apps/desktop/src/features/settings/providerCatalogCache.ts'; const input={template:'open_ai_compatible',protocol:'chat_completions',endpoint:'http://localhost/v1',credentialSource:'environment',apiKey:'fixture-A'}; const result={state:'remote',models:[],manualEntryAllowed:true}; await load({providerSetupCatalog:async()=>result},'rotated',input); assert.deepEqual(await read('rotated',input),{catalog:result,stale:false}); await load({providerSetupCatalog:async()=>({state:'auth_rejected',models:[]})},'rotated',input); assert.equal(await read('rotated',input),undefined);"]
+timeout_ms = 30000

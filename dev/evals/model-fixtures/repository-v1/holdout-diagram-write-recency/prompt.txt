@@ -1,0 +1,2 @@
+Frequently read diagrams are evicted while unused diagrams remain cached. Restore bounded least-recently-used behavior without growing capacity.
+Run the independent check command: node --experimental-strip-types checks.mjs. Do not weaken or edit checks.
