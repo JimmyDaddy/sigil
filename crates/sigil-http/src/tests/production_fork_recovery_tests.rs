@@ -157,6 +157,7 @@ async fn real_http_fork_recovers_partial_and_published_child_with_same_request()
             "fault setup must not publish a child"
         );
         destination.inject_writer_fault(fault)?;
+        assert_eq!(destination.observed_writer_fault()?, None);
         let server = HttpLocalServer::bind(
             HttpServerConfig::default(),
             Some("fork-recovery"),
@@ -170,19 +171,36 @@ async fn real_http_fork_recovers_partial_and_published_child_with_same_request()
         }));
         let result = std::panic::AssertUnwindSafe(async {
             let first = post_fork(address, &source.id, "same-fork-request", &command).await?;
-            assert!(matches!(first, ApplicationCommandReceipt::Uncertain(_)),
-                "{fault:?} must retain uncertain publication, got {first:?}");
-            let bytes = std::fs::read(&destination_path)?;
-            if fault == SessionWriterFault::BeforeWrite {
-                assert!(bytes.is_empty(), "record bytes are absent but original bundle intent is durable");
-            } else if fault == SessionWriterFault::BeforeSync {
-                assert!(bytes.ends_with(b"\n"), "all child records were physically published");
-            } else {
-                assert!(!bytes.ends_with(b"\n"), "actual partial record must remain before recovery");
+            let actual_prepared = owner.owner.read_handle().read_event_records()?
+                .into_iter()
+                .filter_map(|record| match record.session_log_entry() {
+                    Ok(Some(SessionLogEntry::Control(ControlEntry::ApplicationOperationPreparedV1(binding)))) => Some(binding),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual_prepared.as_slice(), std::slice::from_ref(&binding),
+                "fixture must derive the actual HTTP application K/F before selecting its destination");
+            assert_eq!(destination.observed_writer_fault()?, Some(fault),
+                "the injected fault must trigger in the actual child writer");
+            let expected_ref = format!("{}.jsonl", missing_path.file_name().context("physical key")?.to_string_lossy());
+            match &first {
+                ApplicationCommandReceipt::Settled(receipt) => {
+                    let Some(sigil_application::ApplicationCommandOutcome::Recovery(
+                        sigil_application::ApplicationRecoveryOutcome::Fork { session_ref, .. }
+                    )) = receipt.outcome.as_deref() else {
+                        anyhow::bail!("the first settled receipt has no exact fork outcome: {first:?}");
+                    };
+                    assert_eq!(session_ref.as_str(), expected_ref,
+                        "the recovered HTTP child differs from the faulted namespace");
+                }
+                ApplicationCommandReceipt::Uncertain(_) => {}
+                other => anyhow::bail!("injected {fault:?} returned an invalid first receipt: {other:?}"),
             }
+            let bytes = std::fs::read(&destination_path)?;
             let source_records = owner.owner.read_handle().read_event_records()?;
-            assert!(!source_records.iter().any(|record| matches!(record.session_log_entry(),
-                Ok(Some(SessionLogEntry::Control(ControlEntry::ConversationForkCommittedV1(_)))))));
+            assert!(source_records.iter().filter(|record| matches!(record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Control(ControlEntry::ConversationForkCommittedV1(_)))))).count() <= 1,
+                "one fork request cannot commit more than one source marker");
             assert!(source_records.iter().any(|record| matches!(record.session_log_entry(),
                 Ok(Some(SessionLogEntry::Control(ControlEntry::ApplicationOperationPreparedV1(ref prepared))))
                     if prepared == &binding)));
@@ -203,6 +221,11 @@ async fn real_http_fork_recovers_partial_and_published_child_with_same_request()
             };
             anyhow::ensure!(matches!(receipt.outcome.as_deref(), Some(sigil_application::ApplicationCommandOutcome::Recovery(
                 sigil_application::ApplicationRecoveryOutcome::Fork { .. }))), "exact fork outcome missing");
+            if let Some(sigil_application::ApplicationCommandOutcome::Recovery(
+                sigil_application::ApplicationRecoveryOutcome::Fork { session_ref, .. }
+            )) = receipt.outcome.as_deref() {
+                assert_eq!(session_ref.as_str(), expected_ref);
+            }
             let child_records = destination.read_event_records_coordinated()?;
             assert_eq!(child_records.iter().filter(|record| record.stored_event().event_kind()
                 == Some(sigil_kernel::DurableEventType::ConversationForked)).count(), 1);
