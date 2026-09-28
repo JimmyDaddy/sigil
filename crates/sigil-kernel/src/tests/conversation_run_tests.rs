@@ -342,7 +342,7 @@ fn active_admission_checks_the_full_stream_and_exact_start_frontier() -> Result<
             .contains("overlapping active runs")
     );
     assert!(
-        validate_active_conversation_run(&[first_terminal.clone()], "run-1", 0)
+        validate_active_conversation_run(std::slice::from_ref(&first_terminal), "run-1", 0)
             .expect_err("a terminal requires a start")
             .to_string()
             .contains("terminal without a matching start")
