@@ -475,6 +475,7 @@ fn pre_turn_candidate_request_keeps_exact_transient_input_out_of_session_mutatio
             .iter()
             .any(|message| message.content.as_deref() == Some("queued exact pre-turn input"))
     );
+    assert!(request.deterministic_materialization);
     assert_eq!(std::fs::read(store.path())?, before_stream);
     assert_eq!(session.entries().len(), before_entries.len());
     assert!(session.entries().iter().all(|entry| !matches!(
