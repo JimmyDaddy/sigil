@@ -210,6 +210,19 @@ class SharedInventoryCheckerTests(unittest.TestCase):
         self.assertEqual(contract["resource_contract"], "ManagedNamespace(ControlLogRecovery)")
         self.assertEqual(contract["receipt_contract"], "ControlLogRecoveryState")
 
+    def test_agent_tool_worktree_rule_does_not_classify_other_resources(self) -> None:
+        site = scanned_site(
+            "sigil-runtime", "crates/sigil-runtime/src/agent_tools/spawn.rs", 1,
+            "WorktreeOrCheckout",
+        )
+        contract = generator.site_contract(site, generator.PRODUCER_RULES)
+        self.assertEqual(contract["owner"], "IsolatedWorkspaceAuthority")
+        self.assertEqual(contract["resource_contract"], "ManagedGeneration(ArtifactStaging)")
+
+        site["constructor"] = "CreateOrOpenFile"
+        contract = generator.site_contract(site, generator.PRODUCER_RULES)
+        self.assertEqual(contract["owner"], "unclassified")
+
     def test_exact_recovery_root_contracts_freeze_all_fields(self) -> None:
         self.assertEqual(
             [

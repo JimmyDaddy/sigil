@@ -39,11 +39,14 @@ PHYSICAL_IMPORT_ALLOWLIST = {
         "crates/sigil-runtime/src/r71_global_cutover.rs",
         "crates/sigil-runtime/src/session_scratch.rs",
         "crates/sigil-runtime/src/doctor.rs",
+        "crates/sigil-runtime/src/agent_tools/source_observation.rs",
+        "crates/sigil-runtime/src/application_review.rs",
     },
     "sigil-http": {
         "crates/sigil-http/src/listener.rs",
         "crates/sigil-http/src/production_driver.rs",
         "crates/sigil-http/src/support.rs",
+        "crates/sigil-http/src/support/mcp_import.rs",
     },
     "sigil-release-tools": {"crates/sigil-release-tools/src/lib.rs"},
     "sigil-sandbox": {

@@ -186,6 +186,11 @@ PRODUCER_RULES = [
     ("sigil-runtime/src/isolated_workspace", "managed-artifact", "IsolatedWorkspaceAuthority",
      "AuthorityBootstrapAnchor", "Workspace", "None", "WorktreeOrCheckout",
      "ManagedGeneration(ArtifactStaging)", "AuthorityLeaseAndCurrentState", "ManagedResourceReceipt", "0071"),
+    # Child-agent worktree lifecycle calls delegate physical creation and cleanup to the
+    # isolated-workspace owner; they do not establish a second resource authority.
+    ("sigil-runtime/src/agent_tools/", "managed-artifact", "IsolatedWorkspaceAuthority",
+     "AuthorityBootstrapAnchor", "Workspace", "None", "WorktreeOrCheckout",
+     "ManagedGeneration(ArtifactStaging)", "AuthorityLeaseAndCurrentState", "ManagedResourceReceipt", "0071"),
     ("sigil-tools-builtin/src/execution_backends", "managed-execution-temp", "ResourceAuthority",
      "AuthorityBootstrapAnchor", "None", "ExactManagedGrant", "ManagedExecutionLease",
      "ManagedGeneration(ExecutionTemp)", "AuthorityLeaseAndCurrentState", "ManagedResourceReceipt", "0071"),
@@ -321,6 +326,10 @@ def match_rule(site: dict, rules: list) -> tuple | None:
     for rule in rules:
         pattern = rule[0]
         if pattern in key:
+            # These call sites only delegate worktree lifecycle to the isolated-workspace
+            # owner. A different resource constructor in this module needs its own review.
+            if pattern == "sigil-runtime/src/agent_tools/" and site["constructor"] != "WorktreeOrCheckout":
+                continue
             return rule
     return None
 
