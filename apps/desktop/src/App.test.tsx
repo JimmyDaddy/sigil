@@ -7484,81 +7484,6 @@ it("sends image-only input through the conversation panel and retains it after m
   expect(await screen.findByText("Choose an image-capable model to send these images. Your draft is preserved.")).toBeTruthy();
 });
 
-it.each(["retired", "terminal"] as const)("A1 records only visible accepted content after %s events", async (boundary) => {
-  vi.stubGlobal("crypto", webcrypto);
-  const user = userEvent.setup();
-  const runId = `a1-accepted-content-${boundary}`;
-  let eventListener: ((event: TimelineEvent) => void) | undefined;
-  const bridge = bridgeWith({
-    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
-    startRun: async (_workspaceId, sessionId) => ({ id: runId, sessionId, status: "running", permissionMode: "manual", streamSequence: 0 }),
-    subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
-  });
-  render(<App bridge={bridge} />);
-  await screen.findByText("No matching conversation.");
-  await user.click(screen.getByRole("button", { name: "New conversation" }));
-  await user.type(await readyComposer(), "Observe only actual content");
-  await user.click(screen.getByRole("button", { name: "Send message" }));
-  await screen.findByRole("button", { name: "Stop run" });
-  await waitFor(() => expect(eventListener).toBeDefined());
-  const emit = (overrides: Partial<TimelineEvent>) => act(() => eventListener?.({
-    workspaceId: workspace.id, sessionId: "http-session-new", runId, sequence: 0,
-    runSequence: "0", kind: "other", replayable: false, ...overrides,
-  }));
-  emit({ kind: "run_started", sequence: 3, runSequence: "3", replayable: true });
-  emit({ kind: "assistant_delta", runSequence: "3", text: "", livePreview: {
-    attemptId: "retired-attempt", slotId: "text", revision: "1", baseSequence: "3", truncated: false,
-  } });
-  emit({ kind: boundary === "terminal" ? "run_cancelled" : "provider_turn_partial_output_discarded", sequence: 4, runSequence: "4", replayable: true });
-  emit({ kind: "assistant_delta", runSequence: "4", text: "late rejected output", livePreview: {
-    attemptId: "retired-attempt", slotId: "text", revision: "2", baseSequence: "4", truncated: false,
-  } });
-  expect(screen.queryByText("late rejected output")).toBeNull();
-  const runKey = createHash("sha256").update(runId).digest("hex");
-  const observations = async () => (await rendererRunTimings(workspace.id)).filter((entry) => entry.runKey === runKey);
-  expect((await observations()).some((entry) => entry.phase === "first_content")).toBe(false);
-  if (boundary === "retired") {
-    emit({ kind: "assistant_delta", runSequence: "4", text: "new accepted output", livePreview: {
-      attemptId: "new-attempt", slotId: "text", revision: "3", baseSequence: "4", truncated: false,
-    } });
-    await screen.findByText("new accepted output");
-    expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
-  }
-});
-
-it("reviews outdated recorded lines through the normal run and preserves comments until admission", async () => {
-  const user = userEvent.setup();
-  const checkpoint = { checkpointId: "cp-review", checkpointDigest: "cp-digest", turnIndex: 1, files: [], unknownMutationCount: 1, fullyRestorable: false };
-  const review = { checkpointId: checkpoint.checkpointId, checkpointDigest: checkpoint.checkpointDigest, truncated: false,
-    diffs: [{ sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", fileState: "changed" as const, truncated: false, lines: [{ text: "-old", oldLine: 1 }, { text: "+new", newLine: 1 }] }] };
-  const admission = deferred<Awaited<ReturnType<DesktopBridge["startRun"]>>>();
-  const startRun = vi.fn<DesktopBridge["startRun"]>(() => admission.promise);
-  const checkpointRestorePreview = vi.fn<DesktopBridge["checkpointRestorePreview"]>();
-  render(<App bridge={bridgeWith({
-    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
-    conversationRecovery: async () => ({ checkpoints: [checkpoint], forkPoints: [], throughStreamSequence: 8 }),
-    checkpointReview: async () => review, checkpointRestorePreview, startRun,
-  })} />);
-  await screen.findByText("No matching conversation.");
-  await user.click(screen.getByRole("button", { name: "New conversation" }));
-  await readyComposer();
-  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
-  await user.click(await screen.findByRole("button", { name: "Review changes" }));
-  const drawer = screen.getByRole("dialog", { name: "Review changes" });
-  await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));
-  await user.type(within(drawer).getByRole("textbox", { name: "Comment on selected lines" }), "Explain this changed line");
-  await user.click(within(drawer).getByRole("button", { name: "Add comment" }));
-  await user.click(within(drawer).getByRole("button", { name: "Send comments" }));
-  await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
-  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
-  expect(within(drawer).getByRole("button", { name: "Sending comments…" })).toBeTruthy();
-  expect(startRun.mock.calls[0][12]).toEqual([{ checkpointId: "cp-review", checkpointDigest: "cp-digest", sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", side: "new", startLine: 1, endLine: 1, comment: "Explain this changed line" }]);
-  expect(checkpointRestorePreview).not.toHaveBeenCalled();
-  await act(async () => admission.reject(new Error("temporary run failure")));
-  expect(await within(drawer).findByRole("alert")).toBeTruthy();
-  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
-});
-
 it("branches beside a finalized message without checkpoints, keeps failed selection, and isolates the new draft", async () => {
   const user = userEvent.setup();
   const point = { sourceTurnIndex: 1, sourceTurnDigest: "exact-finalized-turn", sourceBoundaryStreamSequence: 3, sourceFinalizedStreamSequence: 7, promptPreview: "Inspect the parser" };
@@ -7653,6 +7578,39 @@ it("does not navigate a late message fork over a newly selected conversation", a
   expect((await readyComposer()).value).toBe("Keep working here");
 });
 
+it("reviews outdated recorded lines through the normal run and preserves comments until admission", async () => {
+  const user = userEvent.setup();
+  const checkpoint = { checkpointId: "cp-review", checkpointDigest: "cp-digest", turnIndex: 1, files: [], unknownMutationCount: 1, fullyRestorable: false };
+  const review = { checkpointId: checkpoint.checkpointId, checkpointDigest: checkpoint.checkpointDigest, truncated: false,
+    diffs: [{ sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", fileState: "changed" as const, truncated: false, lines: [{ text: "-old", oldLine: 1 }, { text: "+new", newLine: 1 }] }] };
+  const admission = deferred<Awaited<ReturnType<DesktopBridge["startRun"]>>>();
+  const startRun = vi.fn<DesktopBridge["startRun"]>(() => admission.promise);
+  const checkpointRestorePreview = vi.fn<DesktopBridge["checkpointRestorePreview"]>();
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    conversationRecovery: async () => ({ checkpoints: [checkpoint], forkPoints: [], throughStreamSequence: 8 }),
+    checkpointReview: async () => review, checkpointRestorePreview, startRun,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await readyComposer();
+  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(await screen.findByRole("button", { name: "Review changes" }));
+  const drawer = screen.getByRole("dialog", { name: "Review changes" });
+  await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));
+  await user.type(within(drawer).getByRole("textbox", { name: "Comment on selected lines" }), "Explain this changed line");
+  await user.click(within(drawer).getByRole("button", { name: "Add comment" }));
+  await user.click(within(drawer).getByRole("button", { name: "Send comments" }));
+  await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
+  expect(within(drawer).getByRole("button", { name: "Sending comments…" })).toBeTruthy();
+  expect(startRun.mock.calls[0][12]).toEqual([{ checkpointId: "cp-review", checkpointDigest: "cp-digest", sourceCallId: "edit-call", diffDigest: "diff-digest", path: "src/a.ts", side: "new", startLine: 1, endLine: 1, comment: "Explain this changed line" }]);
+  expect(checkpointRestorePreview).not.toHaveBeenCalled();
+  await act(async () => admission.reject(new Error("temporary run failure")));
+  expect(await within(drawer).findByRole("alert")).toBeTruthy();
+  expect(within(drawer).getByText("Explain this changed line")).toBeTruthy();
+});
+
 it("imports a branch conclusion during an active run without replacing the draft or starting another run", async () => {
   const user = userEvent.setup();
   let sourcesAvailable = false;
@@ -7687,4 +7645,92 @@ it("imports a branch conclusion during an active run without replacing the draft
   expect(await screen.findByText("Conclusion imported for future requests. Your draft is unchanged.")).toBeTruthy();
   expect(composer.value).toBe("An unsent follow-up draft");
   expect(startRun).toHaveBeenCalledOnce();
+});
+
+it.each(["accepted", "failed"] as const)("queues review comments while running and clears only after a confirmed receipt (%s)", async (outcome) => {
+  const user = userEvent.setup();
+  const defaults = bridgeWith();
+  const startRun = vi.fn<DesktopBridge["startRun"]>(defaults.startRun);
+  const pending = deferred<Awaited<ReturnType<DesktopBridge["commandConversationQueue"]>>>();
+  const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(() => pending.promise);
+  const checkpoint = { checkpointId: "cp-queue-review", checkpointDigest: "cp-digest", turnIndex: 1, files: [], unknownMutationCount: 1, fullyRestorable: false };
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    conversationRecovery: async () => ({ checkpoints: [checkpoint], forkPoints: [], throughStreamSequence: 8 }),
+    checkpointReview: async () => ({ checkpointId: checkpoint.checkpointId, checkpointDigest: checkpoint.checkpointDigest, truncated: false,
+      diffs: [{ sourceCallId: "old-edit", diffDigest: "old-diff", path: "src/a.ts", fileState: "unknown", truncated: false, lines: [{ text: "+new", newLine: 1 }] }] }),
+    startRun, commandConversationQueue,
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  const composer = await readyComposer();
+  await user.type(composer, "Keep working");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByRole("button", { name: "Stop run" });
+  await waitFor(() => expect(composer.value).toBe(""));
+  await user.type(composer, "Keep my unsent draft");
+  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(await screen.findByRole("button", { name: "Review changes" }));
+  const drawer = screen.getByRole("dialog", { name: "Review changes" });
+  await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));
+  await user.type(within(drawer).getByRole("textbox", { name: "Comment on selected lines" }), "Please revisit the original line");
+  await user.click(within(drawer).getByRole("button", { name: "Add comment" }));
+  await user.click(within(drawer).getByRole("button", { name: "Send comments" }));
+  await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledOnce());
+  const input = commandConversationQueue.mock.calls[0][1];
+  expect(input.action).toMatchObject({ action: "enqueue", prompt: "Please revisit the original line", reviewAnnotations: [{ checkpointId: "cp-queue-review", checkpointDigest: "cp-digest", sourceCallId: "old-edit", diffDigest: "old-diff", path: "src/a.ts", side: "new", startLine: 1, endLine: 1, comment: "Please revisit the original line" }] });
+  expect(within(drawer).getByText("Please revisit the original line")).toBeTruthy();
+  expect(within(drawer).getByRole("button", { name: "Sending comments…" })).toBeTruthy();
+  await act(async () => {
+    if (outcome === "failed") pending.reject(new Error("queue not accepted"));
+    else pending.resolve(await defaults.commandConversationQueue(workspace.id, input));
+  });
+  if (outcome === "failed") {
+    expect(await within(drawer).findByRole("alert")).toBeTruthy();
+    expect(within(drawer).getByText("Please revisit the original line")).toBeTruthy();
+  } else await waitFor(() => expect(within(drawer).queryByText("Please revisit the original line")).toBeNull());
+  expect(composer.value).toBe("Keep my unsent draft");
+  expect(startRun).toHaveBeenCalledOnce();
+});
+
+it.each(["retired", "terminal"] as const)("A1 records only visible accepted content after %s events", async (boundary) => {
+  vi.stubGlobal("crypto", webcrypto);
+  const user = userEvent.setup();
+  const runId = `a1-accepted-content-${boundary}`;
+  let eventListener: ((event: TimelineEvent) => void) | undefined;
+  const bridge = bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    startRun: async (_workspaceId, sessionId) => ({ id: runId, sessionId, status: "running", permissionMode: "manual", streamSequence: 0 }),
+    subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
+  });
+  render(<App bridge={bridge} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await user.type(await readyComposer(), "Observe only actual content");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByRole("button", { name: "Stop run" });
+  await waitFor(() => expect(eventListener).toBeDefined());
+  const emit = (overrides: Partial<TimelineEvent>) => act(() => eventListener?.({
+    workspaceId: workspace.id, sessionId: "http-session-new", runId, sequence: 0,
+    runSequence: "0", kind: "other", replayable: false, ...overrides,
+  }));
+  emit({ kind: "run_started", sequence: 3, runSequence: "3", replayable: true });
+  emit({ kind: "assistant_delta", runSequence: "3", text: "", livePreview: {
+    attemptId: "retired-attempt", slotId: "text", revision: "1", baseSequence: "3", truncated: false,
+  } });
+  emit({ kind: boundary === "terminal" ? "run_cancelled" : "provider_turn_partial_output_discarded", sequence: 4, runSequence: "4", replayable: true });
+  emit({ kind: "assistant_delta", runSequence: "4", text: "late rejected output", livePreview: {
+    attemptId: "retired-attempt", slotId: "text", revision: "2", baseSequence: "4", truncated: false,
+  } });
+  expect(screen.queryByText("late rejected output")).toBeNull();
+  const runKey = createHash("sha256").update(runId).digest("hex");
+  const observations = async () => (await rendererRunTimings(workspace.id)).filter((entry) => entry.runKey === runKey);
+  expect((await observations()).some((entry) => entry.phase === "first_content")).toBe(false);
+  if (boundary === "retired") {
+    emit({ kind: "assistant_delta", runSequence: "4", text: "new accepted output", livePreview: {
+      attemptId: "new-attempt", slotId: "text", revision: "3", baseSequence: "4", truncated: false,
+    } });
+    await screen.findByText("new accepted output");
+    expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
+  }
 });
