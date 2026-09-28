@@ -29,9 +29,15 @@ impl Provider for DirectExecutionProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let stage = self.0.fetch_add(1, Ordering::SeqCst);
         let (name, args) = match stage {
-            0 => ("exec_command", serde_json::json!({"command": "false"})),
+            0 => (
+                "exec_command",
+                serde_json::json!({"command": "exit 1", "yield_time_ms": 30_000}),
+            ),
             1..=8 => ("read_file", serde_json::json!({"path": "observation.txt"})),
-            9 => ("exec_command", serde_json::json!({"command": "true"})),
+            9 => (
+                "exec_command",
+                serde_json::json!({"command": "exit 0", "yield_time_ms": 30_000}),
+            ),
             10 => {
                 return Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
                     &request,
@@ -229,7 +235,9 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
         ],
         "all ten business-tool receipts survive without a completion-claim tool"
     );
+    assert_eq!(results[0].facts.exit_code, Some(1));
     assert!(results[0].facts.error.is_some());
+    assert_eq!(results[9].facts.exit_code, Some(0));
     assert!(
         results[1..]
             .iter()

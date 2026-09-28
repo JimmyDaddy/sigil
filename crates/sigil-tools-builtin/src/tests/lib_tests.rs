@@ -2062,13 +2062,12 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
     );
     #[cfg(windows)]
     let (probe_program, probe_args) = (
-        "powershell.exe".to_owned(),
+        "cmd.exe".to_owned(),
         vec![
-            "-NoLogo".to_owned(),
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-Command".to_owned(),
-            "if ($null -eq $env:HOME) { [Console]::Out.Write('unset') } else { [Console]::Out.Write($env:HOME) }".to_owned(),
+            "/d".to_owned(),
+            "/s".to_owned(),
+            "/c".to_owned(),
+            "chcp 65001>nul & if defined HOME (set HOME) else (echo SIGIL_HOME_UNSET)".to_owned(),
         ],
     );
     let temp = tempfile::tempdir()?;
@@ -2088,7 +2087,18 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
             capture: None,
         })
         .await?;
+    #[cfg(unix)]
     assert_eq!(String::from_utf8_lossy(&inherited.stdout), home);
+    #[cfg(windows)]
+    assert_eq!(
+        String::from_utf8_lossy(&inherited.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("HOME=")),
+        Some(home.as_str()),
+        "inherited HOME probe failed: exit={:?}, stderr={}",
+        inherited.exit_code,
+        String::from_utf8_lossy(&inherited.stderr)
+    );
 
     let resolved = sigil_kernel::resolve_extension_process_environment(&[])?;
     let extension_env = resolved
@@ -2110,7 +2120,17 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
             capture: None,
         })
         .await?;
+    #[cfg(unix)]
     assert_eq!(String::from_utf8_lossy(&isolated.stdout), "unset");
+    #[cfg(windows)]
+    assert_eq!(
+        String::from_utf8_lossy(&isolated.stdout).trim(),
+        "SIGIL_HOME_UNSET",
+        "isolated HOME probe failed: exit={:?}, stdout={}, stderr={}",
+        isolated.exit_code,
+        String::from_utf8_lossy(&isolated.stdout),
+        String::from_utf8_lossy(&isolated.stderr)
+    );
     assert_eq!(
         isolated.environment_policy,
         sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
@@ -6089,15 +6109,22 @@ async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
+    #[cfg(unix)]
+    let command = "yes x | head -n 70000";
+    #[cfg(windows)]
+    let command = "[Console]::Out.Write(('x' * 140000))";
+
     let result = exec_tool(temp.path())
-        .execute(
-            ctx,
-            "bash".to_owned(),
-            json!({ "command": "yes x | head -n 70000" }),
-        )
+        .execute(ctx, "bash".to_owned(), json!({ "command": command }))
         .await?;
 
-    assert!(result.metadata.truncated);
+    assert!(
+        result.metadata.truncated,
+        "large-output probe was not truncated: status={:?}, stdout_bytes={:?}, preview={}",
+        result.status,
+        result.metadata.stdout_bytes,
+        result.content.chars().take(160).collect::<String>()
+    );
     assert!(result.content.contains("output truncated"));
     assert!(result.metadata.stdout_bytes.unwrap_or_default() > 64 * 1024);
     Ok(())

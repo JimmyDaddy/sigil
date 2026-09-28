@@ -283,12 +283,7 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
                 result.call_id.as_str(),
                 result.facts.status.as_str(),
                 result.facts.exit_code,
-                result
-                    .initial_model_view
-                    .preview
-                    .chars()
-                    .take(300)
-                    .collect::<String>(),
+                result.initial_model_view.preview.clone(),
             )),
             _ => None,
         })
