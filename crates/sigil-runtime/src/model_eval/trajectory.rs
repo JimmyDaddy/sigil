@@ -260,6 +260,8 @@ pub struct ModelEvalTrajectorySummary {
     pub human_interventions: Option<usize>,
     /// Failed checks alone do not establish which model edits were ineffective repair rounds.
     pub ineffective_repair_rounds: Option<usize>,
+    /// Strict observable subsets; never substitutes for the broader unknown metrics above.
+    pub activity: Option<super::ModelEvalActivityMetrics>,
     pub observation_error: Option<String>,
 }
 
@@ -288,6 +290,13 @@ pub(super) fn write_campaign_trajectory(
             .collect::<BTreeSet<_>>();
         match JsonlSessionStore::read_event_records(&execution.session_path) {
             Ok(records) => {
+                match super::activity::observe_activity(&records) {
+                    Ok(activity) => summary.activity = Some(activity),
+                    Err(_) => {
+                        summary.observation_error =
+                            Some("activity observations unavailable".to_owned())
+                    }
+                }
                 match sigil_kernel::ProviderPhysicalAttemptProjection::from_records(&records) {
                     Ok(projection) => {
                         summary.physical_provider_attempts = Some(projection.attempts().len())

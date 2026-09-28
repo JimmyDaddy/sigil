@@ -257,3 +257,67 @@ An unclassified execution error is reported as `unknown`, not a model failure: t
 `long-session-v1/composer-handoff` keeps twelve fixed user turns in one session. It combines a planted defect in the repository's Desktop composer function with 149,235 bytes of synthetic maintenance history. The final independent check verifies the real function behavior, hashes of early/middle/final handoff values, and unchanged check/package files. Each prompt stays below the existing 16 KiB limit; no product budget is raised for this fixture.
 
 This is separate from the frozen twenty-case `repository-v1` comparison. The model may externalize history in its replies or files, so passing demonstrates continued work with history, not unaided recall or a blind benchmark. Report actual turns, provider token usage and patch evidence. It does not qualify overflow or compaction unless those paths were actually exercised; normal model-eval disables compaction. Use the provider/application qualification for that boundary.
+
+### Observable activity subsets
+
+`trajectory.activity` supplements the three deliberately unknown broad metrics with facts from the
+one observed durable session stream. It is `null` when observation fails. It never changes run
+acceptance, tool admission, billing, or verification. Child sessions are not scanned;
+`observed_child_thread_starts` flags observed delegation but is not a completeness certificate.
+These subsets must not be relabelled as whole-task totals.
+
+- `reads` counts completed `read_file` audit events and the subset with a unique assistant call,
+  started/completed audit, typed requested offset/limit, actual applied caps, and complete
+  policy-preserved V3 artifact in the same session. Identity coverage is split into
+  `canonical_subject_reads` and `managed_logical_subject_reads`: the first has an audited canonical
+  subject; the second requires the exact workspace logical selector hash and the actual managed-file
+  access receipt retained in V3 facts. That receipt binds the borrowed workspace and operation;
+  it does not expose or prove a canonical leaf/inode identity. The two identity kinds never
+  cross-join. Ambiguous reused call IDs,
+  missing bindings, truncated outputs and other scopes are excluded explicitly. Repeated output
+  means the same identity-kind/binding/range and persisted content hash/size were observed more than once.
+  Managed reads compare the same workspace logical selector; path aliases and replacement leaf files
+  are not inferred from this metric. Missing or bounded-away access receipts remain excluded.
+  `repeated_persisted_output_bytes` adds only the artifact's explicit persisted byte count for
+  occurrences after the first. It is not physical disk I/O or file size. The projection reads no
+  current workspace file or artifact body. Re-reading after intervening edits may be necessary;
+  even identical output does not prove redundancy. Both repeat fields are `null` with zero
+  qualified reads; a measured zero with qualified reads applies only to that subset.
+- `decisions` counts exact accepted tool-approval and user-input decisions with an earlier matching
+  durable request. Exact duplicate decisions are counted once; missing or conflicting bindings
+  have a separate count. This records decisions, including automated decisions when those are
+  actually audited. It cannot distinguish a person from automation or count unaudited human
+  activity, so `human_interventions` remains `null` even for an auto-approve campaign.
+- `repairs` counts a typed `Repair` selection tied to its exact pending feedback, and its next new
+  feedback in the same Task, admission and execution attempt. `failed_rechecks_after_repair`
+  counts only pairs with new failed receipts for at least one identical check, policy, workspace,
+  verification scope, environment and sandbox binding. Both sets must match their respective
+  feedback snapshot. Changed checks/policies, missing receipts and different attempts cannot
+  establish a failed repeat. Unpaired selections and excluded pairs remain explicit; without a
+  comparable pair the value is `null`. A selection followed by no further feedback could mean
+  success, cancellation, interruption or missing evidence. This is not proof that an edit was
+  ineffective, and does not convert an ordinary failed check into a repair round.
+
+The original `redundant_reads`, `human_interventions` and `ineffective_repair_rounds` remain `null`.
+No natural-language classification, synthetic human attribution or extra execution owner is
+introduced. Reports expose counts and coverage, not paths, prompt text, decision IDs or output
+bodies. Frozen historical campaign reports are not backfilled; run a new campaign to collect this
+additional side table.
+
+### 活动指标的可观察边界
+
+`trajectory.activity` 只统计本次实际读取的一条持久 session 流；读取失败为 `null`，不会阻碍执行或改变费用与验收。
+子会话不在统计范围内，已观察到的 child 启动次数仅是覆盖提示，不能代表整个任务树完整。
+
+重复读取子指标要求唯一 call、真实 started/completed 审计、typed 范围及同 session 完整 V3 artifact 同时匹配。
+身份覆盖分为 `canonical_subject_reads`（已有 canonical subject）和 `managed_logical_subject_reads`（workspace 逻辑选择器 hash 与 V3 中实际 managed-file access receipt 同时存在且匹配）。后者的 receipt 绑定借用 workspace 和操作，不等于物理 leaf/inode 身份；两种身份不会交叉去重。
+受管读取只比较同一 workspace 的相同逻辑选择器，不推断路径别名或文件替换；receipt 缺失或被 bounded facts 截断仍计入排除项。
+相同范围与持久化内容的重复观测单独计数；字节来自 descriptor 的 `persisted_bytes`，表示持久化安全输出字节，不是物理文件读取字节。
+统计不会再读当前文件反推历史。缺少或歧义的绑定、截断输出均计入排除项；没有合格样本为未知，不能用零冒充。
+相同内容也可能是必要的重读，因此不填写宽泛的 `redundant_reads`。
+
+审批及用户输入子指标只统计与先前请求精确关联的已接受决定，重复审计去重；无法区分人操作与自动批准，因此 `human_interventions` 仍未知。
+修复子指标只统计同 Task/admission/attempt 的显式 `Repair` 后，再次反馈中可比的同一 check 仍失败的事实。
+新 receipt 必须晚于该选择，且分别对应前后 feedback 的 snapshot；策略、范围、环境、sandbox 与 check 身份都要匹配。
+没有下次反馈不代表成功或失败；没有可比证据为未知。此指标不能证明具体修改无效，因此 `ineffective_repair_rounds` 仍未知。
+所有结果都是可观察的严格子集，保留未配对与排除计数；不新增权限 owner，不用自然语言猜测原因，不回填旧实验。

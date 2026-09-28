@@ -30,6 +30,11 @@ mod route_contract;
 pub use route_contract::*;
 mod verification;
 pub use verification::*;
+mod activity;
+pub use activity::{
+    ModelEvalActivityMetrics, ModelEvalDecisionMetrics, ModelEvalReadMetrics,
+    ModelEvalRepairMetrics,
+};
 mod trajectory;
 pub use trajectory::{ModelEvalTrajectorySummary, ModelEvalTurnTrace};
 

@@ -1558,11 +1558,20 @@ async fn spawn_scripted_eval_tool_server(
     tool_name: &str,
     arguments: serde_json::Value,
 ) -> anyhow::Result<String> {
+    let (base_url, _server) =
+        spawn_scripted_eval_tool_sequence_server(requests, vec![(tool_name.to_owned(), arguments)])
+            .await?;
+    Ok(base_url)
+}
+
+async fn spawn_scripted_eval_tool_sequence_server(
+    requests: Arc<Mutex<Vec<String>>>,
+    calls: Vec<(String, serde_json::Value)>,
+) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let tool_name = tool_name.to_owned();
-    tokio::spawn(async move {
-        for index in 0..2 {
+    let server = tokio::spawn(async move {
+        for index in 0..=calls.len() {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
@@ -1582,13 +1591,18 @@ async fn spawn_scripted_eval_tool_server(
                 .lock()
                 .expect("requests lock")
                 .push(String::from_utf8_lossy(&bytes).into_owned());
-            let envelope = if index == 0 {
+            let envelope = if let Some((tool_name, arguments)) = calls.get(index) {
+                let call_id = if index == 0 {
+                    "call-fixture".to_owned()
+                } else {
+                    format!("call-fixture-{index}")
+                };
                 serde_json::json!({
                     "choices": [{
                         "delta": {
                             "tool_calls": [{
                                 "index": 0,
-                                "id": "call-fixture",
+                                "id": call_id,
                                 "function": {
                                     "name": tool_name,
                                     "arguments": arguments.to_string()
@@ -1627,7 +1641,7 @@ async fn spawn_scripted_eval_tool_server(
             let _ = socket.write_all(response.as_bytes()).await;
         }
     });
-    Ok(format!("http://{address}"))
+    Ok((format!("http://{address}"), server))
 }
 
 fn http_request_is_complete(bytes: &[u8]) -> bool {
@@ -1907,6 +1921,247 @@ fn model_eval_multiturn_reuses_session_and_preserves_usage_unknown_cost() {
                 false
             );
             assert!(trajectory["trajectory"]["redundant_reads"].is_null());
+            assert_eq!(
+                trajectory["trajectory"]["activity"]["scope"],
+                "observed_session_stream"
+            );
+            assert!(
+                trajectory["trajectory"]["activity"]["reads"]["repeated_output_reads"].is_null()
+            );
+            assert_eq!(
+                trajectory["trajectory"]["activity"]["decisions"]["tool_decision_events"],
+                0
+            );
+        });
+}
+
+#[test]
+fn model_eval_activity_qualifies_real_read_file_calls_and_v3_output() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_activity_qualifies_real_read_file_calls_and_v3_output",
+        "SIGIL_TEST_MODEL_EVAL_ACTIVITY_READ_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let args = serde_json::json!({"path": "src/lib.rs", "offset": 0, "limit": 2000});
+            let (base_url, mut server) = spawn_scripted_eval_tool_sequence_server(
+                Arc::clone(&requests),
+                vec![
+                    ("read_file".to_owned(), args.clone()),
+                    ("read_file".to_owned(), args),
+                ],
+            )
+            .await
+            .expect("scripted provider");
+            let temp = tempdir().expect("temp");
+            let fixture_path = temp.path().join("fixture");
+            fs::create_dir(&fixture_path).expect("fixture directory");
+            write_python_model_eval_fixture(&fixture_path, false);
+            let source = fs::read_to_string(fixture_path.join("files/src/lib.rs"))
+                .expect("original fixture source");
+            assert!(source.contains("left + right"));
+            let config_path = temp.path().join("source.toml");
+            write_source_config(&config_path, &base_url, "auto-edit");
+            let result = run_model_eval_campaign(
+                ModelEvalCampaignRequest {
+                    config_path,
+                    fixture_roots: vec![fixture_path],
+                    orchestration_route_contract: None,
+                    repetitions: 1,
+                    max_cost_microusd: 500_000,
+                    campaign_timeout: Duration::from_secs(30),
+                    output_dir: temp.path().join("campaign"),
+                    release_output_owner: None,
+                },
+                &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+            )
+            .await;
+            // Retain and join the local provider on both campaign outcomes. A failed run must
+            // not strand a server waiting for its next scripted request.
+            let joined = match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+                Ok(joined) => joined,
+                Err(_) => {
+                    server.abort();
+                    let _ = server.await;
+                    panic!("campaign returned without consuming the bounded provider script");
+                }
+            };
+            joined.expect("provider joined");
+            let campaign = result.expect("campaign");
+            let run = &campaign.runs[0];
+            assert_eq!(run.turns.len(), 1);
+            assert_eq!(
+                run.verification
+                    .as_ref()
+                    .expect("independent check")
+                    .verdict,
+                VerificationVerdict::Failed,
+                "two real reads do not repair the fixture"
+            );
+            let captured = requests.lock().expect("requests");
+            assert_eq!(captured.len(), 3, "two tool rounds and one final response");
+            let final_request: serde_json::Value =
+                serde_json::from_str(captured[2].split_once("\r\n\r\n").expect("HTTP body").1)
+                    .expect("provider request JSON");
+            let messages = final_request["messages"]
+                .as_array()
+                .expect("provider messages");
+            let replies = messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .collect::<Vec<_>>();
+            assert_eq!(replies.len(), 2);
+            for (reply, call_id) in replies.iter().zip(["call-fixture", "call-fixture-1"]) {
+                assert_eq!(reply["tool_call_id"], call_id);
+                let envelope: serde_json::Value =
+                    serde_json::from_str(reply["content"].as_str().expect("real tool reply"))
+                        .expect("tool envelope");
+                assert_eq!(envelope["facts"]["status"], "ok");
+                let preview = envelope["projection"]["preview"]
+                    .as_str()
+                    .expect("read preview");
+                assert_eq!(preview, source.trim_end_matches('\n'));
+                assert!(preview.contains("left + right"));
+            }
+            drop(captured);
+            let records = JsonlSessionStore::read_event_records(&run.session_path)
+                .expect("actual durable execution");
+            let entries = records
+                .iter()
+                .filter_map(|record| record.session_log_entry().expect("typed durable entry"))
+                .collect::<Vec<_>>();
+            let outputs = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    sigil_kernel::SessionLogEntry::ToolResultV3(output)
+                        if output.tool_name == "read_file" =>
+                    {
+                        Some(output)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(outputs.len(), 2);
+            let mut descriptors = Vec::new();
+            for (output, call_id) in outputs.iter().zip(["call-fixture", "call-fixture-1"]) {
+                assert_eq!(output.call_id, call_id);
+                assert!(output.initial_model_view.preview.contains("left + right"));
+                let audits = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        sigil_kernel::SessionLogEntry::Control(ControlEntry::ToolExecution(
+                            audit,
+                        )) if audit.call_id == call_id => Some(audit),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(audits.len(), 2);
+                assert_eq!(audits[0].status, ToolExecutionStatus::Started);
+                assert_eq!(audits[1].status, ToolExecutionStatus::Completed);
+                assert_eq!(audits[1].metadata.limit_lines, Some(2000));
+                assert!(audits[1].metadata.limit_bytes.is_some());
+                // Builtin read_file is a known pure read, so the real parallel-read owner
+                // records its exact permission plan instead of an unknown-mutation profile.
+                assert!(
+                    audits[0]
+                        .metadata
+                        .details
+                        .pointer("/execution_mutation_profile")
+                        .is_none()
+                );
+                assert!(
+                    audits[0]
+                        .metadata
+                        .details
+                        .pointer("/permission_plan_hash")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|hash| !hash.is_empty())
+                );
+                assert_eq!(audits[0].subjects, audits[1].subjects);
+                assert_eq!(audits[0].subjects.len(), 1);
+                assert_eq!(
+                    audits[0].subjects[0].kind,
+                    sigil_kernel::ToolSubjectKind::Path
+                );
+                assert!(audits[0].subjects[0].canonical_path_sha256.is_none());
+                assert_eq!(
+                    audits[0].subjects[0].scope,
+                    sigil_kernel::ToolSubjectScope::Workspace
+                );
+                assert_eq!(
+                    audits[0].subjects[0].identity_sha256,
+                    sigil_kernel::stable_event_hash(b"src/lib.rs")
+                );
+                let access: sigil_kernel::managed_execution::BorrowedResourceAccessReceiptV1 =
+                    serde_json::from_value(
+                        output.facts.tool_specific["managed_access_receipt"].clone(),
+                    )
+                    .expect("actual managed-file receipt survives the bounded V3 facts");
+                assert_eq!(
+                    access.effect_settlement,
+                    sigil_kernel::recovery::EffectSettlementV1::Applied
+                );
+                assert!(
+                    access.identity_before.is_some(),
+                    "receipt binds the borrowed workspace root"
+                );
+                assert_eq!(
+                    audits[0].metadata.details.get("call"),
+                    audits[1].metadata.details.get("call")
+                );
+                assert_eq!(
+                    audits[1]
+                        .metadata
+                        .details
+                        .pointer("/call/path_sha256")
+                        .and_then(serde_json::Value::as_str),
+                    Some(format!("{:x}", Sha256::digest(b"src/lib.rs")).as_str())
+                );
+                descriptors.push(
+                    output
+                        .artifact
+                        .descriptor()
+                        .expect("actual full output artifact"),
+                );
+            }
+            assert_eq!(
+                descriptors[0].content_sha256,
+                sigil_kernel::stable_event_hash(source.trim_end_matches('\n').as_bytes())
+            );
+            assert_eq!(descriptors[0].content_sha256, descriptors[1].content_sha256);
+            assert_eq!(
+                descriptors[0].persisted_bytes,
+                descriptors[1].persisted_bytes
+            );
+            let trajectory: serde_json::Value = serde_json::from_str(
+                fs::read_to_string(campaign.output_dir.join("trajectory.jsonl"))
+                    .expect("trajectory")
+                    .trim(),
+            )
+            .expect("trajectory JSON");
+            let activity = &trajectory["trajectory"]["activity"];
+            assert_eq!(activity["reads"]["completed_read_events"], 2);
+            assert_eq!(activity["reads"]["qualified_reads"], 2);
+            assert_eq!(activity["reads"]["canonical_subject_reads"], 0);
+            assert_eq!(activity["reads"]["managed_logical_subject_reads"], 2);
+            assert_eq!(activity["reads"]["excluded_completed_read_events"], 0);
+            assert_eq!(activity["reads"]["repeated_output_reads"], 1);
+            assert_eq!(
+                activity["reads"]["repeated_persisted_output_bytes"],
+                descriptors[1].persisted_bytes
+            );
+            assert!(trajectory["trajectory"]["redundant_reads"].is_null());
+            let serialized = serde_json::to_string(activity).expect("activity serialization");
+            assert!(!serialized.contains("src/lib.rs"));
+            assert!(!serialized.contains("left + right"));
+            assert!(!serialized.contains(temp.path().to_string_lossy().as_ref()));
         });
 }
 
