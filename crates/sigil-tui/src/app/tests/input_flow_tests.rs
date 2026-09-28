@@ -1376,6 +1376,33 @@ fn follow_ups_after_the_fourth_are_selectable_editable_and_removable() -> Result
 }
 
 #[test]
+fn queue_next_slash_command_uses_the_same_first_item_and_deferred_rules_as_the_panel() -> Result<()>
+{
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![queued_conversation_input_entry("queue_1", "first")?]);
+    app.composer.input = "/queue next 1".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("first follow-up is already next"));
+    assert!(app.drain_pending_worker_commands().is_empty());
+
+    app.push_optimistic_conversation_queue_item(
+        "second".to_owned(),
+        sigil_kernel::ConversationInputKind::Chat,
+        sigil_kernel::ConversationInputTarget::MainThread,
+    );
+    app.composer.input = "/queue next 2".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("follow-up will run next after saving")
+    );
+    assert_eq!(app.composer.deferred_queue_promotions.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![
@@ -1440,13 +1467,17 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         queued_conversation_input_entry("queue_1", "first queued prompt")?,
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
-    for command in ["/queue resume", "/queue next", "/queue send 1"] {
+    for command in ["/queue resume", "/queue next"] {
         app.composer.input = command.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
         let action = app.submit_input()?;
         assert!(action.is_some());
         complete_queue_action_for_test(&mut app, &action)?;
     }
+    app.composer.input = "/queue send 1".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("first follow-up is already next"));
     for command in [
         "/queue cancel 2",
         "/queue remove 2",

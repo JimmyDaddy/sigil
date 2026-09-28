@@ -351,10 +351,14 @@ impl AppState {
             self.last_notice = Some("first follow-up is already next".to_owned());
             return None;
         }
-        let item = projection
+        let Some(item) = projection
             .items
             .into_iter()
-            .nth(self.composer.queue_selected)?;
+            .nth(self.composer.queue_selected)
+        else {
+            self.last_notice = Some("queue item not found".to_owned());
+            return None;
+        };
         if is_optimistic_queue_id(&item.queued.queue_id) {
             if !self
                 .composer
@@ -538,9 +542,16 @@ impl AppState {
         match action.as_str() {
             "pause" => Ok(self.toggle_queue_pause_to(true)),
             "resume" => Ok(self.toggle_queue_pause_to(false)),
-            "next" | "send" => Ok(self.queue_action_for_target(target, |queue_id| {
-                AppAction::PromoteQueuedConversationInput { queue_id }
-            })),
+            "next" | "send" => {
+                if !target.is_empty() {
+                    let Some(index) = self.queue_index_for_target(target) else {
+                        self.last_notice = Some("queue item not found".to_owned());
+                        return Ok(None);
+                    };
+                    self.composer.queue_selected = index;
+                }
+                Ok(self.promote_selected_queue_item())
+            }
             "delete" | "cancel" | "remove" => Ok(self
                 .queue_action_for_target(target, |queue_id| {
                     AppAction::CancelQueuedConversationInput { queue_id }
