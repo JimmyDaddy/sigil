@@ -3548,10 +3548,15 @@ impl Session {
             skill_index_fingerprint: "none".to_owned(),
         };
         apply_memory_report(&mut prefix_snapshot, &memory.report);
-        let request_messages =
-            crate::apply_exact_message_overlays(&safe_request_messages, &exact_overlays)?;
-        let deterministic_materialization = serde_json::to_value(&request_messages)?
-            == serde_json::to_value(&safe_request_messages)?;
+        let (request_messages, deterministic_materialization) = if exact_overlays.is_empty() {
+            (safe_request_messages, true)
+        } else {
+            let request_messages =
+                crate::apply_exact_message_overlays(&safe_request_messages, &exact_overlays)?;
+            let deterministic_materialization = serde_json::to_value(&request_messages)?
+                == serde_json::to_value(&safe_request_messages)?;
+            (request_messages, deterministic_materialization)
+        };
         Ok(AssembledRequest {
             request: CompletionRequest {
                 provider_name: self.provider_name.clone(),
