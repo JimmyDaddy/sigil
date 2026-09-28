@@ -51,9 +51,9 @@ impl Provider for FiveBatchProvider {
             2 => (
                 "exec_command",
                 serde_json::json!({"command": if cfg!(windows) {
-                    "rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & ./.git/delivery-tests.exe --exact tests::increment_is_correct; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git add crates/delivery/src/tests.rs"
+                    "cargo test --offline --manifest-path crates/delivery/Cargo.toml --target-dir .git/delivery-target --lib tests::increment_is_correct -- --exact; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git add crates/delivery/src/tests.rs"
                 } else {
-                    "rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests && .git/delivery-tests --exact tests::increment_is_correct && git add crates/delivery/src/tests.rs"
+                    "cargo test --offline --manifest-path crates/delivery/Cargo.toml --target-dir .git/delivery-target --lib tests::increment_is_correct -- --exact && git add crates/delivery/src/tests.rs"
                 }}),
             ),
             3 => (
@@ -159,7 +159,7 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
     }
     std::fs::write(
         workspace.join(".gitignore"),
-        "sigil.toml\n.sigil/\nstate/\ncache/\n",
+        "sigil.toml\n.sigil/\nstate/\ncache/\ncrates/delivery/Cargo.lock\n",
     )?;
     git(
         workspace,
@@ -175,10 +175,21 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
     let original = git(workspace, &["rev-list", "--reverse", "HEAD"])?;
     std::fs::create_dir_all(workspace.join("crates/delivery/src"))?;
     std::fs::write(
+        workspace.join("crates/delivery/Cargo.toml"),
+        "[package]\nname = \"delivery-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[workspace]\n",
+    )?;
+    std::fs::write(
         workspace.join("crates/delivery/src/lib.rs"),
         "pub fn increment(value: u32) -> u32 {\n    value + 1\n}\n#[cfg(test)]\nmod tests;\n",
     )?;
-    git(workspace, &["add", "crates/delivery/src/lib.rs"])?;
+    git(
+        workspace,
+        &[
+            "add",
+            "crates/delivery/Cargo.toml",
+            "crates/delivery/src/lib.rs",
+        ],
+    )?;
 
     let config_path = workspace.join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;

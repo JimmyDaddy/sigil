@@ -2024,10 +2024,15 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
     assert!(!capabilities.network_isolation);
     assert!(!capabilities.process_isolation);
 
+    #[cfg(unix)]
+    let (program, args) = ("sh", vec!["-lc", "printf backend-ok"]);
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/d", "/s", "/c", "echo backend-ok"]);
+
     let receipt = backend
         .execute(ExecutionRequest {
-            program: "sh".to_owned(),
-            args: vec!["-lc".to_owned(), "printf backend-ok".to_owned()],
+            program: program.to_owned(),
+            args: args.into_iter().map(str::to_owned).collect(),
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
             environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
@@ -2043,7 +2048,10 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
     assert_eq!(receipt.backend, ExecutionBackendKind::Local);
     assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Unknown);
     assert_eq!(receipt.exit_code, Some(0));
+    #[cfg(unix)]
     assert_eq!(String::from_utf8_lossy(&receipt.stdout), "backend-ok");
+    #[cfg(windows)]
+    assert_eq!(String::from_utf8_lossy(&receipt.stdout), "backend-ok\r\n");
     assert!(receipt.stderr.is_empty());
     assert!(!receipt.timed_out);
     Ok(())
@@ -2584,10 +2592,15 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let backend = LocalExecutionBackend;
 
+    #[cfg(unix)]
+    let (program, args) = ("printf", vec!["no-timeout"]);
+    #[cfg(windows)]
+    let (program, args) = ("cmd.exe", vec!["/d", "/s", "/c", "echo no-timeout"]);
+
     let receipt = backend
         .execute(ExecutionRequest {
-            program: "printf".to_owned(),
-            args: vec!["no-timeout".to_owned()],
+            program: program.to_owned(),
+            args: args.into_iter().map(str::to_owned).collect(),
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
             environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
@@ -2601,7 +2614,10 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
         .await?;
 
     assert_eq!(receipt.exit_code, Some(0));
+    #[cfg(unix)]
     assert_eq!(String::from_utf8_lossy(&receipt.stdout), "no-timeout");
+    #[cfg(windows)]
+    assert_eq!(String::from_utf8_lossy(&receipt.stdout), "no-timeout\r\n");
     assert!(!receipt.timed_out);
     Ok(())
 }
@@ -3708,16 +3724,24 @@ async fn exec_truncated_invalid_utf8_stays_within_text_budget() -> Result<()> {
     )?;
     let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
     let artifacts = ToolArtifactStore::for_session_store(&store);
-    let context = ToolContext::new(workspace.path(), 5).with_tool_artifact_reader(
+    let context = ToolContext::new(workspace.path(), 30).with_tool_artifact_reader(
         artifacts.clone(),
         ToolArtifactReadBudgetV1::default(),
         "invalid-utf8-epoch",
     );
-    let result = posix_exec_tool(workspace.path())?
+
+    #[cfg(unix)]
+    let (tool, command) = (posix_exec_tool(workspace.path())?, "cat invalid-utf8.bin");
+    #[cfg(windows)]
+    let (tool, command) = (
+        exec_tool(workspace.path()),
+        "$bytes = [System.IO.File]::ReadAllBytes('invalid-utf8.bin'); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)",
+    );
+    let result = tool
         .execute(
             context,
             "call-invalid-utf8".into(),
-            json!({"command":"cat invalid-utf8.bin", "yield_time_ms":10000}),
+            json!({"command":command, "yield_time_ms":30000}),
         )
         .await?;
     assert!(result.content.len() <= super::DEFAULT_TEXT_LIMIT_BYTES);
