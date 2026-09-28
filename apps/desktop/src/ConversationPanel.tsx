@@ -135,6 +135,8 @@ interface PendingPrompt {
   readonly runId?: string;
   /** Set when the prompt was queued as a follow-up instead of starting a run. */
   readonly queued?: boolean;
+  readonly queueEntryId?: string;
+  readonly settlementRefreshRequested?: boolean;
   readonly queueAccepted?: boolean;
 }
 
@@ -708,6 +710,8 @@ export function ConversationPanel({
   useEffect(() => {
     let disposed = false;
     const query = new AbortController();
+    const settlingPrompt = pendingPromptRef.current?.settlementRefreshRequested
+      ? pendingPromptRef.current : undefined;
     const loadCanonicalDisplay = async () => {
       setDisplayBusy(true);
       let failure: CanonicalDisplayFailure | undefined;
@@ -731,6 +735,11 @@ export function ConversationPanel({
             setDurablePlanReview(canonicalPage.planReview);
             reconcileDurableUserInputs(canonicalPage);
             setDisplayError(false);
+            if (settlingPrompt !== undefined
+              && pendingPromptRef.current?.identity === settlingPrompt.identity) {
+              pendingPromptRef.current = undefined;
+              setPendingPrompt((current) => current?.identity === settlingPrompt.identity ? undefined : current);
+            }
             return;
           } catch (error) {
             if (disposed) return;
@@ -913,17 +922,13 @@ export function ConversationPanel({
         // so that fast runs are still projected into the open conversation.
         queuedSuccessorExpected.current = false;
         startedRunProjectionExpected.current = undefined;
-        if (
-          startedProjectionRunId !== undefined
-          || pendingPromptRef.current?.queued === true
-        ) {
-          if (startedProjectionRunId !== undefined) {
-            reportSessionCatalogChange(startedProjectionRunId);
+        if (startedProjectionRunId !== undefined) {
+          reportSessionCatalogChange(startedProjectionRunId);
+          const pending = pendingPromptRef.current;
+          if (pending !== undefined && !pending.queued) {
+            pendingPromptRef.current = undefined;
+            setPendingPrompt((current) => current?.identity === pending.identity ? undefined : current);
           }
-          // Queued follow-ups are surfaced optimistically and cleared when the run
-          // settles; the canonical display reload then shows the durable user message.
-          pendingPromptRef.current = undefined;
-          setPendingPrompt(undefined);
         }
         setDisplayReload((value) => value + 1);
       }
@@ -1050,12 +1055,14 @@ export function ConversationPanel({
       }
       if (!eventBelongsToActiveTransition) return;
       if (event.kind === "run_started") {
-        pendingPromptRef.current = undefined;
-        setPendingPrompt((current) => (
-          current !== undefined && (current.runId === undefined || current.runId === event.runId)
-            ? undefined
-            : current
-        ));
+        const pending = pendingPromptRef.current;
+        if (pending?.queued === true) {
+          setConversationQueueReload((value) => value + 1);
+        } else if (pending !== undefined && (pending.runId === event.runId
+          || (pending.runId === undefined && event.runId === activeRunId))) {
+          pendingPromptRef.current = undefined;
+          setPendingPrompt((current) => current?.identity === pending.identity ? undefined : current);
+        }
       }
       if (event.kind === "control" && event.itemId?.startsWith("agent_")) {
         setAgentActivityReload((value) => value + 1);
@@ -1083,8 +1090,13 @@ export function ConversationPanel({
       const terminal = terminalSignalFromTimelineEvent(event);
       if (terminal !== undefined) {
         reportSessionCatalogChange(terminal.runId);
-        pendingPromptRef.current = undefined;
-        setPendingPrompt(undefined);
+        const pending = pendingPromptRef.current;
+        if (pending !== undefined && !pending.queued
+          && (pending.runId === event.runId
+            || (pending.runId === undefined && event.runId === activeRunId))) {
+          pendingPromptRef.current = undefined;
+          setPendingPrompt((current) => current?.identity === pending.identity ? undefined : current);
+        }
         setConversationQueueReload((value) => value + 1);
         setIntentStackReload((value) => value + 1);
         dispatchContinuity({
@@ -1417,6 +1429,16 @@ export function ConversationPanel({
     [bridge, workspaceId, session.id],
   );
 
+  useEffect(() => {
+    const pending = pendingPromptRef.current;
+    if (pending?.queued !== true || pending.settlementRefreshRequested
+      || pending.queueEntryId === undefined || conversationQueue === undefined
+      || conversationQueue.truncated
+      || conversationQueue.items.some((item) => item.entryId === pending.queueEntryId)) return;
+    pendingPromptRef.current = { ...pending, settlementRefreshRequested: true };
+    setDisplayReload((value) => value + 1);
+  }, [conversationQueue, pendingPrompt]);
+
   const rows = useMemo(() => {
     const next = projectConversationRows(
       selectConversationTimeline(continuityState),
@@ -1610,12 +1632,36 @@ export function ConversationPanel({
       });
       setConversationQueue(receipt.queue);
       const enqueued = action.action === "enqueue";
+      const pending = pendingPromptRef.current;
+      if (pending?.queued === true && pending.queueEntryId !== undefined
+        && (action.action === "remove" || action.action === "edit")
+        && action.entryId === pending.queueEntryId) {
+        if (action.action === "remove") {
+          pendingPromptRef.current = undefined;
+          setPendingPrompt((current) => current?.identity === pending.identity ? undefined : current);
+        } else {
+          const editedPrompt = { ...pending, text: action.prompt };
+          pendingPromptRef.current = editedPrompt;
+          setPendingPrompt(editedPrompt);
+        }
+      }
       queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue);
       if (enqueued) {
         if (pendingPromptRef.current?.queued === true) {
-          const acceptedPrompt = { ...pendingPromptRef.current, queueAccepted: true };
+          const addedEntries = receipt.queue.items.filter((item) =>
+            !conversationQueue.items.some((previous) => previous.entryId === item.entryId));
+          const settledBeforeReceipt = addedEntries.length === 0
+            && !receipt.queue.truncated
+            && (!receipt.replayed || receipt.queue.items.length === 0);
+          const acceptedPrompt = {
+            ...pendingPromptRef.current,
+            queueAccepted: true,
+            queueEntryId: addedEntries.length === 1 ? addedEntries[0].entryId : undefined,
+            settlementRefreshRequested: settledBeforeReceipt,
+          };
           pendingPromptRef.current = acceptedPrompt;
           setPendingPrompt(acceptedPrompt);
+          if (settledBeforeReceipt) setDisplayReload((value) => value + 1);
         }
         // The predecessor may already have finished while its background terminal
         // stream remains live. Queue admission must discover the successor itself.

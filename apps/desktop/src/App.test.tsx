@@ -4877,7 +4877,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Finish before attach")).toBeNull();
   });
 
-  it.each(["queued", "delivered"] as const)(
+  it.each(["queued", "settled"] as const)(
     "discovers a completed queued successor without predecessor events when its receipt is %s",
     async (receiptStatus) => {
       const user = userEvent.setup();
@@ -4899,7 +4899,7 @@ describe("desktop workspace and history shell", () => {
         }],
       }];
       const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
-        durableFrontier: { throughStreamSequence: completed ? 2 : 0 },
+        durableFrontier: { throughStreamSequence: completed ? 3 : 0 },
         foregroundOwner: completed ? undefined : {
           runId: predecessor,
           ownerRevision: `sha256:${"d".repeat(64)}`,
@@ -4910,12 +4910,29 @@ describe("desktop workspace and history shell", () => {
       const display = vi.fn(async (): Promise<ConversationDisplayPage> => ({
         schemaVersion: 1,
         requestScope: "queued-successor-scope",
-        throughSessionStreamSequence: completed ? "2" : "0",
-        totalItems: completed ? "2" : "0",
+        throughSessionStreamSequence: completed ? "3" : "0",
+        totalItems: completed ? "3" : "0",
         items: completed ? [{
           schemaVersion: 1,
-          displayId: "queued-successor-answer",
+          displayId: "queued-successor-user",
           displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "queued-successor-user-event",
+          kind: "user_message",
+          source: "durable_transcript",
+          runId: successor,
+          status: "recorded",
+          content: {
+            type: "message",
+            role: "user",
+            text: prompt,
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: prompt.length,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "queued-successor-answer",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
           sourceEventId: "queued-successor-answer-event",
           kind: "assistant_message",
           source: "durable_transcript",
@@ -4933,7 +4950,7 @@ describe("desktop workspace and history shell", () => {
         }, {
           schemaVersion: 1,
           displayId: "queued-successor-terminal",
-          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          displayOrder: { sessionStreamSequence: "3", subindex: 0 },
           sourceEventId: "queued-successor-terminal-event",
           kind: "terminal",
           source: "durable_run_event",
@@ -4947,12 +4964,31 @@ describe("desktop workspace and history shell", () => {
         }] : [],
         terminalFrontier: completed ? {
           runId: successor,
-          sessionStreamSequence: "2",
+          sessionStreamSequence: "3",
           status: "succeeded",
         } : undefined,
         hasMore: false,
         gapFacts: [],
       }));
+      const queueView = (sessionId: string, status: "queued" | "settled"):
+        Awaited<ReturnType<DesktopBridge["conversationQueue"]>> => ({
+          schemaVersion: 1,
+          sessionId,
+          generation: "queue-after-enqueue",
+          paused: false,
+          totalItems: status === "queued" ? 1 : 0,
+          items: status === "queued" ? [{
+            entryId: "queued-successor-entry",
+            order: 0,
+            kind: "chat",
+            status: "queued",
+            promptPreview: prompt,
+            promptPreviewTruncated: false,
+            promptMaterial: "persisted_safe",
+            dispatchable: false,
+          }] : [],
+          truncated: false,
+        });
       const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(
         async (_workspaceId, input) => {
           // The old attachment stays live for its terminal task. The successor can finish
@@ -4965,24 +5001,7 @@ describe("desktop workspace and history shell", () => {
             action: input.action.action,
             expectedGeneration: input.expectedGeneration,
             generation: "queue-after-enqueue",
-            queue: {
-              schemaVersion: 1,
-              sessionId: input.sessionId,
-              generation: "queue-after-enqueue",
-              paused: false,
-              totalItems: 1,
-              items: [{
-                entryId: "queued-successor-entry",
-                order: 0,
-                kind: "chat",
-                status: receiptStatus,
-                promptPreview: prompt,
-                promptPreviewTruncated: false,
-                promptMaterial: "persisted_safe",
-                dispatchable: false,
-              }],
-              truncated: false,
-            },
+            queue: queueView(input.sessionId, receiptStatus),
             replayed: false,
           };
         },
@@ -5006,6 +5025,17 @@ describe("desktop workspace and history shell", () => {
         display,
         attachRun,
         startRun,
+        conversationQueue: async (_workspaceId, sessionId) => completed
+          ? queueView(sessionId, "settled")
+          : {
+              schemaVersion: 1,
+              sessionId,
+              generation: "queue-before-enqueue",
+              paused: false,
+              totalItems: 0,
+              items: [],
+              truncated: false,
+            },
         commandConversationQueue,
         // No listener is invoked: the enqueue receipt must wake successor discovery itself.
         subscribeRunEvents: async () => () => undefined,
@@ -5027,12 +5057,13 @@ describe("desktop workspace and history shell", () => {
       expect(startRun).not.toHaveBeenCalled();
       expect(attachRun).toHaveBeenCalledTimes(1);
       expect(display).toHaveBeenCalledTimes(2);
-      expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(8);
+      await waitFor(() => expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(8), { timeout: 4_000 });
       expect(continuity.mock.calls.length).toBeLessThanOrEqual(10);
       expect(document.querySelector('[data-continuity-owner-run-id]')).toBeNull();
       expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
       expect(screen.getByRole("button", { name: "Stop task" })).toBeTruthy();
-      expect(document.querySelector(".timeline")?.textContent).not.toContain(prompt);
+      expect(screen.getAllByText(prompt)).toHaveLength(1);
+      expect(screen.getByText(prompt).closest("article")?.textContent).not.toContain("queued");
     },
   );
 
@@ -5663,6 +5694,316 @@ describe("desktop workspace and history shell", () => {
     }
     expect(composer.value).toBe("Another draft during queue admission");
   });
+
+  it.each(["started", "canonical", "settled_without_projection", "settlement_refresh_wait", "earlier_queue", "settled_behind_earlier", "replayed_behind_earlier", "ambiguous_new_entries", "idle_wait", "unrelated_terminal", "replayed_active", "explicit_remove"] as const)(
+    "keeps an accepted follow-up visible through predecessor replay with %s settlement",
+    async (settlement) => {
+      const user = userEvent.setup();
+      const predecessor = "run-handoff-A";
+      const current = "run-handoff-B";
+      const queued = "run-handoff-C";
+      const earlier = "run-handoff-earlier";
+      const unrelated = "run-handoff-D";
+      const prompt = "Queued after the owner handoff";
+      const earlierQueued = settlement === "earlier_queue"
+        || settlement === "settled_behind_earlier" || settlement === "replayed_behind_earlier";
+      const replayedActive = settlement === "replayed_active" || settlement === "replayed_behind_earlier";
+      const replayedEntryVisible = settlement === "replayed_active";
+      let owner: string | undefined = predecessor;
+      let firstTerminalRecorded = false;
+      let accepted = false;
+      let successorProjected = false;
+      let earlierProjected = false;
+      let unrelatedProjected = false;
+      let earlierDelivered = false;
+      let queueSettled = false;
+      let queueDispatching = false;
+      let queueReads = 0;
+      let displayReads = 0;
+      let ownerProbes = 0;
+      const settledDisplay = deferred<void>();
+      let eventListener: ((event: TimelineEvent) => void) | undefined;
+      const queueView = (): Awaited<ReturnType<DesktopBridge["conversationQueue"]>> => ({
+        schemaVersion: 1,
+        sessionId: "http-session-new",
+        generation: accepted ? "queue-C" : earlierQueued ? "queue-earlier" : "queue-empty",
+        paused: false,
+        totalItems: ((accepted || replayedEntryVisible) && !queueSettled ? 1 : 0)
+          + (earlierQueued && !earlierDelivered ? 1 : 0)
+          + (accepted && settlement === "ambiguous_new_entries" ? 1 : 0),
+        truncated: false,
+        items: [
+          ...(earlierQueued && !earlierDelivered ? [{
+            entryId: "entry-earlier",
+            order: 0,
+            kind: "chat" as const,
+            status: "queued" as const,
+            promptPreview: "Earlier follow-up",
+            promptPreviewTruncated: false,
+            promptMaterial: "persisted_safe" as const,
+            dispatchable: false,
+            blockedReason: "foreground_run_active" as const,
+          }] : []),
+          ...((accepted || replayedEntryVisible) && !queueSettled ? [{
+            entryId: "entry-C",
+            order: earlierQueued ? 1 : 0,
+            kind: "chat" as const,
+            status: queueDispatching ? "dispatching" as const : "queued" as const,
+            promptPreview: prompt,
+            promptPreviewTruncated: false,
+            promptMaterial: "persisted_safe" as const,
+            dispatchable: false,
+            blockedReason: "foreground_run_active" as const,
+          }] : []),
+          ...(accepted && settlement === "ambiguous_new_entries" ? [{
+            entryId: "entry-other-client",
+            order: 1,
+            kind: "chat" as const,
+            status: "queued" as const,
+            promptPreview: "Other client queued this",
+            promptPreviewTruncated: false,
+            promptMaterial: "persisted_safe" as const,
+            dispatchable: false,
+            blockedReason: "foreground_run_active" as const,
+          }] : []),
+        ],
+      });
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        continuity: async () => {
+          ownerProbes += 1;
+          return {
+            durableFrontier: { throughStreamSequence: unrelatedProjected ? 3 : firstTerminalRecorded ? 1 : 0 },
+            foregroundOwner: owner === undefined ? undefined : {
+              runId: owner,
+              ownerRevision: `sha256:${owner.slice(-1).repeat(64)}`,
+            },
+            retainedTerminalRuns: [],
+            recoveryActions: [],
+          };
+        },
+        attachRun: async (_workspaceId, input) => ({
+          run: { id: input.runId, sessionId: input.sessionId, status: "running", permissionMode: "manual", streamSequence: 0 },
+          events: [],
+          streamState: "live",
+          hasGap: false,
+        }),
+        display: async () => {
+          displayReads += 1;
+          if (settlement === "settlement_refresh_wait" && queueSettled) {
+            await settledDisplay.promise;
+          }
+          return {
+            schemaVersion: 1,
+            requestScope: "handoff-queued-scope",
+            throughSessionStreamSequence: unrelatedProjected ? "3" : successorProjected && earlierProjected ? "3" : successorProjected || earlierProjected ? "2" : firstTerminalRecorded ? "1" : "0",
+            totalItems: unrelatedProjected ? "3" : successorProjected && earlierProjected ? "3" : successorProjected || earlierProjected ? "2" : firstTerminalRecorded ? "1" : "0",
+            items: firstTerminalRecorded ? [{
+              schemaVersion: 1,
+              displayId: "handoff-A-terminal",
+              displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+              sourceEventId: "handoff-A-terminal-event",
+              kind: "terminal",
+              source: "durable_run_event",
+              runId: predecessor,
+              status: "succeeded",
+              content: { type: "terminal", summaryTruncated: false },
+            }, ...(earlierProjected ? [{
+              schemaVersion: 1 as const,
+              displayId: "handoff-earlier-user",
+              displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+              sourceEventId: "handoff-earlier-user-event",
+              kind: "user_message" as const,
+              source: "durable_transcript" as const,
+              runId: earlier,
+              status: "recorded" as const,
+              content: {
+                type: "message" as const,
+                role: "user" as const,
+                text: "Earlier follow-up",
+                imageAttachmentCount: 0,
+                truncated: false,
+                originalContentBytes: 17,
+              },
+            }] : []), ...(successorProjected ? [{
+              schemaVersion: 1 as const,
+              displayId: "handoff-C-user",
+              displayOrder: { sessionStreamSequence: earlierProjected ? "3" : "2", subindex: 0 },
+              sourceEventId: "handoff-C-user-event",
+              kind: "user_message" as const,
+              source: "durable_transcript" as const,
+              runId: queued,
+              status: "recorded" as const,
+              content: {
+                type: "message" as const,
+                role: "user" as const,
+                text: prompt,
+                imageAttachmentCount: 0,
+                truncated: false,
+                originalContentBytes: prompt.length,
+              },
+            }] : []), ...(unrelatedProjected ? [{
+              schemaVersion: 1 as const,
+              displayId: "handoff-D-answer",
+              displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+              sourceEventId: "handoff-D-answer-event",
+              kind: "assistant_message" as const,
+              source: "durable_transcript" as const,
+              runId: unrelated,
+              status: "succeeded" as const,
+              content: {
+                type: "message" as const,
+                role: "assistant" as const,
+                text: "Unrelated Task continuation completed",
+                assistantPhase: "final_answer" as const,
+                imageAttachmentCount: 0,
+                truncated: false,
+                originalContentBytes: 37,
+              },
+            }, {
+              schemaVersion: 1 as const,
+              displayId: "handoff-D-terminal",
+              displayOrder: { sessionStreamSequence: "3", subindex: 0 },
+              sourceEventId: "handoff-D-terminal-event",
+              kind: "terminal" as const,
+              source: "durable_run_event" as const,
+              runId: unrelated,
+              status: "succeeded" as const,
+              content: { type: "terminal" as const, summaryTruncated: false },
+            }] : [])] : [],
+            terminalFrontier: unrelatedProjected
+              ? { runId: unrelated, sessionStreamSequence: "3", status: "succeeded" }
+              : firstTerminalRecorded ? { runId: predecessor, sessionStreamSequence: "1", status: "succeeded" } : undefined,
+            hasMore: false,
+            gapFacts: [],
+          };
+        },
+        conversationQueue: async () => {
+          queueReads += 1;
+          return queueView();
+        },
+        commandConversationQueue: async (_workspaceId, input) => {
+          if (input.action.action === "remove") queueSettled = true;
+          if (input.action.action === "enqueue" && (
+            settlement === "settled_behind_earlier" || settlement === "replayed_behind_earlier"
+          )) queueSettled = true;
+          accepted = true;
+          return {
+            commandId: "accept-C", clientId: "sigil-desktop", sessionId: input.sessionId,
+            action: input.action.action, expectedGeneration: input.expectedGeneration,
+            generation: "queue-C", queue: queueView(), replayed: replayedActive,
+          };
+        },
+        subscribeRunEvents: async (listener) => {
+          eventListener = listener;
+          return () => undefined;
+        },
+        subscribeRunStreamStatus: async () => () => undefined,
+      })} />);
+
+      await screen.findByText("No matching conversation.");
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await waitFor(() => expect(document.querySelector("[data-continuity-owner-run-id='run-handoff-A']")).toBeTruthy());
+      const event = (runId: string, kind: TimelineEvent["kind"], sequence: number): TimelineEvent => ({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId,
+        sequence,
+        runSequence: String(sequence),
+        replayable: true,
+        kind,
+      });
+      firstTerminalRecorded = true;
+      owner = current;
+      act(() => eventListener?.(event(predecessor, "run_finished", 1)));
+      await waitFor(() => expect(document.querySelector("[data-continuity-owner-run-id='run-handoff-B']")).toBeTruthy());
+      const composer = await readyComposer();
+      await user.type(composer, prompt);
+      await user.click(screen.getByRole("button", { name: "Queue message" }));
+      const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+      const queuedRow = () => within(timeline).getByText(prompt).closest("article")!;
+      if (settlement === "settled_behind_earlier") {
+        await waitFor(() => expect(within(timeline).queryByText(prompt)).toBeNull());
+        return;
+      }
+      await waitFor(() => expect(within(queuedRow()).getByText("queued")).toBeTruthy());
+      if (settlement === "replayed_behind_earlier") return;
+
+      act(() => eventListener?.(event(predecessor, "run_started", 2)));
+      expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+      act(() => eventListener?.(event(current, "run_started", 1)));
+      expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+      act(() => eventListener?.(event(predecessor, "run_finished", 3)));
+      expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+      if (settlement === "explicit_remove") {
+        await user.click(screen.getByRole("button", { name: /Open follow-up queue/ }));
+        await user.click(screen.getByRole("button", { name: "Remove queued message" }));
+        await waitFor(() => expect(within(timeline).queryByText(prompt)).toBeNull());
+        return;
+      }
+
+      const beforeOwnerProbes = ownerProbes;
+      if (settlement === "unrelated_terminal") unrelatedProjected = true;
+      owner = settlement === "idle_wait" || settlement === "unrelated_terminal"
+        ? undefined : earlierQueued ? earlier : queued;
+      act(() => eventListener?.(event(current, "run_finished", 2)));
+      expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+      if (settlement === "idle_wait") {
+        await waitFor(() => expect(ownerProbes).toBeGreaterThanOrEqual(beforeOwnerProbes + 6), { timeout: 4_000 });
+        expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+        return;
+      }
+      if (settlement === "unrelated_terminal") {
+        expect(await within(timeline).findByText("Unrelated Task continuation completed")).toBeTruthy();
+        await act(async () => { await Promise.resolve(); });
+        expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+        return;
+      }
+      await waitFor(() => expect(document.querySelector(`[data-continuity-owner-run-id='${owner}']`)).toBeTruthy());
+      expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+      if (replayedActive || settlement === "ambiguous_new_entries") return;
+      if (earlierQueued) {
+        earlierDelivered = true;
+        act(() => eventListener?.(event(earlier, "run_started", 1)));
+        earlierProjected = true;
+        act(() => eventListener?.(event(earlier, "conversation_route_changed", 2)));
+        await waitFor(() => expect(within(timeline).getByText("Earlier follow-up")).toBeTruthy());
+        expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+        return;
+      }
+      if (settlement === "started") {
+        const beforeQueueReads = queueReads;
+        const beforeDisplayReads = displayReads;
+        queueDispatching = true;
+        act(() => eventListener?.(event(queued, "run_started", 1)));
+        await waitFor(() => expect(queueReads).toBeGreaterThan(beforeQueueReads));
+        expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+        expect(displayReads).toBeGreaterThanOrEqual(beforeDisplayReads);
+        successorProjected = true;
+        queueSettled = true;
+        act(() => eventListener?.(event(queued, "conversation_route_changed", 2)));
+        act(() => eventListener?.(event(queued, "run_finished", 3)));
+        await waitFor(() => expect(within(timeline).queryByText("queued")).toBeNull());
+        expect(within(timeline).getAllByText(prompt)).toHaveLength(1);
+      } else if (settlement === "canonical") {
+        queueSettled = true;
+        successorProjected = true;
+        act(() => eventListener?.(event(current, "run_finished", 3)));
+        await waitFor(() => expect(within(timeline).queryByText("queued")).toBeNull());
+        expect(within(timeline).getAllByText(prompt)).toHaveLength(1);
+      } else {
+        const beforeQueueReads = queueReads;
+        queueSettled = true;
+        act(() => eventListener?.(event(current, "run_finished", 3)));
+        if (settlement === "settlement_refresh_wait") {
+          await waitFor(() => expect(queueReads).toBeGreaterThan(beforeQueueReads));
+          expect(within(queuedRow()).getByText("queued")).toBeTruthy();
+          settledDisplay.resolve();
+        }
+        await waitFor(() => expect(within(timeline).queryByText(prompt)).toBeNull());
+      }
+    },
+  );
 
   it("preserves IME text, accepts clipboard input, and does not submit during composition", async () => {
     const user = userEvent.setup();
