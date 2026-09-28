@@ -1350,6 +1350,56 @@ fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
 }
 
 #[test]
+fn follow_ups_after_the_fourth_are_selectable_editable_and_removable() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(
+        (1..=5)
+            .map(|index| {
+                queued_conversation_input_entry(
+                    &format!("queue_{index}"),
+                    &format!("follow-up {index}"),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+    assert_eq!(app.composer_queue_rows().len(), 5);
+    assert_eq!(app.queue_strip_rows(), 6);
+    assert!(app.focus_composer_queue_panel());
+    for _ in 0..4 {
+        assert!(app.move_composer_queue_selection(true));
+    }
+    assert!(app.composer_queue_rows()[4].selected);
+    assert!(app.begin_edit_selected_queue_item());
+    assert_eq!(
+        app.composer
+            .queue_edit_target
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("queue_5")
+    );
+    assert!(app.cancel_queue_edit());
+
+    app.composer.input = "/queue edit 5".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.composer
+            .queue_edit_target
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("queue_5")
+    );
+    assert!(app.cancel_queue_edit());
+
+    assert!(app.focus_composer_queue_panel());
+    let remove = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+    assert!(
+        matches!(remove, Some(AppAction::CancelQueuedConversationInput { ref queue_id }) if queue_id.as_str() == "queue_5")
+    );
+    Ok(())
+}
+
+#[test]
 fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![

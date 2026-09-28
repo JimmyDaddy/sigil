@@ -15,7 +15,7 @@ use crate::{
 use super::state::QueueEditComposerDraft;
 use super::{AgentView, AppAction, AppState, ComposerQueueAction, PaneFocus};
 
-const COMPOSER_QUEUE_VISIBLE_ROWS: usize = 4;
+const COMPOSER_QUEUE_STRIP_ROWS: usize = 4;
 const OPTIMISTIC_QUEUE_ID_PREFIX: &str = "ui_pending_";
 
 impl AppState {
@@ -187,7 +187,6 @@ impl AppState {
             .items
             .into_iter()
             .enumerate()
-            .take(COMPOSER_QUEUE_VISIBLE_ROWS)
             .map(|(index, item)| ComposerQueueRow {
                 label: queue_prompt_label(&item),
                 detail: self
@@ -227,7 +226,7 @@ impl AppState {
         if item_count == 0 {
             return 0;
         }
-        2 + item_count.min(COMPOSER_QUEUE_VISIBLE_ROWS) as u16
+        2 + item_count.min(COMPOSER_QUEUE_STRIP_ROWS) as u16
     }
 
     pub(crate) fn is_composer_queue_panel_focused(&self) -> bool {
@@ -301,7 +300,7 @@ impl AppState {
             self.composer.queue_panel_focused = false;
             return false;
         }
-        let max_index = count.min(COMPOSER_QUEUE_VISIBLE_ROWS).saturating_sub(1);
+        let max_index = count.saturating_sub(1);
         self.composer.queue_selected = if next {
             self.composer
                 .queue_selected
@@ -330,12 +329,9 @@ impl AppState {
     }
 
     pub(super) fn select_composer_queue_item(&mut self, index: usize) -> bool {
-        let visible_count = self
-            .conversation_queue_projection()
-            .items
-            .len()
-            .min(COMPOSER_QUEUE_VISIBLE_ROWS);
-        if index >= visible_count || !self.focus_composer_queue_panel() {
+        if index >= self.conversation_queue_projection().items.len()
+            || !self.focus_composer_queue_panel()
+        {
             return false;
         }
         self.composer.queue_selected = index;
@@ -359,7 +355,6 @@ impl AppState {
         let item = projection
             .items
             .into_iter()
-            .take(COMPOSER_QUEUE_VISIBLE_ROWS)
             .nth(self.composer.queue_selected)?;
         if is_optimistic_queue_id(&item.queued.queue_id) {
             if !self
@@ -486,7 +481,7 @@ impl AppState {
                 .iter()
                 .any(|item| item.queued.queue_id == *queue_id)
         });
-        let visible_count = projection.items.len().min(COMPOSER_QUEUE_VISIBLE_ROWS);
+        let visible_count = projection.items.len();
         if visible_count == 0 {
             self.composer.queue_selected = 0;
             self.composer.queue_panel_focused = false;
@@ -630,7 +625,6 @@ impl AppState {
         self.conversation_queue_projection()
             .items
             .into_iter()
-            .take(COMPOSER_QUEUE_VISIBLE_ROWS)
             .nth(self.composer.queue_selected)
     }
 

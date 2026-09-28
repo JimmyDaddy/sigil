@@ -356,15 +356,16 @@ fn short_queue_hit_areas_follow_the_selected_last_item_window() -> anyhow::Resul
         "second queued prompt",
         "third queued prompt",
         "fourth queued prompt",
+        "fifth queued prompt",
     ] {
         app.composer.input = prompt.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
         app.submit_input()?;
     }
     app.composer.queue_panel_focused = true;
-    app.composer.queue_selected = 3;
+    app.composer.queue_selected = 4;
     app.composer.queue_action_selected = crate::app::ComposerQueueAction::Delete;
-    assert!(app.composer_queue_rows()[3].selected);
+    assert!(app.composer_queue_rows()[4].selected);
 
     for height in 10..=12 {
         app.set_terminal_size(40, height);
@@ -376,11 +377,11 @@ fn short_queue_hit_areas_follow_the_selected_last_item_window() -> anyhow::Resul
         let selected = hit_areas
             .item_rows
             .iter()
-            .find(|row| row.index == 3)
-            .expect("selected fourth item must remain visible and interactive");
+            .find(|row| row.index == 4)
+            .expect("selected fifth item must remain visible and interactive");
         assert_eq!(
             layout.hit_target(selected.area.x, selected.area.y),
-            HitTarget::ComposerQueueItem { index: 3 }
+            HitTarget::ComposerQueueItem { index: 4 }
         );
 
         let delete = hit_areas

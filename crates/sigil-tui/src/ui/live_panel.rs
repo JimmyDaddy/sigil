@@ -922,9 +922,9 @@ fn render_queue_strip_lines(
     if view_model.queue_rows.is_empty() {
         return Vec::new();
     }
-    let mut lines = Vec::with_capacity(2 + view_model.queue_rows.len().min(LIVE_QUEUE_ROW_LIMIT));
+    let mut lines = Vec::with_capacity(2 + view_model.queue_rows.len());
     lines.push(render_queue_header(view_model, width, theme));
-    for row in view_model.queue_rows.iter().take(LIVE_QUEUE_ROW_LIMIT) {
+    for row in &view_model.queue_rows {
         lines.push(render_queue_row(
             row,
             width,
@@ -946,18 +946,13 @@ fn render_queue_strip_lines(
 }
 
 fn selected_queue_item_index(view_model: &LivePanelViewModel) -> Option<usize> {
-    view_model
-        .queue_rows
-        .iter()
-        .take(LIVE_QUEUE_ROW_LIMIT)
-        .position(|row| row.selected)
+    view_model.queue_rows.iter().position(|row| row.selected)
 }
 
 fn selected_queue_item_preview(view_model: &LivePanelViewModel) -> Option<String> {
     view_model
         .queue_rows
         .iter()
-        .take(LIVE_QUEUE_ROW_LIMIT)
         .enumerate()
         .find(|(_, row)| row.selected)
         .map(|(index, row)| format!("#{} {}", index + 1, row.label))

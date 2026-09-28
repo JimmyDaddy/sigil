@@ -389,6 +389,10 @@ fn queue_item_window_keeps_selected_item_next_to_the_pinned_action() {
     let full = queue_item_window(4, 3, 6);
     assert!(full.show_header);
     assert_eq!(full.item_indices, vec![0, 1, 2, 3]);
+
+    let fifth_selected = queue_item_window(5, 4, 6);
+    assert!(fifth_selected.show_header);
+    assert_eq!(fifth_selected.item_indices, vec![1, 2, 3, 4]);
 }
 
 #[test]
