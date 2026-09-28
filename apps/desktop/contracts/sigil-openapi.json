@@ -3454,6 +3454,9 @@
               "null"
             ]
           },
+          "enqueued_entry_id": {
+            "type": "string"
+          },
           "expected_generation": {
             "$ref": "#/components/schemas/ConversationQueueGeneration"
           },

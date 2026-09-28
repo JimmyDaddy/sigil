@@ -4944,6 +4944,11 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             .is_some_and(|required| required.iter().any(|field| field == "expected_generation"))
     );
     assert_eq!(
+        document["components"]["schemas"]["ConversationQueueCommandReceipt"]["properties"]["enqueued_entry_id"]
+            ["type"],
+        "string"
+    );
+    assert_eq!(
         document["components"]["schemas"]["ConversationQueueCommandReceipt"]["properties"]["interrupt_owner"]
             ["oneOf"][0]["$ref"],
         "#/components/schemas/ForegroundRunOwner"
@@ -5970,6 +5975,7 @@ fn conversation_queue_contract_keeps_exact_prompt_request_only() {
         action: HttpConversationQueueCommandActionKind::Enqueue,
         expected_generation: HttpConversationQueueGeneration("queue-v1:17:event-1".to_owned()),
         generation: view.generation.clone(),
+        enqueued_entry_id: Some("queue-1".to_owned()),
         interrupt_owner: None,
         queue: view,
         correlation_id: None,
@@ -6036,6 +6042,8 @@ fn conversation_queue_command_replays_exact_identity_and_rejects_conflicting_fin
     assert!(replay.replayed);
     assert_eq!(first.generation, replay.generation);
     assert_eq!(first.queue, replay.queue);
+    assert_eq!(first.enqueued_entry_id, replay.enqueued_entry_id);
+    assert!(first.enqueued_entry_id.is_some());
 
     let delivered = driver.queue_commands();
     assert_eq!(delivered.len(), 1);
@@ -6625,6 +6633,7 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
     let driver = Arc::new(QueueTestDriver::default());
     let command;
     let session_id;
+    let exact_entry_id;
     {
         let store =
             Arc::new(HttpDurableCommandStore::open(&path, 8).expect("command store should open"));
@@ -6652,6 +6661,8 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
         let receipt = registry
             .command_conversation_queue(&session.id, command.clone())
             .expect("queue command should persist");
+        exact_entry_id = receipt.enqueued_entry_id.clone();
+        assert!(exact_entry_id.is_some());
         assert_eq!(
             receipt.queue.items[0].prompt_material,
             HttpConversationQueuePromptMaterial::AvailableProcessLocal
@@ -6674,6 +6685,10 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
             )
             .expect("equivalent secret-safe command identity should replay");
         assert!(replay_with_equivalent_safe_projection.replayed);
+        assert_eq!(
+            replay_with_equivalent_safe_projection.enqueued_entry_id,
+            exact_entry_id
+        );
         assert_eq!(driver.applied_queue_mutations(), 1);
     }
     let stored = fs::read_to_string(&path).expect("durable command store should be readable");
@@ -6690,6 +6705,7 @@ fn conversation_queue_durable_replay_downgrades_process_local_material() {
         .command_conversation_queue(&session_id, command)
         .expect("stored queue receipt should replay without a live session");
     assert!(replay.replayed);
+    assert_eq!(replay.enqueued_entry_id, exact_entry_id);
     assert_eq!(
         replay.queue.items[0].prompt_material,
         HttpConversationQueuePromptMaterial::RequiresReentry
@@ -11196,7 +11212,7 @@ async fn spawn_provider_catalog_server(
     (format!("http://{address}/v1"), count, task)
 }
 
-fn http_post(path: &str, token: Option<&str>, body: &str) -> String {
+pub(crate) fn http_post(path: &str, token: Option<&str>, body: &str) -> String {
     let auth = token
         .map(|token| format!("authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
@@ -11244,7 +11260,7 @@ fn http_run_events_get(
     )
 }
 
-async fn http_raw_request(address: SocketAddr, request: String) -> (u16, Value) {
+pub(crate) async fn http_raw_request(address: SocketAddr, request: String) -> (u16, Value) {
     let (status, _content_type, body) = http_raw_exchange(address, request).await;
     let body = serde_json::from_str(&body).expect("response body should be json");
     (status, body)

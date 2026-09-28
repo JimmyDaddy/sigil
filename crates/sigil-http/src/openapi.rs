@@ -2965,6 +2965,7 @@ pub fn http_openapi_document() -> Value {
                         "action": { "$ref": "#/components/schemas/ConversationQueueCommandActionKind" },
                         "expected_generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
                         "generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
+                        "enqueued_entry_id": { "type": "string" },
                         "interrupt_owner": {
                             "oneOf": [
                                 { "$ref": "#/components/schemas/ForegroundRunOwner" },

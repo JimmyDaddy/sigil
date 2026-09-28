@@ -1922,6 +1922,8 @@ pub struct DesktopConversationQueueCommandReceipt {
     pub expected_generation: DesktopConversationQueueGeneration,
     pub generation: DesktopConversationQueueGeneration,
     #[serde(default)]
+    pub enqueued_entry_id: Option<String>,
+    #[serde(default)]
     pub interrupt_owner: Option<DesktopForegroundRunOwner>,
     pub queue: DesktopConversationQueueView,
     #[serde(default)]

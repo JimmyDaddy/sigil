@@ -354,6 +354,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       action: input.action.action,
       expectedGeneration: input.expectedGeneration,
       generation: input.expectedGeneration,
+      enqueuedEntryId: input.action.action === "enqueue" ? "queue-command-test-entry" : undefined,
       queue: {
         schemaVersion: 1,
         sessionId: input.sessionId,
@@ -3295,6 +3296,7 @@ describe("desktop workspace and history shell", () => {
       action: input.action.action,
       expectedGeneration: input.expectedGeneration,
       generation: "queue-v1:1:queued",
+      enqueuedEntryId: "queue-entry-active",
       queue: {
         schemaVersion: 1,
         sessionId: input.sessionId,
@@ -5006,6 +5008,7 @@ describe("desktop workspace and history shell", () => {
             action: input.action.action,
             expectedGeneration: input.expectedGeneration,
             generation: "queue-after-enqueue",
+            enqueuedEntryId: "queued-successor-entry",
             queue: queueView(input.sessionId, receiptStatus),
             replayed: false,
           };
@@ -5684,7 +5687,7 @@ describe("desktop workspace and history shell", () => {
         request.reject(new Error("queue unavailable"));
       } else request.resolve({
         commandId: "queue-deferred", clientId: "sigil-desktop", sessionId: input.sessionId,
-        action: "enqueue", expectedGeneration: input.expectedGeneration, generation: "queue-accepted", replayed: false,
+        action: "enqueue", expectedGeneration: input.expectedGeneration, generation: "queue-accepted", enqueuedEntryId: "queued-deferred", replayed: false,
         queue: {
           schemaVersion: 1, sessionId: input.sessionId, generation: "queue-accepted", paused: false, totalItems: 1, truncated: false,
           items: [{ entryId: "queued-deferred", order: 0, kind: "chat", status: "queued", promptPreview: "Follow-up waiting for receipt", promptPreviewTruncated: false, promptMaterial: "persisted_safe", dispatchable: false, blockedReason: "foreground_run_active" }],
@@ -5762,7 +5765,7 @@ describe("desktop workspace and history shell", () => {
           }] : []),
           ...(accepted && settlement === "ambiguous_new_entries" ? [{
             entryId: "entry-other-client",
-            order: 1,
+            order: queueSettled ? 0 : 1,
             kind: "chat" as const,
             status: "queued" as const,
             promptPreview: "Other client queued this",
@@ -5896,7 +5899,8 @@ describe("desktop workspace and history shell", () => {
           return {
             commandId: "accept-C", clientId: "sigil-desktop", sessionId: input.sessionId,
             action: input.action.action, expectedGeneration: input.expectedGeneration,
-            generation: "queue-C", queue: queueView(), replayed: replayedActive,
+            generation: "queue-C", enqueuedEntryId: input.action.action === "enqueue" ? "entry-C" : undefined,
+            queue: queueView(), replayed: replayedActive,
           };
         },
         subscribeRunEvents: async (listener) => {
@@ -5927,12 +5931,11 @@ describe("desktop workspace and history shell", () => {
       await user.click(screen.getByRole("button", { name: "Queue message" }));
       const timeline = screen.getByRole("log", { name: "Conversation timeline" });
       const queuedRow = () => within(timeline).getByText(prompt).closest("article")!;
-      if (settlement === "settled_behind_earlier") {
+      if (settlement === "settled_behind_earlier" || settlement === "replayed_behind_earlier") {
         await waitFor(() => expect(within(timeline).queryByText(prompt)).toBeNull());
         return;
       }
       await waitFor(() => expect(within(queuedRow()).getByText("queued")).toBeTruthy());
-      if (settlement === "replayed_behind_earlier") return;
 
       act(() => eventListener?.(event(predecessor, "run_started", 2)));
       expect(within(queuedRow()).getByText("queued")).toBeTruthy();
@@ -5966,7 +5969,13 @@ describe("desktop workspace and history shell", () => {
       }
       await waitFor(() => expect(document.querySelector(`[data-continuity-owner-run-id='${owner}']`)).toBeTruthy());
       expect(within(queuedRow()).getByText("queued")).toBeTruthy();
-      if (replayedActive || settlement === "ambiguous_new_entries") return;
+      if (replayedActive) return;
+      if (settlement === "ambiguous_new_entries") {
+        queueSettled = true;
+        act(() => eventListener?.(event(current, "run_finished", 3)));
+        await waitFor(() => expect(within(timeline).queryByText(prompt)).toBeNull());
+        return;
+      }
       if (earlierQueued) {
         earlierDelivered = true;
         act(() => eventListener?.(event(earlier, "run_started", 1)));

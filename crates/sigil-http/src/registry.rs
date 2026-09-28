@@ -28,7 +28,7 @@ use crate::{
         HttpRunAdmissionError, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
         HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel,
         HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
-        HttpUserInputDecisionDriverCommand,
+        HttpUserInputDecisionDriverCommand, stable_http_queue_entry_id,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecision,
@@ -1966,6 +1966,14 @@ impl HttpSessionRunRegistry {
             };
             let _queue_session_guard = queue_session_guard;
 
+            let enqueued_entry_id = matches!(
+                &request.action,
+                HttpConversationQueueCommandAction::Enqueue { .. }
+            )
+            .then(|| {
+                stable_http_queue_entry_id(&session.durable_session_scope_id, client_id, command_id)
+            });
+
             let interrupt_owner = match &request.action {
                 HttpConversationQueueCommandAction::InterruptAndRunNext {
                     foreground_run_id,
@@ -2010,6 +2018,7 @@ impl HttpSessionRunRegistry {
                 action,
                 expected_generation,
                 generation: queue.generation.clone(),
+                enqueued_entry_id,
                 interrupt_owner,
                 queue,
                 correlation_id: correlation_id.map(str::to_owned),
@@ -2030,6 +2039,19 @@ impl HttpSessionRunRegistry {
         command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
         client: crate::application_bridge::HttpApplicationClient,
     ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        let enqueued_entry_id = if matches!(
+            &command.payload.action,
+            HttpConversationQueueCommandAction::Enqueue { .. }
+        ) {
+            let session = self.get_session(session_id)?;
+            Some(stable_http_queue_entry_id(
+                &session.durable_session_scope_id,
+                &command.client_id,
+                &command.command_id,
+            ))
+        } else {
+            None
+        };
         client.refresh().map_err(application_registry_error)?;
         let (expected_generation, action) =
             crate::application_bridge::application_queue_command(&command.payload)
@@ -2112,6 +2134,7 @@ impl HttpSessionRunRegistry {
             action: command.payload.action.kind(),
             expected_generation: command.payload.expected_generation,
             generation: queue.generation.clone(),
+            enqueued_entry_id,
             interrupt_owner: matches!(
                 command.payload.action,
                 HttpConversationQueueCommandAction::InterruptAndRunNext { .. }

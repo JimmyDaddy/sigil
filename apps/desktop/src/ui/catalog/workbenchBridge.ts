@@ -646,6 +646,7 @@ export function createCatalogWorkbenchBridge(
       action: input.action.action,
       expectedGeneration: input.expectedGeneration,
       generation: input.expectedGeneration,
+      enqueuedEntryId: input.action.action === "enqueue" ? "catalog-queue-entry" : undefined,
       queue: {
         schemaVersion: 1,
         sessionId: input.sessionId,

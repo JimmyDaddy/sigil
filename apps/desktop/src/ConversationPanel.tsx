@@ -1648,15 +1648,14 @@ export function ConversationPanel({
       queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue);
       if (enqueued) {
         if (pendingPromptRef.current?.queued === true) {
-          const addedEntries = receipt.queue.items.filter((item) =>
-            !conversationQueue.items.some((previous) => previous.entryId === item.entryId));
-          const settledBeforeReceipt = addedEntries.length === 0
+          const enqueuedEntryId = receipt.enqueuedEntryId;
+          const settledBeforeReceipt = enqueuedEntryId !== undefined
             && !receipt.queue.truncated
-            && (!receipt.replayed || receipt.queue.items.length === 0);
+            && !receipt.queue.items.some((item) => item.entryId === enqueuedEntryId);
           const acceptedPrompt = {
             ...pendingPromptRef.current,
             queueAccepted: true,
-            queueEntryId: addedEntries.length === 1 ? addedEntries[0].entryId : undefined,
+            queueEntryId: enqueuedEntryId,
             settlementRefreshRequested: settledBeforeReceipt,
           };
           pendingPromptRef.current = acceptedPrompt;

@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use sigil_kernel::SessionRef;
+use sigil_kernel::{SessionRef, stable_event_uuid};
 use thiserror::Error as ThisError;
 
 use crate::dto::{
@@ -165,8 +165,8 @@ impl HttpDurableSessionAttachmentGuard {
 
 /// Idempotent identity and exact payload for one queue mutation.
 ///
-/// The application owner uses this identity to derive stable durable entry ids. This prevents a
-/// retry after a process interruption from appending a second logical queue item.
+/// The HTTP host and application owner derive the same durable entry id from this identity.
+/// This prevents a retry after a process interruption from appending a second logical item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConversationQueueDriverCommand {
     /// Stable command identity within the client/session scope.
@@ -177,6 +177,29 @@ pub struct HttpConversationQueueDriverCommand {
     pub request: HttpConversationQueueCommandRequest,
     /// Bound by the actual Session owner before dispatch; never accepted from HTTP JSON.
     pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
+}
+
+/// The durable queue identity owned by one HTTP enqueue command, even after replay or delivery.
+pub(crate) fn stable_http_queue_entry_id(
+    session_scope_id: &str,
+    client_id: &str,
+    command_id: &str,
+) -> String {
+    stable_event_uuid(
+        "sigil-http-conversation-queue-entry",
+        &stable_http_identity_seed(&[session_scope_id, client_id, command_id]),
+    )
+}
+
+pub(crate) fn stable_http_identity_seed(parts: &[&str]) -> String {
+    use std::fmt::Write as _;
+
+    let mut seed = String::new();
+    for part in parts {
+        write!(&mut seed, "{}:{part}", part.len())
+            .expect("writing a stable identity seed into String cannot fail");
+    }
+    seed
 }
 
 /// Operation preparation retains the exact attachment until owner dispatch returns.

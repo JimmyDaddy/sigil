@@ -1180,6 +1180,94 @@ fn conversation_queue_receipt_echoes_cas_and_exact_interrupt_owner() {
         .expect("receipt queue projection should remain bounded and consistent");
 }
 
+#[tokio::test]
+async fn queue_enqueue_receipt_requires_exact_id_even_after_replay_and_settlement() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    for include_entry_id in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            serve_command_journal_binding(&listener, "session-1", 7).await;
+            let (mut stream, _) = listener.accept().await.expect("queue command connection");
+            let mut request = vec![0_u8; 8_192];
+            let read = stream
+                .read(&mut request)
+                .await
+                .expect("queue command request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /sessions/session-1/queue "));
+            let envelope: serde_json::Value = serde_json::from_str(
+                request
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .expect("queue command body"),
+            )
+            .expect("queue command JSON");
+            let mut body = serde_json::json!({
+                "command_id": envelope["command_id"],
+                "client_id": envelope["client_id"],
+                "session_id": "session-1",
+                "action": "enqueue",
+                "expected_generation": "queue-v1:0:initial",
+                "generation": "queue-v1:2:terminal",
+                "queue": {
+                    "schema_version": 1,
+                    "session_id": "session-1",
+                    "generation": "queue-v1:2:terminal",
+                    "paused": false,
+                    "total_items": 0,
+                    "items": [],
+                    "truncated": false
+                },
+                "replayed": true
+            });
+            if include_entry_id {
+                body["enqueued_entry_id"] = "entry-exact".into();
+            }
+            let body = body.to_string();
+            stream
+                .write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).as_bytes())
+                .await
+                .expect("queue command response");
+        });
+        let client = DesktopHttpClient::new(
+            Client::new(),
+            address,
+            Arc::new(DesktopBearerToken::generate().expect("token")),
+        );
+        let result = client
+            .command_conversation_queue(
+                "session-1",
+                DesktopConversationQueueCommandRequest {
+                    expected_generation: crate::DesktopConversationQueueGeneration(
+                        "queue-v1:0:initial".to_owned(),
+                    ),
+                    action: DesktopConversationQueueCommandAction::Enqueue {
+                        review_annotations: Vec::new(),
+                        prompt: "Follow up after this run".to_owned(),
+                        kind: crate::DesktopConversationQueueItemKind::Chat,
+                        reasoning_effort: None,
+                    },
+                },
+            )
+            .await;
+        if include_entry_id {
+            let receipt = result.expect("exact replay receipt should remain usable");
+            assert_eq!(receipt.enqueued_entry_id.as_deref(), Some("entry-exact"));
+            assert!(receipt.queue.items.is_empty());
+        } else {
+            assert!(matches!(result, Err(DesktopClientError::InvalidResponse)));
+        }
+        server.await.expect("queue command server task");
+    }
+}
+
 #[test]
 fn approval_receipt_preserves_exact_route_identity_and_revision() {
     let receipt: crate::DesktopApprovalCommandReceipt = serde_json::from_value(serde_json::json!({

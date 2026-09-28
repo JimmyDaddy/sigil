@@ -87,6 +87,7 @@ use active_runs::HttpActiveRunsReady;
 mod terminal_io;
 use terminal_io::HttpRunTerminalIo;
 
+use crate::driver::{stable_http_identity_seed, stable_http_queue_entry_id};
 use crate::{
     HttpAgentActivityItem, HttpAgentActivityStatus, HttpAgentActivityView, HttpAgentHandoffStatus,
     HttpAgentUsageSummary, HttpApplicationAgentCatalogEntry, HttpApplicationCacheUsage,
@@ -4981,11 +4982,12 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 reasoning_effort,
                 ..
             } => {
-                let queue_id = stable_http_queue_id(
+                let queue_id = ConversationInputQueueId::new(stable_http_queue_entry_id(
                     &session.durable_session_scope_id,
                     &command.client_id,
                     &command.command_id,
-                )?;
+                ))
+                .map_err(|_| HttpConversationQueueDriverError::Conflict)?;
                 let projection = project_conversation_prompt_for_persistence(prompt);
                 cache_update = Some(HttpExactQueueCacheUpdate::Replace {
                     key: exact_queue_prompt_key(session, queue_id.clone()),
@@ -5780,18 +5782,6 @@ fn exact_queue_prompt_key(
     }
 }
 
-fn stable_http_queue_id(
-    session_scope_id: &str,
-    client_id: &str,
-    command_id: &str,
-) -> Result<ConversationInputQueueId, HttpConversationQueueDriverError> {
-    ConversationInputQueueId::new(stable_event_uuid(
-        "sigil-http-conversation-queue-entry",
-        &stable_http_identity_seed(&[session_scope_id, client_id, command_id]),
-    ))
-    .map_err(|_| HttpConversationQueueDriverError::Conflict)
-}
-
 fn stable_http_queued_dispatch_run_id(
     session_scope_id: &str,
     queue_id: &ConversationInputQueueId,
@@ -5806,17 +5796,6 @@ fn stable_http_queued_dispatch_run_id(
             &revision.event_id,
         ]),
     )
-}
-
-fn stable_http_identity_seed(parts: &[&str]) -> String {
-    use std::fmt::Write as _;
-
-    let mut seed = String::new();
-    for part in parts {
-        write!(&mut seed, "{}:{part}", part.len())
-            .expect("writing a stable identity seed into String cannot fail");
-    }
-    seed
 }
 
 fn http_queue_generation(revision: ConversationQueueRevision) -> HttpConversationQueueGeneration {

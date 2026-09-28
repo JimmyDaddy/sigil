@@ -3717,6 +3717,7 @@ export interface components {
             client_id: string;
             command_id: string;
             correlation_id?: string | null;
+            enqueued_entry_id?: string;
             expected_generation: components["schemas"]["ConversationQueueGeneration"];
             generation: components["schemas"]["ConversationQueueGeneration"];
             interrupt_owner?: components["schemas"]["ForegroundRunOwner"] | null;

@@ -200,6 +200,7 @@ fn queue_receipt(
         action: HttpConversationQueueCommandActionKind::Enqueue,
         expected_generation: HttpConversationQueueGeneration("6:event-queue-6".to_owned()),
         generation: generation.clone(),
+        enqueued_entry_id: Some("queue-1".to_owned()),
         interrupt_owner: None,
         queue: HttpConversationQueueView {
             schema_version: HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION,

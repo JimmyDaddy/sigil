@@ -2769,6 +2769,9 @@ pub struct HttpConversationQueueCommandReceipt {
     pub action: HttpConversationQueueCommandActionKind,
     pub expected_generation: HttpConversationQueueGeneration,
     pub generation: HttpConversationQueueGeneration,
+    /// Exact durable identity of the submitted enqueue, including a replayed or settled item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enqueued_entry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt_owner: Option<HttpForegroundRunOwner>,
     pub queue: HttpConversationQueueView,

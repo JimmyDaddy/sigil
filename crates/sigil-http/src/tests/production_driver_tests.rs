@@ -2023,12 +2023,11 @@ async fn production_queue_mutations_are_durable_cas_guarded_and_owner_exact() {
     );
     assert_eq!(
         queued.items[0].entry_id,
-        stable_http_queue_id(
+        crate::driver::stable_http_queue_entry_id(
             &session.durable_session_scope_id,
             "desktop-client-1",
             "enqueue-safe-1"
         )
-        .expect("stable queue id should derive")
         .as_str()
     );
 
@@ -2314,15 +2313,13 @@ async fn production_queue_interrupt_requires_one_exact_dispatchable_next_item() 
 
 #[test]
 fn production_queue_stable_identity_seed_has_no_delimiter_tuple_collision() {
-    let left = stable_http_queue_id("scope:a", "client", "command")
-        .expect("left stable queue id should derive");
-    let right = stable_http_queue_id("scope", "a:client", "command")
-        .expect("right stable queue id should derive");
+    let left = crate::driver::stable_http_queue_entry_id("scope:a", "client", "command");
+    let right = crate::driver::stable_http_queue_entry_id("scope", "a:client", "command");
 
     assert_ne!(left, right);
     assert_ne!(
-        stable_http_identity_seed(&["scope:a", "client", "command"]),
-        stable_http_identity_seed(&["scope", "a:client", "command"])
+        crate::driver::stable_http_identity_seed(&["scope:a", "client", "command"]),
+        crate::driver::stable_http_identity_seed(&["scope", "a:client", "command"])
     );
 }
 
@@ -3253,7 +3250,7 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
         HttpProductionRunDriver::new_with_preparer(
             HttpProductionRunDriverOptions::new(config_path, temp.path()),
             disclosure_journal,
-            event_bus,
+            Arc::clone(&event_bus),
             tokio::runtime::Handle::current(),
             preparer.clone(),
         )
@@ -3263,9 +3260,11 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
         HttpDurableCommandStore::open(temp.path().join("scheduler-commands.json"), 16)
             .expect("queue scheduler command store should initialize"),
     );
-    let registry = driver
-        .build_registry(command_store)
-        .expect("production queue scheduler registry should attach");
+    let registry = Arc::new(
+        driver
+            .build_registry(command_store)
+            .expect("production queue scheduler registry should attach"),
+    );
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("queue scheduler session should bind");
@@ -3286,11 +3285,44 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
             },
         },
     );
-    let receipt = registry
-        .command_conversation_queue(&session.id, command)
-        .expect("queue scheduler enqueue should commit before admission");
+    let server = crate::HttpLocalServer::bind_with_event_bus(
+        crate::HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::clone(&registry),
+        event_bus,
+    )
+    .await
+    .expect("production queue HTTP listener should bind");
+    let address = server.local_addr().expect("production listener address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let command_body = serde_json::to_string(&command).expect("queue command JSON");
+    let request = crate::tests::http_post(
+        &format!("/sessions/{}/queue", session.id),
+        Some("secret-token"),
+        &command_body,
+    );
+    let (status, body) = crate::tests::http_raw_request(address, request.clone()).await;
+    assert_eq!(status, 200);
+    let receipt: crate::HttpConversationQueueCommandReceipt =
+        serde_json::from_value(body).expect("exact production queue receipt");
     assert_eq!(receipt.command_id, "scheduler-enqueue-1");
     assert_ne!(receipt.generation, receipt.expected_generation);
+    let exact_queue_id = crate::driver::stable_http_queue_entry_id(
+        &session.durable_session_scope_id,
+        "desktop-client-1",
+        "scheduler-enqueue-1",
+    );
+    assert_eq!(
+        receipt.enqueued_entry_id.as_deref(),
+        Some(exact_queue_id.as_str())
+    );
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -3315,6 +3347,13 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
         tokio::task::yield_now().await;
     }
     assert_eq!(preparer.queued_calls.load(Ordering::SeqCst), 1);
+    let (replay_status, replay_body) = crate::tests::http_raw_request(address, request).await;
+    assert_eq!(replay_status, 200);
+    let replay: crate::HttpConversationQueueCommandReceipt =
+        serde_json::from_value(replay_body).expect("settled queue HTTP replay receipt");
+    assert!(replay.replayed);
+    assert_eq!(replay.enqueued_entry_id, receipt.enqueued_entry_id);
+    assert_eq!(replay.queue.total_items, 0);
     let entries = JsonlSessionStore::read_entries(&session.session_log_path)
         .expect("settled queue history should remain readable");
     assert_eq!(
@@ -3340,6 +3379,11 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
             .status,
         HttpRunStatus::Failed
     );
+    shutdown_tx.send(()).expect("server shutdown signal");
+    serving
+        .await
+        .expect("server task should join")
+        .expect("server should drain");
 }
 
 #[test]

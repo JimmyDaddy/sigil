@@ -1044,6 +1044,8 @@ pub(crate) struct DesktopConversationQueueCommandReceipt {
     pub(crate) expected_generation: String,
     pub(crate) generation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enqueued_entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) interrupt_owner: Option<DesktopForegroundRunOwnerSummary>,
     pub(crate) queue: DesktopConversationQueueView,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2648,6 +2650,7 @@ impl From<NativeConversationQueueCommandReceipt> for DesktopConversationQueueCom
             action: conversation_queue_action_kind_label(value.action),
             expected_generation: value.expected_generation.0,
             generation: value.generation.0,
+            enqueued_entry_id: value.enqueued_entry_id,
             interrupt_owner: value
                 .interrupt_owner
                 .map(|owner| DesktopForegroundRunOwnerSummary {

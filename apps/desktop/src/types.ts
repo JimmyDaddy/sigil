@@ -316,6 +316,7 @@ export interface ConversationQueueCommandReceipt {
   action: ConversationQueueCommandActionKind;
   expectedGeneration: string;
   generation: string;
+  enqueuedEntryId?: string;
   interruptOwner?: ForegroundRunOwner;
   queue: ConversationQueueView;
   correlationId?: string;

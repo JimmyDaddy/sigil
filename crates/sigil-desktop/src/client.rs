@@ -677,6 +677,10 @@ impl DesktopHttpClient {
         validate_stream_identity(session_id)?;
         validate_conversation_queue_command(&payload)?;
         let expected_action = payload.action.kind();
+        let enqueued = matches!(
+            &payload.action,
+            DesktopConversationQueueCommandAction::Enqueue { .. }
+        );
         let expected_generation = payload.expected_generation.clone();
         let expected_interrupt_owner = match &payload.action {
             DesktopConversationQueueCommandAction::InterruptAndRunNext {
@@ -714,6 +718,14 @@ impl DesktopHttpClient {
             return Err(DesktopClientError::InvalidResponse);
         }
         if validate_opaque_queue_generation(&receipt.generation.0).is_err() {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if receipt.enqueued_entry_id.is_some() != enqueued
+            || receipt
+                .enqueued_entry_id
+                .as_deref()
+                .is_some_and(|entry_id| validate_stream_identity(entry_id).is_err())
+        {
             return Err(DesktopClientError::InvalidResponse);
         }
         if validate_conversation_queue_view(session_id, &receipt.queue).is_err() {
