@@ -2055,12 +2055,28 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
     let Ok(home) = std::env::var("HOME") else {
         return Ok(());
     };
+    #[cfg(unix)]
+    let (probe_program, probe_args) = (
+        "/bin/sh".to_owned(),
+        vec!["-c".to_owned(), "printf '%s' \"${HOME-unset}\"".to_owned()],
+    );
+    #[cfg(windows)]
+    let (probe_program, probe_args) = (
+        "powershell.exe".to_owned(),
+        vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            "if ($null -eq $env:HOME) { [Console]::Out.Write('unset') } else { [Console]::Out.Write($env:HOME) }".to_owned(),
+        ],
+    );
     let temp = tempfile::tempdir()?;
     let backend = LocalExecutionBackend;
     let inherited = backend
         .execute(ExecutionRequest {
-            program: "/bin/sh".to_owned(),
-            args: vec!["-c".to_owned(), "printf '%s' \"${HOME-unset}\"".to_owned()],
+            program: probe_program.clone(),
+            args: probe_args.clone(),
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
             environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
@@ -2081,8 +2097,8 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
         .collect();
     let isolated = backend
         .execute(ExecutionRequest {
-            program: "/bin/sh".to_owned(),
-            args: vec!["-c".to_owned(), "printf '%s' \"${HOME-unset}\"".to_owned()],
+            program: probe_program,
+            args: probe_args,
             cwd: temp.path().to_path_buf(),
             env: extension_env,
             environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
@@ -4824,11 +4840,17 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
     assert_eq!(changeset.operation, ToolOperation::ApplyChangeSet);
     let bash = registry.permission_plan(
         &ctx,
-        &tool_call("exec_command", json!({ "command": "rm -rf .sigil" })),
+        &tool_call(
+            "exec_command",
+            json!({ "command": "rm -rf .sigil", "shell": "sh" }),
+        ),
     )?;
     let terminal = registry.permission_plan(
         &ctx,
-        &tool_call("exec_command", json!({ "command": "tail -f app.log", })),
+        &tool_call(
+            "exec_command",
+            json!({ "command": "tail -f app.log", "shell": "sh" }),
+        ),
     )?;
     assert_eq!(bash.operation, ToolOperation::ExecuteDestructiveCommand);
     assert_eq!(terminal.operation, ToolOperation::ExecuteReadOnlyCommand);
@@ -5119,7 +5141,8 @@ async fn exec_command_accepts_finite_and_persistent_commands_without_family_rout
         let call = tool_call(
             "exec_command",
             json!({
-                "command": command
+                "command": command,
+                "shell": "sh"
             }),
         );
         let plan = registry.permission_plan(&ctx, &call)?;
@@ -5141,7 +5164,8 @@ async fn exec_command_accepts_finite_and_persistent_commands_without_family_rout
             &tool_call(
                 "exec_command",
                 json!({
-                    "command": command
+                    "command": command,
+                    "shell": "sh"
                 }),
             ),
         )?;
@@ -5153,7 +5177,7 @@ async fn exec_command_accepts_finite_and_persistent_commands_without_family_rout
             tool_call(
                 "exec_command",
                 json!({
-                    "command": "printf finite-command-finished", "yield_time_ms": 5000,
+                    "command": "printf finite-command-finished", "shell": "sh", "yield_time_ms": 5000,
                 }),
             ),
         )
@@ -8993,20 +9017,32 @@ async fn windows_job_object_reaps_one_shot_descendants_on_timeout() -> Result<()
     // Observe readiness while the command is still running. Reading the PID only after the
     // timeout races with job-object cleanup on a saturated hosted runner: cleanup can terminate
     // nested PowerShell before it gets a chance to publish the file.
-    let tool = exec_tool(temp.path());
-    let (result, child_pid) = tokio::join!(
-        tool.execute(
-            ToolContext::new(workspace, 10),
-            "windows-timeout".to_owned(),
-            json!({ "command": command, "max_runtime_secs": 15, "yield_time_ms": 30000 }),
-        ),
+    let shell = crate::shell_runtime::ResolvedShell::detect_default();
+    let backend = LocalExecutionBackend;
+    let (receipt, child_pid) = tokio::join!(
+        backend.execute(ExecutionRequest {
+            program: shell.program_string(),
+            args: shell.one_shot_args(&command),
+            cwd: workspace,
+            env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            timeout_ms: Some(15_000),
+            timeout_secs: 0,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+            capture: None,
+        }),
         read_windows_pid(&pid_file)
     );
-    let result = result?;
+    let receipt = receipt?;
     let child_pid = child_pid?;
 
-    assert!(matches!(result.status, ToolResultStatus::Error(_)));
-    assert_eq!(result.metadata.details["cleanup"]["status"], "completed");
+    assert!(receipt.timed_out);
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed
+    );
     assert!(!windows_process_is_alive(child_pid)?);
     Ok(())
 }

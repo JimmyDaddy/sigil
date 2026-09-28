@@ -6,6 +6,16 @@ use sigil_kernel::resource::{
     ResourceRetentionPolicyV1, StorageAdmissionSourceClassV1,
 };
 
+#[cfg(windows)]
+#[test]
+fn physical_namespace_check_accepts_windows_verbatim_root() {
+    let root = tempfile::tempdir().expect("authority root");
+    let namespace = root.path().join("managed").join("session-log");
+    fs::create_dir_all(&namespace).expect("physical namespace");
+    let canonical = namespace.canonicalize().expect("verbatim namespace path");
+    reject_reparse_components(&canonical, false).expect("ordinary namespace is not a reparse path");
+}
+
 pub(super) fn source() -> StorageAdmissionSourceV1 {
     StorageAdmissionSourceV1::ApplicationCutoverRoot {
         cutover_manifest_hash: CanonicalHash::from_bytes([0x11; 32]),

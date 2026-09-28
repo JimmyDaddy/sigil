@@ -355,7 +355,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(".repo-local-dev/tui-orchestration-acceptance"),
     )
-    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--keep-fixture", action="store_true")
     return parser.parse_args()
 

@@ -1107,10 +1107,8 @@ async fn plugin_hook_local_backend_clears_ambient_environment() {
         return;
     }
     let workspace = tempfile::tempdir().expect("workspace should create");
-    write_plugin_manifest(
-        workspace.path(),
-        "repo-review",
-        r#"id = "repo-review"
+    #[cfg(unix)]
+    let manifest = r#"id = "repo-review"
 name = "Repository Review"
 version = "0.1.0"
 
@@ -1122,8 +1120,22 @@ command = "/bin/sh"
 args = ["-c", "printf '%s|%s' \"${HOME-unset}\" \"${PATH-unset}\""]
 declared_effect = "read_only"
 approval = "allow"
-"#,
-    );
+"#;
+    #[cfg(windows)]
+    let manifest = r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "environment"
+event = "context"
+kind = "context"
+command = "cmd.exe"
+args = ["/D", "/C", "echo %HOME%^|%PATH%"]
+declared_effect = "read_only"
+approval = "allow"
+"#;
+    write_plugin_manifest(workspace.path(), "repo-review", manifest);
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
     let trust =
@@ -1142,8 +1154,16 @@ approval = "allow"
         .await
         .expect("isolated hook should execute");
 
-    assert!(outcome.output.stdout.content.starts_with("unset|"));
-    assert!(!outcome.output.stdout.content.ends_with("|unset"));
+    #[cfg(unix)]
+    {
+        assert!(outcome.output.stdout.content.starts_with("unset|"));
+        assert!(!outcome.output.stdout.content.ends_with("|unset"));
+    }
+    #[cfg(windows)]
+    {
+        assert!(outcome.output.stdout.content.starts_with("%HOME%|"));
+        assert!(!outcome.output.stdout.content.ends_with("|%PATH%\r\n"));
+    }
     assert_eq!(
         outcome.receipt.environment_policy,
         sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension

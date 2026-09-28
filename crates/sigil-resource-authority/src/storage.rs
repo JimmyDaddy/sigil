@@ -1063,6 +1063,11 @@ fn reject_reparse_components(path: &Path, allow_missing_leaf: bool) -> std::io::
     let mut current = PathBuf::new();
     for (index, component) in components.into_iter().enumerate() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // Drive and verbatim prefixes are not filesystem entries; inspect from the root.
+            continue;
+        }
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error)

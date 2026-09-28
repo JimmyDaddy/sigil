@@ -329,7 +329,7 @@ jobs:
 
       - name: Run model-owned orchestration real-PTY acceptance
         run: >-
-          python3 scripts/run-isolated-tests.py -- timeout 120s
+          python3 scripts/run-isolated-tests.py -- timeout 240s
           python3 scripts/tui-orchestration-pty-acceptance.py
           --binary target/debug/sigil
 

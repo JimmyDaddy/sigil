@@ -5659,6 +5659,95 @@ fn run_terminal_reconciliation_failure_leaves_the_terminal_transition_retryable(
 }
 
 #[test]
+fn natural_terminal_wins_a_shutdown_cancellation_claim_before_driver_ack() {
+    let (registry, driver) = registry_with_driver();
+    let registry = Arc::new(registry);
+    let event_bus = Arc::new(HttpLiveEventBus::new(8));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start(
+                "natural completion during shutdown",
+                HttpPermissionMode::ReadOnly,
+            ),
+        )
+        .expect("run should start");
+    event_bus
+        .publish_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "natural completion during shutdown".to_owned(),
+            },
+        ))
+        .expect("run start should publish");
+
+    let registry_for_cancel = Arc::downgrade(&registry);
+    let event_bus_for_cancel = Arc::clone(&event_bus);
+    let session_scope_id = session.durable_session_scope_id.clone();
+    driver.observe_cancel(Arc::new(move |cancel| {
+        let registry = registry_for_cancel
+            .upgrade()
+            .expect("cancellation should retain its registry");
+        assert_eq!(
+            registry
+                .get_run(&cancel.run_id)
+                .expect("run should remain visible")
+                .status,
+            HttpRunStatus::CancelRequested
+        );
+        event_bus_for_cancel
+            .publish_run_event_with_stream_continuation(PublicRunEvent::new(
+                &session_scope_id,
+                &cancel.run_id,
+                2,
+                PublicRunEventKind::RunFinished {
+                    final_text: "naturally finished".to_owned(),
+                },
+            ))
+            .expect("natural terminal should publish before cancellation ack");
+        record_run_terminal_and_reconcile_stream(
+            &registry,
+            &event_bus_for_cancel,
+            &session_scope_id,
+            &cancel.run_id,
+            HttpRunTerminalOutcome::Finished,
+        )
+        .expect("natural terminal should settle the claimed run");
+    }));
+
+    registry
+        .cancel_active_runs("HTTP server graceful shutdown")
+        .expect("an exact natural terminal should satisfy shutdown cancellation");
+    assert_eq!(
+        registry.get_run(&run.id).expect("run should settle").status,
+        HttpRunStatus::Finished
+    );
+    assert!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain visible")
+            .foreground_run_id
+            .is_none()
+    );
+    assert_eq!(
+        event_bus
+            .replay_run_after(&session.durable_session_scope_id, &run.id, None)
+            .expect("run stream should replay")
+            .into_iter()
+            .filter(|event| matches!(
+                event.run_event.as_ref().map(|entry| &entry.event),
+                Some(PublicRunEventKind::RunFinished { .. })
+            ))
+            .count(),
+        1,
+        "shutdown must retain the single natural terminal"
+    );
+}
+
+#[test]
 fn terminal_lifecycle_continues_after_foreground_run_terminal() {
     let (registry, _driver) = registry_with_driver();
     let session = create_session(&registry, HttpSessionCreateRequest::default());

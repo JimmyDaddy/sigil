@@ -77,18 +77,18 @@ fn current_writer_read_rejects_same_length_prefix_rewrite_with_restored_mtime() 
     store.append_event(
         DurableEventType::RunStatusChanged,
         EventClass::Critical,
-        serde_json::json!({"value":"original"}),
+        serde_json::json!({"run_status":"running","terminal_reason":"in_progress","tool_calls":0,"value":"original"}),
     )?;
     store.append_event(
         DurableEventType::RunStatusChanged,
         EventClass::Critical,
-        serde_json::json!({"value":"unchanged-tail"}),
+        serde_json::json!({"run_status":"running","terminal_reason":"in_progress","tool_calls":0,"value":"unchanged-tail"}),
     )?;
     let records = store.read_current_event_records_writer()?;
     let before = fs::read(&path)?;
     let modified = fs::metadata(&path)?.modified()?;
     let mut first = records[0].stored_event().clone();
-    first.payload = serde_json::json!({"value":"rewrites"});
+    first.payload["value"] = "rewrites".into();
     first.record_checksum = first.compute_record_checksum()?;
     let after = format!(
         "{}{}",
@@ -119,12 +119,12 @@ fn current_writer_read_rejects_truncation_and_invalid_checksum() -> Result<()> {
         store.append_event(
             DurableEventType::RunStatusChanged,
             EventClass::Critical,
-            serde_json::json!({"value":"original"}),
+            serde_json::json!({"run_status":"running","terminal_reason":"in_progress","tool_calls":0,"value":"original"}),
         )?;
         store.append_event(
             DurableEventType::RunStatusChanged,
             EventClass::Critical,
-            serde_json::json!({"value":"unchanged-tail"}),
+            serde_json::json!({"run_status":"running","terminal_reason":"in_progress","tool_calls":0,"value":"unchanged-tail"}),
         )?;
         let records = store.read_current_event_records_writer()?;
         if checksum {

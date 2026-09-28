@@ -115,8 +115,11 @@ fn manager_persistent_command() -> (String, String) {
 
 #[cfg(windows)]
 fn manager_persistent_command() -> (String, String) {
+    let ping = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+        .join("System32")
+        .join("ping.exe");
     (
-        "ping -n 30 127.0.0.1 >NUL".to_owned(),
+        format!("\"{}\" -n 30 127.0.0.1 >NUL", ping.display()),
         comspec_path().to_string_lossy().into_owned(),
     )
 }

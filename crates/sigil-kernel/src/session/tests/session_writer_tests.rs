@@ -230,7 +230,12 @@ fn live_run_recorder_source_reuses_the_validated_writer_and_never_recreates_remo
     let scans = store.writer_full_scan_count()?;
 
     let source = session.run_recorder_source()?;
-    assert_eq!(store.writer_full_scan_count()?, scans);
+    // Without a change-time fingerprint, Windows replays once to validate the
+    // current stream before handing the source to another owner.
+    assert_eq!(
+        store.writer_full_scan_count()?,
+        scans + u64::from(cfg!(windows))
+    );
     assert_eq!(source.path(), store.path());
     assert_eq!(source.read_current_event_records_writer()?.len(), 2);
 

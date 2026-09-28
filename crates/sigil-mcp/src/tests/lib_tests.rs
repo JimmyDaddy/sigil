@@ -663,15 +663,21 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
     };
     let temp = tempfile::tempdir()?;
     let run = |grant_names: &[String]| -> Result<_> {
+        let environment = sigil_kernel::resolve_extension_process_environment(grant_names)?;
+        if grant_names.is_empty() {
+            assert!(environment.variable("HOME").is_none());
+            assert!(environment.variable("GITHUB_ACTIONS").is_none());
+        }
         LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
             server_name: "environment-test".to_owned(),
             command: "sh".to_owned(),
             args: vec![
                 "-c".to_owned(),
-                "printf '%s|%s' \"${HOME-unset}\" \"${PATH-unset}\"".to_owned(),
+                "printf '%s|%s|%s' \"${HOME-unset}\" \"${PATH-unset}\" \"${GITHUB_ACTIONS-unset}\""
+                    .to_owned(),
             ],
             working_dir: Some(temp.path().to_path_buf()),
-            environment: sigil_kernel::resolve_extension_process_environment(grant_names)?,
+            environment,
             launch_static_fingerprint: "sha256:test-launch".to_owned(),
             startup_timeout_secs: 1,
             classification: McpProcessClass::LocalStdioConfigured,
@@ -696,8 +702,12 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
         .expect("local launcher must return a child")
         .wait()
         .await?;
+    // Git Bash may synthesize HOME from its Windows profile even after env_clear().
+    // The resolved launch environment must still exclude it unless explicitly granted.
+    #[cfg(not(windows))]
     assert!(isolated_output.starts_with("unset|"));
-    assert!(!isolated_output.ends_with("|unset"));
+    assert!(!isolated_output.contains("|unset|"));
+    assert!(isolated_output.ends_with("|unset"));
 
     let mut granted = run(&["HOME".to_owned()])?;
     let metadata = granted.receipt.audit_metadata();

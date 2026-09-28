@@ -119,8 +119,8 @@ fn coordinated_session_reader_preserves_external_reader_busy_without_recovery() 
         assert_eq!(busy.kind, SessionIoBusyKind::Reader);
         assert_eq!(busy.path, store.path());
     }
-    assert_eq!(fs::read(store.path())?, before);
     drop(external);
+    assert_eq!(fs::read(store.path())?, before);
     assert_eq!(store.read_event_records_coordinated()?.len(), 1);
     assert_eq!(fs::read(store.path())?, before);
     Ok(())

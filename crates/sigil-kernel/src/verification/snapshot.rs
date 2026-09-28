@@ -641,6 +641,10 @@ fn snapshot_entry(
     mode: Option<u32>,
     symlink_target: Option<PathBuf>,
 ) -> WorkspaceSnapshotEntry {
+    // Git index paths use '/' while the filesystem walker yields '\\' on Windows.
+    // Keep the content-bound identity stable across those two discovery paths.
+    #[cfg(windows)]
+    let normalized_path = PathBuf::from(normalized_path.to_string_lossy().replace('\\', "/"));
     WorkspaceSnapshotEntry {
         normalized_path,
         file_type,

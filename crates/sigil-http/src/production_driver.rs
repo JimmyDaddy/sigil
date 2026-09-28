@@ -6962,12 +6962,13 @@ impl HttpRunSupervisor {
                         }
                     },
                 };
-                let execution_joined = tokio::time::timeout(
+                let mut execution_result = tokio::time::timeout(
                     ticket.remaining_timeout(),
                     &mut execution,
                 )
                 .await
-                .is_ok();
+                .ok();
+                let execution_joined = execution_result.is_some();
                 if !execution_joined && !acknowledgement_sent {
                     let _ = quarantine_cancellation_failure(
                         &registry,
@@ -7026,9 +7027,31 @@ impl HttpRunSupervisor {
                         HttpRunTerminalOutcome::Interrupted
                     }
                     Err(error) => {
-                        let error = HttpRunDriverError::new(format!(
+                        let mut error = HttpRunDriverError::new(format!(
                             "production cancellation terminal could not be durably proven: {error}"
                         ));
+                        // The execution can commit its natural terminal while a cancellation
+                        // request is in flight. Once it joins, prefer that exact durable
+                        // terminal to a stale Task-stop attempt against an already completed Task.
+                        if let Some(natural_result) = execution_result.take() {
+                            match terminal_io
+                                .record_natural_if_committed(&control, natural_result)
+                                .await
+                            {
+                                Ok(true) => {
+                                    if !acknowledgement_sent {
+                                        let _ = acknowledgement.send(Ok(()));
+                                    }
+                                    break 'run;
+                                }
+                                Ok(false) => {}
+                                Err(observation) => {
+                                    error = HttpRunDriverError::new(format!(
+                                        "{error}; natural terminal observation failed: {observation}"
+                                    ));
+                                }
+                            }
+                        }
                         let error = if acknowledgement_sent {
                             error
                         } else {

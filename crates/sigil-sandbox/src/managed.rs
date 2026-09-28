@@ -302,6 +302,9 @@ impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The one-shot planner currently admits only ExplicitUnconfined on Windows. A hosted
+        // runner's outer Job may deny CREATE_BREAKAWAY_FROM_JOB when no child Job is requested.
+        #[cfg(unix)]
         sigil_process::configure_process_tree(&mut command);
         command
             .spawn()

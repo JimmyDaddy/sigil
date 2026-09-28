@@ -2589,7 +2589,14 @@ fn serve_process_auto_continues_direct_task_after_background_child_result() {
     };
     assert!(completed);
 
-    assert_eq!(stop_serve(server).status.code(), Some(0));
+    let output = stop_serve(server);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "completed Direct Task server failed to drain: stderr={}; stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
