@@ -706,3 +706,7 @@ pub(super) fn application_task_continuation_terminal(
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/task_verification_repository_tests.rs"]
+mod repository_live_tests;
