@@ -19,6 +19,21 @@ export interface ProviderCatalogCacheHit {
 }
 
 const cache = new Map<string, CachedCatalog>();
+const inFlightRequests = new Map<string, { latest: number; pending: number }>();
+const unresolvedRequestKeys = new Set<number>();
+let nextRequestOrder = 0;
+
+function retireInactiveRequests(): void {
+  let oldestUnresolved = Number.POSITIVE_INFINITY;
+  for (const order of unresolvedRequestKeys) {
+    oldestUnresolved = Math.min(oldestUnresolved, order);
+  }
+  for (const [key, request] of inFlightRequests) {
+    if (request.pending === 0 && request.latest < oldestUnresolved) {
+      inFlightRequests.delete(key);
+    }
+  }
+}
 
 async function requestCacheKey(
   workspaceId: string,
@@ -65,20 +80,45 @@ export async function loadAndCacheProviderCatalog(
   workspaceId: string,
   input: ProviderSetupCatalogInput,
 ): Promise<ProviderSetupCatalog> {
-  const catalog = await bridge.providerSetupCatalog(workspaceId, input);
-  const key = await requestCacheKey(workspaceId, input);
-  if (key !== undefined && catalogIsReusable(catalog)) {
-    cache.delete(key);
-    cache.set(key, { catalog, storedAt: Date.now() });
-    while (cache.size > MAX_ENTRIES) {
-      const oldest = cache.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      cache.delete(oldest);
-    }
-  } else if (key !== undefined && catalog.state === "auth_rejected") {
-    cache.delete(key);
+  const requestOrder = ++nextRequestOrder;
+  unresolvedRequestKeys.add(requestOrder);
+  const key = await requestCacheKey(workspaceId, input).catch((error: unknown) => {
+    unresolvedRequestKeys.delete(requestOrder);
+    retireInactiveRequests();
+    throw error;
+  });
+  unresolvedRequestKeys.delete(requestOrder);
+  const inFlight = key === undefined
+    ? undefined
+    : inFlightRequests.get(key) ?? { latest: 0, pending: 0 };
+  if (key !== undefined && inFlight !== undefined) {
+    inFlight.latest = Math.max(inFlight.latest, requestOrder);
+    inFlight.pending += 1;
+    inFlightRequests.set(key, inFlight);
   }
-  return catalog;
+  retireInactiveRequests();
+  try {
+    const catalog = await bridge.providerSetupCatalog(workspaceId, input);
+    if (key !== undefined && inFlight?.latest === requestOrder) {
+      if (catalogIsReusable(catalog)) {
+        cache.delete(key);
+        cache.set(key, { catalog, storedAt: Date.now() });
+        while (cache.size > MAX_ENTRIES) {
+          const oldest = cache.keys().next().value as string | undefined;
+          if (oldest === undefined) break;
+          cache.delete(oldest);
+        }
+      } else if (catalog.state === "auth_rejected") {
+        cache.delete(key);
+      }
+    }
+    return catalog;
+  } finally {
+    if (key !== undefined && inFlight !== undefined) {
+      inFlight.pending -= 1;
+      retireInactiveRequests();
+    }
+  }
 }
 
 function catalogIsReusable(catalog: ProviderSetupCatalog): boolean {

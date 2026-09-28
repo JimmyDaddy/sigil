@@ -10,6 +10,7 @@ import {
 describe("provider catalog view cache", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("reuses a fresh exact request without another provider load", async () => {
@@ -102,6 +103,135 @@ describe("provider catalog view cache", () => {
     response = { ...original, state: "auth_rejected", models: [] };
     await loadAndCacheProviderCatalog(bridge, workspaceId, input);
     expect(await readProviderCatalogCache(workspaceId, input)).toBeUndefined();
+  });
+
+  it("does not restore an older remote catalog after a newer authentication rejection", async () => {
+    const pending: Array<(catalog: ProviderSetupCatalog) => void> = [];
+    const providerSetupCatalog = vi.fn(() => new Promise<ProviderSetupCatalog>((resolve) => {
+      pending.push(resolve);
+    }));
+    const bridge = { providerSetupCatalog } as unknown as DesktopBridge;
+    const input: ProviderSetupCatalogInput = {
+      template: "deep_seek",
+      credentialSource: "environment",
+    };
+    const workspaceId = "out-of-order-auth-cache-workspace-test";
+    const remote: ProviderSetupCatalog = {
+      connectionId: "deepseek-out-of-order-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "old-remote-model",
+        displayName: "Old Remote Model",
+        availability: "available",
+        recommended: true,
+        provenance: "remote",
+      }],
+      manualEntryAllowed: true,
+    };
+
+    const older = loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    const newer = loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]?.({ ...remote, state: "auth_rejected", models: [] });
+    expect((await newer).state).toBe("auth_rejected");
+    pending[0]?.(remote);
+    expect((await older).state).toBe("remote");
+
+    expect(await readProviderCatalogCache(workspaceId, input)).toBeUndefined();
+    expect(providerSetupCatalog).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses call order when an older credential digest completes after a newer rejected request", async () => {
+    const digests: Array<(value: ArrayBuffer) => void> = [];
+    vi.stubGlobal("crypto", {
+      subtle: {
+        digest: () => new Promise<ArrayBuffer>((resolve) => {
+          digests.push(resolve);
+        }),
+      },
+    });
+    const pending: Array<(catalog: ProviderSetupCatalog) => void> = [];
+    const bridge = {
+      providerSetupCatalog: vi.fn(() => new Promise<ProviderSetupCatalog>((resolve) => {
+        pending.push(resolve);
+      })),
+    } as unknown as DesktopBridge;
+    const input: ProviderSetupCatalogInput = {
+      template: "deep_seek",
+      credentialSource: "secure_store",
+      apiKey: "same-revoked-key",
+    };
+    const workspaceId = "delayed-digest-cache-workspace-test";
+    const remote: ProviderSetupCatalog = {
+      connectionId: "deepseek-delayed-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "old-remote-model",
+        displayName: "Old Remote Model",
+        availability: "available",
+        recommended: true,
+        provenance: "remote",
+      }],
+      manualEntryAllowed: true,
+    };
+    const hash = new Uint8Array([1, 2, 3]).buffer;
+
+    const older = loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    const newer = loadAndCacheProviderCatalog(bridge, workspaceId, input);
+    expect(digests).toHaveLength(2);
+    digests[1]?.(hash);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]?.({ ...remote, state: "auth_rejected", models: [] });
+    expect((await newer).state).toBe("auth_rejected");
+
+    digests[0]?.(hash);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]?.(remote);
+    expect((await older).state).toBe("remote");
+    const cached = readProviderCatalogCache(workspaceId, input);
+    expect(digests).toHaveLength(3);
+    digests[2]?.(hash);
+    expect(await cached).toBeUndefined();
+  });
+
+  it("keeps different request keys independent when their responses arrive out of order", async () => {
+    const pending: Array<(catalog: ProviderSetupCatalog) => void> = [];
+    const bridge = {
+      providerSetupCatalog: vi.fn(() => new Promise<ProviderSetupCatalog>((resolve) => {
+        pending.push(resolve);
+      })),
+    } as unknown as DesktopBridge;
+    const workspaceId = "parallel-cache-keys-workspace-test";
+    const firstInput: ProviderSetupCatalogInput = {
+      template: "open_ai_compatible",
+      protocol: "chat_completions",
+      endpoint: "http://127.0.0.1:11450/v1",
+      credentialSource: "none",
+    };
+    const secondInput = { ...firstInput, endpoint: "http://127.0.0.1:11451/v1" };
+    const remote: ProviderSetupCatalog = {
+      connectionId: "local-parallel-1",
+      providerLabel: "OpenAI-compatible",
+      state: "remote",
+      models: [],
+      manualEntryAllowed: true,
+    };
+
+    const first = loadAndCacheProviderCatalog(bridge, workspaceId, firstInput);
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    const second = loadAndCacheProviderCatalog(bridge, workspaceId, secondInput);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]?.({ ...remote, state: "auth_rejected" });
+    await second;
+    pending[0]?.(remote);
+    await first;
+
+    expect(await readProviderCatalogCache(workspaceId, firstInput))
+      .toEqual({ catalog: remote, stale: false });
+    expect(await readProviderCatalogCache(workspaceId, secondInput)).toBeUndefined();
   });
 
   it("marks an exact catalog stale after ten minutes while keeping it visible", async () => {
