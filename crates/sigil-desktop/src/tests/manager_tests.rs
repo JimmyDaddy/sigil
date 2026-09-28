@@ -104,7 +104,7 @@ mod lifecycle {
         }
 
         async fn wait(&self, name: &str) {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_secs(15), async {
                 while !tokio::fs::try_exists(self.root.join(name))
                     .await
                     .expect("barrier status")

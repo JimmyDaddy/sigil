@@ -982,12 +982,27 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: TaskId::new("task_2")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "already done".to_owned(),
+        objective: "newer work".to_owned(),
         title: None,
-
-        status: TaskRunStatus::Completed,
+        status: TaskRunStatus::Started,
         reason: None,
     }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(TaskId::new("task_2")?, "newer work", 2),
+    ))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_2")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "newer work".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+
+    let (latest, _, objective) =
+        resolve_continue_task(&session, None).map_err(anyhow::Error::msg)?;
+    assert_eq!(latest.as_str(), "task_2");
+    assert_eq!(objective, "newer work");
 
     let (task_id, task_id_value, objective) =
         resolve_continue_task(&session, Some("task_1".to_owned())).map_err(anyhow::Error::msg)?;

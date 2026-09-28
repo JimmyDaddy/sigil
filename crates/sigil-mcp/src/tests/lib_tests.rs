@@ -3953,6 +3953,15 @@ fn mcp_egress_json_summary_bounds_field_names_and_counts_without_copying_values(
     assert_eq!(summary["truncated"], true);
     assert!(encoded.len() < 32 * 1024);
     assert!(!String::from_utf8_lossy(&encoded).contains("must-not-be-copied"));
+
+    let mut reversed = serde_json::Map::new();
+    for index in (0..1_000).rev() {
+        reversed.insert(format!("field_{index:04}"), json!("v".repeat(128)));
+    }
+    reversed.insert("L".repeat(1024 * 1024), json!("must-not-be-copied"));
+    let reordered = super::summarize_egress_json(&Value::Object(reversed));
+    assert_eq!(summary["top_level_keys"], reordered["top_level_keys"]);
+    assert_eq!(summary["field_types"], reordered["field_types"]);
 }
 
 #[tokio::test]

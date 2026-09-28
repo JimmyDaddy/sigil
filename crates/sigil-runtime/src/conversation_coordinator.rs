@@ -530,8 +530,9 @@ impl ConversationCoordinator {
     ///
     /// Requested handoffs are resolved from their durable policy snapshot, and accepted handoffs
     /// missing execution admission receive the same deterministic direct Task authority. New
-    /// tasks publish `TaskRun::Started` and that authority in one append batch. Repeated calls
-    /// append nothing after the projection is complete.
+    /// tasks publish `TaskRun::Started` and that authority in one append batch. An in-flight
+    /// direct Task whose process owner was lost becomes resumable without settling its exact
+    /// execution attempt. Repeated calls append nothing after the projection is complete.
     ///
     /// # Errors
     ///
@@ -544,6 +545,7 @@ impl ConversationCoordinator {
         now_ms: u64,
     ) -> Result<Vec<StartDurableTaskAction>> {
         session.recover_unfinished_provider_physical_attempts(now_ms)?;
+        pause_orphaned_direct_tasks(session)?;
         let projection = session.task_handoff_projection();
         if projection.has_conflicts() {
             bail!("task handoff projection contains conflicting durable facts");
@@ -782,6 +784,40 @@ pub fn validate_task_continuation_action(
         session,
         Some(action.task_id.as_str()),
     )
+}
+
+fn pause_orphaned_direct_tasks(session: &mut Session) -> Result<()> {
+    let tasks = session.task_state_projection();
+    for task in tasks.tasks.values() {
+        if task.direct_execution_admission.is_none() || task.latest_plan_version.is_some() {
+            continue;
+        }
+        let latest_attempt = task
+            .direct_execution_attempts
+            .values()
+            .max_by_key(|attempt| attempt.ordinal);
+        let orphaned = match task.status {
+            TaskRunStatus::Started => latest_attempt
+                .is_some_and(|attempt| attempt.status == TaskExecutionAttemptStatus::Started),
+            TaskRunStatus::Running => latest_attempt
+                .is_none_or(|attempt| attempt.status == TaskExecutionAttemptStatus::Started),
+            _ => false,
+        };
+        if !orphaned {
+            continue;
+        }
+        // Keep a started attempt open: continuation must recover its exact durable frontier
+        // instead of silently dispatching a second physical attempt.
+        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task.task_id.clone(),
+            parent_session_ref: task.parent_session_ref.clone(),
+            objective: task.objective.clone(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: Some("direct Task was interrupted; continue to recover its execution".into()),
+        }))?;
+    }
+    Ok(())
 }
 
 fn interrupt_task_after_durable_cancellation(

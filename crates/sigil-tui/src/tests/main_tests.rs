@@ -1945,17 +1945,24 @@ fn apply_key_action_always_requests_render_and_forwards_actions() -> Result<()> 
 #[test]
 fn tab_enter_run_next_reaches_the_worker_command_channel() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let entries = vec![SessionLogEntry::Control(
-        ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
-            queue_id: sigil_kernel::ConversationInputQueueId::new("queue_keyboard_next")?,
-            target: sigil_kernel::ConversationInputTarget::MainThread,
-            kind: sigil_kernel::ConversationInputKind::Chat,
-            prompt_hash: "sha256:keyboard-next".to_owned(),
-            prompt: "run this follow-up next".to_owned(),
-            reasoning_effort: Some(sigil_kernel::ReasoningEffort::High),
-            created_at_ms: Some(1),
-        }),
-    )];
+    let first = sigil_kernel::ConversationInputQueuedEntry {
+        queue_id: sigil_kernel::ConversationInputQueueId::new("queue_keyboard_first")?,
+        target: sigil_kernel::ConversationInputTarget::MainThread,
+        kind: sigil_kernel::ConversationInputKind::Chat,
+        prompt_hash: "sha256:keyboard-first".to_owned(),
+        prompt: "keep this follow-up first".to_owned(),
+        reasoning_effort: Some(sigil_kernel::ReasoningEffort::High),
+        created_at_ms: Some(1),
+    };
+    let mut next = first.clone();
+    next.queue_id = sigil_kernel::ConversationInputQueueId::new("queue_keyboard_next")?;
+    next.prompt_hash = "sha256:keyboard-next".to_owned();
+    next.prompt = "run this follow-up next".to_owned();
+    next.created_at_ms = Some(2);
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(first)),
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(next)),
+    ];
     let items = sigil_kernel::ConversationQueueProjection::from_entries(&entries).items;
     app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
         items,
@@ -1973,6 +1980,13 @@ fn tab_enter_run_next_reaches_the_worker_command_channel() -> Result<()> {
         .is_none()
     );
     assert!(app.is_composer_queue_panel_focused());
+    assert!(
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .is_none()
+    );
     let action = app.handle_key_event(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Enter,
         crossterm::event::KeyModifiers::NONE,

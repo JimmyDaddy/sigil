@@ -163,14 +163,19 @@ fn stream_mapper_covers_block_start_and_delta_edges() -> anyhow::Result<()> {
     assert!(chunks.iter().any(|chunk| matches!(
         chunk,
         ProviderChunk::ToolCallArgsDelta { id, delta }
-            if id == "toolu_2" && delta == r#"{"path":"src/lib.rs","pattern":"fn"}"#
+            if id == "toolu_2"
+                && serde_json::from_str::<serde_json::Value>(delta).is_ok_and(|args| {
+                    args == serde_json::json!({"path": "src/lib.rs", "pattern": "fn"})
+                })
     )));
     assert!(chunks.iter().any(|chunk| matches!(
         chunk,
         ProviderChunk::ToolCallComplete(call)
             if call.id == "toolu_2"
                 && call.name == "grep"
-                && call.args_json == r#"{"path":"src/lib.rs","pattern":"fn"}"#
+                && serde_json::from_str::<serde_json::Value>(&call.args_json).is_ok_and(|args| {
+                    args == serde_json::json!({"path": "src/lib.rs", "pattern": "fn"})
+                })
     )));
     Ok(())
 }

@@ -3,9 +3,10 @@ use sigil_kernel::{
     AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ControlEntry, ConversationTurnRef,
     ImageAttachment, ImageMimeType, JsonlSessionStore, ModelMessage, RunCancellationRequestedEntry,
     RunCancellationTarget, Session, SessionLogEntry, SessionRef, TaskAdmissionTrigger,
-    TaskHandoffDecision, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId,
-    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, ToolAccess,
-    ToolCategory, ToolPreviewCapability, ToolSpec,
+    TaskDirectExecutionAttemptV1, TaskExecutionAttemptStatus, TaskHandoffDecision,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskRoutingPolicy,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, ToolAccess, ToolCategory,
+    ToolPreviewCapability, ToolSpec,
 };
 use tempfile::tempdir;
 
@@ -791,6 +792,92 @@ fn seed_current_resumable_direct_task(session: &mut Session) -> Result<TaskId> {
     session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
     session.append_control(run(TaskRunStatus::Paused))?;
     Ok(task_id)
+}
+
+#[test]
+fn reconciliation_pauses_orphaned_direct_task_without_replacing_its_attempt() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("orphaned-direct-task", "model");
+    let task_id = TaskId::new("task-orphaned-direct")?;
+    let objective = "finish the existing direct task";
+    let admission = crate::direct_plan_fixture::append(&mut session, &task_id, objective)?;
+    let run = |status| {
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_ref().expect("valid parent ref"),
+            objective: objective.to_owned(),
+            title: None,
+            status,
+            reason: None,
+        })
+    };
+    session.append_control(run(TaskRunStatus::Started))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        admission.clone(),
+    ))?;
+    session.append_control(run(TaskRunStatus::Running))?;
+    let attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone()))?;
+
+    assert!(
+        coordinator
+            .reconcile(&mut session, &parent_ref()?, 50)?
+            .is_empty()
+    );
+    let task = &session.task_state_projection().tasks[&task_id];
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(task.direct_execution_attempts[&attempt.attempt_id], attempt);
+    let entry_count = session.entries().len();
+    assert!(
+        coordinator
+            .reconcile(&mut session, &parent_ref()?, 60)?
+            .is_empty()
+    );
+    assert_eq!(session.entries().len(), entry_count);
+    Ok(())
+}
+
+#[test]
+fn reconciliation_preserves_direct_task_waiting_for_background_agents() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("background-direct-task", "model");
+    let task_id = TaskId::new("task-background-direct")?;
+    let objective = "wait for child results";
+    let admission = crate::direct_plan_fixture::append(&mut session, &task_id, objective)?;
+    let run = |status| {
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_ref().expect("valid parent ref"),
+            objective: objective.to_owned(),
+            title: None,
+            status,
+            reason: None,
+        })
+    };
+    session.append_control(run(TaskRunStatus::Started))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        admission.clone(),
+    ))?;
+    let mut attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone()))?;
+    attempt.status = TaskExecutionAttemptStatus::Completed;
+    attempt.final_message_id = Some("message-1".to_owned());
+    attempt.output_hash = Some(format!("sha256:{}", "a".repeat(64)));
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))?;
+    session.append_control(run(TaskRunStatus::Running))?;
+
+    let entry_count = session.entries().len();
+    assert!(
+        coordinator
+            .reconcile(&mut session, &parent_ref()?, 50)?
+            .is_empty()
+    );
+    assert_eq!(session.entries().len(), entry_count);
+    assert_eq!(
+        session.task_state_projection().tasks[&task_id].status,
+        TaskRunStatus::Running
+    );
+    Ok(())
 }
 
 #[test]

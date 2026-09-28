@@ -41,8 +41,12 @@ function testReleaseDoctor(root) {
   write(resolve(root, "Cargo.toml"), `[workspace.package]\nversion = "${version}"\n`);
   write(
     resolve(root, "Cargo.lock"),
-    ["sigil", "sigil-desktop-app", "sigil-runtime", "sigil-tui"]
-      .map((name) => `[[package]]\nname = "${name}"\nversion = "${version}"\n`)
+    [
+      ...["sigil", "sigil-desktop-app", "sigil-runtime", "sigil-tui-host"]
+        .map((name) => `[[package]]\nname = "${name}"\nversion = "${version}"\n`),
+      ...["sigil-tui", "sigil-tui-core", "sigil-tui-ratatui"]
+        .map((name) => `[[package]]\nname = "${name}"\nversion = "0.1.0"\n`),
+    ]
       .join("\n"),
   );
   write(resolve(root, "apps/desktop/package.json"), JSON.stringify({ version }));

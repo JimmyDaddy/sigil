@@ -22,7 +22,7 @@ required_rows = [
   "<tr><td>Open help / slash selector</td><td><code>F1</code> / <code>/</code></td></tr>",
   "<tr><th>Command</th><th>Purpose</th></tr>",
   "<tr><td><code>/agent &lt;main|child-id&gt;</code></td><td>Switch visible transcript</td></tr>",
-  "<tr><td><code>/queue next|interrupt|edit|delete [item]</code></td><td>Reorder, interrupt for, edit, or remove a follow-up</td></tr>"
+  "<tr><td><code>/queue next|edit|delete [item]</code></td><td>Move a follow-up next, edit it, or remove it</td></tr>"
 ]
 
 missing_rows = required_rows.reject { |row| rendered_reference.include?(row) }

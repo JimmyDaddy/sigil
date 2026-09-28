@@ -1,5 +1,5 @@
 mod branches;
-use std::{fmt, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
@@ -2911,10 +2911,16 @@ fn desktop_task_pause_request(
     task_id: &str,
     execution: crate::DesktopTaskExecutionBinding,
 ) -> DesktopTaskPauseRequest {
-    let seed = serde_json::json!({
-        "task_id": task_id,
-        "execution": execution,
-    })
+    let execution_fields = match &execution {
+        crate::DesktopTaskExecutionBinding::Direct { admission_id } => BTreeMap::from([
+            ("admission_id", serde_json::json!(admission_id)),
+            ("kind", serde_json::json!("direct")),
+        ]),
+    };
+    let seed = serde_json::json!(BTreeMap::from([
+        ("execution", serde_json::json!(execution_fields)),
+        ("task_id", serde_json::json!(task_id)),
+    ]))
     .to_string();
     DesktopTaskPauseRequest {
         request_id: format!("task-pause-{}", sha256_hex(seed.as_bytes())),

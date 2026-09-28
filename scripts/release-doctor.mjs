@@ -10,6 +10,11 @@ import { pathToFileURL } from "node:url";
 import { parseReleaseVersion } from "./release-channel-version.mjs";
 
 const DEFAULT_REQUIRED_WORKFLOW = "CI";
+const INDEPENDENT_TUI_FRAMEWORK_PACKAGES = new Set([
+  "sigil-tui",
+  "sigil-tui-core",
+  "sigil-tui-ratatui",
+]);
 
 function usage() {
   return `Usage: scripts/release-doctor.mjs --tag v<version> [options]
@@ -93,7 +98,7 @@ export function inspectReleaseSource({ root, tag, updaterPublicKey }) {
   const lockVersions = extractSigilLockVersions(
     readFileSync(resolve(root, "Cargo.lock"), "utf8"),
   );
-  for (const requiredPackage of ["sigil", "sigil-desktop-app", "sigil-runtime", "sigil-tui"]) {
+  for (const requiredPackage of ["sigil", "sigil-desktop-app", "sigil-runtime", "sigil-tui-host"]) {
     if (lockVersions.get(requiredPackage) !== version) {
       throw new Error(
         `Cargo.lock ${requiredPackage} version ${lockVersions.get(requiredPackage) ?? "<missing>"} does not match ${tag}`,
@@ -101,6 +106,7 @@ export function inspectReleaseSource({ root, tag, updaterPublicKey }) {
     }
   }
   for (const [packageName, packageVersion] of lockVersions) {
+    if (INDEPENDENT_TUI_FRAMEWORK_PACKAGES.has(packageName)) continue;
     if (packageVersion !== version) {
       throw new Error(`Cargo.lock ${packageName} version ${packageVersion} does not match ${tag}`);
     }

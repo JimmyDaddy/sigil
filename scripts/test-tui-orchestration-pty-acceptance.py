@@ -24,6 +24,18 @@ def tool(name: str) -> dict[str, object]:
 
 
 class DirectTaskPtyAcceptanceTests(unittest.TestCase):
+    def test_each_scenario_has_a_distinct_user_prompt(self) -> None:
+        prompts = (
+            MODULE.USER_PROMPT,
+            MODULE.APPROVAL_USER_PROMPT,
+            MODULE.CONTINUE_USER_PROMPT,
+            MODULE.CANCEL_USER_PROMPT,
+            MODULE.INTEGRATION_USER_PROMPT,
+            MODULE.TERMINAL_USER_PROMPT,
+        )
+        self.assertEqual(len(prompts), len(set(prompts)))
+        self.assertTrue(all(prompt.startswith("DIRECT-TASK-PTY-OPAQUE-REQUEST-") for prompt in prompts))
+
     def test_cancellation_requires_exact_task_scope_and_confirmed_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "records.jsonl"
@@ -95,7 +107,7 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
     def test_conversation_terminal_status_uses_current_typed_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "records.jsonl"
-            for status, expected in (("succeeded", 0), ("failed", 1), ("unknown", 1)):
+            for status, expected in (("succeeded", 0), ("blocked", 0), ("failed", 1), ("unknown", 1)):
                 path.write_text(json.dumps({"event_type": "run_finalized", "payload": {
                     "record": "conversation_run_finalized_v1", "status": status,
                 }}) + "\n", encoding="utf-8")
@@ -170,7 +182,7 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
             self.assertIn('protocol = "chat_completions"', text)
             self.assertIn('base_url = "http://127.0.0.1:43123/v1"', text)
             self.assertIn('credential = { source = "none" }', text)
-            self.assertIn('[permission.tools]\nterminal_cancel = "allow"', text)
+            self.assertNotIn("terminal_cancel", text)
             self.assertNotIn("[providers.", text)
             self.assertNotIn("api_key", text)
 
@@ -329,12 +341,17 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
 
             write()
             self.assertEqual(MODULE.bound_approval_state(path, "call", "request"), "requested")
+            controls.append({"call_id": "call", "action": "decision_accepted",
+                             "user_decision": "approved",
+                             "identity": {"approval_request_id": "request"}})
+            write()
+            self.assertEqual(MODULE.bound_approval_state(path, "call", "request"), "accepted")
             controls.append({"call_id": "other", "action": "requested",
                              "identity": {"approval_request_id": "other-request"}})
             write()
             with self.assertRaises(MODULE.AcceptanceError):
                 MODULE.bound_approval_state(path, "call", "request")
-            controls.insert(1, {"call_id": "call", "action": "resolved", "user_decision": "approved",
+            controls.insert(2, {"call_id": "call", "action": "resolved", "user_decision": "approved",
                                 "identity": {"approval_request_id": "request"}})
             write()
             self.assertEqual(MODULE.bound_approval_state(path, "call", "request"), "resolved")
@@ -402,7 +419,7 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
                 }
             )
 
-    def test_valid_terminal_audit_requires_approval_readiness_progress_and_cancel(self) -> None:
+    def test_valid_command_audit_requires_approval_output_and_exit(self) -> None:
         audit = MODULE.SessionAudit(
             event_counts={
                 "plan_draft_created": 6,
@@ -416,9 +433,8 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
             approved_tool_call_count=1,
             approved_terminal_start_count=1,
             terminal_start_completed_count=1,
-            terminal_cancel_completed_count=1,
-            terminal_task_statuses=("cancelled", "running"),
-            terminal_readiness_states=("ready", "waiting"),
+            terminal_task_statuses=("exited",),
+            terminal_readiness_states=(),
             terminal_max_output_bytes=(
                 len(MODULE.TERMINAL_READY_CANARY)
                 + len(MODULE.TERMINAL_PROGRESS_CANARY)
@@ -447,7 +463,6 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
                 "direct:integration:final": 1,
                 "direct:terminal:start": 1,
                 "direct:terminal:after_start": 1,
-                "direct:terminal:after_cancel": 1,
                 "title": 1,
             }
         )

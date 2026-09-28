@@ -329,7 +329,9 @@ pub(super) fn summarize_egress_json(value: &Value) -> Value {
             let mut keys = Vec::with_capacity(MCP_EGRESS_FIELD_LIMIT.min(object.len()));
             let mut field_types = serde_json::Map::new();
             let mut retained_key_bytes = 0usize;
-            for (key, nested) in object {
+            let mut fields = object.iter().collect::<Vec<_>>();
+            fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, nested) in fields {
                 if keys.len() >= MCP_EGRESS_FIELD_LIMIT
                     || key.len() > MCP_EGRESS_KEY_LIMIT_BYTES
                     || retained_key_bytes.saturating_add(key.len()) > MCP_EGRESS_KEYS_TOTAL_BYTES

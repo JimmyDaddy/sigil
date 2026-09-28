@@ -524,14 +524,17 @@ async fn unauthenticated_responses_uses_one_auth_choice_for_stream_compact_and_c
         Ok::<_, anyhow::Error>(requests)
     });
     let result: Result<()> = async {
-        let provider = OpenAiResponsesProvider::new_exact(
-            OpenAiResponsesProviderConfig {
-                authentication: crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback,
-                base_url,
-                ..Default::default()
-            },
-            ModelRequestTimeouts::default(),
-        )?;
+        let provider = {
+            let _guard = crate::test_env::lock();
+            OpenAiResponsesProvider::new_exact(
+                OpenAiResponsesProviderConfig {
+                    authentication: crate::OpenAiResponsesAuthentication::UnauthenticatedLoopback,
+                    base_url,
+                    ..Default::default()
+                },
+                ModelRequestTimeouts::default(),
+            )?
+        };
         // The three protocol methods share this request seam. This does not grant a loopback
         // server the separate official-endpoint input-token proof capability.
         for url in [

@@ -1495,11 +1495,12 @@ impl HttpSessionRunRegistry {
     }
 
     /// Produces a fresh reverse-diff and conflict review without mutating workspace truth.
+    /// The preview is advisory; applying a restore performs a fresh serialized preflight.
     ///
     /// # Errors
     ///
-    /// Returns an error for unknown sessions, active durable mutations, stale checkpoint
-    /// bindings, or unavailable application recovery state.
+    /// Returns an error for unknown sessions, stale checkpoint bindings, or unavailable
+    /// application recovery state.
     pub fn checkpoint_restore_review(
         &self,
         session_id: &str,
@@ -1507,17 +1508,14 @@ impl HttpSessionRunRegistry {
     ) -> Result<HttpCheckpointRestoreReview, HttpRegistryError> {
         validate_checkpoint_restore_request(&request)?;
         let session = self.get_session(session_id)?;
-        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        catch_unwind(AssertUnwindSafe(|| {
             self.driver.checkpoint_restore_review(&session, &request)
         }))
         .map_err(|_| HttpRegistryError::DriverPanicked {
             operation: "checkpoint restore preview",
             run_id: session_id.to_owned(),
         })?
-        .map_err(recovery_driver_registry_error);
-        guard.finish(false);
-        result
+        .map_err(recovery_driver_registry_error)
     }
 
     /// Builds one fresh portable compaction preview without activating a compaction lifecycle.

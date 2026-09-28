@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -7,6 +7,14 @@
 这一页只记录用户能够直接感知的变化。当前支持边界和早期预览说明见[当前支持状态与后续计划](status.md)。
 
 ## 尚未发布 - main
+
+已签名 Desktop 版本仍为 beta.4。等待下次 Desktop 发布的源码变更包括 Follow-ups 重排与中断控制、
+历史加载期间的草稿恢复、图片附件、模型目录发现失败时的手动设置，以及运行清理期间仍可查看的检查点恢复预览。
+
+## v0.0.1-beta.5 - 2026-09-29
+
+本次只发布 TUI/npm beta；签名 Desktop 产物就绪前，GitHub Release 保持草稿状态。
+TUI 的日常输入、Follow-ups、计划审阅和故障恢复得到改进。
 
 - provider 的临时断线、超时、限流和服务端错误现在会在同一个 durable generation 内恢复：只有尚未提交
   模型输出或外部 effect 时才会有界重试，并显示重连/等待状态。重启后也只有原 child session 保存了精确的
@@ -27,6 +35,15 @@
   后仍然存在且没有超时；后台智能体的问题会路由到 root session；一个已接受回答只会继续一次
   provider attempt，不会重放提出问题的 turn。MCP elicitation 复用同一表单 renderer，但不会继承
   durable replay 语义。
+- TUI 可以访问 Follow-ups 队列中的每一项，编辑时保留尚未发送的 composer 草稿；排队输入会在
+  下一个安全续接点交付。提交 prompt 时界面保持响应，运行耗时诊断可区分本地延迟和模型延迟。
+- 共享 runtime 支持 Session 分叉、导入选定分支知识及绑定精确版本的审阅意见；DeepSeek 视觉输入
+  路线和兼容协议得到支持。
+- 可选 MCP 能力或模型目录不可用时，不再阻碍基本使用；provider 就绪状态作为诊断信息展示，
+  用户可以在目录请求失败时手动修复模型设置。
+- Task 验证失败时可以在同一次运行中修复；长会话压缩保留精确协议重放，durable 恢复界面展示可执行的
+  处理结果，不会静默重放结果不明的外部 effect。TUI 恢复会把进程中断时仍在执行的 Direct Task
+  标为可继续，保留原执行尝试与恢复证据；用户可用 `/task continue` 接着处理。
 
 ## v0.0.1-beta.4 - 2026-08-11
 

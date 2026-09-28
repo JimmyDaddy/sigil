@@ -8,6 +8,13 @@ use crate::{
 /// OpenAPI version emitted for the MVP desktop/app-server command surface.
 pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
 
+// Building the large sections in separate frames keeps the endpoint usable on
+// normal worker-thread stacks, including builds with serde_json preserve_order.
+#[inline(never)]
+fn build_openapi_section(section: impl FnOnce() -> Value) -> Value {
+    section()
+}
+
 /// Returns the MVP OpenAPI description for the local HTTP command surface.
 ///
 /// The document intentionally covers only routes implemented by this crate.
@@ -21,7 +28,7 @@ pub fn http_openapi_document() -> Value {
             "description": "Localhost-only adapter surface for desktop and future local clients."
         },
         "security": [{ "BearerAuth": [] }],
-        "paths": {
+        "paths": build_openapi_section(|| json!({
             "/health": {
                 "get": {
                     "summary": "Local listener health check",
@@ -1308,8 +1315,8 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             }
-        },
-        "components": {
+        })),
+        "components": build_openapi_section(|| json!({
             "securitySchemes": {
                 "BearerAuth": {
                     "type": "http",
@@ -4599,7 +4606,7 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             }
-        }
+        }))
     });
     document["paths"]["/settings/mcp-import/preview"] = json!({
         "post": {

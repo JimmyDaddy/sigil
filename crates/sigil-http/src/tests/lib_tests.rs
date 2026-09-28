@@ -41,9 +41,9 @@ use super::{
     HttpApplicationExtensionCatalog, HttpApplicationModelOption, HttpApprovalCommandReceipt,
     HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
     HttpApprovalLifecycleState, HttpApprovalRouteState, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCheckpointRestoreConflictReason, HttpCommandEnvelope,
-    HttpCompactionAdmission, HttpCompactionEconomics, HttpCompactionReceipt, HttpCompactionReview,
-    HttpContextWindowSource, HttpConversationDisplayCheckpointConflictReason,
+    HttpAuthValidator, HttpCheckpointRestoreConflictReason, HttpCheckpointRestoreRequest,
+    HttpCommandEnvelope, HttpCompactionAdmission, HttpCompactionEconomics, HttpCompactionReceipt,
+    HttpCompactionReview, HttpContextWindowSource, HttpConversationDisplayCheckpointConflictReason,
     HttpConversationDisplayContent, HttpConversationDisplayDriverError,
     HttpConversationDisplayItem, HttpConversationDisplayItemKind,
     HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
@@ -8455,6 +8455,29 @@ fn durable_session_mutation_guard_blocks_new_runs_and_evicts_idle_handle() {
         registry.get_session(&session.id),
         Err(HttpRegistryError::SessionNotFound { .. })
     ));
+}
+
+#[test]
+fn checkpoint_restore_preview_remains_readable_during_mutation_reservation() {
+    let registry = HttpSessionRunRegistry::new(Arc::new(RecordingRunDriver::default()));
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should create");
+    let _guard = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("mutation reservation should be claimable");
+
+    assert_eq!(
+        registry.checkpoint_restore_review(
+            &session.id,
+            HttpCheckpointRestoreRequest {
+                checkpoint_id: "checkpoint-1".to_owned(),
+                checkpoint_digest: "sha256-1".to_owned(),
+            },
+        ),
+        Err(HttpRegistryError::ConversationRecoveryUnavailable),
+        "read-only preview should reach the driver while a mutation is reserved"
+    );
 }
 
 #[test]

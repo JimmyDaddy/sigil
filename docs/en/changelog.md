@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -7,6 +7,16 @@
 This page lists user-facing release notes. For support boundaries and early-preview caveats, see [Supported Today And Future Work](status.md).
 
 ## Unreleased - main
+
+The signed Desktop build remains at beta.4. Desktop source changes awaiting its next release
+include follow-up reorder and interrupt controls, draft recovery during history loading,
+image attachments, manual model setup when catalog discovery fails, and checkpoint restore
+previews that remain available during run cleanup.
+
+## v0.0.1-beta.5 - 2026-09-29
+
+This is a TUI/npm beta. The GitHub Release stays a draft until signed Desktop assets are ready.
+It improves everyday input, follow-ups, plan review, and recovery in the TUI.
 
 - Transient provider disconnects, timeouts, rate limits, and server failures now recover within
   the same durable generation when no response or external effect was committed. Recovery is
@@ -33,6 +43,21 @@ This page lists user-facing release notes. For support boundaries and early-prev
   session, and an accepted answer resumes exactly one provider attempt without replaying the turn
   that asked the question. MCP elicitation reuses the form renderer without inheriting durable
   replay semantics.
+- TUI follow-ups can now reach every queued item and preserve an unsent composer draft when
+  editing one. Queued input is delivered at the next safe continuation point. Prompt admission
+  remains responsive while the run begins, and runtime timing diagnostics separate local delays
+  from model delays.
+- Session forks, selected branch knowledge, and version-bound review comments are available
+  through the shared runtime. DeepSeek vision-capable routes and compatibility protocols are
+  supported.
+- Optional MCP discovery no longer blocks basic use when a server lacks a capability or its model
+  catalog is unavailable. Provider readiness is diagnostic, and users can repair model setup
+  manually without waiting for a successful catalog request.
+- Task verification can repair failed checks within the existing run. Long-session compaction
+  preserves exact protocol replay, and durable recovery surfaces expose actionable outcomes
+  rather than silently restarting uncertain effects. After a TUI process interruption, an
+  in-flight Direct Task is resumable with `/task continue` while its exact execution attempt
+  and recovery evidence remain intact.
 
 ## v0.0.1-beta.4 - 2026-08-11
 

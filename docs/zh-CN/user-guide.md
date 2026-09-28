@@ -134,6 +134,8 @@ release 默认值是 `auto / explicit_request_only`。自动 Task 路由依据�
 
 会话日志保存在 Sigil 的用户状态目录中。直接运行 `sigil` 始终创建 fresh session，即使同一工作区已经打开另一个 Sigil 窗口也不会自动复用最近会话。恢复必须显式进行：`sigil resume` 恢复最近的受支持会话，`sigil resume <session-id>` 恢复精确会话，或用 `/resume` 选择。恢复会带回可见消息、任务状态、已完成活动摘要和中断工具结果，但不会静默重跑中断工具。退出时会显示会话 ID 和精确恢复命令。
 
+进程中断时仍在执行的 Direct Task 会恢复为可继续状态。使用 `/task continue` 选择最近的未完成任务；若上一次 provider 请求没有可证明的恢复调度，首次继续会明确停在阻塞状态，不会自动重放。检查状态后，再次明确继续才会启动新的执行尝试。
+
 同一 session 同时只允许一个可写交互表面 attach。目标 session 已在另一个 TUI 或 Desktop run 中活动时，Sigil 会保留当前 shell，并提供重试、新建会话或返回会话库；退出原 owner 后再重试即可，不要删除 attachment sidecar 或强制接管。
 
 同一可信 origin 内的 Provider endpoint 路径修正会在恢复时自动 rebind。origin、账户/tenant 边界变化、connection 缺失，或旧 session 无法证明 trust binding 时，需要显式确认当前 route 或选择 replacement。请在 `/config`（或 Desktop 设置）检查并保存目标 connection，或选择替代 route；session ID 与可移植对话记录保持不变，旧的 provider 私有 continuation 会被丢弃。

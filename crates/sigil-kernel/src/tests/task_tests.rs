@@ -268,6 +268,17 @@ fn task_pause_request_binds_exact_direct_authority() -> Result<()> {
 }
 
 #[test]
+fn task_pause_request_identity_uses_canonical_key_order() -> Result<()> {
+    let request = TaskPauseRequest::direct(task_id("task_1")?, "admission_3");
+
+    assert_eq!(
+        request.request_id,
+        "task-pause-05538f40b3b5c77b42326f2f5a5611b284e3e7a83867a70322e122c2774c6ed9",
+    );
+    Ok(())
+}
+
+#[test]
 fn child_session_ref_uses_stable_relative_layout() -> Result<()> {
     let reference = child_session_ref(
         &task_id("task_1")?,

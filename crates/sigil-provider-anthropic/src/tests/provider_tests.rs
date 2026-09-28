@@ -387,12 +387,23 @@ async fn provider_native_compact_uses_paused_beta_wire_and_preserves_raw_content
         compacted.canonical_compacted_content_json(),
         Some(r#"[{"type":"compaction","content":"opaque-summary","extension":{"retain":true}}]"#)
     );
-    let wire = server.request_text().to_ascii_lowercase();
+    let request_text = server.request_text();
+    let wire = request_text.to_ascii_lowercase();
     assert!(wire.contains("anthropic-beta: compact-2026-01-12"));
     assert_eq!(wire.matches("compact-2026-01-12").count(), 1);
-    assert!(wire.contains("\"stream\":false"));
-    assert!(wire.contains("\"context_management\":{\"edits\":[{\"pause_after_compaction\":true"));
-    assert!(wire.contains("\"type\":\"compact_20260112\""));
+    let (_, body) = request_text
+        .split_once("\r\n\r\n")
+        .expect("request includes HTTP headers and body");
+    let body: serde_json::Value = serde_json::from_str(body)?;
+    assert_eq!(body["stream"], false);
+    assert_eq!(
+        body["context_management"]["edits"][0]["pause_after_compaction"],
+        true
+    );
+    assert_eq!(
+        body["context_management"]["edits"][0]["type"],
+        "compact_20260112"
+    );
     Ok(())
 }
 

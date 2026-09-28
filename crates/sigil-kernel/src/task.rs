@@ -1281,10 +1281,16 @@ impl TaskPauseRequest {
 
     #[must_use]
     pub fn expected_request_id(&self) -> String {
-        let seed = serde_json::json!({
-            "task_id": self.task_id,
-            "execution": self.execution,
-        })
+        let execution = match &self.execution {
+            TaskExecutionBindingV1::Direct { admission_id } => BTreeMap::from([
+                ("admission_id", serde_json::json!(admission_id)),
+                ("kind", serde_json::json!("direct")),
+            ]),
+        };
+        let seed = serde_json::json!(BTreeMap::from([
+            ("execution", serde_json::json!(execution)),
+            ("task_id", serde_json::json!(self.task_id.as_str())),
+        ]))
         .to_string();
         format!("task-pause-{}", crate::sha256_hex(seed.as_bytes()))
     }

@@ -1495,9 +1495,17 @@ pub(in crate::runner) fn resolve_continue_task(
     session: &Session,
     requested_task_id: Option<String>,
 ) -> std::result::Result<(TaskId, String, String), String> {
+    let task_id = requested_task_id
+        .or_else(|| {
+            session
+                .task_state_projection()
+                .latest_unfinished_task()
+                .map(|task| task.task_id.as_str().to_owned())
+        })
+        .ok_or_else(|| "no unfinished Task to continue".to_owned())?;
     let task = sigil_runtime::agent_supervisor::task_execution::resolve_task_continuation(
         session,
-        requested_task_id.as_deref(),
+        Some(&task_id),
     )
     .map_err(|error| format!("{error:#}"))?;
     Ok((
