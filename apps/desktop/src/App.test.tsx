@@ -5768,6 +5768,39 @@ describe("desktop workspace and history shell", () => {
       .toEqual(["0", "external-update"]);
   });
 
+  it("does not retry a stale edit that could overwrite another client's change", async () => {
+    const user = userEvent.setup();
+    const defaults = bridgeWith();
+    const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(async () => {
+      throw { code: "queue_generation_stale" };
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      conversationQueue: async (workspaceId, sessionId) => ({
+        ...(await defaults.conversationQueue(workspaceId, sessionId)),
+        totalItems: 1,
+        items: [{
+          entryId: "shared-edit", order: 0, kind: "chat", status: "queued",
+          promptPreview: "Original safe prompt", promptPreviewTruncated: false,
+          promptMaterial: "persisted_safe", dispatchable: true,
+        }],
+      }),
+      commandConversationQueue,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await readyComposer();
+    await user.click(await screen.findByRole("button", { name: "Open follow-up queue, 1 messages" }));
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    const input = screen.getByRole("textbox", { name: "Replacement prompt" }) as HTMLTextAreaElement;
+    await user.clear(input);
+    await user.type(input, "My revised prompt");
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledOnce());
+    expect(input.value).toBe("My revised prompt");
+  });
+
   it("uses the latest queue generation across a run-next reorder and resume", async () => {
     const user = userEvent.setup();
     let generation = 0;

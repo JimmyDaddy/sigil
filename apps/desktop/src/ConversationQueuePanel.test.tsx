@@ -83,6 +83,50 @@ describe("conversation queue panel", () => {
     }));
   });
 
+  it("prefills only a complete persisted-safe prompt for editing", async () => {
+    const user = userEvent.setup();
+    renderQueue();
+
+    const editButtons = screen.getAllByRole("button", { name: "Replace queued message" });
+    await user.click(editButtons[0]!);
+    const input = screen.getByRole("textbox", { name: "Replacement prompt" }) as HTMLTextAreaElement;
+    expect(input.value).toBe("Run the focused tests");
+    expect(screen.queryByText(/The full prompt is not shown here/)).toBeNull();
+  });
+
+  it("keeps process-local exact and truncated prompts blank with a full-replacement explanation", async () => {
+    const user = userEvent.setup();
+    renderQueue(undefined, {
+      ...queue,
+      items: [{
+        ...queue.items[1]!,
+        promptMaterial: "available_process_local",
+        promptPreview: "Partial safe preview",
+        promptPreviewTruncated: false,
+      }],
+      totalItems: 1,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    const input = screen.getByRole("textbox", { name: "Replacement prompt" }) as HTMLTextAreaElement;
+    expect(input.value).toBe("");
+    expect(screen.getByText(/The full prompt is not shown here/)).toBeTruthy();
+
+    cleanup();
+    renderQueue(undefined, {
+      ...queue,
+      items: [{
+        ...queue.items[1]!,
+        promptPreview: "The first part of a longer prompt...",
+        promptPreviewTruncated: true,
+      }],
+      totalItems: 1,
+    });
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    expect((screen.getByRole("textbox", { name: "Replacement prompt" }) as HTMLTextAreaElement).value).toBe("");
+    expect(screen.getByText(/The full prompt is not shown here/)).toBeTruthy();
+  });
+
   it("emits explicit durable remove commands", async () => {
     const user = userEvent.setup();
     const onCommand = renderQueue();

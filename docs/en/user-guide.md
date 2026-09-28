@@ -77,6 +77,10 @@ an uncertain delivery is never resent automatically.
 The queue panel can move a later item to the front, resume a paused queue, or explicitly interrupt
 the current run and execute that item next. The interrupt action appears only while the current
 run owner can be verified; if ownership changes, the queued item remains available for review.
+Editing prefills the complete prompt only when it is safely persisted and untruncated. For a
+truncated preview or process-local exact prompt, enter the full replacement yourself. If another
+client changes the queue before your edit, your text stays in the editor for review instead of
+silently overwriting that change.
 
 ## Config Panel
 

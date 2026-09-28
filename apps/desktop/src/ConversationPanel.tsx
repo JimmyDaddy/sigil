@@ -1627,7 +1627,7 @@ export function ConversationPanel({
           action,
         });
       } catch (error) {
-        if (!isQueueGenerationStale(error)) throw error;
+        if (action.action !== "enqueue" || !isQueueGenerationStale(error)) throw error;
         queue = await bridge.conversationQueue(workspaceId, session.id);
         if (conversationQueueEpoch.current !== commandEpoch) return false;
         conversationQueueRef.current = queue;

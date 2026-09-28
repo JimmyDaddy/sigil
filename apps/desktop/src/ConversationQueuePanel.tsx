@@ -54,7 +54,9 @@ export function ConversationQueuePanel({
 
   const beginEdit = (item: ConversationQueueItem) => {
     setEditingEntryId(item.entryId);
-    setReplacementPrompt("");
+    setReplacementPrompt(item.promptMaterial === "persisted_safe" && !item.promptPreviewTruncated
+      ? item.promptPreview
+      : "");
   };
   const finishEdit = async (entryId: string) => {
     const prompt = replacementPrompt.trim();
@@ -182,6 +184,9 @@ export function ConversationQueuePanel({
                       rows={2}
                       onChange={(event) => setReplacementPrompt(event.target.value)}
                     />
+                    {item.promptMaterial !== "persisted_safe" || item.promptPreviewTruncated
+                      ? <small>{t("queueFullReplacementRequired")}</small>
+                      : null}
                     <div className="conversation-queue-edit-actions">
                       <Button type="button" variant="quiet" disabled={controlsBusy} onClick={() => {
                         setEditingEntryId(undefined);
