@@ -122,8 +122,6 @@ impl AppState {
         kind: ConversationInputKind,
         target: ConversationInputTarget,
     ) {
-        let projection = self.conversation_queue_projection();
-        let schedule_default_run_next = !projection.paused && projection.items.is_empty();
         let queue_id = self.next_optimistic_queue_id();
         let prompt = sigil_kernel::safe_persistence_text(&prompt);
         let queued = ConversationInputQueuedEntry {
@@ -135,9 +133,6 @@ impl AppState {
             reasoning_effort: Some(self.runtime.reasoning_effort.clone()),
             created_at_ms: None,
         };
-        if schedule_default_run_next {
-            self.composer.deferred_queue_promotions.push(queued.clone());
-        }
         self.composer
             .pending_queue_enqueues
             .push(QueueOperation::Enqueue {
@@ -352,6 +347,10 @@ impl AppState {
 
     pub(super) fn promote_selected_queue_item(&mut self) -> Option<AppAction> {
         let projection = self.conversation_queue_projection();
+        if self.composer.queue_selected == 0 && !projection.paused && !projection.items.is_empty() {
+            self.last_notice = Some("first follow-up is already next".to_owned());
+            return None;
+        }
         let item = projection
             .items
             .into_iter()

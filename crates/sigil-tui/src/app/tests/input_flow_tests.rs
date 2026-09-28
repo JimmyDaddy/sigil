@@ -950,13 +950,8 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let pending_action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(pending_action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("follow-up will run next after saving")
-    );
-    assert!(app.events.iter().any(|event| {
-        event.label == "follow-up:next" && event.detail == "waiting for durable queue id"
-    }));
+    assert_eq!(app.last_notice(), Some("first follow-up is already next"));
+    assert!(!app.has_pending_worker_commands());
 
     let entries = vec![queued_conversation_input_entry(
         "queue_1",
@@ -968,33 +963,14 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
         paused: false,
         entries,
     })?;
-    assert!(matches!(
-        app.drain_pending_worker_commands().as_slice(),
-        [crate::runner::WorkerCommand::PromoteQueuedConversationInput { queue_id }]
-            if queue_id.as_str() == "queue_1"
-    ));
+    assert!(app.drain_pending_worker_commands().is_empty());
     let rows = app.composer_queue_rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "follow up after this finishes");
     let confirmed_action =
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(
-        confirmed_action.is_none(),
-        "the deferred promotion still awaits its operation receipt after queue confirmation"
-    );
-    assert!(app.drain_pending_worker_commands().is_empty());
-    complete_queue_action_for_test(
-        &mut app,
-        &Some(AppAction::PromoteQueuedConversationInput {
-            queue_id: sigil_kernel::ConversationInputQueueId::new("queue_1")?,
-        }),
-    )?;
-    let settled_action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(matches!(
-        settled_action,
-        Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
-            if queue_id.as_str() == "queue_1"
-    ));
+    assert!(confirmed_action.is_none());
+    assert_eq!(app.last_notice(), Some("first follow-up is already next"));
     assert!(
         app.timeline
             .iter()
