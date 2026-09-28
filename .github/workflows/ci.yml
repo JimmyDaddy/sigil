@@ -384,6 +384,10 @@ jobs:
         if: runner.os == 'Windows'
         run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-kernel --lib
 
+      - name: Test Windows control log recovery
+        if: runner.os == 'Windows'
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-resource-authority --lib windows_recovery_activates_successor_without_directory_flush_support
+
   platform-windows-mcp:
     name: Platform reliability (Windows MCP)
     needs: check

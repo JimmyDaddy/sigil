@@ -622,7 +622,7 @@ def inspect_session(state_dir: Path) -> SessionAudit:
     sessions = []
     for pattern in (
         "workspaces/*/sessions/session-*.jsonl",
-        "managed/session-log/session-*/records.jsonl",
+        "managed/session-log/*/records.jsonl",
     ):
         for candidate in state_dir.glob(pattern):
             try:
