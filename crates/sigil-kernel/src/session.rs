@@ -361,7 +361,7 @@ pub use store::{
     JsonlSessionStore, MAX_SESSION_RAW_RECORD_BYTES, SessionIoBusyError, SessionIoBusyKind,
     SessionIoLockMetricsSnapshot, SessionObservationCancelled, SessionReadBudget,
     SessionRecordRange, SessionRecordReadHandle, SessionRecordSourceSnapshot,
-    SessionRunRecorderSource, SessionStreamRecordReader, session_io_lock_metrics,
+    SessionStreamRecordReader, session_io_lock_metrics,
 };
 pub use tool_artifact::{
     ModelMessagePayloadV1, ProcessStreamCaptureConfigV1, ProviderToolResultMessageV1,

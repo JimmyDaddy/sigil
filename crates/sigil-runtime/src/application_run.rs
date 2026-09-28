@@ -22,11 +22,10 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
-    Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, SessionRunRecorderSource,
-    TaskId, TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest, ToolArtifactStore,
-    ToolRegistryScope, VerificationProductView, WorkspaceTrust, rerun_task_verification_check,
-    resolve_workspace_root, safe_persistence_text, verification_product_view,
-    workspace_trust_from_entries,
+    Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, TaskId, TaskPauseRequest,
+    TaskRunStatus, TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope,
+    VerificationProductView, WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root,
+    safe_persistence_text, verification_product_view, workspace_trust_from_entries,
 };
 
 /// The kernel owns the sole exhaustive conversation/application terminal status table.
@@ -7027,7 +7026,7 @@ fn canonical_session_lease_path(path: &Path) -> Result<PathBuf> {
 pub(crate) struct ApplicationRunEventSequence {
     session_id: String,
     run_id: String,
-    outbox_store: SessionRunRecorderSource,
+    outbox_store: JsonlSessionStore,
     projection_owner: crate::RuntimeSessionProjectionOwner,
     outbox: PublicEventOutboxRecorder,
     live_preview: RuntimeLivePreviewSource,
@@ -7073,9 +7072,8 @@ impl ApplicationRunEventSequence {
         run_id: String,
         outbox_store: JsonlSessionStore,
     ) -> Result<Self> {
-        let source = SessionRunRecorderSource::from_store(outbox_store);
-        let records = source.read_event_records_writer()?;
-        Self::with_outbox_records(session_id, run_id, source, &records)
+        let records = outbox_store.read_event_records_writer()?;
+        Self::with_outbox_records(session_id, run_id, outbox_store, &records)
     }
 
     // Used only while constructing a recorder from the same freshly validated durable prefix.
@@ -7083,10 +7081,10 @@ impl ApplicationRunEventSequence {
     fn with_outbox_records(
         session_id: String,
         run_id: String,
-        outbox_store: SessionRunRecorderSource,
+        outbox_store: JsonlSessionStore,
         records: &[sigil_kernel::SessionStreamRecord],
     ) -> Result<Self> {
-        let outbox = outbox_store.public_outbox_recorder();
+        let outbox = PublicEventOutboxRecorder::new(outbox_store.clone());
         let projection = PublicEventOutboxProjectionV1::from_records(records)?;
         let sequence = projection.durable_sequence(&run_id);
         let conversation_terminals = records
@@ -7109,9 +7107,7 @@ impl ApplicationRunEventSequence {
         });
         Ok(Self {
             live_preview: RuntimeLivePreviewSource::new(&session_id, &run_id, terminal),
-            projection_owner: crate::RuntimeSessionProjectionOwner::from_run_recorder_source(
-                &outbox_store,
-            ),
+            projection_owner: crate::RuntimeSessionProjectionOwner::from_store(&outbox_store),
             session_id,
             run_id,
             outbox_store,

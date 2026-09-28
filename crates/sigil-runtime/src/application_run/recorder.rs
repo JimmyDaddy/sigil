@@ -37,7 +37,11 @@ impl ApplicationRunEventRecorder {
 
     /// Rejoins the durable sequence without emitting a new start or acknowledging delivery.
     pub fn resume(session: &Session, run_id: &str) -> Result<Self> {
-        let store = session.run_recorder_source()?;
+        let store = JsonlSessionStore::open_existing(
+            session
+                .store_path()
+                .context("application recorder requires a durable session")?,
+        )?;
         let records = store.read_current_event_records_writer()?;
         let mut events = ApplicationRunEventSequence::with_outbox_records(
             session.session_scope_id().to_owned(),

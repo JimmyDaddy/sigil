@@ -140,16 +140,6 @@ impl SharedSessionCoordinator {
         self.read_reconciled_records().map(|_| ())
     }
 
-    /// Reuses an already-attached session owner's validated writer, while enforcing no-create
-    /// recovery semantics. A changed tail still reloads and recovers through the normal writer.
-    pub(super) fn require_existing_current(&self) -> Result<()> {
-        {
-            let mut writer = self.lock_writer()?;
-            writer.require_existing();
-        }
-        self.read_current_records().map(|_| ())
-    }
-
     pub(super) fn metrics(&self) -> ActiveProjectionMetricsSnapshot {
         ActiveProjectionMetricsSnapshot {
             snapshot_total: self.snapshot_total.load(Ordering::Relaxed),
@@ -1872,8 +1862,6 @@ pub(super) struct LinearSessionWriter {
     data_sync_count: u64,
     #[cfg(any(test, feature = "test-support"))]
     next_fault: Option<SessionWriterFault>,
-    #[cfg(any(test, feature = "test-support"))]
-    last_triggered_fault: Option<SessionWriterFault>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2029,8 +2017,6 @@ impl LinearSessionWriter {
             data_sync_count: 0,
             #[cfg(any(test, feature = "test-support"))]
             next_fault: None,
-            #[cfg(any(test, feature = "test-support"))]
-            last_triggered_fault: None,
         }
     }
 
@@ -2123,7 +2109,6 @@ impl LinearSessionWriter {
                 #[cfg(any(test, feature = "test-support"))]
                 if self.next_fault == Some(SessionWriterFault::ParentDirectorySync) {
                     self.next_fault = None;
-                    self.last_triggered_fault = Some(SessionWriterFault::ParentDirectorySync);
                     bail!("injected session parent directory sync failure");
                 }
                 sync_parent_dir(&self.path)?;
@@ -2139,10 +2124,6 @@ impl LinearSessionWriter {
 
     fn tail_needs_reload(&self, file: &mut File) -> bool {
         self.requires_reload
-            // An intent can be durable before the data file changes. Cached tail identity alone
-            // cannot prove that recovery has finished.
-            || !matches!(read_append_bundle_intent(&self.path), Ok(None))
-            || !matches!(read_tail_recovery_intent(&self.path), Ok(None))
             || self
                 .tail
                 .as_ref()
@@ -2453,14 +2434,12 @@ impl LinearSessionWriter {
             let attempt = (|| -> Result<u64> {
                 #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeWrite) {
-                    self.last_triggered_fault = injected_fault;
                     bail!("injected stored event pre-write failure");
                 }
                 #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry
                     && injected_fault == Some(SessionWriterFault::DiskSpaceExhaustedBeforeWrite)
                 {
-                    self.last_triggered_fault = injected_fault;
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::StorageFull,
                         "injected session storage exhaustion",
@@ -2476,7 +2455,6 @@ impl LinearSessionWriter {
                         .context("failed to inject partial stored event write")?;
                     file.flush()
                         .context("failed to flush injected partial stored event write")?;
-                    self.last_triggered_fault = injected_fault;
                     bail!("injected partial stored event write failure");
                 }
                 #[cfg(any(test, feature = "test-support"))]
@@ -2492,7 +2470,6 @@ impl LinearSessionWriter {
                             .context("failed to inject partial second stored event write")?;
                         file.flush()
                             .context("failed to flush injected partial stored event write")?;
-                        self.last_triggered_fault = injected_fault;
                         bail!("injected partial second stored event write failure");
                     }
                     file.write_all(line)
@@ -2511,7 +2488,6 @@ impl LinearSessionWriter {
                 file.flush().context("failed to flush stored event batch")?;
                 #[cfg(any(test, feature = "test-support"))]
                 if !storage_retry && injected_fault == Some(SessionWriterFault::BeforeSync) {
-                    self.last_triggered_fault = injected_fault;
                     bail!("injected stored event sync failure");
                 }
                 if any_recovery_critical {
@@ -2922,12 +2898,6 @@ impl LinearSessionWriter {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn inject_fault(&mut self, fault: SessionWriterFault) {
         self.next_fault = Some(fault);
-        self.last_triggered_fault = None;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn last_triggered_fault(&self) -> Option<SessionWriterFault> {
-        self.last_triggered_fault
     }
 }
 

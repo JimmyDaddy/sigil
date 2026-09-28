@@ -3544,14 +3544,6 @@ fn deferred_recorder_resume_preserves_public_sequence_terminal_and_pending_deliv
     );
     assert_eq!(projection.pending_for_adapter("application").len(), 3);
     assert_eq!(application_conversation_lifecycle(&path)?.len(), 2);
-    drop(terminal);
-    drop(session);
-    let reopened =
-        Session::load_from_store("fixture", "model", JsonlSessionStore::open_existing(&path)?)?;
-    let resumed_after_restart = crate::ApplicationRunEventRecorder::resume(&reopened, run_id)?;
-    assert_eq!(resumed_after_restart.public_sequence()?, 3);
-    assert!(resumed_after_restart.live_preview_source().is_terminal());
-    assert_eq!(std::fs::read(&path)?, terminal_bytes);
     Ok(())
 }
 
