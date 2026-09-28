@@ -4559,9 +4559,14 @@ describe("desktop workspace and history shell", () => {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
     });
-    fireEvent.pointerEnter(timeline);
+    fireEvent.wheel(timeline);
     timeline.scrollTop = 72;
     fireEvent.scroll(timeline);
+    await act(async () => {
+      for (let frame = 0; frame < 5; frame += 1) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+    });
     await user.type(composer, "Preserve this draft");
     const reviewTrigger = await screen.findByRole("button", { name: "Open verification: passed" });
     await user.click(reviewTrigger);
