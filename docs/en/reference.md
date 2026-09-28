@@ -30,12 +30,12 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
-| Import a completed conclusion into the current conversation | Saved-session actions, `K`; select and read a conclusion, then `Enter` imports without sending |
+| Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Branch from a completed conversation turn | `Alt-B`; `Up/Down` selects, `Enter` branches, `Esc` closes. While editing, `Alt-B` keeps word navigation. |
 | Comment on recorded changes | `Alt-R`; select a checkpoint, file and line range, `Enter` adds a comment, `Ctrl-S` sends or queues the batch |
-| Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Open Intent Stack review | `Alt-S`; `Up/Down` selects, `D` previews Drop, `Enter` confirms |
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
+| Import a completed conclusion into the current conversation | Saved-session actions, `K`; select and read a conclusion, then `Enter` imports without sending |
 | Toggle latest Mermaid source | `Ctrl-O` when no saved-session, tool-card, or other higher-priority action is active |
 | Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
 | Expand/collapse the current task list, thinking, or activity | Click the task overflow row or press `Ctrl-T` |
