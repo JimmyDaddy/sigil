@@ -2,6 +2,20 @@ use super::surface::SpawnIsolation;
 use super::*;
 
 impl AgentToolRuntime {
+    pub(super) fn spawn_agent_boxed<'a>(
+        &'a mut self,
+        session: &'a mut Session,
+        call: &'a ToolCall,
+        args: &'a Value,
+        options: &'a sigil_kernel::AgentRunOptions,
+        handler: &'a mut (dyn EventHandler + Send),
+        approval_handler: &'a mut (dyn ApprovalHandler + Send),
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+        // Construct the large spawn future in this short-lived frame so its temporaries do not
+        // accumulate in the agent-tool dispatcher's poll stack on Windows.
+        Box::pin(self.spawn_agent(session, call, args, options, handler, approval_handler))
+    }
+
     pub(super) async fn spawn_agent(
         &mut self,
         session: &mut Session,
@@ -242,7 +256,8 @@ impl AgentToolRuntime {
         let mut chat_worktree = None;
         let mut child_workspace_root = options.workspace_root.clone();
         if worktree_write {
-            match prepare_chat_worktree(session, handler, &thread_id, &options.workspace_root).await
+            match prepare_chat_worktree_boxed(session, handler, &thread_id, &options.workspace_root)
+                .await
             {
                 Ok(materialized) => {
                     child_workspace_root = materialized.workspace_root().to_path_buf();
@@ -1334,6 +1349,26 @@ fn default_spawn_isolation(role: AgentRole, profile: &ResolvedAgentProfile) -> S
     }
 }
 
+fn prepare_chat_worktree_boxed<'a>(
+    session: &'a mut Session,
+    handler: &'a mut (dyn EventHandler + Send),
+    thread_id: &'a AgentThreadId,
+    workspace_root: &'a Path,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<crate::isolated_workspace::MaterializedGitWorktree>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(prepare_chat_worktree(
+        session,
+        handler,
+        thread_id,
+        workspace_root,
+    ))
+}
+
 async fn prepare_chat_worktree(
     session: &mut Session,
     handler: &mut (dyn EventHandler + Send),
@@ -1364,15 +1399,14 @@ async fn prepare_chat_worktree(
     })
     .await
     .context("chat worktree mutation lease task failed")??;
-    let frozen = crate::isolated_workspace::freeze_git_worktree_base(
-        crate::isolated_workspace::GitWorktreeBaseFreezeRequest {
+    let frozen =
+        freeze_chat_worktree_base_boxed(crate::isolated_workspace::GitWorktreeBaseFreezeRequest {
             parent_workspace_root: workspace_root.to_path_buf(),
             base_snapshot_id: base_snapshot_id.clone(),
             operation_id,
             artifact_recorder: recorder,
-        },
-    )
-    .await?;
+        })
+        .await?;
     let isolated_workspace_id = chat_worktree_id(thread_id);
     let parent_workspace_id = stable_workspace_id(workspace_root)?;
     let owner_agent_id = format!("agent:{}", thread_id.as_str());
@@ -1393,11 +1427,8 @@ async fn prepare_chat_worktree(
             overlay_entry_count: frozen.overlay_entry_count(),
         }),
     )?;
-    let materialized = match crate::isolated_workspace::materialize_git_worktree_from_frozen_base(
-        &frozen,
-        isolated_workspace_id.clone(),
-    )
-    .await
+    let materialized = match materialize_chat_worktree_boxed(&frozen, isolated_workspace_id.clone())
+        .await
     {
         Ok(materialized) => materialized,
         Err(error) => {
@@ -1452,6 +1483,35 @@ async fn prepare_chat_worktree(
         });
     }
     Ok(materialized)
+}
+
+fn freeze_chat_worktree_base_boxed(
+    request: crate::isolated_workspace::GitWorktreeBaseFreezeRequest,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<crate::isolated_workspace::FrozenGitWorktreeBase>>
+            + Send,
+    >,
+> {
+    Box::pin(crate::isolated_workspace::freeze_git_worktree_base(request))
+}
+
+fn materialize_chat_worktree_boxed(
+    frozen: &crate::isolated_workspace::FrozenGitWorktreeBase,
+    isolated_workspace_id: String,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<crate::isolated_workspace::MaterializedGitWorktree>>
+            + Send
+            + '_,
+    >,
+> {
+    Box::pin(
+        crate::isolated_workspace::materialize_git_worktree_from_frozen_base(
+            frozen,
+            isolated_workspace_id,
+        ),
+    )
 }
 
 fn chat_worktree_id(thread_id: &AgentThreadId) -> String {

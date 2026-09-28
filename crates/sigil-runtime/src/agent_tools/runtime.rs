@@ -540,7 +540,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                 .await
             }
             AgentToolKind::Spawn => {
-                self.spawn_agent(session, call, &args, options, handler, approval_handler)
+                self.spawn_agent_boxed(session, call, &args, options, handler, approval_handler)
                     .await
             }
             AgentToolKind::SpawnBatch => {

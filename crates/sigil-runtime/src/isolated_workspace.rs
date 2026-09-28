@@ -2361,8 +2361,8 @@ async fn collect_git_output_with_limit(
         .ok_or_else(|| anyhow!("Git command stderr pipe is unavailable"))?;
     let output = tokio::time::timeout(GIT_COMMAND_TIMEOUT, async move {
         let (stdout, stderr, status) = tokio::try_join!(
-            read_bounded_output(stdout, stdout_limit),
-            read_bounded_output(stderr, GIT_ERROR_OUTPUT_LIMIT),
+            Box::pin(read_bounded_output(stdout, stdout_limit)),
+            Box::pin(read_bounded_output(stderr, GIT_ERROR_OUTPUT_LIMIT)),
             child.wait()
         )?;
         Ok::<_, std::io::Error>(BoundedGitOutput {
@@ -2470,8 +2470,8 @@ pub(crate) async fn run_git_bytes_with_stdin(
         };
         let (_, stdout, stderr, status) = tokio::try_join!(
             writer,
-            read_bounded_output(stdout, stdout_limit),
-            read_bounded_output(stderr, GIT_ERROR_OUTPUT_LIMIT),
+            Box::pin(read_bounded_output(stdout, stdout_limit)),
+            Box::pin(read_bounded_output(stderr, GIT_ERROR_OUTPUT_LIMIT)),
             child.wait()
         )?;
         Ok::<_, std::io::Error>(BoundedGitOutput {

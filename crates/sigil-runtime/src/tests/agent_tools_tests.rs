@@ -6264,8 +6264,26 @@ async fn cancel_direct_task_user_input(
     Ok(())
 }
 
-#[tokio::test]
-async fn cancelling_worktree_background_child_cleans_its_git_worktree() -> Result<()> {
+#[test]
+fn cancelling_worktree_background_child_cleans_its_git_worktree() -> Result<()> {
+    let test = std::thread::Builder::new()
+        .name("worktree-child-small-stack".to_owned())
+        .stack_size(1024 * 1024)
+        .spawn(|| -> Result<()> {
+            // Construct and poll the complete spawn/cancel path on the bounded thread. Building
+            // a future on the test harness thread would miss large construction temporaries.
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(cancel_worktree_background_child_on_small_stack())
+        })?;
+    match test.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+async fn cancel_worktree_background_child_on_small_stack() -> Result<()> {
     let mut config = root_config();
     config.task.allow_write_subagents = true;
     config.permission.mode = PermissionMode::DangerFullAccess;
