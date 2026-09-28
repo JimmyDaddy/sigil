@@ -341,6 +341,13 @@ workspace、文档、站点和分发 gate。
 | --- | --- | --- | --- | --- | --- |
 | `sigil-resource-authority` | workspace path crate；`sigil-tools-builtin` dev-dependency，无新增 feature | `sigil-tools-builtin/tests/file_tool_fixture` | 用真实 RA、capability broker 与独立临时 storage 验证生产文件工具，清除 `cfg(test)` legacy 业务实现 | Sigil first-party crate；本仓库维护 | 仅增加测试依赖边，不改变 shipping crate 图；验证连续读写、CAS、拒绝、mutation 事实、流式输出与取消预算，fixture 经统一隔离入口运行 |
 
+
+## 模型评测实际补丁产物（A2）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `similar` | `2.7.0`；复用 workspace 默认 feature | `sigil-runtime/model_eval/trajectory` | 对显式评测 fixture 与其实际输出生成 UTF-8 unified diff；来源 hash 与有界文件读取保留，不执行补丁或授予写权限 | Apache-2.0；mitsuhiko/similar | 复用既有锁定版本，不新增网络/原生依赖；非文本或不可完整观察记为 unknown/incomplete。发布前仍执行仓库 supply-chain gate，离线回归不替代安全审计 |
+
 ## Desktop 原生图片输入（A3）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

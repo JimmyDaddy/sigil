@@ -1251,3 +1251,9 @@ fn unix_time_ms() -> Result<u64> {
 #[cfg(test)]
 #[path = "../tests/model_eval_cost_tests.rs"]
 mod cost_tests;
+
+#[cfg(test)]
+#[path = "../tests/model_eval_task_usage_support.rs"]
+mod task_usage_support;
+#[cfg(test)]
+pub use task_usage_support::{observe_task_eval_patch, observe_task_eval_usage};

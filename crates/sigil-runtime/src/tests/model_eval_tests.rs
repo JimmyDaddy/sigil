@@ -2343,3 +2343,133 @@ fn model_eval_registered_exec_command_runs_beyond_old_six_tool_gate() {
             assert_eq!(requests.lock().expect("requests").len(), 2);
         });
 }
+
+#[test]
+fn a5_patch_observation_keeps_new_helper_from_real_write_and_check() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::a5_patch_observation_keeps_new_helper_from_real_write_and_check",
+        "SIGIL_TEST_A5_PATCH_HELPER_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime").block_on(async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let content = "answer = 42\n";
+        let (base_url, mut server) = spawn_scripted_eval_tool_sequence_server(
+            Arc::clone(&requests), vec![("write_file".to_owned(),
+                serde_json::json!({"path":"generated.py","content":content}))],
+        ).await.expect("provider");
+        let temp = tempdir().expect("temp");
+        let fixture_path = temp.path().join("fixture");
+        fs::create_dir(&fixture_path).expect("fixture");
+        write_python_model_eval_fixture(&fixture_path, false);
+        let manifest_path = fixture_path.join("fixture.toml");
+        let mut manifest: crate::model_eval::ModelEvalFixtureManifest = toml::from_str(
+            &fs::read_to_string(&manifest_path).expect("manifest")).expect("manifest type");
+        manifest.allowed_tools.push("write_file".to_owned());
+        let check_source = "import runpy\nassert runpy.run_path('generated.py')['answer'] == 42\n";
+        fs::write(fixture_path.join("files/check.py"), check_source).expect("oracle");
+        let check = manifest.files.iter_mut().find(|file| file.path == Path::new("check.py")).expect("check");
+        check.sha256 = format!("sha256:{:x}", Sha256::digest(check_source.as_bytes()));
+        manifest.assertions.retain(|assertion| assertion.id == "independent-oracle");
+        fs::write(manifest_path, toml::to_string(&manifest).expect("encode")).expect("save");
+        let config_path = temp.path().join("source.toml");
+        write_source_config(&config_path, &base_url, "auto-edit");
+        let result = run_model_eval_campaign(ModelEvalCampaignRequest {
+            config_path, fixture_roots: vec![fixture_path], orchestration_route_contract: None,
+            repetitions: 1, max_cost_microusd: 500_000, campaign_timeout: Duration::from_secs(30),
+            output_dir: temp.path().join("campaign"), release_output_owner: None,
+        }, &ApplicationRunServices::new(Arc::new(RejectingPresenter))).await;
+        let joined = match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                server.abort();
+                let _ = server.await;
+                panic!("campaign did not finish its bounded provider script");
+            }
+        };
+        joined.expect("provider joined");
+        let campaign = result.expect("campaign");
+        let run = &campaign.runs[0];
+        assert_eq!(run.verification.as_ref().expect("real check").verdict, VerificationVerdict::Passed);
+        let accepted: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(campaign.output_dir.join("results.jsonl")).expect("result").trim()).expect("JSON");
+        assert_eq!(accepted["acceptance_passed"], true);
+        assert_eq!(requests.lock().expect("requests").len(), 2);
+        let records = JsonlSessionStore::read_event_records(&run.session_path).expect("records");
+        assert!(records.iter().any(|record| matches!(record.session_log_entry().expect("entry"),
+            Some(sigil_kernel::SessionLogEntry::Control(ControlEntry::ToolExecution(entry)))
+                if entry.tool_name == "write_file" && entry.status == ToolExecutionStatus::Completed)));
+        let (patch, observation) = crate::model_eval::observe_task_eval_patch(&run.materialized_fixture);
+        assert!(patch.contains("+++ b/generated.py"));
+        assert!(patch.contains("+answer = 42"));
+        assert_eq!(observation["complete_for_workspace_regular_file_contents"], true);
+        let helper = observation["files"].as_array().expect("files").iter()
+            .find(|file| file["path"] == "generated.py").expect("new helper recorded");
+        assert!(helper["before_sha256"].is_null());
+        assert_eq!(helper["after_sha256"], format!("sha256:{:x}", Sha256::digest(content.as_bytes())));
+    });
+}
+
+#[test]
+fn a5_patch_observation_marks_unavailable_binary_and_deleted_contents_distinctly() {
+    let temp = tempdir().expect("temp");
+    let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("fixture");
+    let materialized = materialize_model_eval_fixture(&fixture, temp.path().join("workspace"))
+        .expect("materialize");
+    fs::remove_file(materialized.workspace_root.join("Cargo.lock")).expect("delete");
+    fs::write(materialized.workspace_root.join("empty.py"), b"").expect("empty");
+    let (patch, observation) = crate::model_eval::observe_task_eval_patch(&materialized);
+    assert_eq!(
+        observation["complete_for_workspace_regular_file_contents"],
+        true
+    );
+    assert!(patch.contains("--- a/Cargo.lock\n+++ /dev/null"));
+    assert!(patch.contains("diff --git a/empty.py b/empty.py\nnew file mode 100644"));
+    fs::write(materialized.workspace_root.join("binary.dat"), [0, 255]).expect("binary");
+    fs::write(
+        materialized.workspace_root.join("huge.dat"),
+        vec![b'x'; crate::model_eval::MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES as usize + 1],
+    )
+    .expect("large");
+    // A directory at an original file path is a real read error, not a deletion.
+    fs::remove_file(materialized.workspace_root.join("src/lib.rs")).expect("remove source");
+    fs::create_dir(materialized.workspace_root.join("src/lib.rs")).expect("non-file");
+    let (partial, observation) = crate::model_eval::observe_task_eval_patch(&materialized);
+    assert_eq!(
+        observation["complete_for_workspace_regular_file_contents"],
+        false
+    );
+    let files = observation["files"].as_array().expect("files");
+    let status = |path: &str| {
+        files
+            .iter()
+            .find(|file| file["path"] == path)
+            .expect("observed path")["status"]
+            .clone()
+    };
+    assert_eq!(status("binary.dat"), "binary_or_unrepresentable");
+    assert_eq!(status("huge.dat"), "unavailable");
+    assert_eq!(status("src/lib.rs"), "unavailable");
+    assert!(!partial.contains("--- a/src/lib.rs"));
+    #[cfg(unix)]
+    {
+        fs::write(temp.path().join("outside"), b"outside sentinel").expect("outside");
+        std::os::unix::fs::symlink(
+            temp.path().join("outside"),
+            materialized.workspace_root.join("linked"),
+        )
+        .expect("link");
+        let (partial, observation) = crate::model_eval::observe_task_eval_patch(&materialized);
+        assert!(!partial.contains("outside sentinel"));
+        let linked = observation["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .find(|file| file["path"] == "linked")
+            .expect("link observation");
+        assert_eq!(linked["status"], "unavailable");
+        assert!(linked["after_sha256"].is_null());
+    }
+}
