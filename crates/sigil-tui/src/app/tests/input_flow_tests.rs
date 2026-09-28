@@ -1481,6 +1481,50 @@ fn queue_edit_escape_cancels_without_submitting() -> Result<()> {
 }
 
 #[test]
+fn queue_edit_restores_the_unsent_composer_draft_on_cancel_and_success() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "queued prompt",
+    )?]);
+    app.composer.input = "unfinished draft".to_owned();
+    app.composer.input_cursor = 4;
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "draft-image",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?;
+    app.composer.image_attachments.push(image.clone());
+    app.composer.selected_image_attachment = Some(0);
+    assert!(app.focus_composer_queue_panel());
+    assert!(app.begin_edit_selected_queue_item());
+    assert_eq!(app.composer.input, "queued prompt");
+    assert!(app.composer.image_attachments.is_empty());
+    assert!(app.cancel_queue_edit());
+    assert_eq!(app.composer.input, "unfinished draft");
+    assert_eq!(app.composer.input_cursor, 4);
+    assert_eq!(app.composer.image_attachments, vec![image.clone()]);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+
+    assert!(app.begin_edit_selected_queue_item());
+    app.set_input_and_cursor("revised queued prompt".to_owned());
+    let edit = app.submit_input()?;
+    assert!(matches!(
+        edit,
+        Some(AppAction::EditQueuedConversationInput { .. })
+    ));
+    complete_queue_action_for_test(&mut app, &edit)?;
+    assert!(app.composer.queue_edit_target.is_none());
+    assert_eq!(app.composer.input, "unfinished draft");
+    assert_eq!(app.composer.input_cursor, 4);
+    assert_eq!(app.composer.image_attachments, vec![image]);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    Ok(())
+}
+
+#[test]
 fn agent_message_command_reports_unavailable_child_view_without_thread_id() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.agent_panel.active_view = super::super::AgentView::Child {

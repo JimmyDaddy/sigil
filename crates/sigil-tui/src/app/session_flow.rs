@@ -694,6 +694,7 @@ impl AppState {
         self.composer.optimistic_queue_items.clear();
         self.composer.deferred_queue_promotions.clear();
         self.composer.queue_edit_target = None;
+        self.restore_queue_edit_draft();
         self.composer.pending_queue_operations.clear();
         self.composer.pending_queue_pause = None;
         self.composer.pending_queue_enqueues.clear();

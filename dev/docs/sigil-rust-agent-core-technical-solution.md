@@ -2103,7 +2103,7 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
   同一 review 的新草稿完成时保留审阅页面并切换内容，不自动执行；页内操作 pending/success/error 与输入提交回执
   都匹配 exact id/hash/generation，旧响应不能污染新请求。该表现层只投影 durable `PlanRevision` user-input source，
   不改变 append-only 决策语义；快捷键依据当前动作生成，没有结构数据时不显示虚假的零计数
-- 后续输入的删除、编辑、排序与暂停使用独立操作回执；本地 pending 防止重复派发，成功只在持久化回执到达后显示。
+- 后续输入的删除、编辑、排序与暂停使用独立操作回执；本地 pending 防止重复派发，成功只在持久化回执到达后显示。TUI 编辑后续输入暂借 composer 时保存原文字、光标与附件；取消、成功结算或队列项离开待执行状态后恢复原草稿，编辑回执等待期间的新输入继续留在编辑上下文。
   已取消的 exact queue item 可幂等确认，已消费或未知 item 返回对应错误；这些失败不得进入全局 `RunFailed`
   或清除当前 Task、工具活动与运行状态。回执必须匹配 session scope 与对应 pending operation。
   已入队消息的删除、编辑、排序、发送与暂停操作，以及 Plan 决策和修订 guidance 提交，在主线程冻结请求后交给有界后台 admission owner，持久化接收不得阻塞

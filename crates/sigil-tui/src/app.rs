@@ -2060,7 +2060,6 @@ impl AppState {
                     return Ok(None);
                 }
                 if self.cancel_queue_edit() {
-                    self.clear_input_preserving_draft();
                     self.reset_input_history_navigation();
                     self.reset_slash_selector();
                     self.active_pane = PaneFocus::Composer;

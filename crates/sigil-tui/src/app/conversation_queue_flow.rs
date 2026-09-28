@@ -12,6 +12,7 @@ use crate::{
     ui::StatusKind,
 };
 
+use super::state::QueueEditComposerDraft;
 use super::{AgentView, AppAction, AppState, ComposerQueueAction, PaneFocus};
 
 const COMPOSER_QUEUE_VISIBLE_ROWS: usize = 4;
@@ -445,6 +446,15 @@ impl AppState {
             self.last_notice = Some(operation.pending_label().to_owned());
             return false;
         }
+        if self.composer.queue_edit_draft.is_none() {
+            self.composer.queue_edit_draft = Some(QueueEditComposerDraft {
+                input: self.composer.input.clone(),
+                input_cursor: self.composer.input_cursor,
+                input_paste_spans: self.composer.input_paste_spans.clone(),
+                image_attachments: std::mem::take(&mut self.composer.image_attachments),
+                selected_image_attachment: self.composer.selected_image_attachment.take(),
+            });
+        }
         self.composer.queue_edit_target = Some(item.queued.queue_id.clone());
         self.set_input_and_cursor(item.queued.prompt.clone());
         self.active_pane = PaneFocus::Composer;
@@ -466,9 +476,7 @@ impl AppState {
             });
             if !target_is_still_queued {
                 self.composer.queue_edit_target = None;
-                self.composer.input.clear();
-                self.composer.input_cursor = 0;
-                self.composer.input_paste_spans.clear();
+                self.restore_queue_edit_draft();
             }
         }
         let projection = self.conversation_queue_projection();
@@ -580,8 +588,20 @@ impl AppState {
             return false;
         }
         self.composer.queue_edit_target = None;
+        self.restore_queue_edit_draft();
         self.last_notice = Some("follow-up edit cancelled".to_owned());
         true
+    }
+
+    pub(super) fn restore_queue_edit_draft(&mut self) {
+        let Some(draft) = self.composer.queue_edit_draft.take() else {
+            return;
+        };
+        self.composer.input = draft.input;
+        self.composer.input_cursor = draft.input_cursor;
+        self.composer.input_paste_spans = draft.input_paste_spans;
+        self.composer.image_attachments = draft.image_attachments;
+        self.composer.selected_image_attachment = draft.selected_image_attachment;
     }
 
     fn composer_queue_panel_available(&self) -> bool {
@@ -774,18 +794,14 @@ impl AppState {
                     prompt_hash,
                 } = &operation
                     && self.composer.queue_edit_target.as_ref() == Some(queue_id)
-                {
-                    self.composer.queue_edit_target = None;
-                    if conversation_prompt_hash(&sigil_kernel::safe_persistence_text(
+                    && conversation_prompt_hash(&sigil_kernel::safe_persistence_text(
                         self.composer.input.trim(),
                     )) == *prompt_hash
-                    {
-                        self.composer.input.clear();
-                        self.composer.input_cursor = 0;
-                        self.composer.input_paste_spans.clear();
-                        self.reset_slash_selector();
-                        self.reset_input_history_navigation();
-                    }
+                {
+                    self.composer.queue_edit_target = None;
+                    self.restore_queue_edit_draft();
+                    self.reset_slash_selector();
+                    self.reset_input_history_navigation();
                 }
                 self.last_notice = Some(operation.success_label().to_owned());
                 self.push_event("follow-up:completed", operation.success_label());

@@ -349,7 +349,14 @@ fn queue_edit_keeps_draft_until_matching_success_and_preserves_later_typing() {
     app.set_input_and_cursor("newer composer draft".to_owned());
     complete_operation(&mut app, operation, Ok(()));
     assert_eq!(app.composer.input, "newer composer draft");
+    assert!(app.composer.queue_edit_target.is_some());
+    let next_edit = app
+        .finish_queue_edit_submission("newer composer draft".to_owned())
+        .expect("later typing remains an editable follow-up");
+    let next_operation = AppState::queue_operation_for_action(&next_edit).expect("edit operation");
+    complete_operation(&mut app, next_operation, Ok(()));
     assert!(app.composer.queue_edit_target.is_none());
+    assert!(app.composer.input.is_empty());
 }
 
 #[test]

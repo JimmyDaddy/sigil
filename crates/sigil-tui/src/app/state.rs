@@ -247,6 +247,7 @@ pub(crate) struct ComposerState {
     pub(crate) queue_selected: usize,
     pub(crate) queue_action_selected: ComposerQueueAction,
     pub(crate) queue_edit_target: Option<ConversationInputQueueId>,
+    pub(crate) queue_edit_draft: Option<QueueEditComposerDraft>,
     pub(crate) pending_queue_operations:
         BTreeMap<ConversationInputQueueId, crate::runner::QueueOperation>,
     pub(crate) pending_queue_pause: Option<bool>,
@@ -280,6 +281,7 @@ impl Default for ComposerState {
             queue_selected: 0,
             queue_action_selected: ComposerQueueAction::KeepNext,
             queue_edit_target: None,
+            queue_edit_draft: None,
             pending_queue_operations: BTreeMap::new(),
             pending_queue_pause: None,
             pending_queue_enqueues: Vec::new(),
@@ -297,6 +299,15 @@ impl Default for ComposerState {
             selected_image_attachment: None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct QueueEditComposerDraft {
+    pub(crate) input: String,
+    pub(crate) input_cursor: usize,
+    pub(in crate::app) input_paste_spans: Vec<ComposerPasteSpan>,
+    pub(crate) image_attachments: Vec<ImageAttachment>,
+    pub(crate) selected_image_attachment: Option<usize>,
 }
 
 #[derive(Debug)]
