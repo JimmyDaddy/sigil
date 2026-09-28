@@ -140,6 +140,16 @@ impl SharedSessionCoordinator {
         self.read_reconciled_records().map(|_| ())
     }
 
+    /// Reuses an already-attached session owner's validated writer, while enforcing no-create
+    /// recovery semantics. A changed tail still reloads and recovers through the normal writer.
+    pub(super) fn require_existing_current(&self) -> Result<()> {
+        {
+            let mut writer = self.lock_writer()?;
+            writer.require_existing();
+        }
+        self.read_current_records().map(|_| ())
+    }
+
     pub(super) fn metrics(&self) -> ActiveProjectionMetricsSnapshot {
         ActiveProjectionMetricsSnapshot {
             snapshot_total: self.snapshot_total.load(Ordering::Relaxed),
@@ -2129,6 +2139,10 @@ impl LinearSessionWriter {
 
     fn tail_needs_reload(&self, file: &mut File) -> bool {
         self.requires_reload
+            // An intent can be durable before the data file changes. Cached tail identity alone
+            // cannot prove that recovery has finished.
+            || !matches!(read_append_bundle_intent(&self.path), Ok(None))
+            || !matches!(read_tail_recovery_intent(&self.path), Ok(None))
             || self
                 .tail
                 .as_ref()

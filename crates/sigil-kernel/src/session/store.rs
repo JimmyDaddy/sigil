@@ -159,6 +159,44 @@ pub struct JsonlSessionStore {
     live_run_cancellation_scope_ids: std::sync::Arc<BTreeSet<String>>,
 }
 
+/// A narrow source for application run publication and canonical replay.
+/// It exposes only the reads and public outbox writer needed by a run recorder.
+#[derive(Debug, Clone)]
+pub struct SessionRunRecorderSource {
+    store: JsonlSessionStore,
+}
+
+impl SessionRunRecorderSource {
+    /// Narrows an existing store already owned by a caller; this does not open another stream.
+    #[must_use]
+    pub fn from_store(store: JsonlSessionStore) -> Self {
+        Self { store }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.store.path()
+    }
+
+    #[must_use]
+    pub fn read_handle(&self) -> SessionRecordReadHandle {
+        self.store.read_handle()
+    }
+
+    #[must_use]
+    pub fn public_outbox_recorder(&self) -> PublicEventOutboxRecorder {
+        PublicEventOutboxRecorder::new(self.store.clone())
+    }
+
+    pub fn read_current_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.store.read_current_event_records_writer()
+    }
+
+    pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.store.read_event_records_writer()
+    }
+}
+
 /// Read-only access to one existing store's coordinated durable record snapshots.
 ///
 /// Only a store owner can derive this handle. It retains that owner's coordinator without
@@ -350,6 +388,10 @@ impl SessionRecordRange {
 }
 
 impl JsonlSessionStore {
+    pub(super) fn existing_current_run_recorder_source(&self) -> Result<SessionRunRecorderSource> {
+        self.writer.require_existing_current()?;
+        Ok(SessionRunRecorderSource::from_store(self.clone()))
+    }
     /// Derives read-only observation from this store's already-established coordinator.
     #[must_use]
     pub fn read_handle(&self) -> SessionRecordReadHandle {
