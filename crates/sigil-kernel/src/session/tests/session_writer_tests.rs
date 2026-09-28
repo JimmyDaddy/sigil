@@ -218,6 +218,161 @@ fn session_writer_open_existing_refuses_missing_stream_without_creating_any_obje
 }
 
 #[test]
+fn live_run_recorder_source_reuses_the_validated_writer_and_never_recreates_removed_storage()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("live-recorder.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    session.append_user_message(ModelMessage::user("first turn"))?;
+    store.active_projection_snapshot()?;
+    let scans = store.writer_full_scan_count()?;
+
+    let source = session.run_recorder_source()?;
+    assert_eq!(store.writer_full_scan_count()?, scans);
+    assert_eq!(source.path(), store.path());
+    assert_eq!(source.read_current_event_records_writer()?.len(), 2);
+
+    fs::remove_file(&path)?;
+    assert!(source.read_current_event_records_writer().is_err());
+    assert!(
+        !path.exists(),
+        "the attached source must not recreate a missing stream"
+    );
+    Ok(())
+}
+
+#[test]
+fn live_run_recorder_source_rejects_external_prefix_damage() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("live-recorder-damaged.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    session.append_user_message(ModelMessage::user("first turn"))?;
+    let source = session.run_recorder_source()?;
+    let mut bytes = fs::read(&path)?;
+    bytes[0] = b'X';
+    fs::write(&path, &bytes)?;
+    assert!(source.read_current_event_records_writer().is_err());
+    assert_eq!(
+        fs::read(&path)?,
+        bytes,
+        "observation must not rewrite damage"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn live_run_recorder_source_rejects_stream_replacement() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("live-recorder-replaced.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    session.ensure_identity_entry()?;
+    let source = session.run_recorder_source()?;
+
+    let other_path = temp.path().join("other-session.jsonl");
+    let other = JsonlSessionStore::new(&other_path)?;
+    other.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "unrelated".to_owned(),
+        data: serde_json::Value::Null,
+    }))?;
+    let other_bytes = fs::read(&other_path)?;
+    fs::remove_file(&path)?;
+    symlink(&other_path, &path)?;
+
+    assert!(source.read_current_event_records_writer().is_err());
+    assert_eq!(fs::read(&other_path)?, other_bytes);
+    Ok(())
+}
+
+#[test]
+fn live_run_recorder_source_recovers_an_interrupted_bundle_from_its_owned_writer() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("live-recorder-recovery.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let entries = (0..2)
+        .map(|ordinal| {
+            SessionLogEntry::Control(ControlEntry::Note {
+                kind: "recorder_recovery".to_owned(),
+                data: serde_json::json!({"ordinal": ordinal}),
+            })
+        })
+        .collect::<Vec<_>>();
+    store.inject_writer_fault(SessionWriterFault::PartialFirstRecord)?;
+    assert!(store.append_session_entry_events(&entries).is_err());
+
+    let source = session.run_recorder_source()?;
+    assert_eq!(source.read_current_event_records_writer()?.len(), 3);
+    assert_eq!(JsonlSessionStore::read_entries(&path)?.len(), 3);
+    drop(source);
+    drop(session);
+    drop(store);
+    let reopened = JsonlSessionStore::open_existing(&path)?;
+    let resumed = Session::load_from_store_for_control(reopened)?;
+    assert_eq!(
+        resumed
+            .run_recorder_source()?
+            .read_current_event_records_writer()?
+            .len(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn live_run_recorder_source_recovers_a_complete_intent_before_data_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("live-recorder-pending-intent.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let source = session.run_recorder_source()?;
+    let original = fs::read(&path)?;
+    let event = StoredEvent::new(
+        DurableEventType::SessionEntryRecorded,
+        EventClass::NonCritical,
+        "pending-recorder-event".to_owned(),
+        session.session_scope_id().to_owned(),
+        2,
+        serde_json::json!({"session_log_entry": SessionLogEntry::Control(ControlEntry::Note {
+            kind: "pending_intent".to_owned(),
+            data: serde_json::Value::Null,
+        })}),
+    )?;
+    let bundle_jsonl = event.to_json_line()?;
+    write_append_bundle_intent(
+        &path,
+        &AppendBundleIntent {
+            start_offset: original.len() as u64,
+            end_offset: (original.len() + bundle_jsonl.len()) as u64,
+            event_count: 1,
+            bundle_sha256: stable_event_hash(bundle_jsonl.as_bytes()),
+            bundle_jsonl: bundle_jsonl.clone(),
+        },
+    )?;
+    assert_eq!(
+        fs::read(&path)?,
+        original,
+        "intent preceded the data append"
+    );
+
+    let reopened = session.run_recorder_source()?;
+    assert_eq!(reopened.read_current_event_records_writer()?.len(), 2);
+    assert_eq!(fs::read(&path)?.len(), original.len() + bundle_jsonl.len());
+    assert!(!append_bundle_intent_path(&path).exists());
+    assert_eq!(source.read_current_event_records_writer()?.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn session_writer_open_existing_refuses_empty_stream_without_reseeding() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("empty-session.jsonl");

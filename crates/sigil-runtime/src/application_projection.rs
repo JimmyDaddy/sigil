@@ -55,6 +55,13 @@ pub struct RuntimeSessionProjectionOwner {
 
 impl RuntimeSessionProjectionOwner {
     #[must_use]
+    pub fn from_run_recorder_source(source: &sigil_kernel::SessionRunRecorderSource) -> Self {
+        let mut owner = Self::from_read_handle(source.read_handle());
+        owner.delivery_recorder = Some(source.public_outbox_recorder());
+        owner
+    }
+
+    #[must_use]
     pub fn from_store(store: &JsonlSessionStore) -> Self {
         let mut owner = Self::from_read_handle(store.read_handle());
         owner.delivery_recorder = Some(PublicEventOutboxRecorder::new(store.clone()));

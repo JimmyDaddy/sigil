@@ -1640,6 +1640,15 @@ impl Session {
         self.store.clone()
     }
 
+    /// Derives the existing run recorder's narrow publication source from this session's
+    /// already-owned writer. Missing or changed storage fails through writer recovery rules.
+    pub fn run_recorder_source(&self) -> Result<super::SessionRunRecorderSource> {
+        self.store
+            .as_ref()
+            .context("run recorder requires a durable session")?
+            .existing_current_run_recorder_source()
+    }
+
     /// Clones only the existing stream reader for host-side reconstruction on a blocking worker.
     /// This handle cannot append records or create a missing history stream.
     #[must_use]
