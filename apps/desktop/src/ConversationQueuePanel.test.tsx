@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConversationQueuePanel } from "./ConversationQueuePanel";
 import { LocaleProvider } from "./i18n";
-import type { ConversationQueueCommandAction, ConversationQueueView } from "./types";
+import type { ConversationQueueCommandAction, ConversationQueueView, ForegroundRunOwner } from "./types";
 
 afterEach(cleanup);
 
@@ -41,13 +41,18 @@ const queue: ConversationQueueView = {
   ],
 };
 
-function renderQueue(onCommand = vi.fn(async (_action: ConversationQueueCommandAction) => true)) {
+function renderQueue(
+  onCommand = vi.fn(async (_action: ConversationQueueCommandAction) => true),
+  view = queue,
+  foregroundOwner?: ForegroundRunOwner,
+) {
   render(
     <LocaleProvider>
       <ConversationQueuePanel
-        queue={queue}
+        queue={view}
         busy={false}
         error={false}
+        foregroundOwner={foregroundOwner}
         reasoningEffort="high"
         onRefresh={() => undefined}
         onCommand={onCommand}
@@ -88,5 +93,53 @@ describe("conversation queue panel", () => {
       action: "remove",
       entryId: "queue-entry-ready",
     });
+  });
+
+  it("moves a later item next without reordering the already-first item", async () => {
+    const user = userEvent.setup();
+    const onCommand = renderQueue();
+
+    const runNext = screen.getByRole("button", { name: "Run this follow-up next" });
+    await user.click(runNext);
+    await waitFor(() => expect(onCommand).toHaveBeenCalledWith({
+      action: "reorder", entryId: "queue-entry-ready",
+    }));
+    expect(onCommand).toHaveBeenCalledOnce();
+  });
+
+  it("resumes a paused queue after moving a later item next", async () => {
+    const user = userEvent.setup();
+    const onCommand = renderQueue(undefined, { ...queue, paused: true });
+
+    await user.click(screen.getByRole("button", { name: "Run this follow-up next" }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(2));
+    expect(onCommand.mock.calls.map(([action]) => action)).toEqual([
+      { action: "reorder", entryId: "queue-entry-ready" },
+      { action: "resume" },
+    ]);
+  });
+
+  it("binds interruption to the observed run owner after selecting the next item", async () => {
+    const user = userEvent.setup();
+    const onCommand = renderQueue(undefined, queue, {
+      runId: "foreground-run", ownerRevision: "owner-revision",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Interrupt and run next" }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(2));
+    expect(onCommand.mock.calls.map(([action]) => action)).toEqual([
+      { action: "reorder", entryId: "queue-entry-ready" },
+      { action: "interrupt_and_run_next", foregroundRunId: "foreground-run", foregroundOwnerRevision: "owner-revision" },
+    ]);
+  });
+
+  it("does not offer main-run interruption for a non-chat queue item", () => {
+    renderQueue(undefined, {
+      ...queue,
+      items: [{ ...queue.items[1]!, kind: "agent_message", order: 0 }],
+      totalItems: 1,
+    }, { runId: "foreground-run", ownerRevision: "owner-revision" });
+
+    expect(screen.queryByRole("button", { name: "Interrupt and run next" })).toBeNull();
   });
 });

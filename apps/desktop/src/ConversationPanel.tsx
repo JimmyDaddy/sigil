@@ -355,6 +355,7 @@ export function ConversationPanel({
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
   const pendingPromptCounter = useRef(0);
   const conversationQueueEpoch = useRef(0);
+  const conversationQueueRef = useRef<ConversationQueueView | undefined>(undefined);
   const queuedSuccessorExpected = useRef(false);
   const startedRunProjectionExpected = useRef<string | undefined>(undefined);
   const pendingContinuityOwner = useRef<ConversationContinuity | undefined>(undefined);
@@ -567,6 +568,7 @@ export function ConversationPanel({
     setRequestedSkill(undefined);
     setRequestedAgent(undefined);
     setConversationQueue(undefined);
+    conversationQueueRef.current = undefined;
     setConversationQueueBusy(false);
     setConversationQueueError(false);
     setConversationRecovery(undefined);
@@ -627,6 +629,7 @@ export function ConversationPanel({
     void bridge.conversationQueue(workspaceId, session.id)
       .then((queue) => {
         if (disposed || conversationQueueEpoch.current !== requestEpoch) return;
+        conversationQueueRef.current = queue;
         setConversationQueue(queue);
         if (queueHasPendingDelivery(queue)) queuedSuccessorExpected.current = true;
         setConversationQueueError(false);
@@ -1610,10 +1613,12 @@ export function ConversationPanel({
     action: ConversationQueueCommandAction,
   ): Promise<boolean> => {
     if (conversationQueueBusy) return false;
-    conversationQueueEpoch.current += 1;
+    const commandEpoch = conversationQueueEpoch.current + 1;
+    conversationQueueEpoch.current = commandEpoch;
     setConversationQueueBusy(true);
     try {
-      let queue = conversationQueue ?? await bridge.conversationQueue(workspaceId, session.id);
+      let queue = conversationQueueRef.current ?? await bridge.conversationQueue(workspaceId, session.id);
+      if (conversationQueueEpoch.current !== commandEpoch) return false;
       let receipt: ConversationQueueCommandReceipt;
       try {
         receipt = await bridge.commandConversationQueue(workspaceId, {
@@ -1624,12 +1629,16 @@ export function ConversationPanel({
       } catch (error) {
         if (!isQueueGenerationStale(error)) throw error;
         queue = await bridge.conversationQueue(workspaceId, session.id);
+        if (conversationQueueEpoch.current !== commandEpoch) return false;
+        conversationQueueRef.current = queue;
         receipt = await bridge.commandConversationQueue(workspaceId, {
           sessionId: session.id,
           expectedGeneration: queue.generation,
           action,
         });
       }
+      if (conversationQueueEpoch.current !== commandEpoch) return false;
+      conversationQueueRef.current = receipt.queue;
       setConversationQueue(receipt.queue);
       const enqueued = action.action === "enqueue";
       const pending = pendingPromptRef.current;
@@ -1670,17 +1679,20 @@ export function ConversationPanel({
       }
       setConversationQueueError(false);
       return true;
-    } catch {
+    } catch (error) {
+      if (conversationQueueEpoch.current !== commandEpoch) return false;
       setConversationQueueError(true);
       refreshConversationQueue();
       if (pendingPromptRef.current?.queued === true) {
         pendingPromptRef.current = undefined;
         setPendingPrompt(undefined);
       }
-      onNotice(t("conversationQueueCommandFailed"), true);
+      onNotice(action.action === "interrupt_and_run_next" && isQueueOwnerLost(error)
+        ? t("interruptAndRunNextUnavailable")
+        : t("conversationQueueCommandFailed"), true);
       return false;
     } finally {
-      setConversationQueueBusy(false);
+      if (conversationQueueEpoch.current === commandEpoch) setConversationQueueBusy(false);
     }
   };
 
@@ -2944,6 +2956,11 @@ export function ConversationPanel({
             queue={conversationQueue}
             busy={conversationQueueBusy}
             error={conversationQueueError}
+            foregroundOwner={active && !stopControlBlocked
+              && continuityState.owner.foregroundRunId === run?.id
+              && continuityState.owner.ownerRevision !== undefined
+              ? { runId: continuityState.owner.foregroundRunId, ownerRevision: continuityState.owner.ownerRevision }
+              : undefined}
             reasoningEffort={reasoningEffort}
             onRefresh={refreshConversationQueue}
             onCommand={commandConversationQueue}
@@ -3385,6 +3402,11 @@ function errorMessage(error: unknown): string | undefined {
 function isQueueGenerationStale(error: unknown): boolean {
   return typeof error === "object" && error !== null
     && "code" in error && error.code === "queue_generation_stale";
+}
+
+function isQueueOwnerLost(error: unknown): boolean {
+  return typeof error === "object" && error !== null
+    && "code" in error && error.code === "queue_owner_lost";
 }
 
 function integrationReviewTaskProjection(

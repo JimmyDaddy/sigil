@@ -66,7 +66,7 @@ The most common control commands are:
 
 Model, agent, follow-up, and every other command form are listed in [Reference](reference.md#slash-commands).
 
-When a run is active, ordinary input becomes a visible follow-up and the first pending item is already scheduled to run after the current turn. Focus the follow-up panel with `Tab`, or click an item and its `Run next`, `Interrupt`, `Edit`, or `Delete` action directly. The strip shows up to four items at once; arrow keys, clicks on visible rows, and `/queue edit N` can reach items beyond the fourth. Editing a follow-up temporarily uses the composer; cancelling or completing the edit restores any unsent draft, including its cursor position and attachments. The first unpaused item is already next, so pressing `Run next` acknowledges its position without writing a redundant reorder. For a later or paused item that is still being saved, the action is forwarded as soon as its durable queue id is confirmed. `Run next` also resumes a paused queue; use `Interrupt` only when you intentionally want to stop the current turn. Sigil does not resend a follow-up automatically when delivery is uncertain. On short terminals the composer collapses to three rows so a disappearing follow-up strip returns space to the transcript instead of leaving an oversized input panel.
+When a run is active, ordinary input becomes a visible follow-up and the first pending item is already scheduled to run after the current turn. Focus the follow-up panel with `Tab`, or click an item and its `Run next`, `Edit`, or `Delete` action directly. The strip shows up to four items at once; arrow keys, clicks on visible rows, and `/queue edit N` can reach items beyond the fourth. Editing a follow-up temporarily uses the composer; cancelling or completing the edit restores any unsent draft, including its cursor position and attachments. The first unpaused item is already next, so pressing `Run next` acknowledges its position without writing a redundant reorder. For a later or paused item that is still being saved, the action is forwarded as soon as its durable queue id is confirmed. `Run next` also resumes a paused queue; use `Ctrl-C` to request cancellation of the active TUI run. Sigil does not resend a follow-up automatically when delivery is uncertain. On short terminals the composer collapses to three rows so a disappearing follow-up strip returns space to the transcript instead of leaving an oversized input panel.
 
 Queue changes show a pending indicator until confirmed. Repeated clicks while a change is pending
 do not send it again. Deleting an already deleted item is harmless; if it has already been consumed,
@@ -74,6 +74,9 @@ the queue explains that result. A failed queue change keeps the current Task and
 On Desktop, a follow-up can be submitted while the queue panel is still loading. If another client
 changes the queue first, Sigil refreshes its generation and retries the rejected command once;
 an uncertain delivery is never resent automatically.
+The queue panel can move a later item to the front, resume a paused queue, or explicitly interrupt
+the current run and execute that item next. The interrupt action appears only while the current
+run owner can be verified; if ownership changes, the queued item remains available for review.
 
 ## Config Panel
 

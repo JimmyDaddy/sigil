@@ -5768,6 +5768,48 @@ describe("desktop workspace and history shell", () => {
       .toEqual(["0", "external-update"]);
   });
 
+  it("uses the latest queue generation across a run-next reorder and resume", async () => {
+    const user = userEvent.setup();
+    let generation = 0;
+    let paused = true;
+    const queueView = (sessionId: string) => ({
+      schemaVersion: 1, sessionId, generation: String(generation), paused,
+      totalItems: 2, truncated: false,
+      items: ["first", "second"].map((entryId, order) => ({
+        entryId, order, kind: "chat" as const, status: "queued" as const,
+        promptPreview: entryId, promptPreviewTruncated: false,
+        promptMaterial: "persisted_safe" as const,
+        dispatchable: false, blockedReason: "queue_paused" as const,
+      })),
+    });
+    const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(async (_workspaceId, input) => {
+      if (input.expectedGeneration !== String(generation)) throw { code: "queue_generation_stale" };
+      generation += 1;
+      if (input.action.action === "resume") paused = false;
+      return {
+        commandId: `queue-${generation}`, clientId: "sigil-desktop", sessionId: input.sessionId,
+        action: input.action.action, expectedGeneration: input.expectedGeneration,
+        generation: String(generation), queue: queueView(input.sessionId), replayed: false,
+      };
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      conversationQueue: async (_workspaceId, sessionId) => queueView(sessionId),
+      commandConversationQueue,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await readyComposer();
+    await user.click(await screen.findByRole("button", { name: "Open follow-up queue, 2 messages" }));
+    const runNext = screen.getAllByRole("button", { name: "Run this follow-up next" });
+    await user.click(runNext[1]!);
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledTimes(2));
+    expect(commandConversationQueue.mock.calls.map((call) => call[1].expectedGeneration))
+      .toEqual(["0", "1"]);
+    expect(commandConversationQueue.mock.calls.map((call) => call[1].action.action))
+      .toEqual(["reorder", "resume"]);
+  });
+
   it.each(["started", "canonical", "settled_without_projection", "settlement_refresh_wait", "earlier_queue", "settled_behind_earlier", "replayed_behind_earlier", "ambiguous_new_entries", "idle_wait", "unrelated_terminal", "replayed_active", "explicit_remove"] as const)(
     "keeps an accepted follow-up visible through predecessor replay with %s settlement",
     async (settlement) => {

@@ -5,6 +5,7 @@ import type {
   ConversationQueueCommandAction,
   ConversationQueueItem,
   ConversationQueueView,
+  ForegroundRunOwner,
   ReasoningEffort,
 } from "./types";
 import { Icon } from "./ui/icons";
@@ -14,6 +15,7 @@ export function ConversationQueuePanel({
   queue,
   busy,
   error,
+  foregroundOwner,
   reasoningEffort,
   onRefresh,
   onCommand,
@@ -21,6 +23,7 @@ export function ConversationQueuePanel({
   readonly queue?: ConversationQueueView;
   readonly busy: boolean;
   readonly error: boolean;
+  readonly foregroundOwner?: ForegroundRunOwner;
   readonly reasoningEffort?: ReasoningEffort;
   readonly onRefresh: () => void;
   readonly onCommand: (action: ConversationQueueCommandAction) => Promise<boolean>;
@@ -28,6 +31,26 @@ export function ConversationQueuePanel({
   const { t } = useLocale();
   const [editingEntryId, setEditingEntryId] = useState<string>();
   const [replacementPrompt, setReplacementPrompt] = useState("");
+  const [sequencing, setSequencing] = useState(false);
+  const controlsBusy = busy || sequencing;
+
+  const runNext = async (item: ConversationQueueItem, index: number, interrupt: boolean) => {
+    if (controlsBusy) return;
+    setSequencing(true);
+    try {
+      if (index > 0 && !await onCommand({ action: "reorder", entryId: item.entryId })) return;
+      if (queue?.paused && !await onCommand({ action: "resume" })) return;
+      if (interrupt && foregroundOwner !== undefined) {
+        await onCommand({
+          action: "interrupt_and_run_next",
+          foregroundRunId: foregroundOwner.runId,
+          foregroundOwnerRevision: foregroundOwner.ownerRevision,
+        });
+      }
+    } finally {
+      setSequencing(false);
+    }
+  };
 
   const beginEdit = (item: ConversationQueueItem) => {
     setEditingEntryId(item.entryId);
@@ -67,9 +90,9 @@ export function ConversationQueuePanel({
           <IconButton
             type="button"
             aria-label={queue.paused ? t("resumeQueue") : t("pauseQueue")}
-            aria-busy={busy || undefined}
+            aria-busy={controlsBusy || undefined}
             icon={<Icon name={queue.paused ? "play" : "pause"} />}
-            disabled={busy}
+            disabled={controlsBusy}
             onClick={() => void onCommand({ action: queue.paused ? "resume" : "pause" })}
           />
         </Tooltip>
@@ -100,12 +123,34 @@ export function ConversationQueuePanel({
                     <small>{queueItemState(item, t)}</small>
                   </span>
                   <span className="conversation-queue-actions">
+                    {(index > 0 || queue.paused) && item.status === "queued" && !requiresReentry ? (
+                      <Tooltip label={t("runQueuedMessageNext")}>
+                        <IconButton
+                          type="button"
+                          aria-label={t("runQueuedMessageNext")}
+                          icon={<Icon name="chevron-up" />}
+                          disabled={controlsBusy}
+                          onClick={() => void runNext(item, index, false)}
+                        />
+                      </Tooltip>
+                    ) : null}
+                    {foregroundOwner !== undefined && item.kind === "chat" && item.status === "queued" && !requiresReentry ? (
+                      <Tooltip label={t("interruptAndRunNextHint")}>
+                        <IconButton
+                          type="button"
+                          aria-label={t("interruptAndRunNext")}
+                          icon={<Icon name="interrupt-next" />}
+                          disabled={controlsBusy}
+                          onClick={() => void runNext(item, index, true)}
+                        />
+                      </Tooltip>
+                    ) : null}
                     <Tooltip label={requiresReentry ? t("reenterQueuedMessage") : t("replaceQueuedMessage")}>
                       <IconButton
                         type="button"
                         aria-label={requiresReentry ? t("reenterQueuedMessage") : t("replaceQueuedMessage")}
                         icon={<Icon name="edit" />}
-                        disabled={busy || item.status !== "queued"}
+                        disabled={controlsBusy || item.status !== "queued"}
                         onClick={() => beginEdit(item)}
                       />
                     </Tooltip>
@@ -114,7 +159,7 @@ export function ConversationQueuePanel({
                         type="button"
                         aria-label={t("removeQueuedMessage")}
                         icon={<Icon name="delete" />}
-                        disabled={busy || item.status !== "queued"}
+                        disabled={controlsBusy || item.status !== "queued"}
                         onClick={() => void onCommand({ action: "remove", entryId: item.entryId })}
                       />
                     </Tooltip>
@@ -132,19 +177,19 @@ export function ConversationQueuePanel({
                       label={requiresReentry ? t("reenterQueuedMessage") : t("replacementPrompt")}
                       value={replacementPrompt}
                       placeholder={t("replacementPromptPlaceholder")}
-                      disabled={busy}
+                      disabled={controlsBusy}
                       autoFocus
                       rows={2}
                       onChange={(event) => setReplacementPrompt(event.target.value)}
                     />
                     <div className="conversation-queue-edit-actions">
-                      <Button type="button" variant="quiet" disabled={busy} onClick={() => {
+                      <Button type="button" variant="quiet" disabled={controlsBusy} onClick={() => {
                         setEditingEntryId(undefined);
                         setReplacementPrompt("");
                       }}>
                         {t("cancel")}
                       </Button>
-                      <Button type="submit" variant="primary" busy={busy} disabled={replacementPrompt.trim() === ""}>
+                      <Button type="submit" variant="primary" busy={controlsBusy} disabled={replacementPrompt.trim() === ""}>
                         {requiresReentry ? t("saveAndRestoreQueueItem") : t("replace")}
                       </Button>
                     </div>

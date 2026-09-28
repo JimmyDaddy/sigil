@@ -57,7 +57,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/agent rename <child-id|current> <name>` | Name a child transcript |
 | `/agent cancel <child-id|current>` | Cancel a running child with a live handle |
 | `/queue` | Show advanced follow-up controls |
-| `/queue next|interrupt|edit|delete [item]` | Reorder, interrupt for, edit, or remove a follow-up |
+| `/queue next|edit|delete [item]` | Move a follow-up next, edit it, or remove it |
 | `/plan [prompt]` | Run a read-only plan; accept its card to start a task |
 | `/task <task>` | Start multi-step execution |
 | `/task continue` | Continue the latest unfinished task |

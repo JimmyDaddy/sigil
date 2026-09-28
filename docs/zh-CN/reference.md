@@ -57,7 +57,7 @@
 | `/agent rename <child-id|current> <name>` | 命名子智能体会话 |
 | `/agent cancel <child-id|current>` | 取消仍在运行的子智能体 |
 | `/queue` | 显示高级后续输入控制 |
-| `/queue next|interrupt|edit|delete [item]` | 调整顺序、中断后执行、编辑或删除后续输入 |
+| `/queue next|edit|delete [item]` | 提前执行、编辑或删除后续输入 |
 | `/plan [prompt]` | 运行只读计划；接受计划后开始任务 |
 | `/task <任务>` | 开始多步骤执行 |
 | `/task continue` | 继续最近的未完成任务 |
