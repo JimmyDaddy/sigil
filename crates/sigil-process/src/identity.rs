@@ -192,7 +192,9 @@ fn observe_process_identity_platform(
     if boot_before != boot_after
         || observer_pid_namespace_before != observer_pid_namespace_after
         || target_pid_namespace_before != target_pid_namespace_after
-        || stat != stat_after
+        // Runnable and sleeping are both live states; only a changed birth tick means the
+        // observed PID may now refer to a different process.
+        || !stat.same_birth_as(&stat_after)
     {
         return Err(ProcessIdentityObservationErrorV1::NotObservable(
             "Linux boot, observer PID namespace, or target PID namespace changed during process observation"
@@ -289,6 +291,13 @@ fn map_linux_platform_error(
 struct LinuxProcessStatV1 {
     state: char,
     start_time_ticks: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcessStatV1 {
+    fn same_birth_as(&self, other: &Self) -> bool {
+        self.start_time_ticks == other.start_time_ticks
+    }
 }
 
 #[cfg(target_os = "linux")]

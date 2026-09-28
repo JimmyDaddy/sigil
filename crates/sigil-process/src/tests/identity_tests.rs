@@ -131,6 +131,26 @@ fn linux_stat_parser_uses_field_22_and_state_after_a_parenthesized_command_name(
 
 #[cfg(target_os = "linux")]
 #[test]
+fn linux_process_state_transition_keeps_the_same_birth_identity() {
+    let running = LinuxProcessStatV1 {
+        state: 'R',
+        start_time_ticks: 9876,
+    };
+    let sleeping = LinuxProcessStatV1 {
+        state: 'S',
+        start_time_ticks: 9876,
+    };
+    let reused_pid = LinuxProcessStatV1 {
+        state: 'S',
+        start_time_ticks: 9877,
+    };
+
+    assert!(running.same_birth_as(&sleeping));
+    assert!(!running.same_birth_as(&reused_pid));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn linux_zombie_state_is_never_reported_live() {
     assert!(matches!(
         ensure_linux_process_is_live('Z'),
