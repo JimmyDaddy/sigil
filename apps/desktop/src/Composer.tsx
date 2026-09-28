@@ -342,7 +342,7 @@ export function Composer({
           (candidate) => candidate.modelName === argument || candidate.modelRef.modelId === argument,
         ) ?? [];
         const model = exact ?? (matches.length === 1 ? matches[0] : undefined);
-        if (model === undefined || !modelOptionCanBeSelected(model, providerConnections)) {
+        if (model === undefined || !modelOptionIsSelectable(model)) {
           onNotice(t("unsupportedModel", { value: argument }), true);
           return false;
         }
@@ -437,7 +437,7 @@ export function Composer({
       model: modelOption?.modelName ?? modelName,
     });
   const selectableModelCount = modelOptions.filter(
-    (option) => modelOptionCanBeSelected(option, providerConnections),
+    modelOptionIsSelectable,
   ).length;
   const availableReasoningEfforts = modelOption?.availableReasoningEfforts ?? [];
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
@@ -614,7 +614,7 @@ export function Composer({
                     const selected = modelOptions.find(
                       (option) => modelOptionValue(option) === event.target.value,
                     );
-                    if (selected !== undefined && modelOptionCanBeSelected(selected, providerConnections)) {
+                    if (selected !== undefined && modelOptionIsSelectable(selected)) {
                       onModelChange(selected.modelRef);
                     }
                   }}
@@ -623,7 +623,7 @@ export function Composer({
                     <option
                       key={modelOptionValue(option)}
                       value={modelOptionValue(option)}
-                      disabled={!modelOptionCanBeSelected(option, providerConnections)}
+                      disabled={!modelOptionIsSelectable(option)}
                     >
                       {modelOptionLabel(option)}
                     </option>
@@ -731,18 +731,6 @@ export function Composer({
 
 function focusWithoutScroll(element: HTMLElement | null): void {
   element?.focus({ preventScroll: true });
-}
-
-function modelOptionCanBeSelected(
-  option: ModelOption,
-  connections: ProviderConnection[] | undefined,
-): boolean {
-  if (!modelOptionIsSelectable(option)) return false;
-  if (connections === undefined) return true;
-  const connection = connections.find(
-    (candidate) => candidate.id === option.modelRef.connectionId,
-  );
-  return connection !== undefined && ["ready", "unverified"].includes(connection.readiness);
 }
 
 interface LeadingInvocationToken {

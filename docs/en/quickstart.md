@@ -40,6 +40,7 @@ In Sigil Desktop, open a project first. A new computer or missing config opens t
 provider wizard before **New conversation** becomes available. The Settings page later shows every
 saved connection and can add another one without opening a conversation first.
 If loading the connection list temporarily fails, you can still try **New conversation**. The local service validates the actual model route; if creation fails, retry loading the list or repair the configuration.
+An already configured route remains selectable when the connection list reports a credential problem. You can create a conversation or switch models, then fix the credential if starting a run reports it missing.
 
 For normal local use, choose the protected credential store; a pasted key is held only long
 enough to create a credential record, and `sigil.toml` stores a random reference. The default

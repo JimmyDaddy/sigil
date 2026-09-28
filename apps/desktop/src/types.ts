@@ -1446,11 +1446,11 @@ export interface ProviderDefaultModelSaveResult {
   saveWarning: boolean;
 }
 
-export function providerInventoryIsUsable(
-  inventory: ProviderConnectionInventory | undefined,
+export function providerInventoryNeedsAttention(
+  inventory: ProviderConnectionInventory,
 ): boolean {
-  if (inventory?.defaultModel === undefined) return false;
-  return inventory.connections.some(
+  if (inventory.defaultModel === undefined) return true;
+  return !inventory.connections.some(
     (connection) =>
       connection.id === inventory.defaultModel?.connectionId
       && ["ready", "unverified"].includes(connection.readiness),

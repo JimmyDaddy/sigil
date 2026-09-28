@@ -439,6 +439,33 @@ describe("structured composer", () => {
     });
   });
 
+  it.each(["needs_credential", "credential_unavailable", "invalid"] as const)(
+    "keeps a configured model selectable when inventory readiness is %s",
+    async (readiness) => {
+      const onModelChange = vi.fn();
+      renderComposer({
+        onModelChange,
+        providerConnections: [{
+          id: "deepseek-default",
+          label: "DeepSeek 1",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "environment",
+          readiness,
+        }],
+      });
+
+      const model = screen.getByRole("combobox", { name: "Model" });
+      const pro = within(model).getByRole("option", { name: /DeepSeek V4 Pro/ }) as HTMLOptionElement;
+      expect(pro.disabled).toBe(false);
+      await userEvent.setup().selectOptions(model, "deepseek-default/deepseek-v4-pro");
+      expect(onModelChange).toHaveBeenCalledWith({
+        connectionId: "deepseek-default", modelId: "deepseek-v4-pro",
+      });
+    },
+  );
+
   it("keeps the exact connection and provider visible in the model route", async () => {
     renderComposer({
       providerConnections: [{

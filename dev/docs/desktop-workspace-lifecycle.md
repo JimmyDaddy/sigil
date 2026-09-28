@@ -16,6 +16,8 @@
 
 这些展示规则不批准新的 provider route，不覆盖运行状态或真实权限错误。启动 run、取消与审批仍由原 application/runtime owner 校验准确的 scope 和身份。
 
+已配置默认模型或候选模型的库存 readiness 是诊断，不是新建会话或切换模型的许可。Desktop 允许用户选择配置中的 route 并把请求交给共享服务；建会话时校验 route，真正启动 run 时再校验当前凭证和协议能力。缺少默认模型仍展示首次配置向导，库存诊断问题在已有会话中保留设置提示。
+
 ## 验收
 
 通过统一隔离入口运行 `cargo test -p sigil-desktop --lib`。Unix native fixture 使用真实 child、stdout bootstrap、loopback metadata 与 stdin owner pipe，并以显式文件屏障覆盖慢启动、慢关闭、restart、调用者取消、close_all 和身份碰撞；测试失败不把等待超时当作退出证据。

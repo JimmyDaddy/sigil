@@ -20,7 +20,7 @@ import {
 } from "./preferences";
 import {
   modelOptionIsSelectable,
-  providerInventoryIsUsable,
+  providerInventoryNeedsAttention,
 } from "./types";
 import type {
   CatalogEntry,
@@ -616,10 +616,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
-    if (readyProviderInventory !== undefined && !providerInventoryIsUsable(readyProviderInventory)) {
-      navigate("conversation");
-      return undefined;
-    }
     const selectionEpoch = ++sessionSelectionEpoch.current;
     const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
@@ -1014,8 +1010,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 disabled={
                   sessionActionState === "working"
                   || conversationNavigation !== undefined
-                  || (readyProviderInventory !== undefined
-                    && !providerInventoryIsUsable(readyProviderInventory))
                 }
                 onClick={() => { navigate("conversation"); void createSession(); }}
               />
@@ -1191,8 +1185,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               </Button>
             </div>
           ) : selectedSession === undefined && providerInventory !== undefined
-            && providerInventory.configMode !== "v2"
-            && !providerInventoryIsUsable(providerInventory) ? (
+            && providerInventory.configMode !== "v2" ? (
               <div className="conversation-empty" role="alert">
                 <p className="eyebrow">{activeWorkspace.displayName}</p>
                 <h1>{t("providerConfigInvalidTitle")}</h1>
@@ -1206,7 +1199,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 </Button>
               </div>
             ) : selectedSession === undefined && providerInventory !== undefined
-            && !providerInventoryIsUsable(providerInventory) ? (
+              && providerInventory.defaultModel === undefined ? (
               <ProviderSetup
                 key={activeWorkspace.id}
                 bridge={bridge}
@@ -1235,7 +1228,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   <span>{t("providerConnectionsUnavailable")}</span>
                   <Button type="button" onClick={() => void loadProviderInventory(activeWorkspace.id)}>{t("retry")}</Button>
                 </div>
-              ) : providerInventory !== undefined && !providerInventoryIsUsable(providerInventory) ? (
+              ) : providerInventory !== undefined && providerInventoryNeedsAttention(providerInventory) ? (
                 <div role="status" className="conversation-inventory-notice">
                   <span>{t("providerConnectionsUnavailable")}</span>
                   <Button type="button" onClick={() => navigate("settings")}>{t("openSettings")}</Button>

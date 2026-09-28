@@ -1705,19 +1705,9 @@ export function ConversationPanel({
         && runContext !== undefined
         && selectedModelRef !== undefined
       ) {
-        const selectedConnection = providerInventory?.connections.find(
-          (connection) => connection.id === selectedModelRef.connectionId,
-        );
         if (
           selectedModelOption === undefined
           || !modelOptionIsSelectable(selectedModelOption)
-          || (
-            providerInventory !== undefined
-            && (
-              selectedConnection === undefined
-              || !["ready", "unverified"].includes(selectedConnection.readiness)
-            )
-          )
         ) {
           onNotice(t("unsupportedModel", { value: selectedModelRef.modelId }), true);
           return false;

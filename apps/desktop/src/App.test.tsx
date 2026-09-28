@@ -1230,7 +1230,7 @@ describe("desktop workspace and history shell", () => {
     );
   });
 
-  it("blocks the first conversation on explicit provider setup and saves the chosen route", async () => {
+  it("offers first-run provider setup and saves the chosen route", async () => {
     const user = userEvent.setup();
     const providerSetupCatalog = vi.fn(async () => ({
       connectionId: "deepseek-1",
@@ -1292,7 +1292,7 @@ describe("desktop workspace and history shell", () => {
 
     expect(await screen.findByRole("heading", { name: "Connect a model provider" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New conversation" }).hasAttribute("disabled"))
-      .toBe(true);
+      .toBe(false);
     await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
     await user.type(screen.getByLabelText("API key"), "secret-canary");
     await user.click(screen.getByRole("button", { name: "Continue to models" }));
@@ -1757,7 +1757,9 @@ describe("desktop workspace and history shell", () => {
       ],
       issues: [],
     };
-    const createSession = vi.fn(async () => ({ id: "new-repaired-session", label: "New conversation", runCount: 0 }));
+    const createSession = vi.fn()
+      .mockRejectedValueOnce(new Error("configured route credential unavailable"))
+      .mockResolvedValue({ id: "new-repaired-session", label: "New conversation", runCount: 0 });
     const openSession = vi.fn();
     const runContext = vi.fn(async () => defaultRunContext);
     const saveProviderSetup = vi.fn();
@@ -1778,8 +1780,14 @@ describe("desktop workspace and history shell", () => {
       saveProviderDefaultModel,
     })} />);
 
-    await screen.findByRole("heading", { name: "Connect a model provider" });
-    expect(screen.getByRole("button", { name: "New conversation" }).hasAttribute("disabled")).toBe(true);
+    await screen.findByRole("heading", { name: "Select a conversation" });
+    const newConversation = screen.getByRole("button", { name: "New conversation" });
+    expect(newConversation.hasAttribute("disabled")).toBe(false);
+    await user.click(newConversation);
+    await waitFor(() => expect(createSession).toHaveBeenCalledWith(
+      workspace.id, "New conversation", inventory.defaultModel,
+    ));
+    expect(await screen.findByText("The conversation could not be created. Try again.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.selectOptions(await screen.findByRole("combobox", { name: "Configured connection" }), replacement.connectionId);
     const save = screen.getByRole("button", { name: "Save default model" });
@@ -1788,7 +1796,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(save);
     await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenCalledWith(workspace.id, replacement));
     await waitFor(() => expect(save.hasAttribute("disabled")).toBe(false));
-    expect(createSession).not.toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalledTimes(1);
     expect(openSession).not.toHaveBeenCalled();
     expect(runContext).not.toHaveBeenCalled();
     expect(saveProviderSetup).not.toHaveBeenCalled();
@@ -1796,7 +1804,46 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await waitFor(() => expect(createSession).toHaveBeenCalledWith(workspace.id, "New conversation", replacement));
+    expect(createSession).toHaveBeenCalledTimes(2);
   });
+
+  it.each(["needs_credential", "credential_unavailable", "invalid"] as const)(
+    "lets the backend decide whether a configured default route marked %s can create a conversation",
+    async (readiness) => {
+      const user = userEvent.setup();
+      const defaultModel = { connectionId: "configured-route", modelId: "custom-model" };
+      const createSession = vi.fn(async () => {
+        throw new Error("the configured route could not be bound");
+      });
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        providerConnections: async () => ({
+          configMode: "v2",
+          defaultModel,
+          connections: [{
+            id: defaultModel.connectionId,
+            label: "Configured route",
+            providerLabel: "Custom",
+            protocolLabel: "Chat Completions",
+            endpointDisplay: "gateway.example",
+            credentialSource: "environment",
+            readiness,
+          }],
+          issues: [],
+        }),
+        createSession,
+      })} />);
+
+      expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+      const newConversation = screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement;
+      expect(newConversation.disabled).toBe(false);
+      await user.click(newConversation);
+      await waitFor(() => expect(createSession).toHaveBeenCalledWith(
+        workspace.id, "New conversation", defaultModel,
+      ));
+      expect(await screen.findByText("The conversation could not be created. Try again.")).toBeTruthy();
+    },
+  );
 
   it("persists a provider-validated default model for newly created desktop conversations", async () => {
     const user = userEvent.setup();
@@ -5667,6 +5714,72 @@ describe("desktop workspace and history shell", () => {
       effort: "max",
       effortBinding: "effort-binding-gateway-flash",
     }]);
+  });
+
+  it("submits a configured route with diagnostic credential failure to backend admission", async () => {
+    const user = userEvent.setup();
+    const gatewayRef = { connectionId: "gateway-team", modelId: "gateway-model" };
+    const startRun = vi.fn<DesktopBridge["startRun"]>(async () => {
+      throw new Error("connection credential unavailable");
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        defaultModel: defaultRunContext.modelRef,
+        connections: [
+          {
+            id: "deepseek-default",
+            label: "DeepSeek",
+            providerLabel: "DeepSeek",
+            protocolLabel: "DeepSeek",
+            endpointDisplay: "api.deepseek.com",
+            credentialSource: "environment",
+            readiness: "ready",
+          },
+          {
+            id: gatewayRef.connectionId,
+            label: "Gateway",
+            providerLabel: "Custom",
+            protocolLabel: "Chat Completions",
+            endpointDisplay: "gateway.example",
+            credentialSource: "environment",
+            readiness: "credential_unavailable",
+          },
+        ],
+        issues: [],
+      }),
+      runContext: async () => ({
+        ...defaultRunContext,
+        modelOptions: [
+          defaultRunContext.modelOptions[0],
+          {
+            ...defaultRunContext.modelOptions[0],
+            modelRef: gatewayRef,
+            displayName: "Gateway model",
+            modelName: gatewayRef.modelId,
+            availability: "configured_unavailable",
+          },
+        ],
+      }),
+      startRun,
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    const model = screen.getByRole("combobox", { name: "Model" });
+    const gateway = within(model).getByRole("option", { name: /Gateway model/ }) as HTMLOptionElement;
+    expect(gateway.disabled).toBe(false);
+    await user.selectOptions(model, "gateway-team/gateway-model");
+    await user.type(composer, "Try this configured route");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+    expect(startRun.mock.calls[0][4]).toEqual(gatewayRef);
+    expect(startRun.mock.calls[0][5]).toBe(defaultRunContext.modelSelectionBinding);
+    expect(await screen.findByText("The run could not be started.")).toBeTruthy();
+    expect((composer as HTMLTextAreaElement).value).toBe("Try this configured route");
   });
 
   it("switches and persists the desktop language", async () => {
