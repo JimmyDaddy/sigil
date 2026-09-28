@@ -1714,6 +1714,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "encoding_rs",
+ "find-msvc-tools",
  "fs2",
  "futures",
  "globset",
