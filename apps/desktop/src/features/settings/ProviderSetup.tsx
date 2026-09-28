@@ -71,7 +71,7 @@ export function ProviderSetup({
     && (!isCustom || endpoint.trim().length > 0);
   const canSave = effectiveModelId.length > 0
     && state !== "saving"
-    && catalog !== undefined
+    && canLoadModels
     && contextWindowValid;
   const progress = step === "provider" ? 1 : step === "authentication" ? 2 : 3;
 
@@ -136,6 +136,8 @@ export function ProviderSetup({
       setState("idle");
     } catch {
       if (requestRevision !== catalogRequestRevision.current) return;
+      setModelId((current) => current || "__manual__");
+      setStep("model");
       setState("error");
       setError(t("providerCatalogLoadFailed"));
     }
@@ -319,16 +321,18 @@ export function ProviderSetup({
         </div>
       ) : null}
 
-      {step === "model" && catalog !== undefined && template !== undefined ? (
+      {step === "model" && template !== undefined ? (
         <div className="provider-setup-form">
           <div className="provider-catalog-summary">
             <div>
-              <strong>{catalog.providerLabel}</strong>
-              <span>
-                {t("providerCatalogState", {
-                  state: providerCatalogStateLabel(catalog.state, t),
-                })}
-              </span>
+              <strong>{catalog?.providerLabel ?? providerName(template, t)}</strong>
+              {catalog === undefined ? null : (
+                <span>
+                  {t("providerCatalogState", {
+                    state: providerCatalogStateLabel(catalog.state, t),
+                  })}
+                </span>
+              )}
             </div>
             <Button
               type="button"
@@ -341,7 +345,7 @@ export function ProviderSetup({
               {t("changeConnection")}
             </Button>
           </div>
-          {catalog.orchestrationRollout === undefined ? null : (
+          {catalog?.orchestrationRollout === undefined ? null : (
             <div className="provider-orchestration-summary" aria-label={t("orchestrationRolloutSummary")}>
               <span>{t("orchestrationAutomaticRouting", {
                 policy: formatMachineLabel(catalog.orchestrationRollout.routingPolicy),
@@ -354,7 +358,7 @@ export function ProviderSetup({
           )}
           <fieldset className="provider-model-list">
             <legend>{t("chooseModel")}</legend>
-            {catalog.models.map((model) => (
+            {catalog?.models.map((model) => (
               <Radio
                 key={model.modelId}
                 name="provider-model"
@@ -411,14 +415,16 @@ export function ProviderSetup({
             >
               {t("back")}
             </Button>
-            {catalog.state === "cache_stale" ? (
+            {catalog === undefined || catalog.state === "cache_stale" ? (
               <Button
                 type="button"
                 variant="secondary"
-                disabled={state === "refreshing"}
+                disabled={state === "loading" || state === "refreshing"}
                 onClick={() => void loadModels()}
               >
-                {state === "refreshing" ? t("refreshingModels") : t("retryModelCatalog")}
+                {state === "loading" || state === "refreshing"
+                  ? t("refreshingModels")
+                  : t("retryModelCatalog")}
               </Button>
             ) : null}
             <Button
