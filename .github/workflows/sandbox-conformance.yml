@@ -65,7 +65,7 @@ jobs:
             --platform macos --backend seatbelt --required --suite platform
       - name: Upload qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: r71-macos-seatbelt
           path: ${{ runner.temp }}/r71-evidence/macos-seatbelt
@@ -125,7 +125,7 @@ jobs:
             --platform linux --backend bubblewrap --required --suite full
       - name: Upload qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: r71-linux-bubblewrap
           path: ${{ runner.temp }}/r71-evidence/linux-bubblewrap
@@ -167,7 +167,7 @@ jobs:
             --platform windows --backend windows-restricted --required --suite platform
       - name: Upload qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: r71-windows-restricted
           path: ${{ runner.temp }}/r71-evidence/windows-restricted
@@ -213,7 +213,7 @@ jobs:
             --platform docker --backend docker --required --suite platform
       - name: Upload qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: r71-docker-declared
           path: ${{ runner.temp }}/r71-evidence/docker-declared
@@ -260,7 +260,7 @@ jobs:
             --platform toolchain --backend toolchain-offline --required --suite platform
       - name: Upload qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: r71-toolchain-offline
           path: ${{ runner.temp }}/r71-evidence/toolchain-offline
