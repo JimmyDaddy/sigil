@@ -793,33 +793,6 @@ pub(crate) async fn desktop_plugin_catalog(
 }
 
 #[tauri::command]
-pub(crate) async fn desktop_checkpoint_review(
-    workspace_id: String,
-    input: DesktopCheckpointRestorePreviewInput,
-    state: State<'_, DesktopAppState>,
-) -> Result<DesktopCheckpointReview, DesktopCommandError> {
-    validate_workspace_id(&workspace_id)?;
-    validate_session_id(&input.session_id)?;
-    validate_recovery_token(&input.checkpoint_id)?;
-    validate_recovery_token(&input.checkpoint_digest)?;
-    let client = state
-        .manager
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
-        .checkpoint_review(
-            &input.session_id,
-            DesktopCheckpointRestoreRequest {
-                checkpoint_id: input.checkpoint_id,
-                checkpoint_digest: input.checkpoint_digest,
-            },
-        )
-        .await
-        .map(Into::into)
-        .map_err(project_conversation_recovery_client_error)
-}
-
-#[tauri::command]
 pub(crate) async fn desktop_branch_lineage(
     workspace_id: String,
     session_id: String,
@@ -851,6 +824,33 @@ pub(crate) async fn desktop_branch_knowledge_preview(
         .client(&workspace_id)
         .map_err(project_manager_error)?
         .branch_knowledge_preview(&session_id, source.into())
+        .await
+        .map(Into::into)
+        .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_checkpoint_review(
+    workspace_id: String,
+    input: DesktopCheckpointRestorePreviewInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopCheckpointReview, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_recovery_token(&input.checkpoint_id)?;
+    validate_recovery_token(&input.checkpoint_digest)?;
+    let client = state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .checkpoint_review(
+            &input.session_id,
+            DesktopCheckpointRestoreRequest {
+                checkpoint_id: input.checkpoint_id,
+                checkpoint_digest: input.checkpoint_digest,
+            },
+        )
         .await
         .map(Into::into)
         .map_err(project_conversation_recovery_client_error)
