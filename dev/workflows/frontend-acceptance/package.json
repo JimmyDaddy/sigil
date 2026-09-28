@@ -1,0 +1,12 @@
+{
+  "name": "sigil-frontend-acceptance-workflow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned, explicitly installed Playwright MCP dependency for the optional Sigil browser workflow",
+  "scripts": {
+    "test": "node --test tests/launch-browser.test.cjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.82"
+  }
+}

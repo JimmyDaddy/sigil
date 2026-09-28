@@ -294,6 +294,68 @@ fn safe_persistence_url_query_projection_is_idempotent() {
 }
 
 #[test]
+fn safe_persistence_markdown_urls_preserve_exact_citation_targets() {
+    let raw = concat!(
+        "| Source | Contract |\n",
+        "| `http://127.0.0.1:55054/docs/requirements` | requirements |\n",
+        "| `http://127.0.0.1:55054/docs/api-v2` | current |\n",
+        "| `http://127.0.0.1:55054/docs/api-v1` | archived |\n",
+        "[Current API](http://127.0.0.1:55054/docs/api-v2)\n",
+        "``https://example.test/public%60path``\n",
+        "```text\nhttps://example.test/public\n```\n",
+    );
+
+    let projected = safe_persistence_text(raw);
+    assert_eq!(
+        projected, raw,
+        "Markdown delimiters must not become URL bytes"
+    );
+    assert_eq!(safe_persistence_text(&projected), projected);
+}
+
+#[test]
+fn safe_persistence_markdown_urls_keep_secret_redaction_and_exact_overlay() -> Result<()> {
+    let raw = "read `https://example.test/report?token=known-secret#private-fragment`";
+    let safe = "read `https://example.test/report?[redacted]`";
+    assert_eq!(safe_persistence_text(raw), safe);
+    assert_eq!(safe_persistence_text(safe), safe);
+    assert_eq!(
+        safe_persistence_text("`https://example.test/files/secret-credential`"),
+        "`https://example.test/[redacted]`"
+    );
+
+    let projection = project_user_message_for_persistence("markdown-source", raw, None)?;
+    assert_eq!(projection.capability_registrations.len(), 1);
+    let registration = &projection.capability_registrations[0];
+    assert_eq!(
+        registration.raw_canonical_url.expose_secret(),
+        "https://example.test/report?token=known-secret#private-fragment"
+    );
+    assert_eq!(
+        registration.safe_display_url,
+        "https://example.test/report?[redacted]"
+    );
+    assert_eq!(
+        registration.restart_policy,
+        ToolRestartPolicy::InterruptOnRestart
+    );
+    assert!(registration.replayable_canonical_url.is_none());
+    let durable = projection
+        .durable_message
+        .content
+        .as_deref()
+        .unwrap_or_default();
+    assert!(!durable.contains("known-secret"));
+    assert!(!durable.contains("private-fragment"));
+    let exact = apply_exact_message_overlays(
+        std::slice::from_ref(&projection.durable_message),
+        std::slice::from_ref(&projection.overlay),
+    )?;
+    assert_eq!(exact[0].content.as_deref(), Some(raw));
+    Ok(())
+}
+
+#[test]
 fn safe_persistence_one_shot_tool_call_complete_is_capped() {
     let error = project_tool_call_for_persistence(ToolCall {
         id: "call-large".to_owned(),

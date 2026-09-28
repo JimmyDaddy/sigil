@@ -1,0 +1,21 @@
+id = "frontend-acceptance"
+name = "Frontend browser acceptance"
+version = "1.0.0"
+description = "Opt-in real-browser checks for a local frontend, with before/after screenshots and console/network evidence."
+
+[[skills]]
+path = "skills/frontend-acceptance/SKILL.md"
+
+[[mcp_servers]]
+name = "browser"
+description = "Playwright browser for an explicitly selected local frontend acceptance workflow."
+transport = "stdio"
+command = "node"
+args = ["launch-browser.cjs"]
+startup = "lazy"
+required = false
+startup_timeout_secs = 30
+[mcp_servers.trust]
+approval_default = "ask"
+egress_logging = true
+allow_secrets = false

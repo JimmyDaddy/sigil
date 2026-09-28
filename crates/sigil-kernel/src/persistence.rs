@@ -1368,7 +1368,7 @@ fn url_token_delimiter(byte: u8) -> bool {
     byte.is_ascii_whitespace()
         || matches!(
             byte,
-            b'"' | b'\'' | b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|'
+            b'"' | b'\'' | b'`' | b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|'
         )
 }
 
