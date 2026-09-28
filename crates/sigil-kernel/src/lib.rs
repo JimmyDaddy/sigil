@@ -2,7 +2,7 @@ pub mod agent;
 pub mod application_operation;
 pub use application_operation::{
     ApplicationOperationBindingV1, ApplicationOperationCommittedV1, ApplicationOperationEvidenceV1,
-    ApplicationOperationTargetV1,
+    ApplicationOperationTargetV1, ConversationRunAcceptedV1, conversation_run_input_digest,
 };
 pub mod agent_thread;
 pub mod approval;

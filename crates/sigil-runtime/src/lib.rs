@@ -534,3 +534,7 @@ mod model_eval_tests;
 #[cfg(test)]
 #[path = "tests/isolated_workspace_tests.rs"]
 mod isolated_workspace_tests;
+
+#[cfg(test)]
+#[path = "tests/recorded_tool_identity_tests.rs"]
+mod recorded_tool_identity_tests;

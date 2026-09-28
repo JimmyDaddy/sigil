@@ -78,6 +78,9 @@ mod user_input_operation;
 #[path = "production_stop_operation_tests.rs"]
 mod stop_operation;
 
+#[path = "production_prompt_operation_tests.rs"]
+mod prompt_operation;
+
 #[test]
 fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
     let error = anyhow::Error::new(

@@ -804,7 +804,15 @@ impl HttpApplicationCommandExecutor {
                 // Images supply the ordinary foreground input even without textual content.
                 let mut run_request = http_run_start_request(prompt.as_ref(), options, true)?;
                 run_request.image_attachments = attachments.clone();
-                match self.registry.start_run(&self.session_id, run_request) {
+                let operation =
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?;
+                match self.registry.start_run_from_application(
+                    &self.session_id,
+                    run_request,
+                    operation,
+                ) {
                     Ok(run) => uncertain_dispatch(request, format!("http-run-start:{}", run.id)),
                     Err(
                         error @ (crate::HttpRegistryError::ImageInputUnsupported
@@ -840,9 +848,13 @@ impl HttpApplicationCommandExecutor {
                     ));
                 }
                 let run_request = http_run_start_request(prompt.as_ref(), options, false)?;
+                let operation =
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?;
                 let run = self
                     .registry
-                    .start_run(&self.session_id, run_request)
+                    .start_run_from_application(&self.session_id, run_request, operation)
                     .map_err(|_| ApplicationError::Unavailable)?;
                 uncertain_dispatch(request, format!("http-run-start:{}", run.id))
             }

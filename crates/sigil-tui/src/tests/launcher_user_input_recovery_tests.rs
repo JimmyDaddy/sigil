@@ -153,6 +153,7 @@ fn assert_launcher_recovery_uses_new_key_bound_to_committed_decision(
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     pending.start()?;
     let received = pending

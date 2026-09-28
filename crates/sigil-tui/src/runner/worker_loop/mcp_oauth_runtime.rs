@@ -287,7 +287,7 @@ pub(in crate::runner) fn advance_mcp_oauth_results(
         if let Some(active) = state.mcp_oauth.active.remove(&result.server_name) {
             state.mcp_oauth.retired.push(active.handle);
         }
-        super::shutdown::reap_finished_owned_tasks(
+        let _ = super::shutdown::reap_finished_owned_tasks(
             &mut state.mcp_oauth.retired,
             &mut state.mcp_oauth.task_panicked,
         );

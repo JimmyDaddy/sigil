@@ -21,6 +21,8 @@ use crate::{
 
 #[path = "coordinated_session_reader_tests.rs"]
 mod coordinated_reader;
+#[path = "current_writer_read_tests.rs"]
+mod current_writer_read;
 
 fn audit_record(
     _event_type: DurableEventType,

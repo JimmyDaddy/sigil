@@ -1987,7 +1987,16 @@ where
             continue;
         }
         elicitation_handler.set_audit_buffer(None);
+        // The returned session must not carry an unfinished operation into the next command.
+        // Its durable K/F remains uncertain; only a joined run owner permits releasing a UI slot.
+        let returned_operation = task_result.session.clear_application_operation();
         if let Some(completed) = state.run.active.take() {
+            if let Some(binding) = returned_operation {
+                state
+                    .run
+                    .returned_application_operations
+                    .insert(completed.handle.id(), binding);
+            }
             state.run.retired.push(completed.handle);
         }
         // The completed run returns the authoritative in-memory session for its own appends. Queue

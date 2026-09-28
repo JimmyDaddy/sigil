@@ -5,15 +5,15 @@ use sigil_kernel::{
     ControlEntry, ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
     PendingPlanHandoffBinding, PlanReviewAttemptStatus, PlanReviewHandoffBinding, Session,
     SessionLogEntry, SessionRef, StartDurableTaskAction, TaskAdmissionTrigger,
-    TaskContinuationControl, TaskContinuationHandoffBinding, TaskExecutionAttemptStatus,
-    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStartHandoffBinding,
-    conversation_auto_execution_contract_material, conversation_route_contract_fingerprint,
-    conversation_route_decision_id_for_source, conversation_tool_specs_for_bound_context,
-    durable_task_cancellation_requested, plan_review_attempt_id_for_review,
-    plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
-    route_surface_tool_specs_for_bound_context, route_surface_tool_specs_with_memory,
-    safe_persistence_text,
+    TaskContinuationControl, TaskContinuationHandoffBinding, TaskDirectExecutionAdmittedV1,
+    TaskDirectExecutionSourceV1, TaskExecutionAttemptStatus, TaskHandoffDecision, TaskHandoffId,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStartHandoffBinding, conversation_auto_execution_contract_material,
+    conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
+    conversation_tool_specs_for_bound_context, durable_task_cancellation_requested,
+    plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash, route_surface_tool_specs_for_bound_context,
+    route_surface_tool_specs_with_memory, safe_persistence_text,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
@@ -508,7 +508,7 @@ impl ConversationCoordinator {
             .and_then(|state| state.resolution.as_ref())
             .is_none()
         {
-            session.append_control(ControlEntry::TaskHandoffResolved(resolved))?;
+            session.append_control(ControlEntry::TaskHandoffResolved(resolved.clone()))?;
         }
         ensure_task_started(
             session,
@@ -517,6 +517,7 @@ impl ConversationCoordinator {
             &objective,
             None,
             "admitted by explicit task command",
+            resolved.decided_at_ms,
         )?;
         Ok(StartDurableTaskAction {
             handoff_id,
@@ -528,7 +529,8 @@ impl ConversationCoordinator {
     /// Repairs local crash gaps without replaying a provider request.
     ///
     /// Requested handoffs are resolved from their durable policy snapshot, and accepted handoffs
-    /// missing a task run receive the same deterministic `TaskRun::Started` fact. Repeated calls
+    /// missing execution admission receive the same deterministic direct Task authority. New
+    /// tasks publish `TaskRun::Started` and that authority in one append batch. Repeated calls
     /// append nothing after the projection is complete.
     ///
     /// # Errors
@@ -588,6 +590,7 @@ impl ConversationCoordinator {
                 &objective,
                 request.title.as_deref(),
                 "admitted conversation Task",
+                resolution.decided_at_ms,
             )?;
             if durable_task_cancellation_requested(session, task_id.as_str())? {
                 interrupt_task_after_durable_cancellation(session, &task_id)?;
@@ -921,24 +924,49 @@ fn ensure_task_started(
     objective: &str,
     title: Option<&str>,
     reason: &str,
+    admitted_at_ms: u64,
 ) -> Result<bool> {
+    let admission =
+        TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), objective, admitted_at_ms);
     if let Some(task) = session.task_state_projection().tasks.get(task_id) {
         if &task.parent_session_ref != parent_session_ref || task.objective != objective {
             bail!("task handoff target already exists with conflicting task facts");
         }
-        return Ok(false);
+        if task.latest_plan_version.is_some() {
+            bail!("task handoff target has legacy scheduled-plan execution authority");
+        }
+        if let Some(existing) = &task.direct_execution_admission {
+            existing.validate()?;
+            if existing.task_id != *task_id
+                || !existing.matches_objective(objective)
+                || existing.source != TaskDirectExecutionSourceV1::TaskRequest
+            {
+                bail!("task handoff target has conflicting direct execution authority");
+            }
+            return Ok(false);
+        }
+        // Both callers have verified the exact accepted handoff, source and policy. Only its
+        // pre-execution crash gap may acquire missing authority; arbitrary legacy runs cannot.
+        if task.status != TaskRunStatus::Started {
+            bail!("task handoff target is missing direct execution authority after start");
+        }
+        session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
+        return Ok(true);
     }
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_session_ref.clone(),
-        objective: objective.to_owned(),
-        title: Some(title.map_or_else(
-            || sigil_kernel::task_semantic_title(objective),
-            str::to_owned,
-        )),
-        status: TaskRunStatus::Started,
-        reason: Some(reason.to_owned()),
-    }))?;
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: objective.to_owned(),
+            title: Some(title.map_or_else(
+                || sigil_kernel::task_semantic_title(objective),
+                str::to_owned,
+            )),
+            status: TaskRunStatus::Started,
+            reason: Some(reason.to_owned()),
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
+    ])?;
     Ok(true)
 }
 

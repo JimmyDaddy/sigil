@@ -36,7 +36,7 @@ fn maps_tool_card_key_events_to_commands() {
     );
     assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)),
-        None
+        Some(UiCommand::OpenChangeReview)
     );
     assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::ALT)),

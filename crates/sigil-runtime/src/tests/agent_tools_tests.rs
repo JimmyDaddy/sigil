@@ -11112,3 +11112,83 @@ async fn session_disconnect_joins_all_owned_children_when_durable_projection_is_
         "physical cancellation cannot fabricate missing durable terminal controls");
     Ok(())
 }
+
+#[tokio::test]
+async fn manual_profile_application_admission_binds_actual_new_child_and_reopens_proof()
+-> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let mut runtime = user_authorized_runtime_with_provider_factory(
+        supervisor(&config)?,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    );
+    let workspace = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(workspace.path().join("parent.jsonl"))?;
+    let mut session = Session::new("parent", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let owner = session.application_operation_owner()?;
+    let prompt = "draft an implementation plan";
+    let target = sigil_kernel::ApplicationOperationTargetV1::AgentInvocation {
+        profile_id: "plan".to_owned(),
+        prompt_hash: sigil_kernel::sha256_hex(
+            sigil_kernel::safe_persistence_text(prompt).as_bytes(),
+        ),
+    };
+    let mut bindings = Vec::new();
+    let mut children = Vec::new();
+    for index in 0..2 {
+        let binding = sigil_kernel::ApplicationOperationBindingV1::new(
+            session.session_scope_id().to_owned(),
+            sigil_kernel::sha256_hex(format!("profile-command-{index}").as_bytes()),
+            sigil_kernel::sha256_hex(b"same-profile-payload"),
+            target.clone(),
+        )?;
+        owner.prepare(&binding)?;
+        assert!(
+            sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &binding)?
+                .is_none(),
+            "an older identical profile invocation cannot settle this new K"
+        );
+        session.bind_application_operation(binding.clone())?;
+        session.append_user_message(ModelMessage::user(prompt))?;
+        let invocation = runtime
+            .invoke_agent_profile(
+                &mut session,
+                AgentProfileId::new("plan")?,
+                prompt.to_owned(),
+                &run_options(workspace.path().to_path_buf()),
+                &mut RecordingEventHandler::default(),
+                &mut AutoApproveHandler,
+            )
+            .await?;
+        let proof =
+            sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &binding)?
+                .context("actual child admission")?;
+        assert!(
+            matches!(proof.matched_control(), ControlEntry::AgentThreadStarted(entry) if entry.thread_id == invocation.thread_id)
+        );
+        children.push(invocation.thread_id);
+        bindings.push(binding);
+    }
+    assert_ne!(children[0], children[1]);
+    drop(session);
+    let reopened = Session::load_from_store_for_control(store)?;
+    let reader = reopened.application_operation_owner()?.read_handle();
+    let before = reader.read_event_records()?.len();
+    for (binding, child) in bindings.iter().zip(&children) {
+        let proof = sigil_kernel::session::reconcile_application_operation(&reader, binding)?
+            .context("reopened proof")?;
+        assert!(
+            matches!(proof.matched_control(), ControlEntry::AgentThreadStarted(entry) if &entry.thread_id == child)
+        );
+    }
+    assert_eq!(
+        reader.read_event_records()?.len(),
+        before,
+        "reconciliation creates no new child"
+    );
+    Ok(())
+}

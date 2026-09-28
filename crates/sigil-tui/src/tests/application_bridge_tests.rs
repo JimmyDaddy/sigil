@@ -1321,3 +1321,93 @@ fn branch_knowledge_application_action_binds_current_target_and_exact_source() -
         if target_session_id == "target" && request == selected));
     Ok(())
 }
+
+#[tokio::test]
+async fn ordinary_run_receipt_requires_causal_marker_and_recovers_with_closed_worker() -> Result<()>
+{
+    use anyhow::Context;
+    use sigil_kernel::{JsonlSessionStore, Session};
+    let fixture = tempfile::tempdir()?;
+    let path = fixture.path().join("ordinary-recovery.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut source = Session::new("test", "model").with_store(store.clone());
+    source.ensure_identity_entry()?;
+    let source_id = source.session_scope_id().to_owned();
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("ordinary-recovery")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new(&source_id)?),
+    };
+    let application = session(
+        Arc::new(sigil_application::FakeApplication::new(
+            snapshot(scope.clone()).envelope,
+        )?),
+        scope.clone(),
+    )?;
+    let request = application
+        .prepare_action(
+            &AppAction::SubmitPrompt("same input".to_owned()),
+            None,
+            None,
+        )?
+        .context("ordinary request")?;
+    let binding =
+        sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+            .context("ordinary binding")?;
+    let owner = source.application_operation_owner()?;
+    owner.prepare(&binding)?;
+    source
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+            "run-before-receipt",
+            1,
+        )?)?;
+    let projection = Arc::new(
+        sigil_runtime::RuntimeSessionProjectionBinding::new(
+            fixture.path().join("unused.toml"),
+            fixture.path().to_owned(),
+            path.clone(),
+            source_id,
+            scope.application_instance.clone(),
+            scope.authenticated_subject.clone(),
+            scope.workspace.clone(),
+            1,
+            1,
+            1,
+            1,
+        )?
+        .with_owner(sigil_runtime::RuntimeSessionProjectionOwner::from_store(
+            &store,
+        )),
+    );
+    let (sender, _observed) = acknowledged_test_channel(Some(owner.clone()));
+    assert!(
+        reconcile_worker_operation(
+            Some(Arc::clone(&projection)),
+            TuiWorkerEndpoint::new(sender),
+            request.clone()
+        )
+        .await?
+        .is_none(),
+        "legacy run start is not this command's causal receipt"
+    );
+    source.bind_application_operation(binding)?;
+    source.record_bound_conversation_run_admission("run-before-receipt")?;
+    drop(source);
+    // The command owner can be gone before a delayed receipt arrives. Recovery reads the
+    // original K/F batch, never the currently visible UI run or a live worker acknowledgement.
+    let (sender, receiver) = WorkerCommandSender::test_channel();
+    drop(receiver);
+    let recovered =
+        reconcile_worker_operation(Some(projection), TuiWorkerEndpoint::new(sender), request)
+            .await?
+            .context("durable admission")?;
+    let sigil_runtime::RuntimeApplicationDispatch::Settled(receipt) = recovered else {
+        anyhow::bail!("admission was not recovered");
+    };
+    assert!(
+        matches!(receipt.outcome.as_deref(), Some(sigil_application::ApplicationCommandOutcome::ConversationRunAccepted { run_id }) if run_id.as_str() == "run-before-receipt")
+    );
+    Ok(())
+}

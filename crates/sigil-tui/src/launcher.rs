@@ -2331,6 +2331,7 @@ pub(crate) struct PendingApplicationAdmission {
     retryable: bool,
     receipt_resolved: bool,
     reconcile_requested: bool,
+    run_owner_returned: bool,
 }
 
 impl std::fmt::Debug for PendingApplicationAdmission {
@@ -2338,6 +2339,10 @@ impl std::fmt::Debug for PendingApplicationAdmission {
         formatter
             .debug_struct("PendingApplicationAdmission")
             .field("receipt_resolved", &self.receipt_resolved)
+            .field("receiving", &self.receiver.is_some())
+            .field("retryable", &self.retryable)
+            .field("reconcile_requested", &self.reconcile_requested)
+            .field("run_owner_returned", &self.run_owner_returned)
             .field(
                 "running",
                 &self
@@ -2577,6 +2582,7 @@ fn queue_background_application_action(
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
@@ -2704,6 +2710,7 @@ fn queue_run_admission(
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
@@ -2800,6 +2807,7 @@ fn queue_plan_revision(
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
@@ -2909,6 +2917,7 @@ fn queue_application_interaction(
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     if waiting_for_run {
         pending.reconcile_requested = true;
@@ -3106,6 +3115,23 @@ fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
 }
 
 fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerMessage) -> bool {
+    // Async child admission can commit after the early UI start notification. A domain
+    // notification only wakes reconciliation; the original K/F still needs its durable marker.
+    if let WorkerMessage::Event(event) = message {
+        match (action, event.as_ref()) {
+            (
+                AppAction::InvokeAgentProfile { .. },
+                sigil_kernel::RunEvent::Control(sigil_kernel::ControlEntry::AgentThreadStarted(_)),
+            )
+            | (
+                AppAction::InvokeChildSessionSkill { .. },
+                sigil_kernel::RunEvent::Control(
+                    sigil_kernel::ControlEntry::TaskDirectExecutionAdmittedV1(_),
+                ),
+            ) => return true,
+            _ => {}
+        }
+    }
     if let WorkerMessage::ConversationQueueOperationCompleted { operation, .. } = message {
         return AppState::queue_operation_for_action(action).as_ref() == Some(operation);
     }
@@ -3307,6 +3333,17 @@ fn poll_application_admission(
                 configuration_publications.push(Arc::clone(request));
             }
             runtime.pending_interactions.remove(index);
+            changed = true;
+        } else if pending.run_owner_returned
+            && pending.receiver.is_none()
+            && pending.handle.is_none()
+        {
+            // Both the original run owner and its admission thread have joined. Preserve the
+            // unresolved exact K/F for recovery without occupying an active admission slot.
+            let mut retained = runtime.pending_interactions.remove(index);
+            retained.reconcile_requested = false;
+            retained.retryable = false;
+            app.retained_application_admissions.push(retained);
             changed = true;
         } else {
             index += 1;
@@ -3953,7 +3990,26 @@ fn apply_worker_message_state(
     message: &WorkerMessage,
 ) -> bool {
     for pending in &mut runtime.pending_interactions {
-        if application_interaction_outcome_matches(&pending.action, message) {
+        if let WorkerMessage::ApplicationRunOwnerReturned { binding } = message {
+            let matches = pending.request.lock().ok().is_some_and(|request| {
+                request.as_ref().is_some_and(|request| {
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                        == Some(binding.as_ref())
+                })
+            });
+            if matches {
+                pending.run_owner_returned = true;
+                pending.reconcile_requested = false;
+                pending.retryable = false;
+            }
+        } else if !pending.run_owner_returned
+            && application_interaction_outcome_matches(&pending.action, message)
+        {
             pending.reconcile_requested = true;
         }
     }
@@ -4925,3 +4981,7 @@ mod lifecycle_rfc0075_tests;
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/launcher_user_input_recovery_tests.rs"]
 mod user_input_recovery_tests;
+
+#[cfg(test)]
+#[path = "tests/launcher_real_admission_support.rs"]
+pub(crate) mod real_admission_support;

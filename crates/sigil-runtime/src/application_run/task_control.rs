@@ -34,6 +34,34 @@ pub struct PreparedApplicationTaskContinuation {
 }
 
 impl PreparedApplicationTaskContinuation {
+    /// Binds this prepared continuation to its original typed Task/guidance command.
+    /// Fresh Task resolution and the existing run owner remain the execution authority.
+    ///
+    /// # Errors
+    /// Rejects a different Task, input digest, scope, or durable application preparation.
+    pub fn bind_conversation_run_operation(
+        &mut self,
+        binding: sigil_kernel::ApplicationOperationBindingV1,
+        original_task_id: &str,
+        original_guidance: Option<&str>,
+    ) -> Result<()> {
+        if self.execution.task.task_id.as_str() != original_task_id {
+            bail!("Task continuation operation changes its selected Task");
+        }
+        let input_digest = crate::application_operation_owner::task_continuation_input_digest(
+            Some(original_task_id),
+            original_guidance,
+        )?;
+        if binding.target
+            != (sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                input_digest,
+            })
+        {
+            bail!("Task continuation operation changes its original input");
+        }
+        self.execution.session.bind_application_operation(binding)
+    }
+
     /// Returns projection and delivery capabilities from this continuation's actual session owner.
     #[must_use]
     pub fn session_projection_owner(&self) -> crate::RuntimeSessionProjectionOwner {
@@ -464,6 +492,29 @@ impl ApplicationTaskContinuationExecution {
             .append_started(&self.conversation_start)
             .context("failed to persist application Task continuation start")?;
         let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler)?;
+        if let Err(error) = self
+            .session
+            .record_bound_conversation_run_admission(&self.run_id)
+        {
+            let error = error.context("failed to persist Task continuation command admission");
+            let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+            if let Err(terminal_error) = bridge.emit_conversation_terminal(
+                &self.conversation_lifecycle,
+                &self.run_id,
+                ApplicationRunTerminalStatus::Failed,
+                None,
+                Some(&safe_error),
+                &self.redactor,
+                PublicRunEventKind::RunFailed {
+                    error: safe_error.clone(),
+                },
+            ) {
+                return Err(error).context(format!(
+                    "Task continuation admission failure terminal was not confirmed: {terminal_error:#}"
+                ));
+            }
+            return Err(error);
+        }
         bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.public_prompt,
         })?;

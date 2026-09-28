@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
@@ -919,6 +919,7 @@ where
     }
     let mut assistant_text = String::new();
     let mut reasoning_trace_buffer = String::new();
+    let recorded_call_ids = recorded_tool_call_ids(session);
     let mut tool_parts: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut completed_calls: Vec<ToolCallPersistenceProjection> = Vec::new();
     let mut pending_states: Vec<ProviderContinuationState> = Vec::new();
@@ -972,6 +973,7 @@ where
             ProviderChunk::ToolCallStart { id, name } => {
                 partial_output.observes_tool_call();
                 validate_streamed_tool_identity(&id, &name)?;
+                validate_unrecorded_tool_call_id(&recorded_call_ids, &id)?;
                 if tool_parts.len() >= MAX_PROVIDER_TURN_TOOL_CALLS && !tool_parts.contains_key(&id)
                 {
                     anyhow::bail!(
@@ -1031,6 +1033,7 @@ where
                     );
                 }
                 validate_streamed_tool_identity(&call.id, &call.name)?;
+                validate_unrecorded_tool_call_id(&recorded_call_ids, &call.id)?;
                 if !completed_call_ids.insert(call.id.clone()) {
                     anyhow::bail!(
                         "tool_call_stream_invalid: provider reused a completed tool-call id"
@@ -1170,6 +1173,7 @@ where
     H: EventHandler + Send,
 {
     let mut buffer = crate::HostedTurnBuffer::new(crate::HostedTurnBufferLimits::default());
+    let recorded_call_ids = recorded_tool_call_ids(session);
     let mut tool_parts: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut completed_calls = Vec::new();
     let mut completed_call_ids = std::collections::BTreeSet::new();
@@ -1211,6 +1215,7 @@ where
             ProviderChunk::ToolCallStart { id, name } => {
                 partial_output.observes_tool_call();
                 validate_streamed_tool_identity(&id, &name)?;
+                validate_unrecorded_tool_call_id(&recorded_call_ids, &id)?;
                 if tool_parts.len() >= MAX_PROVIDER_TURN_TOOL_CALLS
                     || tool_parts.contains_key(&id)
                     || completed_call_ids.contains(&id)
@@ -1241,6 +1246,7 @@ where
             ProviderChunk::ToolCallComplete(call) => {
                 partial_output.observes_tool_call();
                 validate_streamed_tool_identity(&call.id, &call.name)?;
+                validate_unrecorded_tool_call_id(&recorded_call_ids, &call.id)?;
                 if completed_calls.len() >= MAX_PROVIDER_TURN_TOOL_CALLS
                     || !completed_call_ids.insert(call.id.clone())
                 {
@@ -1386,6 +1392,32 @@ fn provider_chunk_observes_generation(chunk: &ProviderChunk) -> bool {
             | ProviderChunk::HostedToolFailed { .. }
             | ProviderChunk::HostedRequestUsage { .. }
     )
+}
+
+// The current owner holds the session entry prefix for this turn. Check its durable identities
+// before publishing a streamed call: detecting reuse only after the result append also corrupts
+// the active projection and can regress an already-terminal public tool card.
+fn recorded_tool_call_ids(session: &Session) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for entry in session.entries() {
+        match entry {
+            crate::SessionLogEntry::Assistant(message) => {
+                ids.extend(message.tool_calls.iter().map(|call| call.id.clone()));
+            }
+            crate::SessionLogEntry::ToolResultV3(result) => {
+                ids.insert(result.call_id.clone());
+            }
+            _ => {}
+        }
+    }
+    ids
+}
+
+fn validate_unrecorded_tool_call_id(recorded: &BTreeSet<String>, id: &str) -> Result<()> {
+    if recorded.contains(id) {
+        anyhow::bail!("tool_call_stream_invalid: provider reused a recorded tool-call id");
+    }
+    Ok(())
 }
 
 fn validate_streamed_tool_identity(id: &str, name: &str) -> Result<()> {

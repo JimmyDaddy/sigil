@@ -673,13 +673,24 @@ impl SharedSessionCoordinator {
     /// Refresh that recovered frontier before releasing the same writer lock; cheap snapshots
     /// can then remain I/O-free without indefinitely returning the pre-recovery cache.
     pub(super) fn read_reconciled_records(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.read_writer_records(true)
+    }
+
+    pub(super) fn read_current_records(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.read_writer_records(false)
+    }
+
+    fn read_writer_records(&self, force_reload: bool) -> Result<Vec<SessionStreamRecord>> {
         let (records, notice) = {
             let mut writer = self.lock_writer()?;
-            // Session loading is an explicit reconciliation boundary. Even when this process
-            // already owns a warm writer cache, replay the durable stream once so startup and
-            // existing-only recovery rebuild every derived index from disk and detect changes
-            // made outside the current in-memory projection.
-            let records = writer.reload_records_writer()?;
+            // Explicit loading/recovery replays disk. Ordinary owned reads retain the same
+            // append-time identity, change-time, length and tail-hash checks. Platforms without
+            // a change-time fingerprint keep strict replay for these reads as well.
+            let records = if force_reload || !cfg!(unix) {
+                writer.reload_records_writer()?
+            } else {
+                writer.read_records_writer()?
+            };
             let frontier = writer.frontier_from_tail()?;
             let mut state = self
                 .projection
@@ -2275,6 +2286,7 @@ impl LinearSessionWriter {
             PublicEventOutboxAdmissionIndexV1::from_records(&recovered.records)
                 .context("failed to rebuild public event outbox admission index")?,
         );
+        self.event_links = Some(DurableEventLinkIndex::from_records(&recovered.records));
         self.records = Some(recovered.records.clone());
         self.requires_reload = false;
         Ok(recovered.records)

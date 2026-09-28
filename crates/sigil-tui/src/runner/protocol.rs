@@ -1208,6 +1208,11 @@ impl std::error::Error for WorkerCommandSendError {}
 
 #[derive(Debug)]
 pub enum WorkerMessage {
+    /// The exact session returned from synchronous run dispatch or its async owner was joined.
+    /// The admission thread must still join; this is not a durable accepted/no-effect receipt.
+    ApplicationRunOwnerReturned {
+        binding: Box<sigil_kernel::ApplicationOperationBindingV1>,
+    },
     PluginReviewCompleted {
         session_id: String,
         receipt: sigil_runtime::plugin_management::ApplicationPluginDecisionReceipt,

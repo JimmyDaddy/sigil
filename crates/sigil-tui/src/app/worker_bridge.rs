@@ -226,6 +226,7 @@ impl AppState {
             WorkerMessage::RuntimeReady(_) => {
                 // The host controller consumes this handshake; it is not a UI activation fact.
             }
+            WorkerMessage::ApplicationRunOwnerReturned { .. } => {}
             WorkerMessage::WorkerReady => {
                 self.worker_ready = true;
                 if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {

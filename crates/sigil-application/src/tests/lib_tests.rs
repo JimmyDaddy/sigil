@@ -766,3 +766,58 @@ fn tool_live_preview_requires_execution_owner_instead_of_provider_attempt() {
     update.slot_id = "call".into();
     assert!(update.validate().is_err());
 }
+
+#[test]
+fn conversation_admission_receipt_retains_run_identity_and_commit_frontier() {
+    let scope = scope();
+    let command_id = ApplicationCommandId::new("accepted-command").expect("command");
+    let key = CommandAdmissionContext::host_bound(
+        scope.authenticated_subject.clone(),
+        1,
+        HostConnectionInstanceId::new("host").expect("host"),
+        scope.clone(),
+    )
+    .expect("admission")
+    .reservation_key(&command_id);
+    let mut receipt = ApplicationDomainReceipt {
+        command_id,
+        command_kind: "conversation".to_owned(),
+        frontier: ApplicationFrontier {
+            schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+            scope,
+            writer_generation: 1,
+            stream_generation: 1,
+            through_sequence: 3,
+            durable_cursor: "cut-3".to_owned(),
+        },
+        settlement: EffectSettlementClass::ExternalOrWorkspaceEffect,
+        summary: "input accepted, execution remains observable separately".to_owned(),
+        domain_commit: ApplicationDomainCommitRef {
+            source_session_scope_id: None,
+            source_event_id: "causal-marker".to_owned(),
+            source_sequence: 3,
+            source_digest: "a".repeat(64),
+        },
+        outcome: Some(Box::new(
+            ApplicationCommandOutcome::ConversationRunAccepted {
+                run_id: SafeText::new("run-1").expect("run"),
+            },
+        )),
+    };
+    let encoded = serde_json::to_vec(&ApplicationCommandReceipt::Replayed(receipt.clone()))
+        .expect("encode recovery");
+    let recovered: ApplicationCommandReceipt =
+        serde_json::from_slice(&encoded).expect("decode recovery");
+    assert!(
+        matches!(recovered, ApplicationCommandReceipt::Replayed(ref decoded) if decoded == &receipt)
+    );
+    receipt.validate_for(&key).expect("real domain cut");
+    receipt.frontier.through_sequence = 2;
+    assert!(
+        matches!(
+            receipt.validate_for(&key),
+            Err(ApplicationError::ScopeMismatch)
+        ),
+        "an accepted run id cannot replace missing commit coverage"
+    );
+}

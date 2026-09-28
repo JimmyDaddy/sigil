@@ -57,6 +57,21 @@ where
                 prompt,
                 parent_prompt,
             } => {
+                if let Some(session) = state.session.current.as_ref()
+                    && let Err(error) = session.ensure_application_operation_binding_target(
+                        &sigil_kernel::ApplicationOperationTargetV1::AgentInvocation {
+                            profile_id: profile_id.clone(),
+                            prompt_hash: sigil_kernel::sha256_hex(
+                                sigil_kernel::safe_persistence_text(&prompt).as_bytes(),
+                            ),
+                        },
+                    )
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "application invocation binding failed: {error:#}"
+                    )));
+                    continue;
+                }
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -220,6 +235,18 @@ where
                 skill_id,
                 arguments,
             } => {
+                if let Some(session) = state.session.current.as_ref()
+                    && let Err(error) = session.ensure_application_operation_binding_target(&sigil_kernel::ApplicationOperationTargetV1::DirectTaskAdmission {
+                        objective_hash: sigil_kernel::direct_task_execution::task_direct_execution_objective_hash(
+                            &sigil_runtime::application_operation_owner::skill_child_task_objective(&skill_id, &arguments),
+                        ),
+                    })
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "application invocation binding failed: {error:#}"
+                    )));
+                    continue;
+                }
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -331,7 +358,6 @@ where
                         task_id,
                         task_id_value,
                         parent_session_ref,
-                        objective,
                         skill_id,
                         arguments,
                         loaded,
@@ -371,6 +397,28 @@ where
                 });
             }
             AgentTaskCommand::SubmitTask { prompt } => {
+                if let Some(session) = state.session.current.as_ref()
+                    && let Err(error) = session.ensure_application_operation_binding_target(
+                        &sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                            input_digest: match sigil_kernel::conversation_run_input_digest(
+                                &prompt,
+                                &[],
+                            ) {
+                                Ok(digest) => digest,
+                                Err(error) => {
+                                    let _ = message_tx
+                                        .send(WorkerMessage::RunFailed(format!("{error:#}")));
+                                    continue;
+                                }
+                            },
+                        },
+                    )
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "application invocation binding failed: {error:#}"
+                    )));
+                    continue;
+                }
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -467,8 +515,8 @@ where
                     continue;
                 }
                 let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
-                if let Err(error) = handler.start_public_run(
-                    &run_session,
+                if let Err(error) = handler.start_bound_public_run(
+                    &mut run_session,
                     &public_run_id,
                     &sigil_kernel::safe_persistence_text(&prompt),
                 ) {
@@ -529,6 +577,22 @@ where
                 });
             }
             AgentTaskCommand::ContinueTask { task_id, guidance } => {
+                if let Some(session) = state.session.current.as_ref()
+                    && let Err(error) = session.ensure_application_operation_binding_target(&sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                        input_digest: match sigil_runtime::application_operation_owner::task_continuation_input_digest(task_id.as_deref(), guidance.as_deref()) {
+                            Ok(digest) => digest,
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                                continue;
+                            }
+                        },
+                    })
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "application invocation binding failed: {error:#}"
+                    )));
+                    continue;
+                }
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -604,8 +668,8 @@ where
                     continue;
                 }
                 let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
-                if let Err(error) = handler.start_public_run(
-                    &run_session,
+                if let Err(error) = handler.start_bound_public_run(
+                    &mut run_session,
                     &public_run_id,
                     &sigil_kernel::safe_persistence_text(&objective),
                 ) {

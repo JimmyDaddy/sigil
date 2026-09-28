@@ -951,7 +951,7 @@ impl ProviderPhysicalAttemptAudit {
         let (prior_cache_layout, prior_semantic_cache_layout_v2, recovery_envelope) = {
             let store = store.clone();
             tokio::task::spawn_blocking(move || {
-                let records = store.read_event_records_writer()?;
+                let records = store.read_current_event_records_writer()?;
                 let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
                 if let Some(schedule) = recovery_schedule {
                     if purpose != ProviderPhysicalAttemptPurpose::ConversationGeneration {

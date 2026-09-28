@@ -3930,6 +3930,133 @@ async fn application_execution_does_not_rewrite_an_unconfirmed_public_append_as_
     Ok(())
 }
 
+#[tokio::test]
+async fn application_admission_failure_terminalizes_only_with_confirmed_publication() -> Result<()>
+{
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    for conflicting_public_sequence in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let config_path = temp.path().join("sigil.toml");
+        write_unauthenticated_application_test_config(&config_path)?;
+        let prompt = "this command cannot adopt an already-started run";
+        let request = ApplicationRunRequest::non_interactive(
+            &config_path,
+            temp.path(),
+            prompt,
+            "run-admission-failure",
+        );
+        let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+            ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+            &config_path,
+            temp.path(),
+        )?;
+        let mut prepared = prepare_application_run(request, &services).await?;
+        let session_id = prepared.session_id().to_owned();
+        let run_id = prepared.run_id().to_owned();
+        let path = prepared.execution.session_log_path.clone();
+        // This is a real rejected admission: its run predates this command's prepared marker.
+        // Re-entering append_started is idempotent; a newer K still cannot adopt that old run.
+        prepared
+            .execution
+            .conversation_lifecycle
+            .append_started(&prepared.execution.conversation_start)?;
+        let digest = sigil_kernel::conversation_run_input_digest(prompt, &[])?;
+        let binding = sigil_kernel::ApplicationOperationBindingV1::new(
+            session_id.clone(),
+            "a".repeat(64),
+            "b".repeat(64),
+            sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                input_digest: digest.clone(),
+            },
+        )?;
+        let owner = prepared.execution.session.application_operation_owner()?;
+        owner.prepare(&binding)?;
+        prepared.bind_conversation_run_operation(binding.clone(), &digest)?;
+        if conflicting_public_sequence {
+            let foreign = PublicRunEvent::new(
+                &session_id,
+                &run_id,
+                1,
+                PublicRunEventKind::Notice {
+                    message: "a different immutable publication owns sequence one".to_owned(),
+                },
+            );
+            let event_id = "admission-conflicting-public-sequence".to_owned();
+            sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?)
+                .append_outbox(&sigil_kernel::PublicEventOutboxEntryV1 {
+                    schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    domain_event_id: event_id.clone(),
+                    public_event_id: event_id,
+                    run_id: run_id.clone(),
+                    sequence: 1,
+                    payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&foreign)?),
+                    event: foreign,
+                })?;
+        }
+        let mut recorder = Recorder::default();
+        let error = prepared
+            .execution
+            .execute(&mut recorder, &mut AutoApproveHandler)
+            .await
+            .expect_err("a failed admission must not dispatch a provider run");
+        assert!(
+            format!("{error:#}").contains("failed to persist application command run admission")
+        );
+        assert!(
+            sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &binding)?
+                .is_none(),
+            "a failed lifecycle terminal is not command acceptance evidence"
+        );
+        let records = owner.read_handle().read_event_records()?;
+        assert!(records.iter().all(|record| !matches!(
+            record.session_log_entry(),
+            Ok(Some(SessionLogEntry::User(_)))
+                | Ok(Some(SessionLogEntry::Control(
+                    ControlEntry::ConversationRunAcceptedV1(_)
+                )))
+        )));
+        let terminals = application_conversation_lifecycle(&path)?
+            .into_iter()
+            .filter_map(|record| match record {
+                ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(entry) => Some(entry),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if conflicting_public_sequence {
+            assert!(format!("{error:#}").contains("terminal was not confirmed"));
+            assert!(
+                terminals.is_empty(),
+                "unconfirmed publication remains recoverable"
+            );
+            assert!(
+                recorder
+                    .0
+                    .iter()
+                    .all(|event| !matches!(event.event, PublicRunEventKind::RunFailed { .. }))
+            );
+        } else {
+            assert_eq!(terminals.len(), 1);
+            assert_eq!(terminals[0].run_id(), run_id);
+            assert_eq!(
+                terminals[0].status(),
+                ConversationRunTerminalStatusV1::Failed
+            );
+            assert!(recorder.0.iter().any(|event| event.run_id == run_id
+                && matches!(event.event, PublicRunEventKind::RunFailed { .. })));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_domain_state()
 -> Result<()> {
@@ -5090,8 +5217,20 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         "an ordinary User turn must clear the previous Task focus before explicit continuation"
     );
     let session_scope_id = session.session_scope_id().to_owned();
+    let owner = session.application_operation_owner()?;
+    let input_digest = crate::application_operation_owner::task_continuation_input_digest(
+        Some(task_id.as_str()),
+        None,
+    )?;
+    let operation = sigil_kernel::ApplicationOperationBindingV1::new(
+        session_scope_id.clone(),
+        "a".repeat(64),
+        "b".repeat(64),
+        sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission { input_digest },
+    )?;
+    owner.prepare(&operation)?;
     drop(session);
-    let prepared = prepare_application_task_continuation(
+    let mut prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path,
             launch_cwd: temp.path().to_path_buf(),
@@ -5113,6 +5252,21 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         prepared.session_log_path(),
         std::fs::canonicalize(&session_path)?.as_path()
     );
+    assert!(
+        prepared
+            .bind_conversation_run_operation(operation.clone(), "different-task", None)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .bind_conversation_run_operation(
+                operation.clone(),
+                task_id.as_str(),
+                Some("different guidance")
+            )
+            .is_err()
+    );
+    prepared.bind_conversation_run_operation(operation.clone(), task_id.as_str(), None)?;
     let (execution, control) = prepared.into_parts();
     assert_eq!(
         control.cancellation_target,
@@ -5136,6 +5290,24 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         .execute(&mut events, &mut approval_handler)
         .await?;
 
+    let proof =
+        sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &operation)?
+            .context("actual Task foreground admission")?;
+    assert!(
+        matches!(proof.matched_control(), ControlEntry::ConversationRunAcceptedV1(entry) if entry.run_id == output.run_id)
+    );
+    let other = sigil_kernel::ApplicationOperationBindingV1::new(
+        session_scope_id.clone(),
+        "c".repeat(64),
+        operation.fingerprint.clone(),
+        operation.target.clone(),
+    )?;
+    owner.prepare(&other)?;
+    assert!(
+        sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &other)?
+            .is_none(),
+        "same Task/guidance with a new K cannot borrow a previous continuation"
+    );
     assert_eq!(output.session_id, session_scope_id);
     assert_eq!(output.task_id, task_id);
     assert_eq!(output.task_status, TaskRunStatus::Completed);

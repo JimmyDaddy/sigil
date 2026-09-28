@@ -56,7 +56,6 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) task_id: TaskId,
     pub(in crate::runner) task_id_value: String,
     pub(in crate::runner) parent_session_ref: SessionRef,
-    pub(in crate::runner) objective: String,
     pub(in crate::runner) skill_id: String,
     pub(in crate::runner) arguments: String,
     pub(in crate::runner) loaded: sigil_runtime::LoadedSkillContext,
@@ -240,7 +239,6 @@ pub(in crate::runner) fn spawn_skill_child_run(
             task_id,
             task_id_value,
             parent_session_ref,
-            objective,
             skill_id,
             arguments,
             loaded,
@@ -265,7 +263,6 @@ pub(in crate::runner) fn spawn_skill_child_run(
             SkillChildRunOrchestration {
                 task_id,
                 parent_session_ref,
-                objective,
                 skill_id,
                 arguments,
                 loaded,
@@ -363,7 +360,6 @@ pub(in crate::runner) struct RoutedTaskContinuationOrchestration<'a> {
 pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
     task_id: TaskId,
     parent_session_ref: SessionRef,
-    objective: String,
     skill_id: String,
     arguments: String,
     loaded: sigil_runtime::LoadedSkillContext,
@@ -684,7 +680,6 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
     let SkillChildRunOrchestration {
         task_id,
         parent_session_ref,
-        objective,
         skill_id,
         arguments,
         loaded,
@@ -729,7 +724,9 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
         .map_err(|error| format!("{error:#}"))?;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-    let objective = format!("{objective}\n\nInvoke skill {skill_id} with arguments: {arguments}");
+    let objective = sigil_runtime::application_operation_owner::skill_child_task_objective(
+        &skill_id, &arguments,
+    );
     direct_task_runtime
         .run(
             session,

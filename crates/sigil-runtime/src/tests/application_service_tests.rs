@@ -923,3 +923,82 @@ async fn runtime_page_cancellation_drops_the_active_source_future() -> anyhow::R
     ));
     Ok(())
 }
+
+#[test]
+fn ordinary_run_binding_recovers_only_exact_admission_and_preserves_outcome() -> anyhow::Result<()>
+{
+    let fixture = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(fixture.path().join("admission.jsonl"))?;
+    let mut session = sigil_kernel::Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let mut request = request("original input", 1);
+    let session_scope = SessionScopeId::new(session.session_scope_id())?;
+    request.admission.scope.session = Some(session_scope.clone());
+    request.envelope.expected_frontier.scope.session = Some(session_scope);
+    let binding = crate::application_operation_owner::application_operation_binding(&request)?
+        .expect("ordinary run binding");
+    let owner = session.application_operation_owner()?;
+    owner.prepare(&binding)?;
+    session.bind_application_operation(binding.clone())?;
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+            "accepted-run",
+            1,
+        )?)?;
+    let frontier = |sequence| ApplicationFrontier {
+        schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+        scope: request.admission.scope.clone(),
+        writer_generation: 1,
+        stream_generation: 1,
+        through_sequence: sequence,
+        durable_cursor: "actual-session-cut".to_owned(),
+    };
+    assert!(
+        crate::application_operation_owner::reconcile_application_operation_receipt(
+            &request,
+            &store.read_handle(),
+            &frontier(u64::MAX)
+        )?
+        .is_none()
+    );
+    session.record_bound_conversation_run_admission("accepted-run")?;
+    let proof =
+        sigil_kernel::session::reconcile_application_operation(&owner.read_handle(), &binding)?
+            .expect("causal admission");
+    let receipt = crate::application_operation_owner::reconcile_application_operation_receipt(
+        &request,
+        &store.read_handle(),
+        &frontier(proof.stream_sequence()),
+    )?
+    .expect("receipt");
+    assert!(
+        matches!(receipt, RuntimeApplicationDispatch::Settled(receipt) if matches!(receipt.outcome.as_deref(), Some(sigil_application::ApplicationCommandOutcome::ConversationRunAccepted { run_id }) if run_id.as_str() == "accepted-run"))
+    );
+    assert!(
+        crate::application_operation_owner::application_operation_receipt_from_proof(
+            &request,
+            &binding,
+            &proof,
+            &frontier(proof.stream_sequence() - 1)
+        )
+        .is_err(),
+        "an old observed cut cannot advertise this admission"
+    );
+    let mut changed = request.clone();
+    changed.envelope.command =
+        ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+            prompt: Some(SafeText::new("other input")?),
+            options: None,
+        });
+    assert!(
+        crate::application_operation_owner::application_operation_receipt_from_proof(
+            &changed,
+            &binding,
+            &proof,
+            &frontier(proof.stream_sequence())
+        )
+        .is_err()
+    );
+    Ok(())
+}

@@ -22,6 +22,96 @@ pub fn application_operation_binding(
     use ApplicationOperationTargetV1 as Target;
     request.validate()?;
     let target = match &request.envelope.command {
+        ApplicationCommand::Conversation(
+            sigil_application::ConversationCommand::SubmitPrompt {
+                prompt: Some(prompt),
+                options,
+            },
+        ) if foreground_run_options(options.as_deref()) => Target::ConversationRunAdmission {
+            input_digest: sigil_kernel::conversation_run_input_digest(prompt.as_str(), &[])
+                .map_err(unavailable)?,
+        },
+        ApplicationCommand::Conversation(
+            sigil_application::ConversationCommand::SubmitPromptWithAttachments {
+                prompt,
+                attachments,
+                options,
+            },
+        ) if !attachments.is_empty() && foreground_run_options(options.as_deref()) => {
+            Target::ConversationRunAdmission {
+                input_digest: sigil_kernel::conversation_run_input_digest(
+                    prompt.as_ref().map_or("", |text| text.as_str()),
+                    attachments,
+                )
+                .map_err(unavailable)?,
+            }
+        }
+        ApplicationCommand::Agent(sigil_application::AgentCommand::InvokeInlineSkill {
+            arguments,
+            attachments,
+            ..
+        }) => Target::ConversationRunAdmission {
+            // Skill identity and invocation options remain in the complete command F.
+            // Bind only the original input here, before the host adds skill context.
+            input_digest: sigil_kernel::conversation_run_input_digest(
+                arguments.as_ref().map_or("", |text| text.as_str()),
+                attachments,
+            )
+            .map_err(unavailable)?,
+        },
+        ApplicationCommand::PlanTask(
+            PlanTaskCommand::SubmitTask { prompt }
+            | PlanTaskCommand::SubmitPlanPrompt { prompt, .. },
+        ) => Target::ConversationRunAdmission {
+            input_digest: sigil_kernel::conversation_run_input_digest(prompt.as_str(), &[])
+                .map_err(unavailable)?,
+        },
+        ApplicationCommand::PlanTask(PlanTaskCommand::ContinueTask { task_id, guidance }) => {
+            Target::ConversationRunAdmission {
+                input_digest: task_continuation_input_digest(
+                    task_id.as_ref().map(|id| id.as_str()),
+                    guidance.as_ref().map(|text| text.as_str()),
+                )
+                .map_err(unavailable)?,
+            }
+        }
+        ApplicationCommand::Conversation(
+            sigil_application::ConversationCommand::SubmitPrompt {
+                prompt: None,
+                options: Some(options),
+            },
+        ) if options.task_continuation.is_some() => {
+            let task = options
+                .task_continuation
+                .as_ref()
+                .ok_or(ApplicationError::Unavailable)?;
+            Target::ConversationRunAdmission {
+                input_digest: task_continuation_input_digest(
+                    Some(task.task_id.as_str()),
+                    task.guidance.as_ref().map(|text| text.as_str()),
+                )
+                .map_err(unavailable)?,
+            }
+        }
+        ApplicationCommand::Agent(sigil_application::AgentCommand::InvokeProfile {
+            profile_id,
+            prompt,
+            ..
+        }) => Target::AgentInvocation {
+            profile_id: profile_id.as_str().to_owned(),
+            prompt_hash: sigil_kernel::sha256_hex(
+                sigil_kernel::safe_persistence_text(prompt.as_str()).as_bytes(),
+            ),
+        },
+        ApplicationCommand::Agent(sigil_application::AgentCommand::InvokeChildSessionSkill {
+            skill_id,
+            arguments,
+        }) => Target::DirectTaskAdmission {
+            objective_hash:
+                sigil_kernel::direct_task_execution::task_direct_execution_objective_hash(
+                    &skill_child_task_objective(skill_id.as_str(), arguments.as_str()),
+                ),
+        },
         ApplicationCommand::Conversation(sigil_application::ConversationCommand::Recovery {
             action:
                 sigil_application::ApplicationRecoveryAction::ForkConversation {
@@ -197,6 +287,39 @@ pub fn application_operation_binding(
     .map_err(unavailable)
 }
 
+fn foreground_run_options(options: Option<&sigil_application::RunStartOptions>) -> bool {
+    // An inline skill uses the same prepared foreground run and exact K/F. Its fresh
+    // content/trust/tool-scope validation still happens during normal preparation.
+    options.is_none_or(|options| options.task_continuation.is_none())
+}
+
+/// Binds a continuation's original selected Task and guidance before host context is added.
+/// The digest records input identity; existing Task resolution remains the execution authority.
+///
+/// # Errors
+/// Returns an error if the structured original input cannot be serialized.
+pub fn task_continuation_input_digest(
+    task_id: Option<&str>,
+    guidance: Option<&str>,
+) -> anyhow::Result<String> {
+    let value = sigil_kernel::canonicalize_cache_stable_json(
+        &serde_json::json!({"task_id": task_id, "guidance": guidance}),
+    )?;
+    Ok(sigil_kernel::sha256_hex(&serde_json::to_vec(&value)?))
+}
+
+/// Exact objective consumed by the existing child-skill Task owner and its admission receipt.
+/// This only formats an already-typed invocation; it does not select a route or grant permission.
+pub fn skill_child_task_objective(skill_id: &str, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    let summary = if trimmed.is_empty() {
+        format!("invoke agent {skill_id}")
+    } else {
+        format!("invoke agent {skill_id} with arguments: {trimmed}")
+    };
+    format!("{summary}\n\nInvoke skill {skill_id} with arguments: {arguments}")
+}
+
 /// Canonical identity shared by original dispatch and typed continuation validation.
 pub fn application_reservation_key_digest(
     key: &sigil_application::CommandReservationKey,
@@ -347,11 +470,18 @@ pub fn application_operation_receipt_from_proof(
             source_sequence: proof.stream_sequence(),
             source_digest: sigil_kernel::sha256_hex(proof.record_checksum().as_bytes()),
         },
-        outcome: recovery_outcome_from_proof(proof)?.map(|outcome| {
-            Box::new(sigil_application::ApplicationCommandOutcome::Recovery(
-                outcome,
-            ))
-        }),
+        outcome: match proof.matched_control() {
+            sigil_kernel::ControlEntry::ConversationRunAcceptedV1(entry) => Some(Box::new(
+                sigil_application::ApplicationCommandOutcome::ConversationRunAccepted {
+                    run_id: sigil_application::SafeText::new(entry.run_id.clone())?,
+                },
+            )),
+            _ => recovery_outcome_from_proof(proof)?.map(|outcome| {
+                Box::new(sigil_application::ApplicationCommandOutcome::Recovery(
+                    outcome,
+                ))
+            }),
+        },
     };
     receipt.validate_for(
         &request

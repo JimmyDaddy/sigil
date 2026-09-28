@@ -75,6 +75,9 @@ mod task_progress;
 #[path = "agent_auto_execution_tests.rs"]
 mod auto_execution;
 
+#[path = "agent_tool_identity_tests.rs"]
+mod tool_identity;
+
 #[test]
 fn flat_request_user_input_arguments_allow_required_subset_and_ignore_unknown_superset() {
     let parsed = super::user_input::parse_request_user_input_args(

@@ -1010,6 +1010,20 @@ impl JsonlSessionStore {
         self.writer.read_reconciled_records()
     }
 
+    /// Reads the current validated records through this store's existing writer owner.
+    ///
+    /// Ordinary reads reuse the writer's append-maintained records after checking the file's
+    /// identity, change time, length and tail hash. A changed or uncertain stream is replayed and
+    /// recovered through the same writer. Platforms without a change-time fingerprint replay
+    /// every read. Explicit session loading/recovery still uses `read_event_records_writer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer cannot read, recover or validate the current stream.
+    pub fn read_current_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.writer.read_current_records()
+    }
+
     /// Appends a bounded batch of public-event delivery receipts through the existing session
     /// writer and outbox authority.
     pub fn append_public_event_delivery_batch(
@@ -1822,6 +1836,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::ProviderDiagnostic(_) => DurableEventType::DiagnosticRecorded,
         ControlEntry::SessionCompositionBound(_) => DurableEventType::SessionCompositionBound,
         ControlEntry::SessionRuntimeTransitionV1(_) => DurableEventType::SessionRuntimeTransitionV1,
+        ControlEntry::ConversationRunAcceptedV1(_) => DurableEventType::ConversationRunAcceptedV1,
         ControlEntry::ApplicationOperationPreparedV1(_) => {
             DurableEventType::ApplicationOperationPreparedV1
         }

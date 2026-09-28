@@ -63,3 +63,11 @@ TUI tracing 写入 sink 保护终端，支持导出无需打开日志，也不�
 用 deferred Promise 验证 UI 在 receipt 前的状态，用协议 barrier 验证 MCP 实际并发及 failure cleanup，用阻塞 admission 证明 TUI 主线程可继续绘制/处理 Stop，用 gated provider stream 验证 text/reasoning 不等待后续 chunk 或结束才发布。这些测试证明顺序与生命周期，不把 fixture 时间宣称为真实模型延迟改善比例。
 
 实际首响还取决于会话长度、所配置的 eager 服务、机器负载、网络与模型推理。没有现场分段 trace 时，不将用户观察的全部等待时间归因于模型，也不承诺固定秒数。
+
+## 普通提交的持久接纳回执
+
+普通文本和图片提交通过既有 application 命令 K/F 绑定原始输入摘要。运行 owner 持久化该次 `ConversationRunStarted` 后、启动 provider 前，沿同一 Session writer 原子追加 `ConversationRunAcceptedV1` 与既有 operation marker；摘要覆盖原始文字和图片内容引用，review 注释的完整 options 仍由命令指纹绑定。writer 同时核对该 run 仍活动，且其 start 晚于该命令的 prepare，防止新命令认领旧 run。
+
+`ConversationRunAccepted` 回执只表示输入已被该次运行持久接纳。执行失败、等待用户输入、取消和最终成功仍以原 run 生命周期为准。TUI 可释放已接纳提交的 pending 槽位；32 个并发未决操作的保护保持不变。HTTP 使用同一事实恢复 exact run ID，异步准备尚未完成时仍保留不确定结果。
+
+重试和重启通过原 K/F 对应的原子 batch 恢复回执。只有旧 `RunStarted`、相同 prompt、当前 UI 终态或通道 ACK 都不能补造接纳事实；缺少 marker 的历史不确定命令不会自动变成成功。连续提交回归必须经过真实 worker、application service 和 session writer，不能通过增加 pending 上限掩盖回执缺失。

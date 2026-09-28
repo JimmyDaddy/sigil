@@ -217,7 +217,7 @@ fn branch_knowledge_distinct_application_operations_require_their_own_causal_rec
             session.append_branch_knowledge(entry.clone()).is_err(),
             "same K/F must reconcile instead of executing twice"
         );
-        session.clear_application_operation();
+        let _ = session.clear_application_operation();
         assert_eq!(std::fs::read(&path)?, before);
     }
     assert_eq!(

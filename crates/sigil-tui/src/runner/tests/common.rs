@@ -225,6 +225,16 @@ impl TestWorker {
         })
     }
 
+    pub(super) fn try_recv(&self) -> Result<Option<WorkerMessage>> {
+        match self.message_rx.try_recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow!("worker message channel disconnected"))
+            }
+        }
+    }
+
     pub(super) fn recv_with_timeout(&self, timeout: Duration) -> Result<WorkerMessage> {
         self.message_rx
             .recv_timeout(timeout)
@@ -634,6 +644,10 @@ impl PlannedProvider {
             plans: Arc::new(Mutex::new(VecDeque::from(plans))),
             stream_started: None,
         }
+    }
+
+    pub(super) fn remaining_plan_count(&self) -> usize {
+        self.plans.lock().expect("plans mutex").len()
     }
 
     pub(super) fn new_with_stream_start_signal(

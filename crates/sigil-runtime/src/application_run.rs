@@ -1125,6 +1125,26 @@ pub struct PreparedApplicationRun {
 }
 
 impl PreparedApplicationRun {
+    /// Attaches an already-prepared application's exact ordinary-input operation to this owner.
+    /// The later durable run start, not preparation or a channel acknowledgement, accepts it.
+    ///
+    /// # Errors
+    /// Rejects a different input, scope, or operation preparation.
+    pub fn bind_conversation_run_operation(
+        &mut self,
+        binding: sigil_kernel::ApplicationOperationBindingV1,
+        original_input_digest: &str,
+    ) -> Result<()> {
+        if binding.target
+            != (sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                input_digest: original_input_digest.to_owned(),
+            })
+        {
+            bail!("conversation run operation does not match its original input");
+        }
+        self.execution.session.bind_application_operation(binding)
+    }
+
     /// Returns projection and delivery capabilities from this prepared run's actual session owner.
     #[must_use]
     pub fn session_projection_owner(&self) -> crate::RuntimeSessionProjectionOwner {
@@ -2527,6 +2547,29 @@ impl ApplicationRunExecution {
             .append_started(&self.conversation_start)
             .context("failed to persist application conversation run start")?;
         let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler)?;
+        if let Err(error) = self
+            .session
+            .record_bound_conversation_run_admission(&self.run_id)
+        {
+            let error = error.context("failed to persist application command run admission");
+            let safe_error = self.redactor.redact_text(&format!("{error:#}"));
+            if let Err(terminal_error) = bridge.emit_conversation_terminal(
+                &self.conversation_lifecycle,
+                &self.run_id,
+                ApplicationRunTerminalStatus::Failed,
+                None,
+                Some(&safe_error),
+                &self.redactor,
+                PublicRunEventKind::RunFailed {
+                    error: safe_error.clone(),
+                },
+            ) {
+                return Err(error).context(format!(
+                    "application admission failure terminal was not confirmed; durable recovery must decide the terminal: {terminal_error:#}"
+                ));
+            }
+            return Err(error);
+        }
         if let Err(error) = bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.prompt.clone(),
         }) {

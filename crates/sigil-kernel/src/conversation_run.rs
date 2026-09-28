@@ -628,6 +628,35 @@ fn conversation_run_lifecycle_state(
     Ok(state)
 }
 
+pub(crate) fn validate_active_conversation_run(
+    records: &[SessionStreamRecord],
+    run_id: &str,
+    after_sequence: u64,
+) -> Result<()> {
+    validate_conversation_run_lifecycle(records)?;
+    if active_conversation_run(records)?
+        .as_ref()
+        .map(|run| run.run_id())
+        != Some(run_id)
+    {
+        bail!("conversation admission requires its exact active durable run");
+    }
+    for record in records {
+        if let Some(ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started)) =
+            conversation_run_lifecycle_record_from_stream(record)?
+            && started.run_id() == run_id
+        {
+            if record.stream_sequence() <= after_sequence {
+                bail!(
+                    "conversation admission cannot adopt a run preceding its command preparation"
+                );
+            }
+            return Ok(());
+        }
+    }
+    bail!("conversation admission lost its durable start")
+}
+
 pub(crate) fn validate_conversation_run_lifecycle(records: &[SessionStreamRecord]) -> Result<()> {
     conversation_run_lifecycle_state(records)?;
     active_conversation_run(records)?;

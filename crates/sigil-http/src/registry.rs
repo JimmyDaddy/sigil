@@ -2305,6 +2305,15 @@ impl HttpSessionRunRegistry {
         session_id: &str,
         request: HttpRunStartRequest,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.start_run_from_application(session_id, request, None)
+    }
+
+    pub(crate) fn start_run_from_application(
+        &self,
+        session_id: &str,
+        request: HttpRunStartRequest,
+        application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         match request.task_continuation.as_ref() {
             Some(task) => {
                 if task.task_id.trim().is_empty()
@@ -2441,6 +2450,7 @@ impl HttpSessionRunRegistry {
         };
 
         let start = HttpRunDriverStart {
+            application_operation,
             review_annotations,
             session: session_snapshot,
             run: run_snapshot,
@@ -2966,6 +2976,26 @@ impl HttpSessionRunRegistry {
             )
             .map_err(application_registry_error)?;
         let (run_id, replayed) = match &receipt {
+            sigil_application::ApplicationCommandReceipt::Settled(settled)
+            | sigil_application::ApplicationCommandReceipt::Replayed(settled) => {
+                let Some(sigil_application::ApplicationCommandOutcome::ConversationRunAccepted {
+                    run_id,
+                }) = settled.outcome.as_deref()
+                else {
+                    return Err(HttpRegistryError::DriverRejected {
+                        operation: "application run start",
+                        run_id: session_id.to_owned(),
+                        message: "application run start returned no exact accepted run".to_owned(),
+                    });
+                };
+                (
+                    run_id.as_str().to_owned(),
+                    matches!(
+                        receipt,
+                        sigil_application::ApplicationCommandReceipt::Replayed(_)
+                    ),
+                )
+            }
             sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
                 parse_application_run_start_recovery(application_owner_recovery_binding(
                     receipt,
@@ -3007,9 +3037,7 @@ impl HttpSessionRunRegistry {
                     message: "application run start is already in flight".to_owned(),
                 });
             }
-            sigil_application::ApplicationCommandReceipt::Settled(_)
-            | sigil_application::ApplicationCommandReceipt::Replayed(_)
-            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
             | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application run start",

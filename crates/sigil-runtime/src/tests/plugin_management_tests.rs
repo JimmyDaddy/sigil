@@ -410,7 +410,7 @@ async fn plugin_review_requires_its_exact_prepared_operation_for_commit_proof() 
         matches!(proof.matched_control(), ControlEntry::PluginReviewCompletedV1(result)
         if result.trust_event_id == receipt.trust_event_id && result.process_cleanup.is_none())
     );
-    controlled.clear_application_operation();
+    let _ = controlled.clear_application_operation();
     let foreign = ApplicationOperationBindingV1::new(
         fixture.session.session_scope_id().to_owned(),
         "3".repeat(64),

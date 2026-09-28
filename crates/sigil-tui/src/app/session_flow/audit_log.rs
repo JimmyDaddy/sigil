@@ -77,6 +77,9 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ControlEntry::ProviderDiagnostic(diagnostic) => {
             format!("[ctl] provider diagnostic {diagnostic:?}")
         }
+        ControlEntry::ConversationRunAcceptedV1(entry) => {
+            format!("[ctl] conversation run {} accepted", entry.run_id)
+        }
         ControlEntry::ApplicationOperationPreparedV1(_) => {
             "application operation prepared".to_owned()
         }

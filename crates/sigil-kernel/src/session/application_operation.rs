@@ -31,7 +31,7 @@ impl SessionApplicationOperationOwner {
         if binding.session_scope_id != self.session_scope_id {
             bail!("application queue operation scope mismatch");
         }
-        if !validate_prepared(&self.store.read_event_records_writer()?, binding)? {
+        if !validate_prepared(&self.store.read_current_event_records_writer()?, binding)? {
             bail!("application queue operation is not prepared");
         }
         self.store
@@ -214,7 +214,7 @@ impl Session {
             }
             (owner, binding)
         };
-        if !validate_prepared(&owner.store.read_event_records_writer()?, &binding)? {
+        if !validate_prepared(&owner.store.read_current_event_records_writer()?, &binding)? {
             bail!("application operation was not prepared by its owner");
         }
         if self
@@ -227,10 +227,6 @@ impl Session {
         }
         self.runtime_attachments.application_operation = Some(binding);
         Ok(())
-    }
-
-    pub fn clear_application_operation(&mut self) {
-        self.runtime_attachments.application_operation = None;
     }
 
     /// Checks a domain transition against the caller's already-prepared command, when present.
@@ -267,6 +263,34 @@ impl Session {
             bail!("domain transition differs from its prepared application operation");
         }
         Ok(())
+    }
+
+    /// Commits this bound command's acceptance by an already-started foreground run.
+    /// Unbound runs retain their existing lifecycle without inventing application evidence.
+    ///
+    /// # Errors
+    /// Rejects a missing/conflicting durable run or an uncertain marker publication.
+    pub fn record_bound_conversation_run_admission(&mut self, run_id: &str) -> Result<()> {
+        let Some(binding) = self.runtime_attachments.application_operation.as_ref() else {
+            return Ok(());
+        };
+        let crate::ApplicationOperationTargetV1::ConversationRunAdmission { input_digest } =
+            &binding.target
+        else {
+            return Ok(());
+        };
+        self.append_control(ControlEntry::ConversationRunAcceptedV1(
+            crate::ConversationRunAcceptedV1 {
+                schema_version: 1,
+                run_id: run_id.to_owned(),
+                input_digest: input_digest.clone(),
+            },
+        ))
+    }
+
+    /// Detaches the process-local binding without changing its durable disposition.
+    pub fn clear_application_operation(&mut self) -> Option<ApplicationOperationBindingV1> {
+        self.runtime_attachments.application_operation.take()
     }
 
     /// Returns the identity of the already-prepared operation attached to this writer.
@@ -343,8 +367,19 @@ impl Session {
                 | crate::ApplicationOperationTargetV1::QueuePause { .. }
         )
         .then(|| crate::ConversationQueueProjection::from_entries(&self.entries));
+        let accepted_run = entries.iter().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationRunAcceptedV1(accepted)) => {
+                Some(accepted.run_id.clone())
+            }
+            _ => None,
+        });
         let expected = binding.clone();
         let appended = store.append_crash_safe_events_if(events, move |records| {
+            if let Some(run_id) = accepted_run.as_deref() {
+                let prepared_sequence = records.iter().find(|record| record.event_id() == prepared_id(&expected))
+                    .context("conversation admission has no prepared command")?.stream_sequence();
+                crate::conversation_run::validate_active_conversation_run(records, run_id, prepared_sequence)?;
+            }
             validate_record_scope(records, expected.domain_session_scope_id())?;
             if let Some(expected_queue)=expected_queue.as_ref() {
                 let entries=records.iter().map(SessionStreamRecord::session_log_entry).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>();

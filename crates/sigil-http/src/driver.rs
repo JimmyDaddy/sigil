@@ -36,6 +36,8 @@ pub struct HttpUserInputDecisionDriverCommand {
 /// Start context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRunDriverStart {
+    /// Host-issued ordinary-input identity, settled by the runtime's durable run admission.
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     /// Exact source references already checked at admission, rechecked at preparation.
     pub review_annotations: Vec<sigil_application::ReviewAnnotation>,
     /// Session snapshot at the moment the run was registered.

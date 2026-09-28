@@ -42,7 +42,7 @@ impl ApplicationRunEventRecorder {
                 .store_path()
                 .context("application recorder requires a durable session")?,
         )?;
-        let records = store.read_event_records_writer()?;
+        let records = store.read_current_event_records_writer()?;
         let mut events = ApplicationRunEventSequence::with_outbox_records(
             session.session_scope_id().to_owned(),
             run_id.to_owned(),

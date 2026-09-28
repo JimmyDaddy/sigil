@@ -65,6 +65,25 @@ where
                 review,
                 ..
             } => {
+                // Validate the exact original input before review materialization changes its
+                // provider-facing text. Full options are already included in the command F.
+                if let Some(session) = state.session.current.as_ref() {
+                    let binding_check =
+                        sigil_kernel::conversation_run_input_digest(&prompt, &attachments)
+                            .and_then(|input_digest| {
+                                session.ensure_application_operation_binding_target(
+                            &sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                                input_digest,
+                            },
+                        )
+                            });
+                    if let Err(error) = binding_check {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "conversation input binding failed: {error:#}"
+                        )));
+                        continue;
+                    }
+                }
                 let prompt = if let Some((expected_session_id, annotations)) = review {
                     match sigil_runtime::materialize_queued_review_annotations(
                         &state.session.log_path,
@@ -152,7 +171,7 @@ where
                     }
                 }
 
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -294,6 +313,25 @@ where
                     state.session.current = Some(run_session);
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                         "failed to persist foreground run admission: {error:#}"
+                    )));
+                    continue;
+                }
+                if let Err(error) =
+                    run_session.record_bound_conversation_run_admission(&provider_logical_run_id)
+                {
+                    let terminal = handler.finish_public_run(&Err(anyhow::anyhow!(
+                        "foreground command admission failed: {error:#}"
+                    )));
+                    let error = match terminal {
+                        Ok(()) => error,
+                        Err(terminal) => error.context(format!(
+                            "foreground admission terminal also failed: {terminal:#}"
+                        )),
+                    };
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist foreground command admission: {error:#}"
                     )));
                     continue;
                 }
@@ -892,6 +930,24 @@ where
                     continue;
                 }
 
+                if let Some(session) = state.session.current.as_ref() {
+                    let input_digest =
+                        sigil_kernel::conversation_run_input_digest(&arguments, &attachments);
+                    let binding = input_digest.and_then(|input_digest| {
+                        session.ensure_application_operation_binding_target(
+                            &sigil_kernel::ApplicationOperationTargetV1::ConversationRunAdmission {
+                                input_digest,
+                            },
+                        )
+                    });
+                    if let Err(error) = binding {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "skill input binding failed: {error:#}"
+                        )));
+                        continue;
+                    }
+                }
+
                 let run_id = state.run.next_id;
                 let loaded = match load_worker_skill(
                     root_config,
@@ -913,7 +969,7 @@ where
                     )));
                     continue;
                 }
-                let Some(run_session) = state.session.current.take() else {
+                let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -923,11 +979,6 @@ where
                     state.session.begin_root_tool_artifact_read_budget();
 
                 let prompt = skill_invocation_prompt(&skill_id, &arguments);
-                let _ = message_tx.send(WorkerMessage::SkillRunStarted {
-                    skill_id: skill_id.clone(),
-                    prompt: sigil_kernel::safe_persistence_text(&prompt),
-                });
-
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
@@ -964,6 +1015,24 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                let provider_logical_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                let public_run_id = Some(provider_logical_run_id.clone());
+                if let Err(error) = handler.start_bound_public_run(
+                    &mut run_session,
+                    &provider_logical_run_id,
+                    &sigil_kernel::safe_persistence_text(&prompt),
+                ) {
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist skill command admission: {error:#}"
+                    )));
+                    continue;
+                }
+                let _ = message_tx.send(WorkerMessage::SkillRunStarted {
+                    skill_id: skill_id.clone(),
+                    prompt: sigil_kernel::safe_persistence_text(&prompt),
+                });
                 let cancellation_owner = RunCancellationOwner::new();
                 let cancellation_handle = cancellation_owner.handle();
                 let run_task_guard = cancellation_handle
@@ -976,7 +1045,8 @@ where
                     let input = AgentRunInput::transient(prompt, vec![loaded.transient_context])
                         .with_image_attachments(attachments)
                         .with_tool_artifact_read_budget(tool_artifact_read_budget)
-                        .with_cancellation(cancellation_handle);
+                        .with_cancellation(cancellation_handle.clone())
+                        .with_logical_run_id(provider_logical_run_id.clone());
                     let result =
                         match run_session.append_control(ControlEntry::SkillLoaded(loaded.entry)) {
                             Ok(()) => {
@@ -991,11 +1061,16 @@ where
                                         &mut approval_handler,
                                     )
                                     .await
-                                    .map(|output| output.result)
-                                    .map_err(|error| format!("{error:#}"))
                             }
-                            Err(error) => Err(format!("{error:#}")),
+                            Err(error) => Err(error),
                         };
+                    let result = if cancellation_handle.is_cancel_requested() {
+                        result
+                    } else {
+                        handler.finish_public_run(&result).and(result)
+                    }
+                    .map(|output| output.result)
+                    .map_err(|error| format!("{error:#}"));
                     let result = match append_mcp_elicitation_audits(
                         &mut run_session,
                         &run_elicitation_audit_buffer,
@@ -1011,7 +1086,7 @@ where
                             plan_mode: false,
                             plan_review: false,
                             queue_id: None,
-                            provider_logical_run_id: None,
+                            provider_logical_run_id: Some(provider_logical_run_id),
                             agent_result_continuation_thread_ids: Vec::new(),
                         },
                         post_run_maintenance: None,
@@ -1020,7 +1095,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
-                    public_run_id: None,
+                    public_run_id,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,

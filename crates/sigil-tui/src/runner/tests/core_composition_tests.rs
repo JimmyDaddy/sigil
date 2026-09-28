@@ -971,3 +971,823 @@ fn application_queue_commit_waits_for_owner_and_replays_after_worker_reopen() ->
     worker.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn ordinary_application_admissions_exceed_pending_limit_and_replay_exact_run_after_restart()
+-> Result<()> {
+    use sigil_application::{ApplicationCommandOutcome, ApplicationCommandReceipt};
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let session_path = workspace.join(".sigil/sessions/ordinary-admission.jsonl");
+    let config = core_root_config(&workspace)?;
+    let (provider, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let plans = (0..34)
+        .map(|_| {
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("done".to_owned()),
+                ProviderChunk::Done,
+            ])
+        })
+        .chain(std::iter::once(StreamPlan::Fail(
+            "unexpected provider call after 34 explicit inputs",
+        )))
+        .collect();
+    let provider = PlannedProvider::new(plans);
+    let observed_provider = provider.clone();
+    let mut worker = spawn_test_worker_with_existing_authority_composition(
+        config.clone(),
+        session_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?);
+    let mut first = None;
+    let mut run_ids = std::collections::BTreeSet::new();
+    // Identical text is intentional: distinct explicit commands must bind distinct runs.
+    runtime.block_on(application.refresh())?;
+    let action = crate::app::AppAction::SubmitPrompt("same ordinary input".to_owned());
+    let requests = crate::launcher::real_admission_support::exercise_slots(
+        Arc::clone(&application),
+        worker.command_sender(),
+        &config,
+        &workspace.join("sigil.toml"),
+        &action,
+        34,
+        || {
+            let message = worker.try_recv()?;
+            if message.is_some() {
+                eprintln!(
+                    "provider_plans_remaining={}",
+                    observed_provider.remaining_plan_count()
+                );
+            }
+            Ok(message)
+        },
+    )?;
+    for (index, request) in requests.into_iter().enumerate() {
+        let receipt = runtime.block_on(application.execute_prepared(request.clone()))?;
+        let ApplicationCommandReceipt::Replayed(receipt) = receipt else {
+            bail!("ordinary command {index} must already be settled by the launcher: {receipt:?}");
+        };
+        let Some(ApplicationCommandOutcome::ConversationRunAccepted { run_id }) =
+            receipt.outcome.as_deref()
+        else {
+            bail!("ordinary command has no exact run outcome");
+        };
+        assert!(run_ids.insert(run_id.as_str().to_owned()));
+        if index == 0 {
+            first = Some((request, run_id.as_str().to_owned()));
+        }
+    }
+    let (first_request, first_run) = first.context("first command")?;
+    worker.stop()?;
+    drop(application);
+    worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        session_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let reopened = crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?;
+    runtime.block_on(reopened.refresh())?;
+    let replay = runtime.block_on(reopened.execute_prepared(first_request))?;
+    assert!(
+        matches!(replay, ApplicationCommandReceipt::Replayed(receipt)
+        if matches!(receipt.outcome.as_deref(), Some(ApplicationCommandOutcome::ConversationRunAccepted { run_id }) if run_id.as_str() == first_run))
+    );
+    let records = store.read_handle().read_event_records()?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Control(
+                    ControlEntry::ConversationRunAcceptedV1(_)
+                )))
+            ))
+            .count(),
+        34
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::User(_)))
+            ))
+            .count(),
+        34,
+        "old K must not dispatch a 35th input"
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn attachment_application_admission_is_exact_and_does_not_claim_provider_success() -> Result<()> {
+    use sigil_application::{ApplicationCommandOutcome, ApplicationCommandReceipt};
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let session_path = workspace.join(".sigil/sessions/image-admission.jsonl");
+    let config = core_root_config(&workspace)?;
+    let (provider, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        session_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?;
+    runtime.block_on(application.refresh())?;
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "image_1",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )?;
+    let digest = sigil_kernel::conversation_run_input_digest("", std::slice::from_ref(&image))?;
+    let action = crate::app::AppAction::SubmitPromptWithAttachments {
+        prompt: String::new(),
+        attachments: vec![image],
+    };
+    let request = application
+        .prepare_action(&action, None, None)?
+        .context("attachment request")?;
+    let receipt = runtime.block_on(application.execute_prepared_run(
+        request.clone(),
+        application.reserve_run_admission(&worker.command_sender())?,
+    ))?;
+    let ApplicationCommandReceipt::Settled(receipt) = receipt else {
+        bail!("attachment was not durably admitted: {receipt:?}");
+    };
+    let Some(ApplicationCommandOutcome::ConversationRunAccepted { run_id }) =
+        receipt.outcome.as_deref()
+    else {
+        bail!("missing exact accepted run");
+    };
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(
+        matches!(failure, WorkerMessage::RunFailed(error) if error.contains("does not support image input")),
+        "the fixture's actual provider limitation must remain enforced"
+    );
+    let binding =
+        sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+            .context("attachment binding")?;
+    let proof =
+        sigil_kernel::session::reconcile_application_operation(&store.read_handle(), &binding)?
+            .context("attachment proof")?;
+    assert!(
+        matches!(proof.matched_control(), ControlEntry::ConversationRunAcceptedV1(entry) if entry.run_id == run_id.as_str() && entry.input_digest == digest)
+    );
+    assert!(matches!(
+        runtime.block_on(application.execute_prepared(request))?,
+        ApplicationCommandReceipt::Replayed(_)
+    ));
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn inline_skill_admissions_settle_each_command_and_replay_after_restart() -> Result<()> {
+    use sigil_application::{ApplicationCommandOutcome, ApplicationCommandReceipt};
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let session_path = workspace.join(".sigil/sessions/inline-admission.jsonl");
+    let skill = workspace.join(".sigil/skills/readonly/SKILL.md");
+    fs::create_dir_all(skill.parent().context("skill directory")?)?;
+    fs::write(
+        &skill,
+        "---\nname: readonly\ndescription: Inspect input.\ntrust: trusted\nuser-invocable: true\nrun-as: inline\n---\nInspect the supplied input.\n",
+    )?;
+    let mut config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+    config.composition = RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::Skills],
+    );
+    config.skills.enabled = true;
+    config.save(&workspace.join("sigil.toml"))?;
+    let config = config.with_effective_composition()?;
+    let (provider, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let plans = (0..34)
+        .map(|_| {
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("done".to_owned()),
+                ProviderChunk::Done,
+            ])
+        })
+        .chain(std::iter::once(StreamPlan::Fail(
+            "unexpected provider call after 34 explicit inputs",
+        )))
+        .collect();
+    let provider = PlannedProvider::new(plans);
+    let observed_provider = provider.clone();
+    let mut worker = spawn_test_worker_with_existing_authority_composition(
+        config.clone(),
+        session_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?);
+    let mut first = None;
+    let mut run_ids = std::collections::BTreeSet::new();
+    // Identical text is intentional: distinct explicit commands must bind distinct runs.
+    runtime.block_on(application.refresh())?;
+    let action = crate::app::AppAction::InvokeInlineSkill {
+        skill_id: "readonly".to_owned(),
+        arguments: "same ordinary input".to_owned(),
+        attachments: Vec::new(),
+    };
+    let requests = crate::launcher::real_admission_support::exercise_slots(
+        Arc::clone(&application),
+        worker.command_sender(),
+        &config,
+        &workspace.join("sigil.toml"),
+        &action,
+        34,
+        || {
+            let message = worker.try_recv()?;
+            if message.is_some() {
+                eprintln!(
+                    "provider_plans_remaining={}",
+                    observed_provider.remaining_plan_count()
+                );
+            }
+            Ok(message)
+        },
+    )?;
+    for (index, request) in requests.into_iter().enumerate() {
+        let receipt = runtime.block_on(application.execute_prepared(request.clone()))?;
+        let ApplicationCommandReceipt::Replayed(receipt) = receipt else {
+            bail!("ordinary command {index} must already be settled by the launcher: {receipt:?}");
+        };
+        let Some(ApplicationCommandOutcome::ConversationRunAccepted { run_id }) =
+            receipt.outcome.as_deref()
+        else {
+            bail!("ordinary command has no exact run outcome");
+        };
+        assert!(run_ids.insert(run_id.as_str().to_owned()));
+        if index == 0 {
+            first = Some((request, run_id.as_str().to_owned()));
+        }
+    }
+    let (first_request, first_run) = first.context("first command")?;
+    worker.stop()?;
+    drop(application);
+    worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        session_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let reopened = crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?;
+    runtime.block_on(reopened.refresh())?;
+    let replay = runtime.block_on(reopened.execute_prepared(first_request))?;
+    assert!(
+        matches!(replay, ApplicationCommandReceipt::Replayed(receipt)
+        if matches!(receipt.outcome.as_deref(), Some(ApplicationCommandOutcome::ConversationRunAccepted { run_id }) if run_id.as_str() == first_run))
+    );
+    let records = store.read_handle().read_event_records()?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Control(
+                    ControlEntry::ConversationRunAcceptedV1(_)
+                )))
+            ))
+            .count(),
+        34
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::User(_)))
+            ))
+            .count(),
+        34,
+        "old K must not dispatch a 35th input"
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn task_and_child_skill_application_admissions_use_actual_domain_owner() -> Result<()> {
+    use super::common::{
+        planned_role_provider_builder, spawn_test_worker_with_role_provider_builder_and_authority,
+    };
+    use sigil_application::ApplicationCommandReceipt;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _entered = runtime.enter();
+    for child_skill in [false, true] {
+        let temp = tempdir()?;
+        let workspace = temp.path().to_path_buf();
+        let path = workspace.join(".sigil/sessions/task-admission.jsonl");
+        let skill = workspace.join(".sigil/skills/child-review/SKILL.md");
+        fs::create_dir_all(skill.parent().context("skill directory")?)?;
+        fs::write(
+            skill,
+            "---\nname: child-review\ndescription: Inspect input.\ntrust: trusted\nuser-invocable: true\nrun-as: child-session\n---\nInspect the supplied input.\n",
+        )?;
+        let mut config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+        config.task.enabled = true;
+        config.skills.enabled = true;
+        config.save(&workspace.join("sigil.toml"))?;
+        let (provider, route) =
+            sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+        let store = JsonlSessionStore::new(&path)?;
+        let mut session =
+            sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+        session.ensure_identity_entry()?;
+        let scope = session.session_scope_id().to_owned();
+        let (authority, _authority_root) = test_authority_composition(&workspace)?;
+        let worker = spawn_test_worker_with_role_provider_builder_and_authority(
+            config.clone(),
+            path.clone(),
+            Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+            workspace.clone(),
+            planned_role_provider_builder(
+                (0..2)
+                    .map(|_| {
+                        StreamPlan::Chunks(vec![
+                            ProviderChunk::TextDelta("task complete".to_owned()),
+                            ProviderChunk::Done,
+                        ])
+                    })
+                    .collect(),
+            ),
+            Arc::clone(&authority),
+            None,
+        )?;
+        worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+        let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
+            &workspace.join("sigil.toml"),
+            &workspace,
+            &path,
+            &scope,
+            worker.command_sender(),
+            &authority,
+            sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+        )?);
+        runtime.block_on(application.refresh())?;
+        let action = if child_skill {
+            crate::app::AppAction::InvokeChildSessionSkill {
+                skill_id: "child-review".to_owned(),
+                arguments: "same task input".to_owned(),
+            }
+        } else {
+            crate::app::AppAction::SubmitTask("same task input".to_owned())
+        };
+        let requests = crate::launcher::real_admission_support::exercise_slots(
+            Arc::clone(&application),
+            worker.command_sender(),
+            &config,
+            &workspace.join("sigil.toml"),
+            &action,
+            2,
+            || worker.try_recv(),
+        )?;
+        let mut effects = std::collections::BTreeSet::new();
+        for request in requests {
+            let binding =
+                sigil_runtime::application_operation_owner::application_operation_binding(
+                    &request,
+                )?
+                .context("bound task input")?;
+            let proof = sigil_kernel::session::reconcile_application_operation(
+                &store.read_handle(),
+                &binding,
+            )?
+            .context("actual domain proof")?;
+            let effect = match proof.matched_control() {
+                ControlEntry::TaskDirectExecutionAdmittedV1(entry) if child_skill => {
+                    entry.task_id.as_str().to_owned()
+                }
+                ControlEntry::ConversationRunAcceptedV1(entry) if !child_skill => {
+                    entry.run_id.clone()
+                }
+                other => bail!("wrong acceptance source: {other:?}"),
+            };
+            assert!(
+                effects.insert(effect),
+                "same objective with a new K needs a new owner effect"
+            );
+            let before = store.read_handle().read_event_records()?.len();
+            assert!(matches!(
+                runtime.block_on(application.execute_prepared(request))?,
+                ApplicationCommandReceipt::Replayed(_)
+            ));
+            assert_eq!(
+                store.read_handle().read_event_records()?.len(),
+                before,
+                "replay must not create another child or Task"
+            );
+        }
+        worker.shutdown()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn joined_failed_profile_admissions_release_active_slots_and_preserve_exact_recovery() -> Result<()>
+{
+    exercise_failed_enhanced_admissions(false, 34)
+}
+
+#[test]
+fn joined_failed_child_skill_returns_session_without_lending_its_old_binding() -> Result<()> {
+    exercise_failed_enhanced_admissions(true, 1)
+}
+
+fn exercise_failed_enhanced_admissions(child_skill: bool, failure_count: usize) -> Result<()> {
+    use sigil_application::ApplicationCommandReceipt;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _entered = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    let session_path = workspace.join(".sigil/sessions/failed-profile-admission.jsonl");
+    let mut config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(workspace.join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(workspace.join("cache").display().to_string());
+    // A valid selected child route with an absent, fixture-local credential fails before
+    // AgentThreadStarted. The ordinary route remains a valid unauthenticated loopback route.
+    config.connections.insert("missing-child-credential".to_owned(), serde_json::json!({
+        "label": "Missing fixture credential", "provider": "custom", "protocol": "chat_completions",
+        "base_url": "http://127.0.0.1:1", "credential": { "source": "stored", "id": uuid::Uuid::new_v4().to_string() }
+    }));
+    config.task.enabled = true;
+    config.skills.enabled = true;
+    let skill = workspace.join(".sigil/skills/failing-child/SKILL.md");
+    fs::create_dir_all(skill.parent().context("skill directory")?)?;
+    fs::write(
+        skill,
+        "---\nname: failing-child\ndescription: Read input.\ntrust: trusted\nuser-invocable: true\nrun-as: child-session\n---\nRead the input.\n",
+    )?;
+    config.task.planner.connection =
+        Some(sigil_kernel::ConnectionId::new("missing-child-credential")?);
+    config.task.planner.model = Some("planned-model".to_owned());
+    config.save(&config_path)?;
+    sigil_kernel::RootConfig::load(&config_path)
+        .context("failed-owner fixture config reload")?
+        .with_effective_composition()
+        .context("failed-owner fixture effective composition")?;
+    let (provider, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let scope = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let worker = super::common::spawn_test_worker_with_role_provider_builder_and_authority(
+        config.clone(),
+        session_path.clone(),
+        Agent::new(
+            PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("ordinary route still works".to_owned()),
+                ProviderChunk::Done,
+            ])]),
+            ToolRegistry::new(),
+        ),
+        workspace.clone(),
+        failing_role_provider_builder(),
+        Arc::clone(&authority),
+        None,
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
+        &config_path,
+        &workspace,
+        &session_path,
+        &scope,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?);
+    runtime
+        .block_on(application.refresh())
+        .context("failed-owner initial durable application projection")?;
+    let action = if child_skill {
+        crate::app::AppAction::InvokeChildSessionSkill {
+            skill_id: "failing-child".to_owned(),
+            arguments: "same child objective".to_owned(),
+        }
+    } else {
+        crate::app::AppAction::InvokeAgentProfile {
+            profile_id: "plan".to_owned(),
+            prompt: "same profile objective".to_owned(),
+            parent_prompt: "same profile objective".to_owned(),
+        }
+    };
+    crate::launcher::real_admission_support::exercise_failed_runs_then_success(
+        Arc::clone(&application),
+        worker.command_sender(),
+        &config,
+        &config_path,
+        &action,
+        failure_count,
+        || {
+            worker
+                .try_recv()
+                .context("failed-owner actual worker receive")
+        },
+        |requests| {
+    assert_eq!(requests.len(), failure_count + 1);
+    let before = store.read_handle().read_event_records()?;
+    assert!(!before.iter().any(|record| matches!(
+        record.session_log_entry(),
+        Ok(Some(SessionLogEntry::Control(
+            ControlEntry::AgentThreadStarted(_)
+        )))
+    )));
+    assert_eq!(
+        before
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::User(_)))
+            ))
+            .count(),
+        if child_skill { 1 } else { failure_count + 1 },
+        "profile failure preserves its real user append; child preflight has not appended user input"
+    );
+    if child_skill {
+        assert!(!before.iter().any(|record| matches!(
+            record.session_log_entry(),
+            Ok(Some(SessionLogEntry::Control(
+                ControlEntry::TaskDirectExecutionAdmittedV1(_)
+            )))
+        )));
+    }
+    for request in &requests[..failure_count] {
+        let binding =
+            sigil_runtime::application_operation_owner::application_operation_binding(request)?
+                .context("profile binding")?;
+        assert!(
+            sigil_kernel::session::reconcile_application_operation(&store.read_handle(), &binding)?
+                .is_none()
+        );
+        let receipt = runtime.block_on(application.execute_prepared(request.clone()))?;
+        assert!(
+            matches!(
+                receipt,
+                ApplicationCommandReceipt::ReplayedUncertain(_)
+                    | ApplicationCommandReceipt::Uncertain(_)
+            ),
+            "failed K retains uncertainty: {receipt:?}"
+        );
+    }
+    assert_eq!(
+        store.read_handle().read_event_records()?.len(),
+        before.len(),
+        "recovering old K does not redispatch its profile"
+    );
+    assert!(matches!(
+        runtime.block_on(application.execute_prepared(requests[failure_count].clone()))?,
+        ApplicationCommandReceipt::Replayed(_)
+    ));
+            Ok(())
+        },
+    )
+    .context("failed-owner launcher admission sequence")?;
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn synchronous_missing_skill_admissions_release_slots_without_forging_recovery() -> Result<()> {
+    use sigil_application::ApplicationCommandReceipt;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _entered = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    let session_path = workspace.join(".sigil/sessions/missing-skill-admission.jsonl");
+    let skill = workspace.join(".sigil/skills/readonly/SKILL.md");
+    fs::create_dir_all(skill.parent().context("skill directory")?)?;
+    fs::write(
+        &skill,
+        "---\nname: readonly\ndescription: Inspect input.\ntrust: trusted\nuser-invocable: true\nrun-as: inline\n---\nInspect the supplied input.\n",
+    )?;
+    let mut config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+    config.composition = RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::Skills],
+    );
+    config.skills.enabled = true;
+    config.save(&config_path)?;
+    let config = config.with_effective_composition()?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider_name, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let scope = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("ordinary input after missing skill works".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let observed_provider = provider.clone();
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        config.clone(),
+        session_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
+        &config_path,
+        &workspace,
+        &session_path,
+        &scope,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?);
+    runtime.block_on(application.refresh())?;
+    let selected = sigil_runtime::discover_skill_index_with_session_entries(
+        &workspace,
+        None,
+        &config.skills,
+        session.entries(),
+    )?;
+    sigil_runtime::load_user_invoked_skill(&workspace, &selected.snapshot, "readonly", None)
+        .context("the selected skill is initially legal")?;
+    fs::remove_file(skill)?;
+    let action = crate::app::AppAction::InvokeInlineSkill {
+        skill_id: "readonly".to_owned(),
+        arguments: "same selected skill input".to_owned(),
+        attachments: Vec::new(),
+    };
+    let failures = 34;
+    crate::launcher::real_admission_support::exercise_failed_runs_then_success(
+        Arc::clone(&application),
+        worker.command_sender(),
+        &config,
+        &config_path,
+        &action,
+        failures,
+        || {
+            let message = worker.try_recv()?;
+            if matches!(message, Some(WorkerMessage::RunFailed(_))) {
+                assert_eq!(
+                    observed_provider.remaining_plan_count(),
+                    1,
+                    "skill preflight must not call the model"
+                );
+            }
+            Ok(message)
+        },
+        |requests| {
+            assert_eq!(requests.len(), failures + 1);
+            assert_eq!(observed_provider.remaining_plan_count(), 0);
+            let before = store.read_handle().read_event_records()?;
+            assert_eq!(
+                before
+                    .iter()
+                    .filter(|record| matches!(
+                        record.session_log_entry(),
+                        Ok(Some(SessionLogEntry::User(_)))
+                    ))
+                    .count(),
+                1,
+                "only the final ordinary input was admitted"
+            );
+            assert_eq!(
+                before
+                    .iter()
+                    .filter(|record| matches!(
+                        record.session_log_entry(),
+                        Ok(Some(SessionLogEntry::Control(
+                            ControlEntry::ConversationRunAcceptedV1(_)
+                        )))
+                    ))
+                    .count(),
+                1
+            );
+            for request in &requests[..failures] {
+                let binding =
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?
+                    .context("skill binding")?;
+                assert!(
+                    sigil_kernel::session::reconcile_application_operation(
+                        &store.read_handle(),
+                        &binding
+                    )?
+                    .is_none()
+                );
+                let receipt = runtime.block_on(application.execute_prepared(request.clone()))?;
+                assert!(
+                    matches!(
+                        receipt,
+                        ApplicationCommandReceipt::Uncertain(_)
+                            | ApplicationCommandReceipt::ReplayedUncertain(_)
+                    ),
+                    "a returned dispatcher does not settle its old K: {receipt:?}"
+                );
+            }
+            assert_eq!(
+                store.read_handle().read_event_records()?.len(),
+                before.len(),
+                "old K does not run the missing skill again"
+            );
+            assert_eq!(observed_provider.remaining_plan_count(), 0);
+            assert!(matches!(
+                runtime.block_on(application.execute_prepared(requests[failures].clone()))?,
+                ApplicationCommandReceipt::Replayed(_)
+            ));
+            Ok(())
+        },
+    )?;
+    worker.shutdown()?;
+    Ok(())
+}

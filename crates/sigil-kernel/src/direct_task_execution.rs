@@ -228,7 +228,9 @@ pub fn task_direct_execution_attempt_id(
     )
 }
 
-fn task_direct_execution_objective_hash(objective: &str) -> String {
+/// Canonical objective identity shared by Task admission and its application receipt.
+#[must_use]
+pub fn task_direct_execution_objective_hash(objective: &str) -> String {
     format!(
         "sha256:{}",
         sha256_hex(safe_persistence_text(objective).as_bytes())

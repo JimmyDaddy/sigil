@@ -10,6 +10,16 @@ use crate::{ControlEntry, ConversationInputStatus, PlanDecision};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ApplicationOperationTargetV1 {
+    ConversationRunAdmission {
+        input_digest: String,
+    },
+    AgentInvocation {
+        profile_id: String,
+        prompt_hash: String,
+    },
+    DirectTaskAdmission {
+        objective_hash: String,
+    },
     ForkConversation {
         source_turn_digest: String,
         connection_id: String,
@@ -80,6 +90,29 @@ pub enum ApplicationOperationTargetV1 {
 impl ApplicationOperationTargetV1 {
     pub(crate) fn matches(&self, control: &ControlEntry) -> bool {
         match (self, control) {
+            (
+                Self::ConversationRunAdmission { input_digest },
+                ControlEntry::ConversationRunAcceptedV1(entry),
+            ) => &entry.input_digest == input_digest,
+            (
+                Self::AgentInvocation {
+                    profile_id,
+                    prompt_hash,
+                },
+                ControlEntry::AgentThreadStarted(entry),
+            ) => {
+                entry.profile_id.as_str() == profile_id
+                    && &entry.prompt_hash == prompt_hash
+                    && entry.invocation_source == crate::AgentInvocationSource::Mention
+                    && entry.invocation_mode == crate::AgentInvocationMode::JoinBeforeFinal
+            }
+            (
+                Self::DirectTaskAdmission { objective_hash },
+                ControlEntry::TaskDirectExecutionAdmittedV1(entry),
+            ) => {
+                &entry.objective_hash == objective_hash
+                    && entry.source == crate::TaskDirectExecutionSourceV1::TaskRequest
+            }
             (
                 Self::ForkConversation {
                     source_turn_digest,
@@ -217,6 +250,50 @@ impl ApplicationOperationTargetV1 {
             _ => false,
         }
     }
+}
+
+/// Durable association between one admitted input and the foreground run which accepted it.
+/// This is admission evidence only, never a claim about execution or cancellation success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRunAcceptedV1 {
+    pub schema_version: u16,
+    pub run_id: String,
+    pub input_digest: String,
+}
+
+impl ConversationRunAcceptedV1 {
+    /// Validates the persisted identities without retaining prompt text or image bytes.
+    ///
+    /// # Errors
+    /// Rejects invalid versions, run identifiers, or input digests.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != 1
+            || self.input_digest.len() != 64
+            || !self
+                .input_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("conversation run admission is invalid");
+        }
+        crate::ConversationRunStartedEntryV1::new(&self.run_id, 1)?;
+        Ok(())
+    }
+}
+
+/// Binds original user text and host-admitted image references without persisting their bytes.
+/// Command options remain bound independently by the complete application K/F fingerprint.
+///
+/// # Errors
+/// Returns an error when the input cannot be canonically serialized.
+pub fn conversation_run_input_digest(
+    prompt: &str,
+    attachments: &[crate::ImageAttachment],
+) -> Result<String> {
+    let value = serde_json::json!({"prompt": prompt, "attachments": attachments});
+    Ok(crate::sha256_hex(&crate::event::canonical_json_bytes(
+        &value,
+    )?))
 }
 
 /// K remains an application contract; kernel stores only its canonical digest and F.

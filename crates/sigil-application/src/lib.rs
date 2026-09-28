@@ -625,6 +625,7 @@ pub enum ApplicationRecoveryOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplicationCommandOutcome {
+    ConversationRunAccepted { run_id: SafeText },
     Recovery(ApplicationRecoveryOutcome),
 }
 

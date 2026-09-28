@@ -309,6 +309,27 @@ fn explicit_task_admission_uses_the_same_idempotent_handoff_protocol() -> Result
             .count(),
         1
     );
+    let task = session.task_state_projection().tasks[&action.task_id].clone();
+    let admission = task
+        .direct_execution_admission
+        .expect("explicit Task authority");
+    assert_eq!(
+        admission.source,
+        sigil_kernel::TaskDirectExecutionSourceV1::TaskRequest
+    );
+    assert!(admission.matches_objective("execute a durable task"));
+    assert_eq!(admission.admitted_at_ms, 17);
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(_))
+            ))
+            .count(),
+        1
+    );
     let durable_entries = JsonlSessionStore::read_entries(&session_path)?;
     let user_index = durable_entries
         .iter()
@@ -380,6 +401,15 @@ fn requested_crash_gap_reconciles_resolution_and_task_once() -> Result<()> {
         .expect("reconciled task run");
     assert_eq!(task.status, TaskRunStatus::Started);
     assert_eq!(task.objective, "durable objective");
+    let admission = task
+        .direct_execution_admission
+        .expect("reconciled direct Task authority");
+    assert_eq!(
+        admission.source,
+        sigil_kernel::TaskDirectExecutionSourceV1::TaskRequest
+    );
+    assert!(admission.matches_objective(&task.objective));
+    assert_eq!(admission.admitted_at_ms, 50);
     Ok(())
 }
 
@@ -802,5 +832,137 @@ fn coordinator_recovers_direct_continuation_after_chat_clears_focus() -> Result<
         .expect("current direct Task should be host-bound");
     assert_eq!(continuation.task_id, task_id);
     assert_eq!(continuation.task_status, TaskRunStatus::Paused);
+    Ok(())
+}
+
+#[test]
+fn accepted_started_crash_gap_restores_exact_direct_admission_once() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("mock", "model");
+    let source = append_source_turn(&mut session, "durable objective")?;
+    append_requested(&mut session, &source)?;
+    let handoff_id = handoff_id_for_source(&source)?;
+    let task_id = task_id_for_handoff(&handoff_id)?;
+    session.append_controls(vec![
+        ControlEntry::TaskHandoffResolved(TaskHandoffResolvedEntry {
+            handoff_id,
+            decision: TaskHandoffDecision::Accepted,
+            task_id: Some(task_id.clone()),
+            decided_at_ms: 43,
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_ref()?,
+            objective: "durable objective".into(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+    ])?;
+    let before = session.entries().len();
+    let actions = coordinator.reconcile(&mut session, &parent_ref()?, 50)?;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(session.entries().len(), before + 1);
+    let task = session.task_state_projection().tasks[&task_id].clone();
+    let admission = task
+        .direct_execution_admission
+        .expect("recovered execution authority");
+    assert_eq!(
+        admission.admitted_at_ms, 43,
+        "bind original accepted decision, not retry time"
+    );
+    assert_eq!(
+        admission.source,
+        sigil_kernel::TaskDirectExecutionSourceV1::TaskRequest
+    );
+    assert!(admission.matches_objective("durable objective"));
+    assert_eq!(
+        coordinator.reconcile(&mut session, &parent_ref()?, 60)?,
+        actions
+    );
+    assert_eq!(session.entries().len(), before + 1);
+    Ok(())
+}
+
+#[test]
+fn accepted_handoff_rejects_foreign_direct_authority_without_mutation() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("mock", "model");
+    let source = append_source_turn(&mut session, "durable objective")?;
+    append_requested(&mut session, &source)?;
+    let handoff_id = handoff_id_for_source(&source)?;
+    let task_id = task_id_for_handoff(&handoff_id)?;
+    session.append_controls(vec![
+        ControlEntry::TaskHandoffResolved(TaskHandoffResolvedEntry {
+            handoff_id,
+            decision: TaskHandoffDecision::Accepted,
+            task_id: Some(task_id.clone()),
+            decided_at_ms: 43,
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_ref()?,
+            objective: "durable objective".into(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(
+            sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
+                task_id,
+                "durable objective",
+                sigil_kernel::PlanId::new("another-plan")?,
+                format!("sha256:{}", "a".repeat(64)),
+                43,
+            ),
+        ),
+    ])?;
+    let before = session.entries().len();
+    let error = coordinator
+        .reconcile(&mut session, &parent_ref()?, 50)
+        .expect_err("conflicting direct execution authority must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("conflicting direct execution authority")
+    );
+    assert_eq!(session.entries().len(), before);
+    Ok(())
+}
+
+#[test]
+fn accepted_handoff_does_not_grant_authority_after_legacy_execution_started() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("mock", "model");
+    let source = append_source_turn(&mut session, "durable objective")?;
+    append_requested(&mut session, &source)?;
+    let handoff_id = handoff_id_for_source(&source)?;
+    let task_id = task_id_for_handoff(&handoff_id)?;
+    session.append_controls(vec![
+        ControlEntry::TaskHandoffResolved(TaskHandoffResolvedEntry {
+            handoff_id,
+            decision: TaskHandoffDecision::Accepted,
+            task_id: Some(task_id.clone()),
+            decided_at_ms: 43,
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id,
+            parent_session_ref: parent_ref()?,
+            objective: "durable objective".into(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+    ])?;
+    let before = session.entries().len();
+    let error = coordinator
+        .reconcile(&mut session, &parent_ref()?, 50)
+        .expect_err("missing direct execution authority must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("missing direct execution authority after start")
+    );
+    assert_eq!(session.entries().len(), before);
     Ok(())
 }

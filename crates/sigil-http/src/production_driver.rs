@@ -259,6 +259,63 @@ enum HttpPreparedApplicationRun {
 }
 
 impl HttpPreparedApplicationRun {
+    async fn bind_conversation_operation(
+        self,
+        binding: sigil_kernel::ApplicationOperationBindingV1,
+        prompt: String,
+        attachments: Vec<sigil_kernel::ImageAttachment>,
+        task_continuation: Option<crate::HttpTaskContinuationRequest>,
+        expected_run_id: String,
+    ) -> Result<Self, HttpRunDriverError> {
+        // The blocking worker borrows the prepared owner from this temporary handoff slot.
+        // Panic/JoinError must leave the resource owner available for explicit settlement.
+        let slot = Arc::new(Mutex::new(Some(self)));
+        let worker_slot = Arc::clone(&slot);
+        let binding_worker = tokio::task::spawn_blocking(move || {
+            let mut slot = worker_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prepared = slot
+                .as_mut()
+                .ok_or_else(|| HttpRunDriverError::new("prepared run binding lost its owner"))?;
+            match (prepared, task_continuation) {
+                (Self::Conversation(run), None) if run.run_id() == expected_run_id => {
+                    let digest = sigil_kernel::conversation_run_input_digest(&prompt, &attachments)
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+                    run.bind_conversation_run_operation(binding, &digest)
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))
+                }
+                (Self::Task(run), Some(task)) if run.run_id() == expected_run_id => run
+                    .bind_conversation_run_operation(
+                        binding,
+                        &task.task_id,
+                        task.guidance.as_deref(),
+                    )
+                    .map_err(|error| HttpRunDriverError::new(error.to_string())),
+                _ => Err(HttpRunDriverError::new(
+                    "prepared run identity or kind differs from its HTTP admission",
+                )),
+            }
+        });
+        let result = match binding_worker.await {
+            Ok(result) => result,
+            Err(error) => Err(HttpRunDriverError::new(format!(
+                "prepared run binding worker failed: {error}"
+            ))),
+        };
+        let prepared = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                HttpRunDriverError::new("prepared run binding lost its retained owner")
+            })?;
+        match result {
+            Ok(()) => Ok(prepared),
+            Err(error) => Err(prepared.settle_after_rejection(error).await),
+        }
+    }
+
     async fn settle_after_rejection(self, error: HttpRunDriverError) -> HttpRunDriverError {
         let (execution, control) = self.into_parts();
         let cleanup = execution.settle_without_execution().await;
@@ -2239,6 +2296,7 @@ impl HttpProductionRunDriver {
         };
 
         let standard_start = HttpRunDriverStart {
+            application_operation: None,
             review_annotations: Vec::new(),
             image_attachments: Vec::new(),
             session: start.session,
@@ -5427,6 +5485,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 )
                 .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
             let start = HttpRunDriverStart {
+                application_operation: None,
                 review_annotations: Vec::new(),
                 image_attachments: Vec::new(),
                 session: session.clone(),
@@ -6420,7 +6479,7 @@ impl HttpRunSupervisor {
         let artifact_preparation_permit =
             authority_artifact_store_key(&self.services, &self.start.session)
                 .map(|key| self.artifact_access.begin_preparation(&key));
-        let mut preparation = Box::pin(async move {
+        let preparation = Box::pin(async move {
             if let Some(prepared) = preprepared {
                 if queued.is_some() || task_continuation.is_some() {
                     return Err(anyhow!(
@@ -6487,6 +6546,28 @@ impl HttpRunSupervisor {
                     .await
                     .map(Box::new)
                     .map(HttpPreparedApplicationRun::Conversation),
+            }
+        });
+        let operation = self.start.application_operation.clone();
+        let original_prompt = self.start.prompt.clone();
+        let original_attachments = self.start.image_attachments.clone();
+        let original_task_continuation = self.start.task_continuation.clone();
+        let admitted_run_id = self.start.run.id.clone();
+        let mut preparation = Box::pin(async move {
+            let prepared = preparation.await?;
+            if let Some(binding) = operation {
+                prepared
+                    .bind_conversation_operation(
+                        binding,
+                        original_prompt,
+                        original_attachments,
+                        original_task_continuation,
+                        admitted_run_id,
+                    )
+                    .await
+                    .map_err(anyhow::Error::new)
+            } else {
+                Ok(prepared)
             }
         });
         let preparation_outcome = tokio::select! {
@@ -6615,7 +6696,13 @@ impl HttpRunSupervisor {
                     "prepared application run does not match its durable HTTP session binding",
                 ));
             }
-
+            if let HttpPreparedApplicationRun::Conversation(run) = &prepared
+                && run.run_id() != self.start.run.id
+            {
+                return Err(HttpRunDriverError::new(
+                    "prepared conversation run identity differs from its HTTP admission",
+                ));
+            }
             self.retain_prepared_projection_owner(&prepared)?;
             if let Some(control) = prepared.terminal_control() {
                 self.terminal_owners

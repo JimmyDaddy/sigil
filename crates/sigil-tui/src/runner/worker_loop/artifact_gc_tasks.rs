@@ -127,7 +127,8 @@ impl ArtifactGcTaskManager {
     }
 
     pub(in crate::runner) fn reap_finished(&mut self) {
-        super::shutdown::reap_finished_owned_tasks(&mut self.retired, &mut self.task_panicked);
+        let _ =
+            super::shutdown::reap_finished_owned_tasks(&mut self.retired, &mut self.task_panicked);
     }
 
     pub(in crate::runner) fn accept_result(

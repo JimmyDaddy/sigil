@@ -172,6 +172,7 @@ impl WorkerLoopState {
                 tool_artifact_read_budget: ToolArtifactReadBudgetV1::default(),
             },
             run: RunWorkerState {
+                returned_application_operations: BTreeMap::new(),
                 result_tx: WorkerEventPayloadSender::run(event_tx.clone()),
                 active: None,
                 retired: Vec::new(),
@@ -361,7 +362,8 @@ impl SessionMaintenanceTaskManager {
         runtime: &tokio::runtime::Runtime,
         maintenance: sigil_runtime::application_run::ApplicationPostRunMaintenance,
     ) {
-        super::shutdown::reap_finished_owned_tasks(&mut self.tasks, &mut self.task_panicked);
+        let _ =
+            super::shutdown::reap_finished_owned_tasks(&mut self.tasks, &mut self.task_panicked);
         self.tasks.push(runtime.spawn(async move {
             if let Err(error) = maintenance.execute().await {
                 tracing::debug!(
@@ -468,6 +470,9 @@ impl SessionWorkerState {
 }
 
 pub(in crate::runner) struct RunWorkerState {
+    /// Identity metadata lives only until the original run handle has been joined.
+    pub(in crate::runner) returned_application_operations:
+        BTreeMap<tokio::task::Id, sigil_kernel::ApplicationOperationBindingV1>,
     pub(in crate::runner) retired: Vec<tokio::task::JoinHandle<()>>,
     pub(in crate::runner) task_panicked: bool,
     pub(in crate::runner) result_tx: WorkerEventPayloadSender<RunTaskResult>,
@@ -543,7 +548,7 @@ mod shutdown_tests {
             tasks: vec![handle],
             task_panicked: false,
         };
-        super::super::shutdown::reap_finished_owned_tasks(
+        let _ = super::super::shutdown::reap_finished_owned_tasks(
             &mut manager.tasks,
             &mut manager.task_panicked,
         );

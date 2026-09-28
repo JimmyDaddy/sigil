@@ -2105,7 +2105,9 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
   已取消的 exact queue item 可幂等确认，已消费或未知 item 返回对应错误；这些失败不得进入全局 `RunFailed`
   或清除当前 Task、工具活动与运行状态。回执必须匹配 session scope 与对应 pending operation。
   已入队消息的删除、编辑、排序、发送与暂停操作，以及 Plan 决策和修订 guidance 提交，在主线程冻结请求后交给有界后台 admission owner，持久化接收不得阻塞
-  首帧 pending、输入或取消；显式重试复用原 envelope，后台线程即使先收到领域回执仍计入统一退出期限
+  首帧 pending、输入或取消；显式重试复用原 envelope，后台线程即使先收到领域回执仍计入统一退出期限。
+  普通文本/图片提交在真实 conversation start 后，以原输入摘要和 exact K/F 的原子 operation marker 记录接纳，Desktop/HTTP 与 TUI 共用该证据恢复 run identity。
+  接纳不证明 provider 执行成功；旧记录缺少因果证据时仍保持 unknown。32 个真正未决命令的容量保护保留，已持久接纳的命令可以结算并释放槽位，见[首响应与诊断边界](prompt-response-latency.md)。
 - 会话控制区：新会话、恢复会话、切换 workspace、查看错误详情
 - setup 模式：当没有可用配置时，TUI 内部直接承载首启配置流，而不是把用户赶回命令行手写配置；Provider 作为第一项可直接切换，最终的 `Trust folder, save and start` 同时表达当前启动目录的显式信任与配置保存，不再使用独立且默认关闭的信任开关阻塞启动
 - 用户配置的 setup、`/config` 和 `sigil mcp add/remove` 共用 kernel-owned 独占 sidecar lease 与同目录原子替换；MCP 读改写从读取、校验到发布全程持锁，进程崩溃不会留下半截 TOML，并发入口不能静默覆盖彼此。显式配置符号链接会保持链接身份并更新其 canonical regular-file target。

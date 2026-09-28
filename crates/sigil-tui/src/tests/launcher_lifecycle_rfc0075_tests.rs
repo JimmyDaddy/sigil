@@ -1001,6 +1001,7 @@ fn admission_receipt_keeps_idle_wakes_until_the_owner_thread_is_joined() -> Resu
         retryable: false,
         receipt_resolved: true,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     assert!(
         pending.needs_polling(),
@@ -1411,6 +1412,7 @@ fn disconnected_worker_shutdown_accounts_for_blocked_interaction_admission() -> 
         retryable: true,
         receipt_resolved: false,
         reconcile_requested: false,
+        run_owner_returned: false,
     };
     pending.start()?;
     started_rx.recv_timeout(Duration::from_secs(2))?;
@@ -1917,5 +1919,151 @@ fn configuration_completion_and_session_switch_case(uncertain: bool) -> Result<(
     app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
     shutdown_and_join_worker(&mut worker)?;
     drop(replacement_commands);
+    Ok(())
+}
+
+#[test]
+fn returned_run_owner_requires_exact_binding_and_joined_admission_before_retaining() -> Result<()> {
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("returned-owner-ui")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let (release, released) = mpsc::channel();
+    let mut release_guard = AdmissionGateRelease(Some(release));
+    let (started, started_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let application = Arc::new(crate::application_bridge::tests::session(
+        Arc::new(SlowAdmissionPort {
+            settle: false,
+            snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+                scope.clone(),
+            ))),
+            release: Arc::new(Mutex::new(Some(released))),
+            started,
+            calls: Arc::clone(&calls),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }),
+        scope,
+    )?);
+    futures::executor::block_on(application.refresh())?;
+    let action = AppAction::InvokeAgentProfile {
+        profile_id: "plan".to_owned(),
+        prompt: "objective".to_owned(),
+        parent_prompt: "objective".to_owned(),
+    };
+    let request = application
+        .prepare_action(&action, None, None)?
+        .context("profile request")?;
+    let binding =
+        sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+            .context("profile binding")?;
+    let mut pending = PendingApplicationAdmission {
+        application: Arc::clone(&application),
+        request: Arc::new(Mutex::new(Some(request.clone()))),
+        action,
+        run_admission: None,
+        run_submission_intent: None,
+        queue_target: None,
+        attachment_recovery_binding: None,
+        retain_for_recovery: true,
+        settled: false,
+        refresh_before_prepare: false,
+        receiver: None,
+        handle: None,
+        retryable: true,
+        receipt_resolved: false,
+        reconcile_requested: false,
+        run_owner_returned: false,
+    };
+    pending.start()?;
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    let (sender, _commands) = runner::WorkerCommandSender::test_channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx: sender,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: vec![pending],
+        worker_rx: mpsc::channel().1,
+        join_handle: None,
+        ready: true,
+    });
+    let mut app = AppState::from_root_config(
+        Path::new("sigil.toml"),
+        &crate::app::tests::common::test_config(),
+    );
+    for field in 0..3 {
+        let mut foreign = binding.clone();
+        match field {
+            0 => foreign.session_scope_id = "other-session".to_owned(),
+            1 => foreign.reservation_key_digest = "a".repeat(64),
+            _ => foreign.fingerprint = "b".repeat(64),
+        }
+        apply_worker_message_state(
+            worker.as_mut().context("worker")?,
+            None,
+            &WorkerMessage::ApplicationRunOwnerReturned {
+                binding: Box::new(foreign),
+            },
+        );
+        assert!(!worker.as_ref().context("worker")?.pending_interactions[0].run_owner_returned);
+    }
+    apply_worker_message_state(
+        worker.as_mut().context("worker")?,
+        None,
+        &WorkerMessage::RunFailed("UI failure is not owner proof".to_owned()),
+    );
+    assert!(!worker.as_ref().context("worker")?.pending_interactions[0].run_owner_returned);
+    apply_worker_message_state(
+        worker.as_mut().context("worker")?,
+        None,
+        &WorkerMessage::ApplicationRunOwnerReturned {
+            binding: Box::new(binding),
+        },
+    );
+    poll_application_admission(&mut app, &mut worker)?;
+    assert!(
+        app.retained_application_admissions.is_empty(),
+        "admission handle still owns its result"
+    );
+    assert_eq!(
+        worker
+            .as_ref()
+            .context("worker")?
+            .pending_interactions
+            .len(),
+        1
+    );
+    release_guard.release()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.retained_application_admissions.is_empty() && Instant::now() < deadline {
+        poll_application_admission(&mut app, &mut worker)?;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.retained_application_admissions.len(), 1);
+    let retained = &app.retained_application_admissions[0];
+    assert_eq!(
+        retained.request.lock().expect("request").as_ref(),
+        Some(&request)
+    );
+    assert!(!retained.receipt_resolved && !retained.reconcile_requested && !retained.retryable);
+    assert!(retained.handle.is_none() && retained.receiver.is_none());
+    assert!(
+        worker
+            .as_ref()
+            .context("worker")?
+            .pending_interactions
+            .is_empty()
+    );
+    for _ in 0..4 {
+        poll_application_admission(&mut app, &mut worker)?;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "retained uncertainty is not redispatched"
+    );
+    shutdown_and_join_worker(&mut worker)?;
     Ok(())
 }

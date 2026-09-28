@@ -76,6 +76,28 @@ impl ChannelEventHandler {
         Ok(())
     }
 
+    /// Accepts a bound application command only after the existing durable foreground start.
+    pub(super) fn start_bound_public_run(
+        &mut self,
+        session: &mut Session,
+        run_id: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        self.start_public_run(session, run_id, prompt)?;
+        if let Err(error) = session.record_bound_conversation_run_admission(run_id) {
+            let terminal = self.finish_public_run(&Err(anyhow!(
+                "foreground command admission failed: {error:#}"
+            )));
+            return match terminal {
+                Ok(()) => Err(error),
+                Err(terminal) => Err(error.context(format!(
+                    "foreground admission terminal also failed: {terminal:#}"
+                ))),
+            };
+        }
+        Ok(())
+    }
+
     pub(super) fn finish_public_run(
         &mut self,
         result: &Result<sigil_kernel::AgentRunOutput>,

@@ -50,9 +50,15 @@ fn reaped_task_panic_remains_a_shutdown_failure_without_retaining_the_handle() {
         std::thread::yield_now();
     }
     assert!(handle.is_finished());
+    let id = handle.id();
     let mut handles = vec![handle];
     let mut task_panicked = false;
-    reap_finished_owned_tasks(&mut handles, &mut task_panicked);
+    let joined = reap_finished_owned_tasks(&mut handles, &mut task_panicked);
+    assert_eq!(
+        joined,
+        vec![(id, false)],
+        "panic is not a successful joined owner"
+    );
     assert!(handles.is_empty());
     assert!(task_panicked);
     for _ in 0..2 {
@@ -139,4 +145,28 @@ fn explicit_shutdown_keeps_panic_failure_after_draining_other_owned_work() {
             "a retry must not clear actual panic evidence"
         );
     }
+}
+
+#[test]
+fn reaper_reports_only_consumed_successful_owner_joins() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (release, released) = tokio::sync::oneshot::channel();
+    let handle = runtime.spawn(async move {
+        released.await.expect("release");
+    });
+    let id = handle.id();
+    let mut handles = vec![handle];
+    let mut panicked = false;
+    assert!(reap_finished_owned_tasks(&mut handles, &mut panicked).is_empty());
+    release.send(()).expect("release real owner");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !handles[0].is_finished() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        reap_finished_owned_tasks(&mut handles, &mut panicked),
+        vec![(id, true)]
+    );
+    assert!(handles.is_empty());
+    assert!(reap_finished_owned_tasks(&mut handles, &mut panicked).is_empty());
 }

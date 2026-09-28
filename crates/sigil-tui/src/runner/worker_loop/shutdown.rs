@@ -25,19 +25,23 @@ impl std::fmt::Display for OwnedTaskDrainFailure {
 pub(in crate::runner) fn reap_finished_owned_tasks(
     handles: &mut Vec<tokio::task::JoinHandle<()>>,
     task_panicked: &mut bool,
-) {
+) -> Vec<(tokio::task::Id, bool)> {
+    let mut joined = Vec::new();
     handles.retain_mut(|handle| {
         if !handle.is_finished() {
             return true;
         }
+        let id = handle.id();
         match futures::FutureExt::now_or_never(handle) {
             Some(result) => {
+                joined.push((id, result.is_ok()));
                 *task_panicked |= result.is_err_and(|error| error.is_panic());
                 false
             }
             None => true,
         }
     });
+    joined
 }
 
 /// Abort only requests cancellation. Handles remain in the owner until their join completes.
@@ -50,7 +54,7 @@ pub(in crate::runner) fn drain_owned_tasks_until(
     for handle in handles.iter() {
         handle.abort();
     }
-    reap_finished_owned_tasks(handles, task_panicked);
+    let _ = reap_finished_owned_tasks(handles, task_panicked);
     while let Some(handle) = handles.last_mut() {
         match runtime.block_on(async {
             tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), handle).await
@@ -166,11 +170,13 @@ pub(super) fn shutdown_worker_state(
         &stop_control,
         message_tx,
         |_| {
-            join_owned_tasks(
+            let result = join_owned_tasks(
                 &mut state.run.retired,
                 &mut state.run.task_panicked,
                 runtime,
-            )
+            );
+            state.run.returned_application_operations.clear();
+            result
         },
     );
     drain_stopping_owner(

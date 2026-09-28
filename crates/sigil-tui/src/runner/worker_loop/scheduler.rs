@@ -563,10 +563,18 @@ fn run_worker_loop_inner<P>(
 
     loop {
         state.stop_control.stage(WorkerShutdownStage::WorkerLoop);
-        super::shutdown::reap_finished_owned_tasks(
+        for (id, joined) in super::shutdown::reap_finished_owned_tasks(
             &mut state.run.retired,
             &mut state.run.task_panicked,
-        );
+        ) {
+            if let Some(binding) = state.run.returned_application_operations.remove(&id)
+                && joined
+            {
+                let _ = message_tx.send(WorkerMessage::ApplicationRunOwnerReturned {
+                    binding: Box::new(binding),
+                });
+            }
+        }
         if state.run.task_panicked {
             state
                 .stop_control
@@ -1144,7 +1152,7 @@ mod reactor_tests {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut waiting = Some(waiting);
             loop {
-                super::super::shutdown::reap_finished_owned_tasks(
+                let _ = super::super::shutdown::reap_finished_owned_tasks(
                     &mut state.run.retired,
                     &mut state.run.task_panicked,
                 );

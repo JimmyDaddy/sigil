@@ -66,7 +66,7 @@ async fn managed_research_operation_queries_original_child_after_parent_terminal
         )?;
     assert!(!receipt.idempotent_replay);
     assert!(continuation.is_none());
-    parent.clear_application_operation();
+    let _ = parent.clear_application_operation();
     assert_eq!(
         PlanReviewProjection::from_entries(parent.entries())
             .latest_attempt(&request.plan_review_id)
@@ -169,7 +169,7 @@ async fn managed_research_resume_commits_new_operation_only_at_actual_continuati
             .application_operation
             .is_none()
     );
-    parent.clear_application_operation();
+    let _ = parent.clear_application_operation();
     let (_, original_proof) = PlanReviewCoordinator::query_managed_research_application_operation(
         &parent,
         &original,
@@ -257,7 +257,7 @@ async fn managed_research_resume_commits_new_operation_only_at_actual_continuati
         &mut handler,
         140,
     )?;
-    parent.clear_application_operation();
+    let _ = parent.clear_application_operation();
     let reopened = parent.application_operation_owner()?.attach_for_control()?;
     let (resolved, proof) = PlanReviewCoordinator::query_managed_research_application_operation(
         &reopened,

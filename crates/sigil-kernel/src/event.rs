@@ -236,6 +236,7 @@ durable_event_types! {
     IntentOperationResolved => ("intent_operation_resolved", RecoveryCritical, Critical, DirectJson, "intent_operation_resolved"),
     IntentConflictRecorded => ("intent_conflict_recorded", RecoveryCritical, Critical, DirectJson, "intent_conflict_recorded"),
     IntentVersionSuperseded => ("intent_version_superseded", RecoveryCritical, Critical, DirectJson, "intent_version_superseded"),
+    ConversationRunAcceptedV1 => ("conversation_run_accepted_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ApplicationOperationPreparedV1 => ("application_operation_prepared_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ApplicationOperationCommittedV1 => ("application_operation_committed_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -1848,6 +1849,7 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionCompositionBound(_) => "session_composition_bound",
         ControlEntry::SessionRuntimeTransitionV1(_) => "session_runtime_transition_v1",
+        ControlEntry::ConversationRunAcceptedV1(_) => "conversation_run_accepted_v1",
         ControlEntry::ApplicationOperationPreparedV1(_) => "application_operation_prepared_v1",
         ControlEntry::ApplicationOperationCommittedV1(_) => "application_operation_committed_v1",
         ControlEntry::SessionIdentity { .. } => "session_identity",

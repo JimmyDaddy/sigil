@@ -1128,6 +1128,7 @@ where
                 None => None,
             };
             let detached = context.state.session.current.is_none();
+            let dispatched_binding = binding.as_deref().cloned();
             let mut initial_entry_count = 0;
             if let Some(binding) = binding {
                 let bound = (|| -> anyhow::Result<()> {
@@ -1176,8 +1177,24 @@ where
                 }
             }
             let control = dispatch_worker_command(context.reborrow(), *command);
-            if let Some(session) = context.state.session.current.as_mut() {
-                session.clear_application_operation();
+            let returned_binding = context.state.session.current.as_mut().and_then(|session| {
+                session.clear_application_operation().filter(|binding| {
+                    binding.domain_session_scope_id() == session.session_scope_id()
+                })
+            });
+            if run_admission.is_some()
+                && context.state.run.active.is_none()
+                && returned_binding.as_ref() == dispatched_binding.as_ref()
+                && let Some(binding) = returned_binding
+            {
+                // Synchronous preflight returned the same exact session without starting a
+                // run. This only releases the active slot after the admission thread joins;
+                // the durable K/F remains unresolved, and no accepted/no-effect receipt is made.
+                let _ = context
+                    .message_tx
+                    .send(WorkerMessage::ApplicationRunOwnerReturned {
+                        binding: Box::new(binding),
+                    });
             }
             if detached
                 && initial_entry_count > 0
