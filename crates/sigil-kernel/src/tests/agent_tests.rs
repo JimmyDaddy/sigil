@@ -9358,6 +9358,7 @@ struct PartialToolRequestThenErrorProvider {
 struct EquivalentTransportFallbackProvider {
     calls: Arc<AtomicUsize>,
     fallback_active: Arc<AtomicBool>,
+    primary_request: Arc<Mutex<Option<Value>>>,
 }
 
 /// Deterministic stand-in for typed 429/5xx provider failures. The stream text is deliberately
@@ -9696,9 +9697,16 @@ impl Provider for EquivalentTransportFallbackProvider {
 
     fn transport_fallback_candidate(
         &self,
-        _request: &CompletionRequest,
+        request: &CompletionRequest,
         _failure: &ProviderFailureObservationV1,
     ) -> Option<crate::ProviderTransportFallbackCandidateV1> {
+        assert_eq!(
+            self.primary_request
+                .lock()
+                .expect("primary request lock")
+                .as_ref(),
+            Some(&serde_json::to_value(request).expect("fallback request")),
+        );
         (!self.fallback_active.load(Ordering::SeqCst)).then(|| {
             crate::ProviderTransportFallbackCandidateV1 {
                 fallback_transport_id: "https".to_owned(),
@@ -9724,10 +9732,12 @@ impl Provider for EquivalentTransportFallbackProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.fallback_active.load(Ordering::SeqCst) {
+            *self.primary_request.lock().expect("primary request lock") =
+                Some(serde_json::to_value(&request)?);
             anyhow::bail!("deterministic primary transport TLS EOF")
         }
         Ok(Box::pin(stream::iter(vec![
@@ -10603,6 +10613,7 @@ async fn agent_selects_equivalent_transport_only_after_durable_recovery_authorit
         EquivalentTransportFallbackProvider {
             calls: Arc::clone(&calls),
             fallback_active: Arc::clone(&fallback_active),
+            primary_request: Arc::new(Mutex::new(None)),
         },
         ToolRegistry::new(),
     );
@@ -10847,6 +10858,7 @@ async fn agent_restores_durable_transport_fallback_after_session_reload() -> Res
         EquivalentTransportFallbackProvider {
             calls: Arc::clone(&calls),
             fallback_active: Arc::clone(&fallback_active),
+            primary_request: Arc::new(Mutex::new(None)),
         },
         ToolRegistry::new(),
     );
