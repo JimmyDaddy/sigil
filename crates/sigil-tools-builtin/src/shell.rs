@@ -2267,7 +2267,44 @@ fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantSco
 }
 
 pub(crate) fn controlled_shell_environment() -> BTreeMap<String, String> {
-    controlled_shell_environment_with(|name| std::env::var(name).ok())
+    let environment = controlled_shell_environment_with(|name| std::env::var(name).ok());
+    #[cfg(windows)]
+    let environment = {
+        let mut environment = environment;
+        add_host_msvc_linker_environment(&mut environment);
+        environment
+    };
+    environment
+}
+
+#[cfg(windows)]
+fn add_host_msvc_linker_environment(environment: &mut BTreeMap<String, String>) {
+    if !cfg!(target_env = "msvc") {
+        return;
+    }
+    // Discover outside the managed child: its sealed environment may prevent rustc from
+    // locating Visual Studio, allowing Git's unrelated link.exe to win on PATH instead.
+    let Some(linker) = find_msvc_tools::find_tool(std::env::consts::ARCH, "link.exe") else {
+        return;
+    };
+    if !linker.path().is_file() {
+        return;
+    }
+    for (name, value) in linker.env() {
+        if matches!(name.to_str(), Some("PATH" | "LIB" | "INCLUDE")) {
+            environment.insert(
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            );
+        }
+    }
+    environment.insert(
+        format!(
+            "CARGO_TARGET_{}_PC_WINDOWS_MSVC_LINKER",
+            std::env::consts::ARCH.to_ascii_uppercase()
+        ),
+        linker.path().to_string_lossy().into_owned(),
+    );
 }
 
 /// Exact restricted launch material shared by permission binding and the execution owner.

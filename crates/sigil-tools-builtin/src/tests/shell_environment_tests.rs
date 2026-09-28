@@ -143,6 +143,34 @@ fn windows_msvc_toolchain_inputs_are_bound_without_inheriting_credentials() -> R
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn discovered_msvc_linker_is_part_of_the_controlled_shell_binding() -> Result<()> {
+    if !cfg!(target_env = "msvc") {
+        return Ok(());
+    }
+    let Some(linker) = find_msvc_tools::find_tool(std::env::consts::ARCH, "link.exe") else {
+        return Ok(());
+    };
+    let environment = controlled_shell_environment();
+    let name = format!(
+        "CARGO_TARGET_{}_PC_WINDOWS_MSVC_LINKER",
+        std::env::consts::ARCH.to_ascii_uppercase()
+    );
+    assert_eq!(
+        environment.get(&name).map(String::as_str),
+        Some(linker.path().to_string_lossy().as_ref())
+    );
+    let original = shell_environment_binding_for_environment("pwsh.exe", true, &environment)?;
+    let mut changed = environment;
+    changed.remove(&name);
+    assert_ne!(
+        shell_environment_binding_for_environment("pwsh.exe", true, &changed)?,
+        original
+    );
+    Ok(())
+}
+
 #[test]
 fn each_toolchain_root_changes_the_v2_environment_binding() -> Result<()> {
     let environment = environment_from(&[
