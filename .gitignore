@@ -16,5 +16,6 @@ __pycache__/
 /apps/desktop/dist/
 /apps/desktop/src-tauri/gen/
 /apps/desktop/src-tauri/binaries/
+/apps/desktop/tsconfig.tsbuildinfo
 .qoder/worktrees
 .qoder/settings.local.json
