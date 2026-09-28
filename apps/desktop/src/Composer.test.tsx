@@ -268,7 +268,6 @@ const context: RunContext = {
 function renderComposer(overrides: {
   active?: boolean;
   submissionBlocked?: boolean;
-  queueSubmissionBlocked?: boolean;
   queueCount?: number;
   queuePaused?: boolean;
   queueBusy?: boolean;
@@ -324,7 +323,6 @@ function renderComposer(overrides: {
         draftKey="composer-test"
         active={overrides.active ?? false}
         submissionBlocked={overrides.submissionBlocked ?? false}
-        queueSubmissionBlocked={overrides.queueSubmissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
         composerRef={createRef<HTMLTextAreaElement>()}
@@ -845,19 +843,20 @@ describe("structured composer", () => {
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });
 
-  it("retains the draft when the durable queue itself is unavailable", async () => {
+  it("retains the draft when queue admission fails", async () => {
     const user = userEvent.setup();
-    const { onSubmit } = renderComposer({
+    const onSubmit = vi.fn(async () => false);
+    renderComposer({
       active: true,
       submissionBlocked: true,
-      queueSubmissionBlocked: true,
+      onSubmit,
     });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Do not lose this draft");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledOnce();
     expect((input as HTMLTextAreaElement).value).toBe("Do not lose this draft");
   });
 

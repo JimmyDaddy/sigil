@@ -39,7 +39,6 @@ export function Composer({
   active,
   submissionBlocked,
   stopControlBlocked = false,
-  queueSubmissionBlocked = false,
   submitting,
   controlBusy,
   composerRef,
@@ -79,7 +78,6 @@ export function Composer({
   active: boolean;
   submissionBlocked: boolean;
   stopControlBlocked?: boolean;
-  queueSubmissionBlocked?: boolean;
   submitting: boolean;
   controlBusy: boolean;
   composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -202,7 +200,7 @@ export function Composer({
     let nextPrompt = prompt.trim();
     if (
       (nextPrompt === "" && images.length === 0)
-      || (active ? queueSubmissionBlocked : submissionBlocked)
+      || (!active && submissionBlocked)
       || submitting
       || imagePending.current
       || (active && queueBusy)
@@ -564,7 +562,7 @@ export function Composer({
           }}
           placeholder={
             active
-              ? queueSubmissionBlocked ? t("conversationQueueUnavailable") : t("activePrompt")
+              ? t("activePrompt")
               : submissionBlocked ? t("readOnlyRecoveryPrompt") : t("prompt")
           }
           rows={1}
@@ -701,7 +699,7 @@ export function Composer({
                   type="submit"
                   aria-label={t("queueMessage")}
                   icon={<Icon name="queue" />}
-                  disabled={prompt.trim() === "" || queueSubmissionBlocked || submitting || queueBusy}
+                  disabled={prompt.trim() === "" || submitting || queueBusy}
                   aria-busy={queueBusy || undefined}
                 />
               </Tooltip>

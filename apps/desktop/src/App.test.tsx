@@ -5703,6 +5703,71 @@ describe("desktop workspace and history shell", () => {
     expect(composer.value).toBe("Another draft during queue admission");
   });
 
+  it("accepts a follow-up while the queue panel's initial read is still pending", async () => {
+    const user = userEvent.setup();
+    const defaults = bridgeWith();
+    const panelRead = deferred<Awaited<ReturnType<DesktopBridge["conversationQueue"]>>>();
+    let reads = 0;
+    let allowRead = false;
+    const commandConversationQueue = vi.fn(defaults.commandConversationQueue);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      conversationQueue: (workspaceId, sessionId) => {
+        reads += 1;
+        return allowRead ? defaults.conversationQueue(workspaceId, sessionId) : panelRead.promise;
+      },
+      commandConversationQueue,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    await user.type(composer, "Start the first run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop run" });
+    await user.type(composer, "Queue without panel data");
+    const queueButton = screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement;
+    expect(queueButton.disabled).toBe(false);
+    allowRead = true;
+    await user.click(queueButton);
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledOnce());
+    expect(commandConversationQueue.mock.calls[0][1]).toMatchObject({
+      expectedGeneration: "0",
+      action: { action: "enqueue", prompt: "Queue without panel data" },
+    });
+    expect(reads).toBeGreaterThanOrEqual(2);
+    await act(async () => panelRead.resolve(await defaults.conversationQueue(workspace.id, "http-session-new")));
+  });
+
+  it("refreshes a stale queue generation once and retries the rejected command", async () => {
+    const user = userEvent.setup();
+    const defaults = bridgeWith();
+    let generation = "0";
+    const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(async (workspaceId, input) => {
+      if (input.expectedGeneration !== generation) throw { code: "queue_generation_stale" };
+      return defaults.commandConversationQueue(workspaceId, input);
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      conversationQueue: async (workspaceId, sessionId) => ({
+        ...(await defaults.conversationQueue(workspaceId, sessionId)), generation,
+      }),
+      commandConversationQueue,
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    await user.type(composer, "Start the first run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByRole("button", { name: "Stop run" });
+    generation = "external-update";
+    await user.type(composer, "Follow-up after another client changed the queue");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole("button", { name: "Queue message" }));
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenCalledTimes(2));
+    expect(commandConversationQueue.mock.calls.map((call) => call[1].expectedGeneration))
+      .toEqual(["0", "external-update"]);
+  });
+
   it.each(["started", "canonical", "settled_without_projection", "settlement_refresh_wait", "earlier_queue", "settled_behind_earlier", "replayed_behind_earlier", "ambiguous_new_entries", "idle_wait", "unrelated_terminal", "replayed_active", "explicit_remove"] as const)(
     "keeps an accepted follow-up visible through predecessor replay with %s settlement",
     async (settlement) => {

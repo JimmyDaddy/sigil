@@ -38,6 +38,7 @@ import type {
   ContinuityRecoveryAction,
   ConversationContinuity,
   ConversationQueueCommandAction,
+  ConversationQueueCommandReceipt,
   ConversationQueueView,
   CheckpointRestoreReview,
   CheckpointView,
@@ -307,7 +308,6 @@ export function ConversationPanel({
   const [requestedAgent, setRequestedAgent] = useState<AgentCatalogEntry>();
   const [conversationQueue, setConversationQueue] = useState<ConversationQueueView>();
   const [conversationQueueBusy, setConversationQueueBusy] = useState(false);
-  const [conversationQueueLoading, setConversationQueueLoading] = useState(false);
   const [conversationQueueError, setConversationQueueError] = useState(false);
   const [conversationQueueReload, setConversationQueueReload] = useState(0);
   const [conversationRecovery, setConversationRecovery] = useState<ConversationRecoveryView>();
@@ -568,7 +568,6 @@ export function ConversationPanel({
     setRequestedAgent(undefined);
     setConversationQueue(undefined);
     setConversationQueueBusy(false);
-    setConversationQueueLoading(false);
     setConversationQueueError(false);
     setConversationRecovery(undefined);
     setCheckpointRestorePreview(undefined);
@@ -625,7 +624,6 @@ export function ConversationPanel({
     let disposed = false;
     const requestEpoch = conversationQueueEpoch.current + 1;
     conversationQueueEpoch.current = requestEpoch;
-    setConversationQueueLoading(true);
     void bridge.conversationQueue(workspaceId, session.id)
       .then((queue) => {
         if (disposed || conversationQueueEpoch.current !== requestEpoch) return;
@@ -636,11 +634,6 @@ export function ConversationPanel({
       .catch(() => {
         if (!disposed && conversationQueueEpoch.current === requestEpoch) {
           setConversationQueueError(true);
-        }
-      })
-      .finally(() => {
-        if (!disposed && conversationQueueEpoch.current === requestEpoch) {
-          setConversationQueueLoading(false);
         }
       });
     return () => {
@@ -1617,19 +1610,26 @@ export function ConversationPanel({
     action: ConversationQueueCommandAction,
   ): Promise<boolean> => {
     if (conversationQueueBusy) return false;
-    if (conversationQueue === undefined) {
-      onNotice(t("conversationQueueUnavailable"), true);
-      refreshConversationQueue();
-      return false;
-    }
     conversationQueueEpoch.current += 1;
     setConversationQueueBusy(true);
     try {
-      const receipt = await bridge.commandConversationQueue(workspaceId, {
-        sessionId: session.id,
-        expectedGeneration: conversationQueue.generation,
-        action,
-      });
+      let queue = conversationQueue ?? await bridge.conversationQueue(workspaceId, session.id);
+      let receipt: ConversationQueueCommandReceipt;
+      try {
+        receipt = await bridge.commandConversationQueue(workspaceId, {
+          sessionId: session.id,
+          expectedGeneration: queue.generation,
+          action,
+        });
+      } catch (error) {
+        if (!isQueueGenerationStale(error)) throw error;
+        queue = await bridge.conversationQueue(workspaceId, session.id);
+        receipt = await bridge.commandConversationQueue(workspaceId, {
+          sessionId: session.id,
+          expectedGeneration: queue.generation,
+          action,
+        });
+      }
       setConversationQueue(receipt.queue);
       const enqueued = action.action === "enqueue";
       const pending = pendingPromptRef.current;
@@ -1698,7 +1698,6 @@ export function ConversationPanel({
       || (!active && submissionBlocked && !recoveryRetry)
       || submitting
       || conversationQueueBusy
-      || (active && conversationQueueLoading)
     ) return false;
     if (active) {
       if (skillBinding !== undefined || agentBinding !== undefined) {
@@ -2924,7 +2923,6 @@ export function ConversationPanel({
         active={active}
         submissionBlocked={submissionBlocked}
         stopControlBlocked={stopControlBlocked}
-        queueSubmissionBlocked={active && conversationQueue === undefined}
         submitting={submitting}
         controlBusy={controlBusy}
         composerRef={composerRef}
@@ -2938,13 +2936,13 @@ export function ConversationPanel({
         requestedAgent={requestedAgent}
         queueCount={conversationQueue?.totalItems ?? 0}
         queuePaused={conversationQueue?.paused ?? false}
-        queueBusy={conversationQueueBusy || conversationQueueLoading}
+        queueBusy={conversationQueueBusy}
         activityState={composerActivityState}
         statusPresentation={composerStatusPresentation}
         queuePanel={(
           <ConversationQueuePanel
             queue={conversationQueue}
-            busy={conversationQueueBusy || conversationQueueLoading}
+            busy={conversationQueueBusy}
             error={conversationQueueError}
             reasoningEffort={reasoningEffort}
             onRefresh={refreshConversationQueue}
@@ -3382,6 +3380,11 @@ function continuityRecoveryActionsFromError(error: unknown): ContinuityRecoveryA
 function errorMessage(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
   return typeof error.message === "string" ? error.message : undefined;
+}
+
+function isQueueGenerationStale(error: unknown): boolean {
+  return typeof error === "object" && error !== null
+    && "code" in error && error.code === "queue_generation_stale";
 }
 
 function integrationReviewTaskProjection(

@@ -71,6 +71,9 @@ When a run is active, ordinary input becomes a visible follow-up and the first p
 Queue changes show a pending indicator until confirmed. Repeated clicks while a change is pending
 do not send it again. Deleting an already deleted item is harmless; if it has already been consumed,
 the queue explains that result. A failed queue change keeps the current Task and tool activity visible.
+On Desktop, a follow-up can be submitted while the queue panel is still loading. If another client
+changes the queue first, Sigil refreshes its generation and retries the rejected command once;
+an uncertain delivery is never resent automatically.
 
 ## Config Panel
 
