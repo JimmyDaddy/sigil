@@ -5512,7 +5512,8 @@ fn application_bound_session_entries(
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<Vec<SessionLogEntry>> {
-    let records = application_bound_session_records(session_path, expected_session_scope_id)?;
+    let records = sigil_kernel::SessionRecordReadHandle::open_existing_observer(session_path)?
+        .read_event_records()?;
     application_bound_session_entries_from_records(&records, expected_session_scope_id)
 }
 

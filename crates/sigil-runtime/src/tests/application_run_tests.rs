@@ -61,10 +61,11 @@ use super::{
     PublicApplicationEventBridge, accept_application_task_integration_review,
     admit_application_agent_binding, admit_application_model_selection,
     admit_application_reasoning_effort, admit_application_skill_binding,
-    application_run_context_view, application_run_input, application_session_frontier_view,
-    application_session_transcript_page, application_task_integration_review_view,
-    application_terminal_projection, application_verification_view,
-    attach_application_request_context, bind_application_session,
+    application_bound_session_entries_from_records, application_run_context_view,
+    application_run_input, application_session_frontier_view,
+    application_session_has_unresolved_user_input, application_session_transcript_page,
+    application_task_integration_review_view, application_terminal_projection,
+    application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_application_session_with_model_ref,
     bind_application_session_with_model_ref_and_attachment, bind_existing_application_session,
     constrain_application_tool_registry, continue_application_task_handoff,
@@ -616,6 +617,93 @@ fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
     );
     assert!(application_session_frontier_view(&path, "another-scope").is_err());
     assert!(application_session_frontier_view(&path, "").is_err());
+    Ok(())
+}
+
+#[test]
+fn bound_session_entries_keep_user_input_admission_scope_and_stream_checks() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    })?;
+    session.append_user_message(ModelMessage::user("before clarification"))?;
+    let scope = session.session_scope_id().to_owned();
+
+    assert!(!application_session_has_unresolved_user_input(
+        &path, &scope
+    )?);
+    for foreign_scope in ["", "another-session"] {
+        assert!(
+            application_session_has_unresolved_user_input(&path, foreign_scope).is_err(),
+            "user-input admission must reject an unbound session scope"
+        );
+    }
+    let empty_path = temp.path().join("empty.jsonl");
+    JsonlSessionStore::new(&empty_path)?;
+    assert!(application_session_has_unresolved_user_input(&empty_path, &scope).is_err());
+
+    let mut foreign_record = sigil_kernel::SessionRecordReadHandle::open_existing_observer(&path)?
+        .read_event_records()?;
+    let sigil_kernel::SessionStreamRecord::Stored(event) = &mut foreign_record[1];
+    event.session_id = "another-session".to_owned();
+    assert!(
+        format!(
+            "{:#}",
+            application_bound_session_entries_from_records(&foreign_record, &scope)
+                .expect_err("a supplied record slice must still validate every scope")
+        )
+        .contains("scope does not match")
+    );
+
+    let requested = UserInputRequestedV1::new(UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new(&scope)?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new("scope-check-root")?,
+            source_thread_id: AgentThreadId::new("main")?,
+            request_id: UserInputRequestId::new("scope-check-request")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        source: UserInputSourceV1::Mcp {
+            server_id: "test-server".to_owned(),
+            call_id: "test-call".to_owned(),
+        },
+        purpose: UserInputPurposeV1::ExternalElicitation,
+        prompt: "Choose a value".to_owned(),
+        questions: vec![UserInputQuestionV1 {
+            id: "value".to_owned(),
+            question: "Which value?".to_owned(),
+            description: None,
+            required: true,
+            options: Vec::new(),
+            multiple: false,
+        }],
+        allowed_actions: vec![UserInputActionV1::Submit],
+        requested_at_unix_ms: 10,
+        continuation: None,
+    })?;
+    session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(Box::new(
+        requested,
+    ))])?;
+    assert!(application_session_has_unresolved_user_input(
+        &path, &scope
+    )?);
+
+    let mut corrupt = std::fs::read(&path)?;
+    corrupt.extend_from_slice(b"{\"partial\":");
+    std::fs::write(&path, &corrupt)?;
+    assert!(application_session_has_unresolved_user_input(&path, &scope).is_err());
+    assert_eq!(
+        std::fs::read(&path)?,
+        corrupt,
+        "an observer must not repair the stream"
+    );
     Ok(())
 }
 
