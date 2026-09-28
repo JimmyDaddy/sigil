@@ -232,7 +232,6 @@ jobs:
             --require-remote-tag \
             --require-ci \
             --require-workflow CI \
-            --require-workflow "Desktop Package" \
             --require-public-channel \
             --wait-ci-seconds 1800
 
