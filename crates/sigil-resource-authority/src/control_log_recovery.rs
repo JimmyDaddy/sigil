@@ -916,13 +916,10 @@ fn sync_directory(path: &Path) -> Result<(), ManagedStorageErrorV1> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)
-            .map_err(io_error)?;
-        file.sync_all().map_err(io_error)
+        // Windows can open a directory with FILE_FLAG_BACKUP_SEMANTICS, but directory handles
+        // do not support FlushFileBuffers. Each staged metadata file is synced before its
+        // hard-link publication; the directory itself has no portable flush operation here.
+        Ok(())
     }
     #[cfg(not(any(unix, windows)))]
     {

@@ -7,13 +7,15 @@ use std::{
 
 use anyhow::Result;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use sigil_kernel::ToolSubject;
 use sigil_kernel::{
     ApprovalMode, DurableEventType, ExtensionProcessLaunchPhase, ExtensionProcessLifecycleAudit,
     ExtensionProcessLifecycleStatus, JsonlSessionStore, McpServerConfig, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
     ReasoningStreamSupport, SecretRedactor, SecretString, ToolAccess, ToolArtifactBindingV1,
     ToolArtifactSensitivity, ToolArtifactStore, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolResultStatus, ToolSubject,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolResultStatus,
     ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
 };
 use tokio::{
@@ -658,14 +660,20 @@ async fn mcp_process_network_deny_without_proven_isolation_is_zero_spawn() -> Re
 
 #[tokio::test]
 async fn extension_process_environment_clears_ambient_and_injects_only_grants() -> Result<()> {
-    let Some(home) = std::env::var("HOME").ok() else {
+    // Git Bash synthesizes HOME from its Windows profile even when the child environment is
+    // cleared. USERNAME is a stable non-baseline grant there and exercises the same policy.
+    #[cfg(windows)]
+    let grant_name = "USERNAME";
+    #[cfg(not(windows))]
+    let grant_name = "HOME";
+    let Some(granted_value) = std::env::var(grant_name).ok() else {
         return Ok(());
     };
     let temp = tempfile::tempdir()?;
     let run = |grant_names: &[String]| -> Result<_> {
         let environment = sigil_kernel::resolve_extension_process_environment(grant_names)?;
         if grant_names.is_empty() {
-            assert!(environment.variable("HOME").is_none());
+            assert!(environment.variable(grant_name).is_none());
             assert!(environment.variable("GITHUB_ACTIONS").is_none());
         }
         LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
@@ -673,8 +681,9 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
             command: "sh".to_owned(),
             args: vec![
                 "-c".to_owned(),
-                "printf '%s|%s|%s' \"${HOME-unset}\" \"${PATH-unset}\" \"${GITHUB_ACTIONS-unset}\""
-                    .to_owned(),
+                format!(
+                    "printf '%s|%s|%s' \"${{{grant_name}-unset}}\" \"${{PATH-unset}}\" \"${{GITHUB_ACTIONS-unset}}\""
+                ),
             ],
             working_dir: Some(temp.path().to_path_buf()),
             environment,
@@ -702,23 +711,20 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
         .expect("local launcher must return a child")
         .wait()
         .await?;
-    // Git Bash may synthesize HOME from its Windows profile even after env_clear().
-    // The resolved launch environment must still exclude it unless explicitly granted.
-    #[cfg(not(windows))]
     assert!(isolated_output.starts_with("unset|"));
     assert!(!isolated_output.contains("|unset|"));
     assert!(isolated_output.ends_with("|unset"));
 
-    let mut granted = run(&["HOME".to_owned()])?;
+    let mut granted = run(&[grant_name.to_owned()])?;
     let metadata = granted.receipt.audit_metadata();
     let metadata_text = format!("{metadata:?}");
-    assert_eq!(granted.receipt.environment_grant_names, vec!["HOME"]);
+    assert_eq!(granted.receipt.environment_grant_names, vec![grant_name]);
     assert_eq!(
         granted.receipt.environment_policy,
         sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
     );
-    assert!(!metadata_text.contains(&home));
-    assert_eq!(metadata["mcp_environment_grant_names"], "HOME");
+    assert!(!metadata_text.contains(&granted_value));
+    assert_eq!(metadata["mcp_environment_grant_names"], grant_name);
     let mut granted_stdout = granted
         .child
         .as_mut()
@@ -734,7 +740,7 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
         .expect("local launcher must return a child")
         .wait()
         .await?;
-    assert!(granted_output.starts_with(&format!("{home}|")));
+    assert!(granted_output.starts_with(&format!("{granted_value}|")));
     Ok(())
 }
 

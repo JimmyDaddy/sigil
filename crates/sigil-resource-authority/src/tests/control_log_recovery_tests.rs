@@ -448,6 +448,56 @@ fn activated_retry_preserves_later_business_bytes_and_multigeneration_chain_is_v
     assert!(authority.validate_namespace_write(&third).is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_recovery_activates_successor_without_directory_flush_support() {
+    let temp = tempfile::tempdir().expect("root");
+    let authority = service(temp.path());
+    let old = admit(
+        &authority,
+        ManagedStorageSemanticOwnerV1::ApplicationControlLog,
+        61,
+    );
+    let successor = admit(
+        &authority,
+        ManagedStorageSemanticOwnerV1::ApplicationControlLog,
+        62,
+    );
+    let recovery = admit(
+        &authority,
+        ManagedStorageSemanticOwnerV1::ApplicationControlRecovery,
+        63,
+    );
+    let old_path = path(&authority, &old).join("records.jsonl");
+    let old_bytes = b"{\"command\":1}\n{partial";
+    fs::write(&old_path, old_bytes).expect("old journal");
+    let (review, header) = preview(
+        &authority,
+        &recovery,
+        &old,
+        &successor,
+        old.namespace_hash,
+        0,
+    );
+
+    let state = authority
+        .advance_control_log_recovery(&recovery, &old, &successor, &review, &header)
+        .expect("activate exact successor on Windows");
+    assert_eq!(state.phase, Phase::Activated);
+    assert_eq!(fs::read(old_path).expect("old journal"), old_bytes);
+    assert_eq!(
+        fs::read(path(&authority, &successor).join("records.jsonl")).expect("new journal"),
+        header
+    );
+    assert_eq!(
+        authority
+            .query_control_log_recovery(&recovery)
+            .expect("durable chain")
+            .expect("activated phase"),
+        state
+    );
+}
+
 #[test]
 fn forward_guard_blocks_sealing_until_the_authorized_dispatch_releases_ownership() {
     let temp = tempfile::tempdir().expect("root");
