@@ -40,7 +40,6 @@ export function Composer({
   submissionBlocked,
   stopControlBlocked = false,
   queueSubmissionBlocked = false,
-  draftEditingBlocked = false,
   submitting,
   controlBusy,
   composerRef,
@@ -81,7 +80,6 @@ export function Composer({
   submissionBlocked: boolean;
   stopControlBlocked?: boolean;
   queueSubmissionBlocked?: boolean;
-  draftEditingBlocked?: boolean;
   submitting: boolean;
   controlBusy: boolean;
   composerRef: RefObject<HTMLTextAreaElement | null>;
@@ -491,7 +489,7 @@ export function Composer({
             <Button type="button" variant="quiet" onClick={() => removeImage(image.attachmentId)} aria-label={t("removeImage", { count: index + 1 })}>×</Button>
           </figure>)}
         </div> : null}
-        {onPickImage !== undefined ? <Button type="button" variant="quiet" busy={imageBusy} disabled={active || draftEditingBlocked || submitting} onClick={() => void addImage(onPickImage)}>{imageBusy ? t("attachingImage") : t("attachImage")}</Button> : null}
+        {onPickImage !== undefined ? <Button type="button" variant="quiet" busy={imageBusy} disabled={active || submitting} onClick={() => void addImage(onPickImage)}>{imageBusy ? t("attachingImage") : t("attachImage")}</Button> : null}
 
         {selectedSkill !== undefined || selectedAgent !== undefined ? (
           <div className="composer-bindings" aria-label={t("activeExtensions")}>
@@ -531,7 +529,6 @@ export function Composer({
           labelHidden
           ref={composerRef}
           value={prompt}
-          disabled={draftEditingBlocked}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={suggestionsOpen}

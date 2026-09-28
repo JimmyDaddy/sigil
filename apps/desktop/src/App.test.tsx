@@ -2749,7 +2749,11 @@ describe("desktop workspace and history shell", () => {
     await waitFor(() => expect(display).toHaveBeenCalledOnce());
     await waitFor(() => expect(runContext).toHaveBeenCalledOnce());
     expect(continuity).not.toHaveBeenCalled();
-    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
+    expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
+    expect(within(workspaceRegion).getByRole("status", { name: "Loading conversation history…" })).toBeTruthy();
+    const draft = within(workspaceRegion).getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+    expect(draft.disabled).toBe(false);
+    expect((within(workspaceRegion).getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
 
     await act(async () => {
       resolveDisplay?.({
@@ -2763,14 +2767,12 @@ describe("desktop workspace and history shell", () => {
       });
     });
     await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
-    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
-    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
+    expect(within(workspaceRegion).getByRole("status", { name: "Checking conversation continuity" })).toBeTruthy();
 
     await act(async () => {
       resolveRunContext?.(defaultRunContext);
     });
-    expect(within(workspaceRegion).getByRole("status", { name: "Opening conversation…" })).toBe(loading);
-    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
+    expect(within(workspaceRegion).getByRole("status", { name: "Checking conversation continuity" })).toBeTruthy();
 
     await act(async () => {
       resolveContinuity?.({
@@ -2780,10 +2782,154 @@ describe("desktop workspace and history shell", () => {
       });
     });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
-    expect(within(workspaceRegion).queryByRole("status", { name: "Opening conversation…" })).toBeNull();
+    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
     expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
     expect(within(workspaceRegion).getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+  });
+
+  it("keeps local text and image drafts editable through history failure and retry", async () => {
+    const user = userEvent.setup();
+    const initialDisplay = deferred<ConversationDisplayPage>();
+    const page: ConversationDisplayPage = {
+      schemaVersion: 1,
+      requestScope: "draft-history-loading",
+      throughSessionStreamSequence: "0",
+      totalItems: "0",
+      items: [],
+      hasMore: false,
+      gapFacts: [],
+    };
+    const display = vi.fn()
+      .mockReturnValueOnce(initialDisplay.promise)
+      .mockResolvedValue(page);
+    const selectedImage = {
+      attachmentId: "draft-loading-image",
+      mimeType: "image/png" as const,
+      width: 2,
+      height: 3,
+      byteLen: 72,
+      previewDataUrl: "data:image/png;base64,aW1hZ2U=",
+    };
+    const pickImage = vi.fn(async () => selectedImage);
+    const startRun = vi.fn<DesktopBridge["startRun"]>(async (_workspaceId, sessionId) => ({
+      id: "draft-after-history-retry",
+      sessionId,
+      status: "running",
+      permissionMode: "manual",
+      streamSequence: 0,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "draft-loading.jsonl",
+          sessionId: "durable-draft-loading",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Draft loading session",
+          userMessageCount: 0,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-draft-loading", label: "Draft loading session", runCount: 0 }),
+      display,
+      pickImage,
+      startRun,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Draft loading session/ }));
+    await waitFor(() => expect(display).toHaveBeenCalledOnce());
+    const composer = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+    const surface = composer.closest(".conversation-surface");
+    expect(surface?.hasAttribute("inert")).toBe(false);
+    expect(screen.queryByRole("status", { name: "Opening conversation…" })).toBeNull();
+    expect(composer.disabled).toBe(false);
+    const attachImage = screen.getByRole("button", { name: "Attach image" }) as HTMLButtonElement;
+    expect(attachImage.disabled).toBe(false);
+    await user.type(composer, "Draft while history is loading");
+    await user.click(attachImage);
+    expect(await screen.findByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect(pickImage).toHaveBeenCalledWith(workspace.id);
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-draft-loading`))
+      .toBe("Draft while history is loading");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(startRun).not.toHaveBeenCalled();
+
+    await act(async () => initialDisplay.reject(new Error("saved display failed")));
+    expect(await screen.findByRole("button", { name: "Retry messages" })).toBeTruthy();
+    expect(composer.value).toBe("Draft while history is loading");
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(startRun).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Retry messages" }));
+    await waitFor(() => expect(display).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(composer.value).toBe("Draft while history is loading");
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+    expect(startRun.mock.calls[0][2]).toBe("Draft while history is loading");
+    expect(startRun.mock.calls[0][11]).toEqual([selectedImage.attachmentId]);
+  });
+
+  it("keeps the previous session inert until a different session is selected", async () => {
+    const user = userEvent.setup();
+    const openingSecond = deferred<SessionSummary>();
+    const secondDisplay = deferred<ConversationDisplayPage>();
+    const entry = (name: string) => ({
+      sessionRef: `${name}.jsonl`,
+      sessionId: `durable-${name}`,
+      sourceState: "ready" as const,
+      sourceBytes: 512,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+      title: `Session ${name}`,
+      userMessageCount: 0,
+      assistantMessageCount: 0,
+      toolResultCount: 0,
+      pinned: false,
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry("A"), entry("B")] }),
+      openSession: async (_workspaceId, input) => input.sessionId === "durable-A"
+        ? { id: "http-session-A", label: "Session A", runCount: 0 }
+        : openingSecond.promise,
+      display: async (_workspaceId, sessionId) => sessionId === "http-session-A"
+        ? {
+            schemaVersion: 1,
+            requestScope: sessionId,
+            throughSessionStreamSequence: "0",
+            totalItems: "0",
+            items: [],
+            hasMore: false,
+            gapFacts: [],
+          }
+        : secondDisplay.promise,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Session A/ }));
+    const firstDraft = await readyComposer();
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Session B/ }) as HTMLButtonElement).disabled).toBe(false));
+    await user.type(firstDraft, "Keep A's local draft");
+    await user.click(screen.getByRole("button", { name: /^Session B/ }));
+    expect(await screen.findByRole("status", { name: "Opening conversation…" })).toBeTruthy();
+    expect(document.querySelector(".conversation-surface")?.hasAttribute("inert")).toBe(true);
+
+    await act(async () => openingSecond.resolve({ id: "http-session-B", label: "Session B", runCount: 0 }));
+    const secondDraft = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+    expect(secondDraft).not.toBe(firstDraft);
+    expect(secondDraft.closest(".conversation-surface")?.hasAttribute("inert")).toBe(false);
+    expect(secondDraft.disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-session-A`))
+      .toBe("Keep A's local draft");
   });
 
   it("keeps the conversation rail stable with row skeletons while history loads", async () => {

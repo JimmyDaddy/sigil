@@ -2680,7 +2680,7 @@ export function ConversationPanel({
         </section>
       )}
 
-      {continuityLoading === undefined || initialLoadReportedSessionId.current !== session.id ? null : (
+      {continuityLoading === undefined ? null : (
         <LoadingState
           className="conversation-continuity-loading sg-bounded-content"
           label={continuityLoading.label}
@@ -2880,7 +2880,6 @@ export function ConversationPanel({
         submissionBlocked={submissionBlocked}
         stopControlBlocked={stopControlBlocked}
         queueSubmissionBlocked={active && conversationQueue === undefined}
-        draftEditingBlocked={!continuityState.transcriptLoaded}
         submitting={submitting}
         controlBusy={controlBusy}
         composerRef={composerRef}

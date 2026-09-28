@@ -18,8 +18,12 @@
 
 已配置默认模型或候选模型的库存 readiness 是诊断，不是新建会话或切换模型的许可。Desktop 允许用户选择配置中的 route 并把请求交给共享服务；建会话时校验 route，真正启动 run 时再校验当前凭证和协议能力。缺少默认模型仍展示首次配置向导，库存诊断问题在已有会话中保留设置提示。
 
+打开会话后，历史或 continuity 尚在读取、读取失败等待重试时，已选会话的本地文字草稿和图片选择仍可编辑；文字草稿继续按会话保存，已选图片在当前 composer 的重试过程中保留。发送和后续消息排队继续等待会话恢复及准入完成。切换会话时，在新目标真正选中前，旧会话保持不可操作，避免把输入交给错误的会话。
+
 ## 验收
 
 通过统一隔离入口运行 `cargo test -p sigil-desktop --lib`。Unix native fixture 使用真实 child、stdout bootstrap、loopback metadata 与 stdin owner pipe，并以显式文件屏障覆盖慢启动、慢关闭、restart、调用者取消、close_all 和身份碰撞；测试失败不把等待超时当作退出证据。
 
 `pnpm --dir apps/desktop exec vitest run src/App.test.tsx` 验证 inventory loading/失败/默认未配置时，恢复的 live session 仍可见并可调用精确的 Stop run；也验证 cleanup 失败通知及订阅收尾。HTTP wire schema 未改变，native event 仅携带固定错误分类。
+
+同一 App 测试还验证历史加载和失败重试期间文字及图片草稿可编辑且保留、发送仍阻止，以及切换会话时旧会话保持 inert 直至新目标选中。

@@ -179,6 +179,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     && providerInventoryWorkspaceId === activeWorkspaceId
     ? providerInventory
     : undefined;
+  const navigationBlocksSelectedSession = conversationNavigation !== undefined
+    && (conversationNavigation.targetSessionId === undefined
+      || conversationNavigation.targetSessionId !== selectedSession?.id);
   useEffect(() => {
     if (activeWorkspace === undefined && DESKTOP_ROUTE_MAP[desktopView].requiresWorkspace) {
       navigate("conversation");
@@ -1222,7 +1225,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 <p>{t("selectConversationDetail")}</p>
               </div>
             ) : (
-            <div className="conversation-surface" inert={conversationNavigation !== undefined || undefined}>
+            <div className="conversation-surface" inert={navigationBlocksSelectedSession || undefined}>
               {providerInventoryState === "error" ? (
                 <div role="status" className="conversation-inventory-notice">
                   <span>{t("providerConnectionsUnavailable")}</span>
@@ -1284,7 +1287,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               />
             </div>
           )}
-          {desktopView === "conversation" && activeWorkspace !== undefined && conversationNavigation !== undefined ? (
+          {desktopView === "conversation" && activeWorkspace !== undefined && navigationBlocksSelectedSession ? (
             <div className="conversation-loading-overlay">
               <LoadingState
                 label={conversationNavigation.kind === "opening" ? t("openingConversation") : t("creatingConversation")}
