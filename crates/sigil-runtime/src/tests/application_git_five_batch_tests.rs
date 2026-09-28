@@ -270,18 +270,37 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
         9,
         "eight business-tool turns and one final answer finish all five batches"
     );
-    let history = git(workspace, &["log", "--reverse", "--format=%s"])?;
-    assert_eq!(
-        history.lines().collect::<Vec<_>>(),
-        ["batch 1", "batch 2", "batch 3", "batch 4", "batch 5"]
-    );
-    assert!(git(workspace, &["rev-list", "--reverse", "HEAD"])?.starts_with(&original));
-    assert!(git(workspace, &["diff", "--cached", "--name-only"])?.is_empty());
     let session = Session::load_from_store(
         "application-task-test",
         "gpt-test",
         JsonlSessionStore::new(session_path)?,
     )?;
+    let tool_diagnostics = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::ToolResultV3(result) => Some((
+                result.call_id.as_str(),
+                result.facts.status.as_str(),
+                result.facts.exit_code,
+                result
+                    .initial_model_view
+                    .preview
+                    .chars()
+                    .take(300)
+                    .collect::<String>(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let history = git(workspace, &["log", "--reverse", "--format=%s"])?;
+    assert_eq!(
+        history.lines().collect::<Vec<_>>(),
+        ["batch 1", "batch 2", "batch 3", "batch 4", "batch 5"],
+        "tool results: {tool_diagnostics:?}"
+    );
+    assert!(git(workspace, &["rev-list", "--reverse", "HEAD"])?.starts_with(&original));
+    assert!(git(workspace, &["diff", "--cached", "--name-only"])?.is_empty());
     assert!(
         !session
             .entries()

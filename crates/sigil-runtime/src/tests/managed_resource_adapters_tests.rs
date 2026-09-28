@@ -121,11 +121,8 @@ fn manager_persistent_command() -> (String, String) {
         .join("v1.0")
         .join("powershell.exe");
     (
-        format!(
-            "\"{}\" -NoProfile -NonInteractive -Command Start-Sleep -Seconds 30",
-            powershell.display()
-        ),
-        comspec_path().to_string_lossy().into_owned(),
+        "Start-Sleep -Seconds 30".to_owned(),
+        powershell.to_string_lossy().into_owned(),
     )
 }
 
@@ -582,8 +579,9 @@ async fn managed_command_deadline_stops_silent_pipe_and_pty_without_model_pollin
         let final_entry = manager.snapshot(&entry.handle.task_id).await?.entry;
         assert!(
             matches!(final_entry.status, sigil_kernel::TerminalTaskStatus::Failed { ref reason } if reason.contains("timed out")),
-            "pty={pty}: {:?}",
-            final_entry.status
+            "pty={pty}: status={:?}, output={:?}",
+            final_entry.status,
+            final_entry.output_preview
         );
         assert_eq!(
             std::fs::read_dir(execution_temp.path())?.count(),

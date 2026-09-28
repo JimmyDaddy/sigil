@@ -140,9 +140,12 @@ impl ExecutionTempAuthorityV1 {
         // Attempt ids contain purpose labels and may contain `:`. Keep the host directory
         // portable and opaque by deriving a fixed ASCII component instead of using the id as a
         // filename (notably, `:` is not a valid Windows path component).
-        let attempt_root = self.base.join(
-            arena_digest(format!("execution-temp-attempt-v1\0{attempt_id}").as_bytes()).to_hex(),
-        );
+        let digest =
+            arena_digest(format!("execution-temp-attempt-v1\0{attempt_id}").as_bytes()).to_hex();
+        // A 128-bit opaque prefix keeps managed TMP paths usable by tools with MAX_PATH
+        // temporary-file handling (notably MSVC link.exe). A generation collision still fails
+        // closed at create_dir; the full digest remains unchanged in all public identities.
+        let attempt_root = self.base.join(&digest[..32]);
         ensure_private_directory(&attempt_root)?;
         let root = attempt_root.join(generation.to_string());
         if fs::symlink_metadata(&root).is_ok() {

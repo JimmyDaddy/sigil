@@ -66,6 +66,44 @@ fn r71_execution_temp_authority_materializes_and_releases_complete_layout() {
 }
 
 #[test]
+fn execution_temp_attempt_directory_is_short_opaque_and_generation_scoped() {
+    let base = tempfile::tempdir().expect("base");
+    let authority = ExecutionTempAuthorityV1::new(base.path());
+    let first = authority.provision("attempt-1", 1).expect("first attempt");
+    let first_attempt_root = first.binding().root.parent().expect("attempt root");
+    let component = first_attempt_root
+        .file_name()
+        .expect("attempt component")
+        .to_string_lossy();
+    assert_eq!(component.len(), 32, "keep room for toolchain temp files");
+    assert!(component.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+    let different = authority.provision("attempt-2", 1).expect("other attempt");
+    assert_ne!(
+        first.binding().root.parent(),
+        different.binding().root.parent(),
+        "different attempts must not share a temp namespace"
+    );
+    let collision = authority
+        .provision("attempt-1", 1)
+        .expect_err("same attempt and generation must not be reused");
+    assert!(matches!(collision, ArenaErrorV1::GenerationCollision(_)));
+
+    let first_attempt_root = first_attempt_root.to_path_buf();
+    first.finalize().expect("release first generation");
+    let second_generation = authority.provision("attempt-1", 2).expect("new generation");
+    assert_eq!(
+        Some(first_attempt_root.as_path()),
+        second_generation.binding().root.parent(),
+    );
+    second_generation
+        .finalize()
+        .expect("release second generation");
+    different.finalize().expect("release other attempt");
+    assert_eq!(fs::read_dir(base.path()).expect("base").count(), 0);
+}
+
+#[test]
 fn r71_execution_temp_authority_rejects_path_traversal_identity() {
     let base = tempfile::tempdir().expect("base");
     let authority = ExecutionTempAuthorityV1::new(base.path());

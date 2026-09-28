@@ -167,10 +167,7 @@ impl AuthorityManagedStorageServiceV1 {
             };
             // A prior publish may have become visible before its directory sync returned an
             // error. Do not turn that visibility into a durable Activated admission fact.
-            open_no_follow_file(&path)
-                .map_err(io_error)?
-                .sync_all()
-                .map_err(io_error)?;
+            sync_no_follow_file(&path)?;
             if state.phase == Phase::Activated {
                 fail_activated_directory_sync()?;
             }
@@ -319,13 +316,10 @@ impl AuthorityManagedStorageServiceV1 {
                 if state.phase == Phase::Activated {
                     // Activated retries never initialize, overwrite, inspect the business tail or
                     // replace a header, even after subsequent records or damage have appeared.
-                    open_no_follow_file(&registry.join(phase_name(
+                    sync_no_follow_file(&registry.join(phase_name(
                         preview.request.from_generation,
                         Phase::Activated,
-                    )))
-                    .map_err(io_error)?
-                    .sync_all()
-                    .map_err(io_error)?;
+                    )))?;
                     sync_directory_chain(
                         &registry,
                         self.state_root
@@ -461,10 +455,8 @@ impl AuthorityManagedStorageServiceV1 {
             )?;
             // Only an exact, header-only canonical file is reusable before activation.
             publish_exact(&new_directory.join("records.jsonl"), header, true)?;
-            let marker = open_no_follow_file(&new_directory.join("authority-admission.json"))
-                .map_err(io_error)?;
             fail_header_marker_sync()?;
-            marker.sync_all().map_err(io_error)?;
+            sync_no_follow_file(&new_directory.join("authority-admission.json"))?;
             fail_header_parent_sync()?;
             sync_directory_chain(
                 &new_directory,
@@ -846,10 +838,7 @@ fn publish_exact(path: &Path, bytes: &[u8], header: bool) -> Result<(), ManagedS
         if read_bounded(path)? != bytes {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
-        open_no_follow_file(path)
-            .map_err(io_error)?
-            .sync_all()
-            .map_err(io_error)?;
+        sync_no_follow_file(path)?;
         let stage = path.with_file_name(format!(
             ".{}.staged",
             path.file_name()
@@ -903,6 +892,30 @@ fn remove_staging(path: &Path) -> Result<(), ManagedStorageErrorV1> {
         fs::remove_file(path).map_err(io_error)?;
     }
     Ok(())
+}
+
+fn sync_no_follow_file(path: &Path) -> Result<(), ManagedStorageErrorV1> {
+    reject_reparse_components(path, false).map_err(io_error)?;
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(io_error)?;
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.is_file() || !is_safe_physical_metadata(&metadata) {
+        return Err(ManagedStorageErrorV1::AuthorityUnavailable);
+    }
+    // Windows FlushFileBuffers requires GENERIC_WRITE even when no bytes are changed.
+    file.sync_all().map_err(io_error)
 }
 
 fn sync_directory(path: &Path) -> Result<(), ManagedStorageErrorV1> {
