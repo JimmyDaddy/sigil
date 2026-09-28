@@ -4417,13 +4417,44 @@ async fn spawn_revision_draft_fixture() -> Result<(tokio::task::JoinHandle<()>, 
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
-            let mut buffer = vec![0; 16384];
-            let _ = socket.read(&mut buffer).await;
+            // The review prompt can exceed one TCP read. Closing the fixture with unread POST
+            // bytes resets the response on Windows, so consume the whole request first.
+            let mut request = Vec::new();
+            let mut expected_len = None;
+            loop {
+                let mut chunk = [0; 8192];
+                let read = socket
+                    .read(&mut chunk)
+                    .await
+                    .expect("revision request read");
+                assert!(read > 0, "revision request ended before its body");
+                request.extend_from_slice(&chunk[..read]);
+                if expected_len.is_none()
+                    && let Some(header_end) =
+                        request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = std::str::from_utf8(&request[..header_end])
+                        .expect("revision request headers must be UTF-8");
+                    let body_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .expect("revision request must declare Content-Length");
+                    expected_len = Some(header_end + 4 + body_len);
+                }
+                if expected_len.is_some_and(|len| request.len() >= len) {
+                    break;
+                }
+            }
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_review_result\",\"arguments\":\"{\\\"schema_version\\\":1,\\\"outcome\\\":\\\"draft\\\",\\\"content\\\":\\\"# Revised coordinator migration\\\\n\\\\n1. Revise migration.\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                 "data: [DONE]\n\n"
             );
-            let _ = socket
+            socket
                 .write_all(
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -4431,7 +4462,9 @@ async fn spawn_revision_draft_fixture() -> Result<(tokio::task::JoinHandle<()>, 
                     )
                     .as_bytes(),
                 )
-                .await;
+                .await
+                .expect("revision draft response write");
+            socket.shutdown().await.expect("revision socket shutdown");
         }
     });
     Ok((fixture, format!("http://{address}")))

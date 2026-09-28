@@ -1371,7 +1371,30 @@ fn all_committed_model_eval_fixtures_satisfy_structured_acceptance() {
                 .expect("read results");
             let record: serde_json::Value =
                 serde_json::from_str(rendered.trim()).expect("decode result");
-            assert_eq!(manifest.accepted_repetitions, 1, "case {case_id}: {record}");
+            let failed_check = (manifest.accepted_repetitions != 1)
+                .then(|| {
+                    let path = record["session_artifact_path"].as_str()?;
+                    JsonlSessionStore::read_event_records(path)
+                        .ok()?
+                        .into_iter()
+                        .map(|record| record.into_stored_event())
+                        .find(|event| {
+                            event.event_type
+                                == sigil_kernel::DurableEventType::CommandFinished.as_str()
+                        })
+                        .map(|event| {
+                            serde_json::json!({
+                                "exit_code": event.payload["exit_code"],
+                                "termination": event.payload["termination"],
+                                "stderr_preview": event.payload["stderr_preview"],
+                            })
+                        })
+                })
+                .flatten();
+            assert_eq!(
+                manifest.accepted_repetitions, 1,
+                "case {case_id}: {record}; check: {failed_check:?}"
+            );
             assert_eq!(record["acceptance_passed"], true, "case {case_id}");
             assert!(
                 record["assertion_results"]

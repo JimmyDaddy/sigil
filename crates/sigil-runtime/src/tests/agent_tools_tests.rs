@@ -6306,6 +6306,7 @@ async fn cancel_worktree_background_child_on_small_stack() -> Result<()> {
         vec!["init", "-q"],
         vec!["config", "user.email", "sigil-tests@example.invalid"],
         vec!["config", "user.name", "Sigil Tests"],
+        vec!["config", "core.autocrlf", "false"],
     ] {
         assert!(
             Command::new("git")
@@ -8795,6 +8796,7 @@ async fn worker_background_worktree_isolates_changes_and_persists_merge_artifact
         vec!["init", "-q"],
         vec!["config", "user.email", "sigil-tests@example.invalid"],
         vec!["config", "user.name", "Sigil Tests"],
+        vec!["config", "core.autocrlf", "false"],
     ] {
         let status = Command::new("git")
             .args(args)

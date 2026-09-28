@@ -1161,8 +1161,9 @@ approval = "allow"
     }
     #[cfg(windows)]
     {
-        assert!(outcome.output.stdout.content.starts_with("%HOME%|"));
-        assert!(!outcome.output.stdout.content.ends_with("|%PATH%\r\n"));
+        // cmd.exe expands absent variables as their literal tokens. Extension processes do
+        // not inherit the ambient PATH; cmd.exe itself is launched by absolute path.
+        assert_eq!(outcome.output.stdout.content.trim(), "%HOME%|%PATH%");
     }
     assert_eq!(
         outcome.receipt.environment_policy,

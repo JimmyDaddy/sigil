@@ -115,11 +115,16 @@ fn manager_persistent_command() -> (String, String) {
 
 #[cfg(windows)]
 fn manager_persistent_command() -> (String, String) {
-    let ping = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
         .join("System32")
-        .join("ping.exe");
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
     (
-        format!("\"{}\" -n 30 127.0.0.1 >NUL", ping.display()),
+        format!(
+            "\"{}\" -NoProfile -NonInteractive -Command Start-Sleep -Seconds 30",
+            powershell.display()
+        ),
         comspec_path().to_string_lossy().into_owned(),
     )
 }

@@ -50,7 +50,11 @@ impl Provider for FiveBatchProvider {
             ),
             2 => (
                 "exec_command",
-                serde_json::json!({"command":"rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests && .git/delivery-tests --exact tests::increment_is_correct && git add crates/delivery/src/tests.rs"}),
+                serde_json::json!({"command": if cfg!(windows) {
+                    "rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & ./.git/delivery-tests.exe --exact tests::increment_is_correct; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git add crates/delivery/src/tests.rs"
+                } else {
+                    "rustc --edition 2021 --test crates/delivery/src/lib.rs -o .git/delivery-tests && .git/delivery-tests --exact tests::increment_is_correct && git add crates/delivery/src/tests.rs"
+                }}),
             ),
             3 => (
                 "exec_command",
@@ -62,7 +66,11 @@ impl Provider for FiveBatchProvider {
             ),
             5 => (
                 "exec_command",
-                serde_json::json!({"command":"git add batch-four.md && git commit -m 'batch 4'"}),
+                serde_json::json!({"command": if cfg!(windows) {
+                    "git add batch-four.md; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m 'batch 4'"
+                } else {
+                    "git add batch-four.md && git commit -m 'batch 4'"
+                }}),
             ),
             6 => (
                 "write_file",
@@ -70,7 +78,11 @@ impl Provider for FiveBatchProvider {
             ),
             7 => (
                 "exec_command",
-                serde_json::json!({"command":"git add batch-five.md && git commit -m 'batch 5'"}),
+                serde_json::json!({"command": if cfg!(windows) {
+                    "git add batch-five.md; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m 'batch 5'"
+                } else {
+                    "git add batch-five.md && git commit -m 'batch 5'"
+                }}),
             ),
             8 => {
                 anyhow::ensure!(
