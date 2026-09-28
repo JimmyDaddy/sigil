@@ -856,6 +856,13 @@ impl AppState {
         result: ConnectionModelCatalogResult,
         cacheable: bool,
     ) -> bool {
+        if cacheable && result.state == ConnectionModelCatalogState::AuthRejected {
+            let key = connection_model_catalog_view_key(
+                &result.connection_id,
+                &result.connection_fingerprint,
+            );
+            self.runtime.connection_model_catalog_views.remove(&key);
+        }
         if cacheable
             && matches!(
                 result.state,

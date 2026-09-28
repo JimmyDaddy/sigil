@@ -55,6 +55,37 @@ fn apply_connection_catalog(
     Ok(())
 }
 
+fn apply_pending_connection_catalog_state(
+    app: &mut AppState,
+    state: sigil_runtime::provider_connections::ModelCatalogState,
+) -> Result<()> {
+    let pending = app
+        .runtime
+        .active_model_picker_refresh
+        .as_ref()
+        .context("connection catalog refresh should be pending")?
+        .clone();
+    assert!(
+        app.apply_connection_models_refresh(
+            sigil_runtime::provider_connections::ModelCatalogResult {
+                request_id: pending.request_id,
+                connection_id: pending
+                    .connection_id
+                    .context("pending refresh should have a connection")?,
+                draft_revision: pending.draft_revision,
+                connection_fingerprint: pending
+                    .connection_fingerprint
+                    .context("pending refresh should have a fingerprint")?,
+                state,
+                entries: Vec::new(),
+                retry_after_secs: None,
+                manual_entry_allowed: true,
+            }
+        )
+    );
+    Ok(())
+}
+
 #[test]
 fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -202,6 +233,76 @@ fn connection_model_picker_refreshes_a_stale_view_without_blocking_its_display()
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("catalog: exact connection cache · stale reference"));
     assert!(lines.contains("deepseek-v4-flash"));
+    assert!(lines.contains("M manual model id"));
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_drops_a_stale_view_after_authentication_rejection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash", "revoked-only-model"])?;
+    for view in app.runtime.connection_model_catalog_views.values_mut() {
+        view.cached_at = std::time::Instant::now() - std::time::Duration::from_secs(601);
+    }
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    assert!(app.modal_lines().join("\n").contains("revoked-only-model"));
+    apply_pending_connection_catalog_state(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::AuthRejected,
+    )?;
+    assert!(app.runtime.connection_model_catalog_views.is_empty());
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("catalog: credential rejected"));
+    assert!(!lines.contains("revoked-only-model"));
+
+    app.modal_state = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    assert!(app.runtime.active_model_picker_refresh.is_some());
+    assert_eq!(
+        app.last_notice(),
+        Some("loading models for the exact connection")
+    );
+    let lines = app.modal_lines().join("\n");
+    assert!(!lines.contains("revoked-only-model"));
+    assert!(lines.contains("M manual model id"));
+    Ok(())
+}
+
+#[test]
+fn connection_model_picker_keeps_a_stale_view_after_offline_refresh() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_available_connection_models(&mut app, &["deepseek-v4-flash", "offline-only-model"])?;
+    for view in app.runtime.connection_model_catalog_views.values_mut() {
+        view.cached_at = std::time::Instant::now() - std::time::Duration::from_secs(601);
+    }
+
+    app.modal_state = None;
+    app.runtime.active_model_picker_refresh = None;
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    apply_pending_connection_catalog_state(
+        &mut app,
+        sigil_runtime::provider_connections::ModelCatalogState::Offline,
+    )?;
+    assert_eq!(app.runtime.connection_model_catalog_views.len(), 1);
+    assert!(
+        app.modal_lines()
+            .join("\n")
+            .contains("catalog: endpoint offline")
+    );
+
+    app.modal_state = None;
+    app.runtime.pending_worker_commands.clear();
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    assert!(app.runtime.active_model_picker_refresh.is_some());
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("catalog: exact connection cache · stale reference"));
+    assert!(lines.contains("offline-only-model"));
     assert!(lines.contains("M manual model id"));
     Ok(())
 }
