@@ -12,6 +12,6 @@
 
 自动转交的上下文绑定 exact source message、转交前已结算的工具批次和 append-only receipt。不得混入后来追加的 parent 消息或未结算的 handoff 批次；queued source 仅在 durable promotion 身份匹配时加入。PlanReview 的研究与提交在同一个普通模型循环中进行：提交校验失败作为工具错误返回，模型可继续查资料并再次提交；没有固定 finalizer 阶段或额外修正轮数。完整的普通最终答复可作为未确认候选结束审阅，但不会生成 ready Plan 或授权执行；typed 提交才会将完整草案提升为 ready Plan。
 
-首轮冻结请求按当前工具 schema、权限、interaction、source、消息、模型和执行契约校验。恢复只补本地 admission 缺口，不重放 conversation provider 请求或已经执行的 effect。同一循环提升新的 queued follow-up 后，旧 source 的转交入口撤下；新独立 run 会重新装配自己的 source authority。
+首轮冻结请求按当前工具 schema、权限、interaction、source、消息、模型和执行契约校验。恢复只补本地 admission 缺口，不重放 conversation provider 请求或已经执行的 effect。运行期间收到的主会话 Follow-up 先进入持久队列；当前 run 结算后，由队列以单个原子 promotion 事件投递并启动独立 run，重新装配自己的 source authority。一个 run 只记录一个最终答复。后台 child 的定向 mailbox 仍在该 child 的安全点续接。
 
 Manual 不注入自动规划入口；显式 `/plan`、`/task` 与只读、取消、审批边界继续遵循各自的操作契约。

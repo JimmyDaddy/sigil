@@ -169,7 +169,7 @@ impl AppState {
             let (kind, target) = self.active_conversation_queue_submission();
             let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
             // Show the follow-up in the conversation immediately; it is delivered by the
-            // active run's safe-point injection (or the next idle dispatch).
+            // next idle dispatch after the active run settles.
             self.push_optimistic_conversation_queue_item(safe_prompt.clone(), kind, target.clone());
             self.push_optimistic_conversation_timeline_entry(safe_prompt, &target);
             self.composer.input.clear();

@@ -8,19 +8,19 @@ use sigil_kernel::{
     CheckpointRestoreConflictReason, ContextBodyRef, ContextInclusionReason, ContextItem,
     ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry, ConversationForked,
     ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
-    ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-    PermissionRisk, PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind,
-    RuntimeContextCandidates, SecretRedactor, Session, SessionLogEntry, SessionRef,
-    SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
-    TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskStepStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalDecisionReceiptV2,
-    ToolApprovalEntry, ToolApprovalTerminalStatusV2, ToolApprovalUserDecision,
-    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolOperation, ToolResult,
-    ToolResultMeta, ToolResultRecordedV3, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence,
+    ConversationInputQueuedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MemoryConfig,
+    MessageRole, ModelMessage, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionRisk,
+    PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind, RuntimeContextCandidates,
+    SecretRedactor, Session, SessionLogEntry, SessionRef, SessionStreamRecord, SkillLoadEntry,
+    SkillSource, StoredEvent, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
+    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalDecisionReceiptV2, ToolApprovalEntry,
+    ToolApprovalTerminalStatusV2, ToolApprovalUserDecision, ToolArtifactSensitivity,
+    ToolArtifactStore, ToolCall, ToolOperation, ToolResult, ToolResultMeta, ToolResultRecordedV3,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
 use crate::conversation_display::{
@@ -1156,6 +1156,83 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
             .to_string()
             .contains("more than one")
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_injected_follow_up_with_two_finals_remains_displayable() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let run_id = "legacy-injected-run";
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+    recorder.append_started(&ConversationRunStartedEntryV1::new(run_id, 10)?)?;
+    session.append_user_message(ModelMessage::user("first question"))?;
+    let prompt = project_conversation_prompt_for_persistence("queued follow-up");
+    let queue_id = ConversationInputQueueId::new("legacy-queue-1")?;
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: prompt.prompt_hash,
+            prompt: prompt.safe_prompt,
+            reasoning_effort: None,
+            created_at_ms: Some(11),
+        },
+    ))?;
+    session.append_control(ControlEntry::ConversationInputStatusChanged(
+        ConversationInputStatusEntry {
+            queue_id,
+            status: ConversationInputStatus::Delivered,
+            reason: Some(format!("injected at safe point into run {run_id}")),
+            updated_at_ms: Some(12),
+        },
+    ))?;
+    session.append_user_message(ModelMessage::user("queued follow-up"))?;
+    session.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("first answer".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+    let final_message = ModelMessage::assistant_with_kind(
+        Some("second answer".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    let final_id = final_message.id.clone();
+    session.append_assistant_message(final_message)?;
+    let terminal = ConversationRunFinalizedEntryV1::new(
+        run_id,
+        ConversationRunTerminalStatusV1::Succeeded,
+        Some(final_id),
+        Some("complete"),
+        20,
+        &SecretRedactor::empty(),
+    )?;
+    recorder.append_finalized_with_outbox(
+        &terminal,
+        &terminal_outbox(
+            &scope,
+            run_id,
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "second answer".to_owned(),
+            },
+        )?,
+    )?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
+    assert_eq!(
+        page.items
+            .iter()
+            .filter(|item| item.kind == ConversationDisplayItemKindV1::AssistantMessage)
+            .count(),
+        2
+    );
+    assert!(page.items.iter().any(|item| {
+        item.kind == ConversationDisplayItemKindV1::Terminal
+            && item.run_id.as_deref() == Some(run_id)
+    }));
     Ok(())
 }
 

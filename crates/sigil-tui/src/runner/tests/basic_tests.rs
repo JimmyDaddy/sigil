@@ -1637,7 +1637,7 @@ fn queue_conversation_input_persists_while_agent_is_active() -> Result<()> {
 }
 
 #[test]
-fn queued_follow_up_is_injected_into_the_active_run_at_its_final_answer_gate() -> Result<()> {
+fn queued_follow_up_starts_a_new_run_after_the_active_run_finishes() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1672,8 +1672,7 @@ fn queued_follow_up_is_injected_into_the_active_run_at_its_final_answer_gate() -
         prompt: "second".to_owned(),
         reasoning_effort: ReasoningEffort::High,
     })?;
-    // Wait until the follow-up is durably queued BEFORE releasing the first turn, so the
-    // run's final-answer gate deterministically injects it into the same run.
+    // Keep the first run active until the follow-up is durably queued.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut queue_confirmed = false;
     while !queue_confirmed {
@@ -1690,12 +1689,19 @@ fn queued_follow_up_is_injected_into_the_active_run_at_its_final_answer_gate() -
     }
     gate.notify_one();
 
+    let first_finished = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(message, WorkerMessage::RunFinished { result, .. }
+                if result.final_text == "first done")
+        })
+        .context("the active run did not finish before queued dispatch")?;
+    assert!(matches!(first_finished, WorkerMessage::RunFinished { .. }));
     let _ = worker
         .recv_until_with_timeout(Duration::from_secs(10), |message| {
             matches!(message, WorkerMessage::RunFinished { result, .. }
                 if result.final_text == "second done")
         })
-        .context("injected follow-up answer did not finish the run")?;
+        .context("queued follow-up did not finish its own run")?;
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
@@ -1705,13 +1711,16 @@ fn queued_follow_up_is_injected_into_the_active_run_at_its_final_answer_gate() -
     )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+            if promotion.queue_id.as_str() == "queue_1"
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
             if status.queue_id.as_str() == "queue_1"
                 && status.status == ConversationInputStatus::Delivered
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::User(message) if message.content.as_deref() == Some("second")
+                && status.reason.as_deref().is_some_and(|reason|
+                    reason.starts_with("injected at safe point into run "))
     )));
 
     worker.shutdown()?;
@@ -1920,16 +1929,17 @@ fn send_queued_input_now_promotes_follow_up_without_interrupting_the_active_run(
         "sending a queued follow-up must never cancel the active run"
     );
 
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunFinished { result, .. }
+            if result.final_text == "urgent done")
+    })?;
+
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
-            if status.queue_id.as_str() == "queue_1"
-                && status.status == ConversationInputStatus::Delivered
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::User(message) if message.content.as_deref() == Some("urgent queued prompt")
+        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+            if promotion.queue_id.as_str() == "queue_1"
+                && promotion.durable_user_message.content.as_deref() == Some("urgent queued prompt")
     )));
 
     worker.shutdown()?;

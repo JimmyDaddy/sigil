@@ -157,8 +157,7 @@ where
             }
             QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
                 // Non-destructive: the running turn is never cancelled. Promotion makes the
-                // item the queue head so the kernel's safe-point injection (or the next
-                // idle dispatch) delivers it without interrupting the current run.
+                // item the queue head so idle dispatch delivers it after the current run.
                 let result = promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AssistantMessageKind, CheckpointRestoreConflictReason, CheckpointRestored, CompactionAppliedV2,
-    ControlEntry, ConversationForked, ConversationInputPromotedEntry,
+    ControlEntry, ConversationForked, ConversationInputPromotedEntry, ConversationInputStatus,
     ConversationRunLifecycleRecordV1, ConversationRunTerminalStatusV1, DurableEventType,
     JsonlSessionStore, MessageRole, ModelMessage, PublicRunEventKind, PublicTaskEventProjector,
     PublicTaskPhase, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
@@ -438,6 +438,8 @@ struct ActiveRunProjection {
     run_id: String,
     final_message_id: Option<String>,
     user_provisional_reconciled: bool,
+    legacy_delivery_pending_user: bool,
+    legacy_extra_final_allowance: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1377,6 +1379,8 @@ fn project_lifecycle(
                 run_id: started.run_id().to_owned(),
                 final_message_id: None,
                 user_provisional_reconciled: false,
+                legacy_delivery_pending_user: false,
+                legacy_extra_final_allowance: 0,
             });
             Ok(Vec::new())
         }
@@ -1454,6 +1458,10 @@ fn project_session_entry(
                 Some(active) => {
                     let reconcile_live_user = !active.user_provisional_reconciled;
                     active.user_provisional_reconciled = true;
+                    if active.legacy_delivery_pending_user {
+                        active.legacy_delivery_pending_user = false;
+                        active.legacy_extra_final_allowance += 1;
+                    }
                     (Some(active.run_id.clone()), reconcile_live_user)
                 }
                 None => (None, false),
@@ -1477,12 +1485,14 @@ fn project_session_entry(
             }
             if message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
                 && let Some(active) = active_run.as_mut()
-                && active
-                    .final_message_id
-                    .replace(message.id.clone())
-                    .is_some()
             {
-                bail!("conversation run contains more than one durable final assistant");
+                if active.final_message_id.is_some() {
+                    if active.legacy_extra_final_allowance == 0 {
+                        bail!("conversation run contains more than one durable final assistant");
+                    }
+                    active.legacy_extra_final_allowance -= 1;
+                }
+                active.final_message_id = Some(message.id.clone());
             }
             let run_id = active_run_id(active_run);
             let assistant_provisional = run_id
@@ -1747,6 +1757,21 @@ fn project_control(
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     match control {
+        ControlEntry::ConversationInputStatusChanged(status) => {
+            if let Some(active) = active_run.as_mut()
+                && status.status == ConversationInputStatus::Delivered
+                && status
+                    .reason
+                    .as_deref()
+                    .and_then(|reason| reason.strip_prefix("injected at safe point into run "))
+                    == Some(active.run_id.as_str())
+            {
+                // Older main-thread runs recorded a queued user and another final answer
+                // inside the same run. Accept only that exact historical delivery shape.
+                active.legacy_delivery_pending_user = true;
+            }
+            Ok(Vec::new())
+        }
         ControlEntry::SkillLoaded(entry) => {
             if let Some(run_id) = entry.run_id {
                 let name = entry

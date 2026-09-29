@@ -1003,8 +1003,6 @@ pub(in crate::runner) fn promote_queued_conversation_input(
     .map_err(QueueOperationFailure::from)
 }
 
-pub(in crate::runner) use sigil_runtime::pending_input::DurableQueuePendingInputProvider;
-
 pub(in crate::runner) fn set_conversation_queue_paused(
     session_log_path: &Path,
     current_session: &mut Option<Session>,

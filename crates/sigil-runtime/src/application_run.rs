@@ -4341,13 +4341,7 @@ async fn prepare_application_run_internal(
             .await
             .unwrap_or_default();
         drop(context_timer);
-        let pending_input_provider: Arc<dyn sigil_kernel::PendingConversationInputProvider> =
-            Arc::new(crate::pending_input::DurableQueuePendingInputProvider::new(
-                surface.context_resolver.clone(),
-            ));
-        input = input
-            .with_runtime_context(runtime_context.clone())
-            .with_pending_input_provider(Arc::clone(&pending_input_provider));
+        input = input.with_runtime_context(runtime_context.clone());
         let terminal_control = ApplicationTerminalTaskControl::new(
             workspace_root.clone(),
             surface.terminal_control.clone(),
@@ -4482,8 +4476,7 @@ async fn prepare_application_run_internal(
                     .with_runtime_context(runtime_context)
                     .with_logical_run_id(run_id.clone())
                     .with_cancellation(cancellation_handle.clone())
-                    .with_initial_frozen_provider_request(frozen_request.clone())
-                    .with_pending_input_provider(Arc::clone(&pending_input_provider));
+                    .with_initial_frozen_provider_request(frozen_request.clone());
                 if let Some(max_output_tokens) = target_max_tokens {
                     run_input = run_input.with_max_output_tokens(max_output_tokens);
                 }
@@ -6188,12 +6181,7 @@ fn current_schema_managed_artifact_store_writer(
 pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunInput {
     let runtime_context =
         context_candidates_from_safe_sources(workspace_root, &prompt, None).unwrap_or_default();
-    let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
-        crate::RequestContextResolver::new(workspace_root.to_path_buf(), None),
-    );
-    AgentRunInput::user(prompt)
-        .with_runtime_context(runtime_context)
-        .with_pending_input_provider(Arc::new(pending_input_provider))
+    AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
 #[cfg(test)]
@@ -6663,10 +6651,7 @@ fn prepare_application_run_blocking_with_writer(
     let mut input = AgentRunInput::user(format!("{}{}", request.prompt, review_context))
         .with_image_attachments(request.image_attachments.clone())
         .with_logical_run_id(request.run_id.clone())
-        .with_cancellation(cancellation_handle.clone())
-        .with_pending_input_provider(Arc::new(
-            crate::pending_input::DurableQueuePendingInputProvider::default(),
-        ));
+        .with_cancellation(cancellation_handle.clone());
     if let Some(loaded_skill) = loaded_skill.as_ref() {
         input
             .transient_context

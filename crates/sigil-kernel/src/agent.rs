@@ -1543,13 +1543,13 @@ pub trait AgentHostedTurnPreparer: Send + Sync {
 
 /// Runtime hook consulted at safe turn boundaries while a conversation run is active.
 ///
-/// The host durably promotes the next queued follow-up, appends its user message to the
-/// session, and resolves runtime context for that exact prompt. The kernel then continues the
-/// same run with the promoted message and fresh context instead of interrupting or finalizing.
+/// A background agent host may append a targeted mailbox message to its session and resolve
+/// context for that prompt. Main-conversation queues dispatch a separate run after settlement.
+/// The kernel continues this background run with the message at a turn boundary.
 #[async_trait]
 pub trait PendingConversationInputProvider: Send + Sync {
-    /// Durably promotes the next queued follow-up for this logical run and returns its prompt plus
-    /// freshly resolved runtime context, or `None` when no follow-up is ready to inject.
+    /// Appends the next pending message for this logical run and returns its prompt and resolved
+    /// runtime context, or `None` when no targeted input is ready.
     async fn promote_next_pending_input(
         &self,
         session: &mut Session,
@@ -2464,9 +2464,8 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            // Safe-point follow-up injection: after the first provider turn, a queued
-            // follow-up is promoted into the session and answered by the same run, without
-            // interrupting it. The provider is an explicit opt-in from the runtime owner.
+            // Targeted background mailbox input may join at a provider-turn boundary.
+            // Main-conversation queue items are dispatched in their own run.
             if model_turns >= 2
                 && let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
@@ -3719,9 +3718,8 @@ where
                 }
             }
             final_answer_blocker_prompt = None;
-            // Final-answer gate: a queued follow-up keeps the run alive instead of finalizing.
-            // The pending assistant text is persisted so the follow-up answer continues the
-            // transcript instead of replacing it.
+            // A background mailbox may continue this run. Its preceding answer is interim,
+            // so only the eventual terminal answer may be recorded as FinalAnswer.
             if let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
@@ -3737,7 +3735,7 @@ where
                     let exact_message = ModelMessage::assistant_with_kind(
                         Some(assistant_text),
                         Vec::new(),
-                        crate::AssistantMessageKind::FinalAnswer,
+                        crate::AssistantMessageKind::Progress,
                     );
                     let (message, _) = crate::project_message_for_persistence(exact_message)?;
                     assistant_messages::append_assistant_message_bundle(

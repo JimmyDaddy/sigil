@@ -574,9 +574,6 @@ pub async fn prepare_application_user_input_decision(
             .resolve(&preview.request.prompt)
             .await
             .unwrap_or_default();
-        let pending_input_provider = crate::pending_input::DurableQueuePendingInputProvider::new(
-            surface.context_resolver.clone(),
-        );
         let continuation_logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
             &request.identity,
             &request.request_hash,
@@ -591,8 +588,7 @@ pub async fn prepare_application_user_input_decision(
                 request.identity.source_thread_id.clone(),
             )
             .with_initial_provider_physical_attempt_id(physical_attempt_id.clone())
-            .with_cancellation(cancellation_handle.clone())
-            .with_pending_input_provider(Arc::new(pending_input_provider));
+            .with_cancellation(cancellation_handle.clone());
         let parent_session_ref = SessionRef::new_relative(
             session_path
                 .file_name()

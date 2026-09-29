@@ -6448,6 +6448,14 @@ async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupt
         message.role == MessageRole::Assistant
             && message.content.as_deref() == Some("answer to the follow-up")
     }));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.assistant_kind == Some(AssistantMessageKind::FinalAnswer))
+            .count(),
+        1,
+        "a continued run may persist only its terminal answer as final"
+    );
     Ok(())
 }
 

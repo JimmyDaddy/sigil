@@ -174,7 +174,6 @@ pub mod mcp_oauth_http;
 pub mod model_eval;
 mod network_grant_binding;
 pub mod paths;
-pub mod pending_input;
 pub mod plan_review_coordinator;
 pub mod plugins;
 pub mod portable_compaction;

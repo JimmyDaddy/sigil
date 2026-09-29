@@ -1345,7 +1345,6 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     root_config: &RootConfig,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
-    context_resolver: &sigil_runtime::RequestContextResolver,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
     current_session: &mut Option<Session>,
     task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
@@ -1482,7 +1481,6 @@ where
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
-    let pending_input_provider = DurableQueuePendingInputProvider::new(context_resolver.clone());
     let session_log_path = session_log_path.to_path_buf();
     stop_control.bind(&cancellation_owner);
     let handle = runtime.spawn(async move {
@@ -1494,7 +1492,6 @@ where
             let input = AgentRunInput::without_persisted_user_message(background_ready_context)
                 .with_runtime_context(runtime_context)
                 .with_initial_frozen_provider_request(frozen_request)
-                .with_pending_input_provider(Arc::new(pending_input_provider))
                 .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
             let input = if let Some(conversation_coordinator) = conversation_coordinator.as_ref() {
                 conversation_coordinator
@@ -2083,11 +2080,7 @@ pub(in crate::runner) async fn chat_agent_run_input_with_repo_context(
     } else {
         AgentRunInput::transient(prompt, background_ready_context)
     };
-    input
-        .with_runtime_context(runtime_context)
-        .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider::new(
-            context_resolver.clone(),
-        )))
+    input.with_runtime_context(runtime_context)
 }
 
 pub(in crate::runner) fn append_mcp_elicitation_audits(
