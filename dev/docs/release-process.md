@@ -64,9 +64,10 @@ idempotent and verifies an already-published exact npm version before continuing
 The TUI-only job runs publication tooling from the manually dispatched workflow
 SHA, while every package byte remains bound to and verified against the release
 tag candidate.
-Post-publish registry verification tolerates only bounded npm propagation delay:
-known `E404` responses or an older observed dist-tag are retried, while other
-registry errors fail immediately and exhaustion still fails closed.
+Post-publish registry verification allows up to five minutes for npm to process
+the large platform tarballs. Reads revalidate against the registry; known `E404`
+responses or an older observed dist-tag are retried, while other registry errors
+fail immediately and exhaustion still fails closed.
 
 For a beta, build and upload the signed Desktop matrix from the tagged checkout:
 

@@ -581,7 +581,7 @@ jobs:
             *-alpha | *-alpha.*) npm_tag="alpha" ;;
             *-beta | *-beta.*) npm_tag="beta" ;;
           esac
-          test "$(npm view "@sigil-ai/sigil@${npm_tag}" version)" = "${version}"
+          test "$(npm view "@sigil-ai/sigil@${npm_tag}" version --prefer-online)" = "${version}"
           release="$(
             gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \

@@ -27,7 +27,7 @@ packages_dir=""
 package_tarballs_dir=""
 dist_tag=""
 dry_run=false
-publish_verify_attempts="${SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS:-12}"
+publish_verify_attempts="${SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS:-60}"
 publish_verify_delay_seconds="${SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS:-5}"
 
 while [[ $# -gt 0 ]]; do
@@ -168,7 +168,7 @@ wait_for_published_dist_tag() {
   for ((attempt = 1; attempt <= publish_verify_attempts; attempt++)); do
     npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
     if observed_version="$(
-      npm view "${package_name}@${dist_tag}" version 2>"${npm_error}"
+      npm view "${package_name}@${dist_tag}" version --prefer-online 2>"${npm_error}"
     )"; then
       rm -f "${npm_error}"
       if [[ "${observed_version}" == "${expected_version}" ]]; then
@@ -228,7 +228,7 @@ publish_package() {
   fi
 
   npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
-  if dist_tags_json="$(npm view "${package_name}" dist-tags --json 2>"${npm_error}")"; then
+  if dist_tags_json="$(npm view "${package_name}" dist-tags --json --prefer-online 2>"${npm_error}")"; then
     current_tag_version="$(
       node -e '
         const tags = JSON.parse(process.argv[1]);
@@ -255,7 +255,7 @@ publish_package() {
   fi
 
   npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
-  if published_version="$(npm view "${package_name}@${version}" version 2>"${npm_error}")"; then
+  if published_version="$(npm view "${package_name}@${version}" version --prefer-online 2>"${npm_error}")"; then
     if [[ "${published_version}" != "${version}" ]]; then
       cat "${npm_error}" >&2
       rm -f "${npm_error}"

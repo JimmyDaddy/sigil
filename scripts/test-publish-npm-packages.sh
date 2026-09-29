@@ -47,7 +47,7 @@ if [[ "${1-}" == "view" ]]; then
       fi
       attempts="$((attempts + 1))"
       printf '%s\n' "${attempts}" >"${attempts_file}"
-      if ((attempts < 3)); then
+      if ((attempts < ${FAKE_NPM_CONVERGE_AFTER:-3})); then
         echo "E404" >&2
         exit 1
       fi
@@ -91,6 +91,21 @@ expected_last="publish ${packages_dir}/sigil --access public --tag alpha"
 actual_last="$(grep '^publish ' "${log_file}" | tail -n 1)"
 if [[ "${actual_last}" != "${expected_last}" ]]; then
   echo "root package was not published last: ${actual_last}" >&2
+  exit 1
+fi
+
+rm -f "${state_dir}/linux-convergence-attempts"
+FAKE_NPM_LOG="${log_file}" \
+  FAKE_NPM_STATE_DIR="${state_dir}" \
+  FAKE_NPM_CONVERGE_AFTER=13 \
+  SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS=0 \
+  PATH="${fake_bin}:${PATH}" \
+  "${repo_root}/scripts/publish-npm-packages.sh" \
+  --version 1.2.3-alpha.1 \
+  --packages-dir "${packages_dir}" \
+  --tag alpha
+if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "13" ]]; then
+  echo "default npm propagation budget did not reach a thirteenth registry read" >&2
   exit 1
 fi
 
