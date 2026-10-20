@@ -152,22 +152,35 @@ where
     }
 
     let mut preview_error = None;
+    let external = has_external_subject(&decision.subjects);
+    let argument_only = invocation.argument_only_preview();
     let preview = if let Some(prepared) = prepared.as_ref() {
         Some(prepared.preview().clone())
-    } else if has_external_subject(&decision.subjects) {
+    } else if external && !argument_only {
         Some(external_directory_preview(&call.name, &decision.subjects))
     } else {
         match invocation.preview(tool_ctx, call.clone()).await {
-            Ok(preview) => preview,
+            Ok(preview) => preview.map(|mut preview| {
+                if external {
+                    let boundary = external_directory_preview(&call.name, &decision.subjects);
+                    preview.summary = format!("{}\n{}", preview.summary, boundary.summary);
+                    preview.body =
+                        format!("{}\n{}\n\n{}", boundary.title, boundary.body, preview.body);
+                }
+                preview
+            }),
             Err(error) => {
                 let error = error.to_string();
                 preview_error = Some(error.clone());
-                matches!(decision.mode, ApprovalMode::Ask).then(|| ToolPreview {
-                    title: format!("Preview unavailable for {}", call.name),
-                    summary: "The tool preview could not be generated automatically.".to_owned(),
-                    body: error,
-                    changed_files: Vec::new(),
-                    file_diffs: Vec::new(),
+                (matches!(decision.mode, ApprovalMode::Ask) && !argument_only).then(|| {
+                    ToolPreview {
+                        title: format!("Preview unavailable for {}", call.name),
+                        summary: "The tool preview could not be generated automatically."
+                            .to_owned(),
+                        body: error,
+                        changed_files: Vec::new(),
+                        file_diffs: Vec::new(),
+                    }
                 })
             }
         }

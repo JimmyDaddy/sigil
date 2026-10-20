@@ -5082,6 +5082,7 @@ fn exec_command_schema_separates_io_wait_and_runtime() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
     let spec = registry.spec_for("exec_command").expect("exec command");
+    assert_eq!(spec.preview, ToolPreviewCapability::Required);
     assert_eq!(spec.input_schema["required"], json!(["command"]));
     assert!(
         spec.description
@@ -5105,6 +5106,62 @@ fn exec_command_schema_separates_io_wait_and_runtime() {
     );
     assert!(registry.spec_for("bash").is_none());
     assert!(registry.spec_for("terminal_start").is_none());
+}
+
+#[tokio::test]
+async fn exec_command_preview_is_pure_complete_and_binds_execution_context() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let workspace = fixture.path().join("workspace-not-created");
+    let tool = exec_tool_with_shell(
+        fixture.path(),
+        crate::shell_runtime::ResolvedShell::resolve_explicit("/not-installed/bin/bash")?,
+    );
+    assert!(tool.argument_only_preview());
+    let ctx = ToolContext::new(workspace.clone(), 5);
+    let command = "printf '完整命令\\n'\ntouch should-never-exist\n";
+    for (cwd, expected) in [
+        (None, ".".to_owned()),
+        (Some(workspace.join("nested")), "nested".to_owned()),
+        (
+            Some(fixture.path().join("outside")),
+            fixture.path().join("outside").display().to_string(),
+        ),
+    ] {
+        let preview = tool
+            .preview(
+                ctx.clone(),
+                json!({
+                    "command": command, "cwd": cwd, "pty": true, "max_runtime_secs": 7,
+                }),
+            )
+            .await?
+            .expect("frozen command preview");
+        assert!(preview.body.ends_with(command));
+        assert!(
+            preview
+                .body
+                .contains(&format!("unless absolute): {expected}\n"))
+        );
+        assert!(
+            preview
+                .body
+                .contains("Shell: /not-installed/bin/bash (posix)")
+        );
+        assert!(preview.body.contains("Maximum runtime: 7 seconds"));
+        assert!(preview.changed_files.is_empty());
+        assert!(preview.file_diffs.is_empty());
+    }
+    let oversized_command = format!("{}\nlast-command-must-remain", "界".repeat(50_000));
+    let preview = tool
+        .preview(ctx, json!({"command": oversized_command}))
+        .await?
+        .expect("source never truncates an action");
+    assert!(preview.body.ends_with(&oversized_command));
+    assert!(
+        std::fs::read_dir(fixture.path())?.next().is_none(),
+        "preview must not resolve cwd, provision scratch, or execute the command"
+    );
+    Ok(())
 }
 
 #[test]

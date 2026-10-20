@@ -111,6 +111,51 @@ fn session_catalog_warmup_errors_use_stable_path_free_codes() {
 }
 
 #[test]
+fn session_catalog_warmup_source_read_uses_typed_path_free_code() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let sources = fixture.path().join("sessions");
+    fs::create_dir_all(&sources)?;
+    let source_path = sources.join("busy.jsonl");
+    let mut session = sigil_kernel::Session::new("custom", "model")
+        .with_store(JsonlSessionStore::new(&source_path)?);
+    session.append_control(sigil_kernel::ControlEntry::SessionIdentity {
+        provider_name: "custom".to_owned(),
+        model_name: "model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    session.append_user_message(ModelMessage::user("Preserve this healthy source"))?;
+    drop(session);
+    let bytes = fs::read(&source_path)?;
+    let lifecycle = sigil_runtime::LocalSessionLifecycleService::new(
+        "cli-source-read",
+        &sources,
+        fixture.path().join("exports"),
+    );
+    let catalog = sigil_runtime::SessionCatalogProjectionService::new(
+        lifecycle,
+        fixture.path().join("catalog.sqlite3"),
+    );
+    let writer = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source_path)?;
+    writer.try_lock()?;
+    let error = catalog
+        .rebuild()
+        .expect_err("a real source writer lock must reject the path-only catalog read");
+    let SessionCatalogProjectionError::SourceRead { source } = &error else {
+        panic!("reader contention must retain its typed source: {error}");
+    };
+    let busy = source
+        .downcast_ref::<sigil_kernel::session::SessionIoBusyError>()
+        .expect("actual session reader contention");
+    assert_eq!(busy.kind, sigil_kernel::session::SessionIoBusyKind::Reader);
+    assert_eq!(session_catalog_projection_error_code(&error), "source_read");
+    assert_eq!(fs::read(&source_path)?, bytes);
+    Ok(())
+}
+
+#[test]
 fn serve_root_config_uses_setup_shell_for_an_absent_config() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let config_path = workspace.path().join("missing-sigil.toml");

@@ -223,7 +223,11 @@ GET /session-catalog?limit=50&cursor=...&q=...&provider=...&pinned=true&state=re
 ## 13. Acceptance matrix
 
 - 删除 SQLite 后从同一 JSONL/lifecycle inputs重建，normalized query response（除 generation/time）等价。
-- unchanged reconcile 不重新 parse stream；append/change/delete/pin 能在下一次 reconcile 后准确反映。
+- unchanged Ready reconcile 不重新 parse stream；append/change/delete/pin 能在下一次 reconcile 后准确反映。
+  Invalid 仅在 5 秒冷却内复用，之后在既有 entry/byte 预算内重新严格验证，即使源 bytes/mtime 未变化。
+  ReaderBusy、观察取消及暂时 I/O 失败保留原 typed source 并使刷新可重试，不写入 Invalid/0 消息；
+  已有有效目录行保留。结构性损坏仍记录对应 invalid diagnostic，完整校验原因写入诊断日志；
+  catalog 不取得 writer/recovery 权限，也不修改或修复 JSONL。
 - duplicate session id in不同 source不会覆盖 row；主键仍以 workspace/session ref为准并明确报告 identity冲突。
 - gap、checksum corruption、mixed session id、symlink、oversize、scan budget、source drift 都 fail closed或形成
   明确 degraded row，不留下伪 fresh metadata。

@@ -96,6 +96,30 @@ impl PublicEventOutboxProjectionV1 {
             if envelopes
                 .get(entry.domain_event_id.as_str())
                 .is_some_and(|event| {
+                    event.event_kind() == Some(DurableEventType::UserInputLifecycleChanged)
+                })
+                && super::user_input_terminal::terminal_source(records, entry)?.is_some()
+            {
+                let domain = envelopes
+                    .get(entry.domain_event_id.as_str())
+                    .context("terminal input has no domain envelope")?;
+                let public = envelopes
+                    .get(entry.public_event_id.as_str())
+                    .context("terminal input has no public envelope")?;
+                if domain.event_kind() != Some(DurableEventType::UserInputLifecycleChanged)
+                    || public.event_kind() != Some(DurableEventType::PublicEventOutbox)
+                    || domain.session_id != entry.event.session_id
+                    || public.session_id != entry.event.session_id
+                    || domain.stream_sequence.checked_add(1) != Some(public.stream_sequence)
+                    || !paired.insert(entry.domain_event_id.as_str())
+                {
+                    bail!("terminal input and public terminal are not one exact durable pair");
+                }
+                continue;
+            }
+            if envelopes
+                .get(entry.domain_event_id.as_str())
+                .is_some_and(|event| {
                     event.event_kind() == Some(DurableEventType::PlanReviewAttempt)
                 })
             {

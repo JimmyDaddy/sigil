@@ -17,8 +17,8 @@ use sigil_kernel::{
     ProcessContainment, TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess,
     ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind,
     ToolExecutionId, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
-    ToolPermissionPlanV2, ToolPermissionSummary, ToolPreviewCapability, ToolProgressEvent,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolPermissionPlanV2, ToolPermissionSummary, ToolPreview, ToolPreviewCapability,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
     declared_tool_permission_plan, safe_persistence_text,
 };
 
@@ -574,8 +574,45 @@ impl Tool for TerminalStartTool {
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
             network_effect: None,
-            preview: ToolPreviewCapability::None,
+            preview: ToolPreviewCapability::Required,
         }
+    }
+
+    fn argument_only_preview(&self) -> bool {
+        true
+    }
+
+    async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
+        // This path must remain pure: the external-directory gate invokes it before access is
+        // granted. Shell selection reads immutable configuration; cwd is a lexical display of
+        // the requested location, while the host separately adds canonical external subjects.
+        let args = parse_terminal_start_args(&args)?;
+        let shell = self.managers.resolve_shell(args.shell.as_deref())?;
+        let cwd = args.cwd.as_deref().unwrap_or_else(|| Path::new("."));
+        let cwd = cwd.strip_prefix(&ctx.workspace_root).unwrap_or(cwd);
+        let cwd = if cwd.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            cwd
+        };
+        Ok(Some(ToolPreview {
+            title: "Execute a shell command".to_owned(),
+            summary: "Review the complete command and its execution context.".to_owned(),
+            body: format!(
+                "Working directory (relative to workspace unless absolute): {}\nShell: {} ({})\nTerminal I/O: {}\nMaximum runtime: {}\n\nCommand:\n{}",
+                cwd.display(),
+                shell.program().display(),
+                shell.dialect().as_str(),
+                terminal_io_mode(args.pty),
+                args.max_runtime_secs.map_or_else(
+                    || "no explicit deadline".to_owned(),
+                    |seconds| format!("{seconds} seconds")
+                ),
+                args.command,
+            ),
+            changed_files: Vec::new(),
+            file_diffs: Vec::new(),
+        }))
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {

@@ -160,6 +160,7 @@ mod store;
 mod tool_artifact;
 mod tool_output_pressure_projection;
 mod tool_output_projection;
+mod user_input_terminal;
 mod writer;
 
 pub use active_projection::{

@@ -11,10 +11,11 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sigil_kernel::session::SessionIoBusyError;
 use sigil_kernel::{
     JsonlSessionStore, SessionListProjectionEntry, SessionListReadinessSummary,
-    SessionListTaskSummary, SessionListUsageSummary, SessionRef, safe_persistence_text,
-    session_list_projection_from_records,
+    SessionListTaskSummary, SessionListUsageSummary, SessionObservationCancelled, SessionRef,
+    safe_persistence_text, session_list_projection_from_records,
 };
 use thiserror::Error as ThisError;
 
@@ -46,6 +47,9 @@ const MAX_RECOVERY_LEASE_RETRIES: usize = 20;
 const RECOVERY_LEASE_RETRY_DELAY: Duration = Duration::from_millis(5);
 const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
 const SESSION_CATALOG_IDENTITY_MAX_BYTES: usize = 128;
+// Failed validation is retryable evidence, not a durable verdict about unchanged bytes.
+// Bound repeated polling of a genuinely corrupt large source without changing the cache schema.
+const INVALID_SOURCE_REVALIDATE_AFTER: Duration = Duration::from_secs(5);
 
 const CREATE_SCHEMA_SQL: &str = r#"
 CREATE TABLE session_catalog_workspace_v1 (
@@ -123,6 +127,11 @@ pub enum SessionCatalogProjectionError {
     },
     #[error("session catalog source reconciliation failed: {message}")]
     Source { message: String },
+    #[error("session catalog source observation failed: {source}")]
+    SourceRead {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("session catalog value exceeds SQLite integer range: {field}")]
     IntegerRange { field: &'static str },
     #[error("session catalog projection encoding failed: {message}")]
@@ -1012,7 +1021,7 @@ impl SessionCatalogProjectionService {
                 .into_owned();
             if !force_rebuild
                 && let Some(previous) = existing.get(&session_ref)
-                && source_fingerprint_matches(previous, &candidate, state)
+                && source_fingerprint_matches(previous, &candidate, state, indexed_at_unix_ms)
             {
                 let mut reused = previous.clone();
                 reused.pinned = reused.session_id.as_deref().is_some_and(|session_id| {
@@ -1089,9 +1098,9 @@ impl SessionCatalogProjectionService {
         }
         let records = match JsonlSessionStore::read_event_records(&candidate.path) {
             Ok(records) => records,
-            Err(_) => {
+            Err(error) => {
                 entry.source_state = LocalSessionCatalogState::Invalid;
-                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidEventStream);
+                entry.source_diagnostic = Some(classify_source_read_error(error)?);
                 return Ok(entry);
             }
         };
@@ -1109,7 +1118,10 @@ impl SessionCatalogProjectionService {
                 entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
                 return Ok(entry);
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(session_ref = %entry.session_ref,
+                    error = %safe_persistence_text(&format!("{error:#}")),
+                    "session catalog source projection is invalid");
                 entry.source_state = LocalSessionCatalogState::Invalid;
                 entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
                 return Ok(entry);
@@ -1122,7 +1134,7 @@ impl SessionCatalogProjectionService {
         })?;
         entry.source_content_sha256 = Some(
             hash_file_bounded(&candidate.path, self.lifecycle.limits.max_stream_bytes)
-                .map_err(source_error)?,
+                .map_err(|source| SessionCatalogProjectionError::SourceRead { source })?,
         );
         ensure_source_stable(&candidate)?;
         entry.pinned = pins
@@ -1233,12 +1245,41 @@ fn source_fingerprint_matches(
     previous: &SessionCatalogProjectionEntry,
     candidate: &SessionCandidate,
     state: LocalSessionCatalogState,
+    observed_at_unix_ms: u64,
 ) -> bool {
     (previous.source_state == state
         || (state == LocalSessionCatalogState::Ready
-            && previous.source_state == LocalSessionCatalogState::Invalid))
+            && previous.source_state == LocalSessionCatalogState::Invalid
+            && observed_at_unix_ms
+                .checked_sub(previous.indexed_at_unix_ms)
+                .is_some_and(|elapsed| {
+                    u128::from(elapsed) < INVALID_SOURCE_REVALIDATE_AFTER.as_millis()
+                })))
         && previous.source_bytes == candidate.bytes
         && previous.source_modified_at_unix_ms == candidate.modified_at_unix_ms
+}
+
+fn classify_source_read_error(
+    source: anyhow::Error,
+) -> Result<SessionCatalogSourceDiagnostic, SessionCatalogProjectionError> {
+    if source.is::<SessionIoBusyError>()
+        || source.is::<SessionObservationCancelled>()
+        || source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| {
+                !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                )
+            })
+    {
+        // No invalid row is committed for an observation which never established corruption.
+        // Keep the original typed cause for the host's retry/diagnostic policy.
+        return Err(SessionCatalogProjectionError::SourceRead { source });
+    }
+    tracing::warn!(error = %safe_persistence_text(&format!("{source:#}")),
+        "session catalog source event stream is invalid");
+    Ok(SessionCatalogSourceDiagnostic::InvalidEventStream)
 }
 
 fn list_workspace_entries(
@@ -1739,7 +1780,11 @@ fn empty_projection_entry(
 }
 
 fn ensure_source_stable(candidate: &SessionCandidate) -> Result<(), SessionCatalogProjectionError> {
-    let metadata = fs::symlink_metadata(&candidate.path).map_err(source_error)?;
+    let metadata = fs::symlink_metadata(&candidate.path).map_err(|source| {
+        SessionCatalogProjectionError::SourceRead {
+            source: source.into(),
+        }
+    })?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() != candidate.bytes

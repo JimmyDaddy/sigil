@@ -402,6 +402,15 @@ fn mark_bearer_secrets(text: &str, lower: &str, redacted: &mut [u8]) {
         if cursor == after_marker {
             continue;
         }
+        let redacted_end = cursor + REDACTED_SECRET.len();
+        if text[cursor..].starts_with(REDACTED_SECRET)
+            && scan_secret_token_end(text, redacted_end) == redacted_end
+        {
+            // The closing bracket terminates ordinary token scanning. Preserve a complete
+            // existing marker instead of replacing its prefix and appending another bracket.
+            search_start = redacted_end;
+            continue;
+        }
         let token_end = scan_secret_token_end(text, cursor);
         if cursor < token_end {
             mark_redacted_range(redacted, cursor..token_end);
@@ -547,8 +556,7 @@ fn value_has_non_empty_data(value: &Value) -> bool {
     }
 }
 
-#[cfg(test)]
-fn redact_bearer_tokens(text: &str) -> String {
+pub(crate) fn redact_bearer_tokens(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut redacted = vec![0u8; text.len()];
     mark_bearer_secrets(text, &lower, &mut redacted);

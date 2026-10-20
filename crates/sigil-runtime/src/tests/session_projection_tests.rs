@@ -55,6 +55,228 @@ fn projection_service(
 }
 
 #[test]
+fn catalog_revalidates_cached_invalid_without_source_changes_or_replaying_ready_history()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "invalid-cache-recovery");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("healthy.jsonl");
+    let other = lifecycle.session_dir.join("unchanged-ready.jsonl");
+    let session_id = finalized_session(&source, "Healthy unchanged source", "custom", "model")?;
+    finalized_session(&other, "Reuse this large history", "custom", "model")?;
+    projection.rebuild()?;
+    let expected = projection
+        .list_workspace_entries()?
+        .into_iter()
+        .find(|row| row.session_ref == "healthy.jsonl")
+        .expect("healthy row");
+    let bytes = fs::read(&source)?;
+    let modified = fs::metadata(&source)?.modified()?;
+    // Reproduce the old cache state independently of the healthy journal. No source append,
+    // timestamp change, or repair is available to make the fingerprint look different.
+    Connection::open(projection.database_path())?.execute(
+        "UPDATE session_catalog_entry_v1 SET source_state = 'invalid', source_diagnostic = 'invalid_event_stream', session_id = NULL, title = NULL, user_message_count = 0, assistant_message_count = 0, indexed_at_unix_ms = 0 WHERE workspace_id = ?1 AND session_ref = 'healthy.jsonl'",
+        params![lifecycle.workspace_id],
+    )?;
+    // A ready row must still be reused: replaying all unchanged histories would hit this real
+    // data-file writer lock and fail rather than recover only the poisoned entry.
+    let unrelated_writer = OpenOptions::new().read(true).write(true).open(&other)?;
+    FileExt::try_lock_exclusive(&unrelated_writer)?;
+    let report = projection.reconcile()?;
+    assert_eq!(report.reused_source_count, 1);
+    assert_eq!(report.updated_source_count, 1);
+    assert_eq!(report.degraded_source_count, 0);
+    let restored = projection
+        .list_workspace_entries()?
+        .into_iter()
+        .find(|row| row.session_ref == "healthy.jsonl")
+        .expect("restored row");
+    assert_eq!(restored.source_state, LocalSessionCatalogState::Ready);
+    assert_eq!(restored.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(restored.source_diagnostic, None);
+    assert_eq!(restored.user_message_count, expected.user_message_count);
+    assert_eq!(
+        restored.assistant_message_count,
+        expected.assistant_message_count
+    );
+    assert_eq!(restored.title, expected.title);
+    assert_eq!(
+        restored.source_content_sha256,
+        expected.source_content_sha256
+    );
+    assert_eq!(fs::read(&source)?, bytes);
+    assert_eq!(fs::metadata(&source)?.modified()?, modified);
+    Ok(())
+}
+
+#[test]
+fn catalog_reader_busy_preserves_last_valid_row_and_recovers_after_real_writer_releases()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "reader-busy");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("active.jsonl");
+    finalized_session(&source, "Before writer", "custom", "model")?;
+    projection.rebuild()?;
+    let original = projection.list_workspace_entries()?;
+    let store = JsonlSessionStore::new(&source)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Committed before the contended read",
+    )))?;
+    let bytes = fs::read(&source)?;
+    let writer = OpenOptions::new().read(true).write(true).open(&source)?;
+    FileExt::try_lock_exclusive(&writer)?;
+    let error = projection
+        .reconcile()
+        .expect_err("path-only observer must report external writer contention");
+    let SessionCatalogProjectionError::SourceRead { source: error } = error else {
+        panic!("contention must retain its typed source: {error}");
+    };
+    let busy = error
+        .downcast_ref::<sigil_kernel::session::SessionIoBusyError>()
+        .expect("actual reader lock failure");
+    assert_eq!(busy.kind, sigil_kernel::session::SessionIoBusyKind::Reader);
+    assert_eq!(
+        projection.list_workspace_entries()?,
+        original,
+        "busy is not evidence of an invalid zero-message source"
+    );
+    assert_eq!(
+        fs::read(&source)?,
+        bytes,
+        "the catalog must not repair the journal"
+    );
+    drop(writer);
+    // The live owner can append after the observer has returned. Catalog snapshots retain no
+    // writer lease or data-file shared lock, and the next bounded refresh sees the real write.
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Written after reader returned",
+    )))?;
+    projection.reconcile()?;
+    let restored = projection.list_workspace_entries()?.remove(0);
+    assert_eq!(restored.source_state, LocalSessionCatalogState::Ready);
+    assert_eq!(restored.source_diagnostic, None);
+    assert_eq!(
+        restored.user_message_count,
+        original[0].user_message_count + 2
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_corrupt_source_has_bounded_retry_cooldown_and_preserves_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "invalid-cooldown");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("broken.jsonl");
+    fs::write(&source, b"not a session stream\n")?;
+    projection.rebuild()?;
+    let invalid = projection.list_workspace_entries()?;
+    let bytes = fs::read(&source)?;
+    let writer = OpenOptions::new().read(true).write(true).open(&source)?;
+    FileExt::try_lock_exclusive(&writer)?;
+    let cooled = projection.reconcile()?;
+    assert_eq!(
+        cooled.reused_source_count, 1,
+        "a poll during cooldown cannot re-read the locked corrupt source"
+    );
+    assert_eq!(cooled.updated_source_count, 0);
+    Connection::open(projection.database_path())?.execute(
+        "UPDATE session_catalog_entry_v1 SET indexed_at_unix_ms = 0 WHERE workspace_id = ?1",
+        params![lifecycle.workspace_id],
+    )?;
+    let before_retry = projection.list_workspace_entries()?;
+    assert!(
+        matches!(
+            projection.reconcile(),
+            Err(SessionCatalogProjectionError::SourceRead { .. })
+        ),
+        "expired negative cache must actually retry the reader"
+    );
+    assert_eq!(projection.list_workspace_entries()?, before_retry);
+    drop(writer);
+    let retried = projection.reconcile()?;
+    assert_eq!(retried.reused_source_count, 0);
+    assert_eq!(retried.degraded_source_count, 1);
+    let current = projection.list_workspace_entries()?.remove(0);
+    assert_eq!(current.source_state, LocalSessionCatalogState::Invalid);
+    assert_eq!(current.source_diagnostic, invalid[0].source_diagnostic);
+    assert_eq!(fs::read(&source)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn catalog_source_read_diagnostic_preserves_real_cancellation_and_io_causes() -> Result<()> {
+    let budget = sigil_kernel::SessionReadBudget::default();
+    budget.cancel();
+    let cancelled =
+        classify_source_read_error(budget.check().expect_err("actual cancelled budget"))
+            .expect_err("cancel is not corruption");
+    let SessionCatalogProjectionError::SourceRead { source } = cancelled else {
+        panic!("typed cancelled source");
+    };
+    assert!(source.is::<sigil_kernel::SessionObservationCancelled>());
+    let temp = tempfile::tempdir()?;
+    let missing = File::open(temp.path().join("missing.jsonl")).expect_err("actual missing source");
+    let io = classify_source_read_error(missing.into()).expect_err("I/O is not corruption");
+    let SessionCatalogProjectionError::SourceRead { source } = io else {
+        panic!("typed I/O source");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<std::io::Error>()
+            .expect("I/O cause")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let (lifecycle, projection) = projection_service(temp.path(), "missing-observation");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let path = lifecycle.session_dir.join("removed.jsonl");
+    finalized_session(&path, "Removed after discovery", "custom", "model")?;
+    let candidate = lifecycle.session_source_candidates()?.remove(0);
+    fs::remove_file(&path)?;
+    let error = projection
+        .project_candidate(
+            candidate,
+            LocalSessionCatalogState::Ready,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            current_unix_ms(),
+        )
+        .expect_err("disappeared candidate must not become missing-identity invalid");
+    let SessionCatalogProjectionError::SourceRead { source } = error else {
+        panic!("preserved disappearance I/O");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<std::io::Error>()
+            .expect("source I/O")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_invalid_utf8_is_corruption_not_transient_io() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "invalid-utf8");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let path = lifecycle.session_dir.join("invalid.jsonl");
+    let bytes = [0xff, 0xfe, b'\n'];
+    fs::write(&path, bytes)?;
+    assert_eq!(projection.rebuild()?.degraded_source_count, 1);
+    let entry = projection.list_workspace_entries()?.remove(0);
+    assert_eq!(entry.source_state, LocalSessionCatalogState::Invalid);
+    assert_eq!(
+        entry.source_diagnostic,
+        Some(SessionCatalogSourceDiagnostic::InvalidEventStream)
+    );
+    assert_eq!(fs::read(&path)?, bytes);
+    Ok(())
+}
+
+#[test]
 fn session_projection_rebuilds_safe_rows_and_pin_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

@@ -5,6 +5,27 @@ use serde_json::Value;
 
 use super::*;
 
+#[test]
+fn safe_persistence_text_masks_bearer_without_changing_clean_utf8_review() {
+    for raw in [
+        "Authorization: Bearer approval-credential",
+        "authorization:\tbEaReR\tapproval-credential",
+        "Bearer approval-credential",
+    ] {
+        let safe = safe_persistence_text(raw);
+        assert!(!safe.contains("approval-credential"), "{safe}");
+        assert!(safe.contains("[redacted]"));
+        assert_eq!(safe_persistence_text(&safe), safe);
+    }
+    let safe = safe_persistence_text("token=token-credential --token flag-credential");
+    assert!(!safe.contains("token-credential"));
+    assert!(!safe.contains("flag-credential"));
+    assert_eq!(safe_persistence_text(&safe), safe);
+    let ordinary =
+        "+总额 198.01 元\n+参与者：小林|小周\n+bearer_name = 2\n foobearer remains visible";
+    assert_eq!(safe_persistence_text(ordinary), ordinary);
+}
+
 #[derive(Default)]
 struct RecordingRegistrar {
     staged: Mutex<Vec<UserUrlCapabilityRegistration>>,

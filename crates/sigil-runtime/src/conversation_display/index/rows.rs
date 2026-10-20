@@ -18,6 +18,7 @@ pub(super) struct RowSourceContext {
     terminal: Option<(String, command::CommandTerminalState)>,
     approval: Option<(String, String)>,
     skill: Option<(String, ConversationDisplaySkillReferenceV1)>,
+    terminal_frontier: Option<ConversationTerminalFrontierV1>,
     pub(super) tool_source: Option<ConversationDisplayRecordPosition>,
 }
 
@@ -65,6 +66,10 @@ impl RowProjectionState {
                 .map(|tool| (id, tool))
         });
         Ok(RowSourceContext {
+            terminal_frontier: (record.stored_event().event_kind()
+                == Some(DurableEventType::PublicEventOutbox))
+            .then(|| self.terminal_frontier.clone())
+            .flatten(),
             execution,
             terminal,
             active_run: self.active_run.clone(),
@@ -175,7 +180,7 @@ impl RowSourceContext {
             },
             approvals: self.approval.clone().into_iter().collect(),
             skills: self.skill.clone().into_iter().collect(),
-            terminal_frontier: None,
+            terminal_frontier: self.terminal_frontier.clone(),
         };
         state.apply(record, scope)
     }

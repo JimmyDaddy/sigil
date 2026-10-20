@@ -235,7 +235,7 @@ impl SharedSessionCoordinator {
         pending: Vec<PendingStoredEvent>,
         run_id: &str,
     ) -> Result<Vec<StoredEvent>> {
-        self.append_control_publication_inner(pending, run_id, None)?
+        self.append_control_publication_inner(pending, run_id, None, None)?
             .context("control publication append predicate unexpectedly rejected its bundle")
     }
 
@@ -250,7 +250,44 @@ impl SharedSessionCoordinator {
     where
         F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
     {
-        self.append_control_publication_inner(pending, run_id, Some(Box::new(should_append)))
+        self.append_control_publication_inner(pending, run_id, Some(Box::new(should_append)), None)
+    }
+
+    pub(super) fn append_user_input_terminal(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        run_id: &str,
+        resolved: &crate::UserInputResolvedV1,
+        operation: Option<&crate::ApplicationOperationBindingV1>,
+    ) -> Result<Vec<StoredEvent>> {
+        self.append_control_publication_inner(
+            pending,
+            run_id,
+            Some(Box::new(move |records| {
+                if let Some(binding) = operation
+                    && !super::application_operation::validate_prepared(records, binding)?
+                {
+                    bail!("terminal input has no exact prepared application operation");
+                }
+                let entries = records
+                    .iter()
+                    .map(SessionStreamRecord::session_log_entry)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                let projection = crate::UserInputProjectionV1::from_session_entries(&entries)?;
+                let state = projection
+                    .request(&resolved.identity)
+                    .context("terminal input no longer exists")?;
+                if state.status != crate::UserInputStatusV1::Requested {
+                    bail!("terminal input changed before its atomic publication");
+                }
+                Ok(true)
+            })),
+            Some(resolved),
+        )?
+        .context("terminal input publication was not committed")
     }
 
     fn append_control_publication_inner(
@@ -258,14 +295,24 @@ impl SharedSessionCoordinator {
         pending: Vec<PendingStoredEvent>,
         run_id: &str,
         should_append: Option<ControlPublicationPredicate<'_>>,
+        terminal_input: Option<&crate::UserInputResolvedV1>,
     ) -> Result<Option<Vec<StoredEvent>>> {
         let (events, notice) = {
             let mut writer = self.lock_writer()?;
             writer.ensure_public_event_outbox_index()?;
-            writer
-                .public_event_outbox_index()
-                .context("public outbox index is unavailable")?
-                .require_active_run(run_id)?;
+            if let Some(resolved) = terminal_input {
+                let records = writer.read_records_writer()?;
+                if super::user_input_terminal::awaiting_input_run(&records, resolved)?.as_deref()
+                    != Some(run_id)
+                {
+                    bail!("terminal input no longer binds its exact awaiting root");
+                }
+            } else {
+                writer
+                    .public_event_outbox_index()
+                    .context("public outbox index is unavailable")?
+                    .require_active_run(run_id)?;
+            }
             if let Some(should_append) = should_append {
                 let records = writer.read_records_writer()?;
                 if !should_append(&records)? {

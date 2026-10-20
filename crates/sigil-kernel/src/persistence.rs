@@ -779,7 +779,10 @@ pub fn apply_exact_message_overlays(
 /// Redacts sensitive URL/query material and secret-shaped JSON values from arbitrary text.
 #[must_use]
 pub fn safe_persistence_text(value: &str) -> String {
-    let url_safe = project_text_urls("safe-projection", value, None, unix_time_ms(), false)
+    // Preserve Bearer context until its value is masked; the generic Authorization: carrier
+    // below consumes only one token and would otherwise hide the scheme instead of the secret.
+    let bearer_safe = crate::secret::redact_bearer_tokens(value);
+    let url_safe = project_text_urls("safe-projection", &bearer_safe, None, unix_time_ms(), false)
         .map(|(safe, _)| safe)
         .unwrap_or_else(|_| "[unsafe text projection failed]".to_owned());
     redact_secret_carriers(&url_safe)

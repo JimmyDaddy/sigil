@@ -3,9 +3,9 @@ use std::{fs, path::Path};
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ChangeSet, ChangeSetResult, DurableEventType, JsonlSessionStore, MutationBatchFinished,
-    MutationBatchStatus, MutationEventRecorder, Tool, ToolContext, ToolErrorKind, ToolResult,
-    ToolResultStatus,
+    ChangeSet, ChangeSetResult, ChangeSetRisk, DurableEventType, JsonlSessionStore,
+    MutationBatchFinished, MutationBatchStatus, MutationEventRecorder, Tool, ToolContext,
+    ToolErrorKind, ToolResult, ToolResultStatus,
 };
 
 use super::{
@@ -85,6 +85,125 @@ fn assert_artifacts_unavailable(result: &ToolResult) {
             .get("reverse")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn apply_changeset_preview_shows_file_count_without_model_risk_and_preserves_diff()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let artifact_root = state.path().join("diff-artifacts");
+    fs::write(workspace.path().join("existing.txt"), "before\n")?;
+    let tool = changeset_tool(&artifact_root);
+    let mut args = json!({
+        "id": "risk-independent-preview",
+        "title": "Update existing text and add a file",
+        "risk": "low",
+        "files": [
+            { "path": "existing.txt", "action": "update", "content": "after\n" },
+            { "path": "new.txt", "action": "create", "content": "new\n" }
+        ]
+    });
+    let low_risk_preview = tool
+        .preview(
+            ToolContext::new(workspace.path().to_path_buf(), 5),
+            args.clone(),
+        )
+        .await?
+        .expect("validated changes must have a preview");
+    args["risk"] = json!("high");
+    let high_risk_preview = tool
+        .preview(
+            ToolContext::new(workspace.path().to_path_buf(), 5),
+            args.clone(),
+        )
+        .await?
+        .expect("validated changes must have a preview");
+    let plan = build_apply_changeset_plan(workspace.path(), &args)??;
+
+    assert_eq!(low_risk_preview.summary, "2 files");
+    assert_eq!(high_risk_preview.summary, low_risk_preview.summary);
+    assert_eq!(
+        low_risk_preview.title,
+        "Update existing text and add a file"
+    );
+    assert_eq!(low_risk_preview.changed_files, ["existing.txt", "new.txt"]);
+    assert_eq!(
+        high_risk_preview.changed_files,
+        low_risk_preview.changed_files
+    );
+    assert_eq!(low_risk_preview.body, plan.preview_diff);
+    assert_eq!(high_risk_preview.body, low_risk_preview.body);
+    assert_eq!(low_risk_preview.file_diffs.len(), 2);
+    for (index, file) in low_risk_preview.file_diffs.iter().enumerate() {
+        assert_eq!(file.path, low_risk_preview.changed_files[index]);
+        assert_eq!(file.diff, plan.files[index].preview_diff);
+        assert_eq!(high_risk_preview.file_diffs[index].path, file.path);
+        assert_eq!(high_risk_preview.file_diffs[index].diff, file.diff);
+    }
+    assert!(low_risk_preview.body.contains("-before"));
+    assert!(low_risk_preview.body.contains("+after"));
+    assert!(low_risk_preview.body.contains("+new"));
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("existing.txt"))?,
+        "before\n"
+    );
+    assert!(!workspace.path().join("new.txt").exists());
+    assert!(!artifact_root.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_preserves_explicit_summary_and_model_risk_in_audit_metadata() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let artifact_root = state.path().join("diff-artifacts");
+    let (store, recorder) = open_recorder(state.path())?;
+    let tool = changeset_tool(&artifact_root);
+    let summary = "Keep the explicit summary verbatim, including risk=low";
+    let mut args = two_file_change("risk-audit");
+    args["summary"] = json!(summary);
+    args["risk"] = json!("low");
+    args["files"][1]["risk"] = json!("high");
+    let preview = tool
+        .preview(
+            ToolContext::new(workspace.path().to_path_buf(), 5),
+            args.clone(),
+        )
+        .await?
+        .expect("validated changes must have a preview");
+    assert_eq!(preview.summary, "2 files");
+
+    let result = tool
+        .execute(
+            ToolContext::new(workspace.path().to_path_buf(), 5).with_mutation_recorder(recorder),
+            "apply-risk-audit".to_owned(),
+            args,
+        )
+        .await?;
+
+    assert!(!result.is_error());
+    let change_set: ChangeSet =
+        serde_json::from_value(result.metadata.details["change_set"].clone())?;
+    assert_eq!(change_set.summary, summary);
+    assert_eq!(change_set.risk, ChangeSetRisk::Low);
+    assert_eq!(change_set.files[0].risk, ChangeSetRisk::Low);
+    assert_eq!(change_set.files[1].risk, ChangeSetRisk::High);
+    assert_eq!(
+        fs::read_to_string(artifact_root.join("risk-audit/preview.diff"))?,
+        preview.body
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("first.txt"))?,
+        "first\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("second.txt"))?,
+        "second\n"
+    );
+    assert_batch(&store, MutationBatchStatus::Applied, 2)?;
+    Ok(())
 }
 
 #[tokio::test]

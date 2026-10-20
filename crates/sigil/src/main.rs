@@ -1018,6 +1018,7 @@ fn session_catalog_projection_error_code(error: &SessionCatalogProjectionError) 
         SessionCatalogProjectionError::IncompatibleSchema { .. } => "incompatible_schema",
         SessionCatalogProjectionError::Sqlite { .. } => "sqlite",
         SessionCatalogProjectionError::Source { .. } => "source",
+        SessionCatalogProjectionError::SourceRead { .. } => "source_read",
         SessionCatalogProjectionError::IntegerRange { .. } => "integer_range",
         SessionCatalogProjectionError::Encoding { .. } => "encoding",
         SessionCatalogProjectionError::InvalidQuery { .. } => "invalid_query",

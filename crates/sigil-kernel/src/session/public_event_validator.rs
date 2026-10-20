@@ -1,6 +1,6 @@
 //! Strict incremental counterpart of durable public-outbox replay validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::{
@@ -22,6 +22,11 @@ pub struct PublicEventOutboxValidatorV1 {
     outbox: PublicEventOutboxAdmissionIndexV1,
     started_runs: BTreeSet<String>,
     active_conversation: Option<String>,
+    awaiting_inputs: BTreeMap<String, (String, u32, String)>,
+    terminal_inputs: BTreeMap<(crate::UserInputIdentityV1, String), crate::UserInputResolutionV1>,
+    input_calls: BTreeMap<crate::UserInputIdentityV1, String>,
+    input_tool_result: Option<String>,
+    input_tool_settled: Option<String>,
     projector: PublicTaskEventProjector,
     projector_degraded: bool,
     has_linked_publication: bool,
@@ -57,6 +62,10 @@ struct PendingSource {
 #[derive(Debug)]
 enum SourceMaterial {
     ConversationTerminal(crate::ConversationRunFinalizedEntryV1),
+    InputTerminal {
+        resolved: crate::UserInputResolvedV1,
+        run_id: String,
+    },
     Revision(revision::RevisionPublicMaterial),
     Optional {
         explicit: Option<super::control_publication::ExplicitSessionPublicationFingerprint>,
@@ -80,6 +89,8 @@ impl PublicEventOutboxValidatorV1 {
         if event.event_kind() == Some(DurableEventType::PublicEventOutbox) {
             let entry: PublicEventOutboxEntryV1 = serde_json::from_value(event.payload.clone())?;
             self.apply_public(event, &entry)?;
+            self.input_tool_result = None;
+            self.input_tool_settled = None;
         } else {
             self.finish_pending()?;
             self.pending = None;
@@ -117,6 +128,8 @@ impl PublicEventOutboxValidatorV1 {
     fn apply_domain(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         if let Some(lifecycle) = crate::conversation_run_lifecycle_record_from_stream(record)? {
+            self.input_tool_result = None;
+            self.input_tool_settled = None;
             match lifecycle {
                 ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started) => {
                     if !self.started_runs.insert(started.run_id().to_owned()) {
@@ -144,8 +157,38 @@ impl PublicEventOutboxValidatorV1 {
             return Ok(());
         }
         let Some(entry) = record.session_log_entry()? else {
+            self.input_tool_result = None;
+            self.input_tool_settled = None;
             return Ok(());
         };
+        let settled_call = self.input_tool_settled.take();
+        self.input_tool_settled = match &entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.tool_name == crate::REQUEST_USER_INPUT_TOOL_NAME
+                    && execution.status == crate::ToolExecutionStatus::Completed
+                    && self.input_tool_result.as_ref() == Some(&execution.call_id) =>
+            {
+                Some(execution.call_id.clone())
+            }
+            _ => None,
+        };
+        self.input_tool_result = match &entry {
+            SessionLogEntry::ToolResultV3(result)
+                if result.tool_name == crate::REQUEST_USER_INPUT_TOOL_NAME =>
+            {
+                Some(result.call_id.clone())
+            }
+            _ => None,
+        };
+        if let SessionLogEntry::Control(ControlEntry::UserInputRequested(requested)) = &entry
+            && matches!(requested.request.source, crate::UserInputSourceV1::Agent)
+            && let Some(binding) = requested.request.continuation.as_ref()
+        {
+            self.input_calls.insert(
+                requested.request.identity.clone(),
+                binding.tool_call_id.clone(),
+            );
+        }
         let revision = self.revision.apply_entry(&entry)?;
         let source_kind_valid =
             event.event_kind() == Some(super::store::session_entry_event_type(&entry));
@@ -163,6 +206,54 @@ impl PublicEventOutboxValidatorV1 {
         } else {
             None
         };
+        if let SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(accepted)) = &entry
+        {
+            let resolution = match accepted.decision {
+                crate::UserInputDurableDecisionV1::RunCancelled => {
+                    Some(crate::UserInputResolutionV1::RunCancelled)
+                }
+                crate::UserInputDurableDecisionV1::Declined => {
+                    Some(crate::UserInputResolutionV1::Declined)
+                }
+                crate::UserInputDurableDecisionV1::Submitted { .. } => None,
+            };
+            if let Some(resolution) = resolution {
+                self.terminal_inputs.insert(
+                    (accepted.identity.clone(), accepted.request_hash.clone()),
+                    resolution,
+                );
+            }
+        }
+        if let SessionLogEntry::Control(ControlEntry::UserInputResolved(resolved)) = &entry
+            && super::user_input_terminal::terminal_event(&resolved.resolution).is_some()
+            && self
+                .terminal_inputs
+                .get(&(resolved.identity.clone(), resolved.request_hash.clone()))
+                == Some(&resolved.resolution)
+            && settled_call
+                .as_ref()
+                .is_some_and(|call| self.input_calls.get(&resolved.identity) == Some(call))
+            && let Some(run_id) = self.matching_input_run(resolved)?
+            && projected.as_ref().is_some_and(|events| {
+                events.iter().any(|event| {
+                    matches!(event,
+                PublicRunEventKind::UserInputChanged { request, .. }
+                    if matches!(request.source, crate::UserInputSourceV1::Agent))
+                })
+            })
+        {
+            if !source_kind_valid {
+                bail!("terminal input source uses an incorrect durable event type");
+            }
+            self.pending = Some(PendingSource {
+                envelope: event.into(),
+                material: SourceMaterial::InputTerminal {
+                    resolved: resolved.clone(),
+                    run_id,
+                },
+            });
+            return Ok(());
+        }
         if let Some(revision) = revision {
             if !source_kind_valid {
                 bail!("public revision source uses an incorrect durable event type");
@@ -191,6 +282,23 @@ impl PublicEventOutboxValidatorV1 {
         Ok(())
     }
 
+    fn matching_input_run(&self, resolved: &crate::UserInputResolvedV1) -> Result<Option<String>> {
+        let binding = (
+            resolved.identity.request_id.as_str().to_owned(),
+            resolved.identity.generation,
+            resolved.request_hash.clone(),
+        );
+        let mut matching = self
+            .awaiting_inputs
+            .iter()
+            .filter(|(_, candidate)| **candidate == binding);
+        let first = matching.next().map(|(run_id, _)| run_id.clone());
+        if matching.next().is_some() {
+            bail!("terminal input has multiple exact awaiting runs");
+        }
+        Ok(first)
+    }
+
     fn apply_public(
         &mut self,
         envelope: &StoredEvent,
@@ -216,6 +324,30 @@ impl PublicEventOutboxValidatorV1 {
             SourceMaterial::ConversationTerminal(material) => {
                 validate_adjacent_pair(&source.envelope, envelope)?;
                 crate::conversation_run::validate_terminal_outbox(material, outbox)?;
+                if let PublicRunEventKind::RunAwaitingUserInput {
+                    request_id,
+                    generation,
+                    request_hash,
+                } = &outbox.event.event
+                {
+                    self.awaiting_inputs.insert(
+                        outbox.run_id.clone(),
+                        (request_id.clone(), *generation, request_hash.clone()),
+                    );
+                }
+                self.pending = None;
+            }
+            SourceMaterial::InputTerminal { resolved, run_id } => {
+                validate_adjacent_pair(&source.envelope, envelope)?;
+                if !super::user_input_terminal::terminal_event_matches(
+                    &resolved.resolution,
+                    &outbox.event.event,
+                ) || &outbox.run_id != run_id
+                    || outbox.event.session_id != resolved.identity.session_scope_id.as_str()
+                {
+                    bail!("terminal input public terminal does not match its awaiting root");
+                }
+                self.awaiting_inputs.remove(&outbox.run_id);
                 self.pending = None;
             }
             SourceMaterial::Revision(material) => {
@@ -268,6 +400,9 @@ impl PublicEventOutboxValidatorV1 {
             return Ok(());
         };
         match &source.material {
+            // Historical private-only input resolution remains readable. A publication, when
+            // present, must use the exact typed cancellation contract above.
+            SourceMaterial::InputTerminal { .. } => {}
             SourceMaterial::Optional {
                 explicit,
                 expected,

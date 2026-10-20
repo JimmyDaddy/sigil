@@ -37,7 +37,7 @@ pub struct PreparedApplicationUserInputDecision {
     receipt: sigil_kernel::UserInputDecisionReceiptV1,
     continuation: Option<PreparedApplicationRun>,
     revision_request: Option<crate::PlanReviewRunRequest>,
-    revision_terminal_outbox: Option<sigil_kernel::PublicEventOutboxEntryV1>,
+    terminal_outbox: Option<sigil_kernel::PublicEventOutboxEntryV1>,
 }
 
 impl PreparedApplicationUserInputDecision {
@@ -53,10 +53,10 @@ impl PreparedApplicationUserInputDecision {
         self.continuation.is_some() || self.revision_request.is_some()
     }
 
-    /// Returns the exact durable revision terminal that an adapter must replay unchanged.
+    /// Returns the exact durable input/revision terminal an adapter must replay unchanged.
     #[must_use]
-    pub fn revision_terminal_outbox(&self) -> Option<&sigil_kernel::PublicEventOutboxEntryV1> {
-        self.revision_terminal_outbox.as_ref()
+    pub fn terminal_outbox(&self) -> Option<&sigil_kernel::PublicEventOutboxEntryV1> {
+        self.terminal_outbox.as_ref()
     }
 
     /// Separates the durable receipt from the optional supervised run.
@@ -359,7 +359,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: None,
             revision_request,
-            revision_terminal_outbox,
+            terminal_outbox: revision_terminal_outbox,
         });
     }
     if request.identity.session_scope_id.as_str() != request.expected_session_scope_id {
@@ -400,7 +400,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: None,
             revision_request,
-            revision_terminal_outbox: None,
+            terminal_outbox: None,
         });
     }
 
@@ -501,11 +501,14 @@ pub async fn prepare_application_user_input_decision(
             accepted_at_unix_ms,
         )
         .map_err(ApplicationRunPrepareError::execution)?;
+        let terminal_outbox = session
+            .user_input_terminal_outbox(&request.identity, &request.request_hash)
+            .map_err(ApplicationRunPrepareError::execution)?;
         return Ok(PreparedApplicationUserInputDecision {
             receipt,
             continuation: None,
             revision_request: None,
-            revision_terminal_outbox: None,
+            terminal_outbox,
         });
     }
     let preview =
@@ -680,7 +683,7 @@ pub async fn prepare_application_user_input_decision(
             receipt,
             continuation: Some(continuation),
             revision_request: None,
-            revision_terminal_outbox: None,
+            terminal_outbox: None,
         })
     }
     .await;

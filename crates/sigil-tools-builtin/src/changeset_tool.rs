@@ -482,11 +482,7 @@ impl Tool for ApplyChangeSetTool {
 
         Ok(Some(ToolPreview {
             title: plan.change_set.title.clone(),
-            summary: format!(
-                "{} files, risk={}",
-                plan.change_set.files.len(),
-                plan.change_set.risk.as_str()
-            ),
+            summary: format!("{} files", plan.change_set.files.len()),
             body: plan.preview_diff,
             changed_files: plan
                 .change_set

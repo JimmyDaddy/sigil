@@ -890,6 +890,17 @@ impl JsonlSessionStore {
         self.writer.append_control_publication(pending, run_id)
     }
 
+    pub(super) fn append_user_input_terminal(
+        &self,
+        pending: Vec<super::writer::PendingStoredEvent>,
+        run_id: &str,
+        resolved: &crate::UserInputResolvedV1,
+        operation: Option<&crate::ApplicationOperationBindingV1>,
+    ) -> Result<Vec<StoredEvent>> {
+        self.writer
+            .append_user_input_terminal(pending, run_id, resolved, operation)
+    }
+
     pub(super) fn append_control_publication_if_records<F>(
         &self,
         pending: Vec<PendingStoredEvent>,

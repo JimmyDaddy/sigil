@@ -1168,6 +1168,7 @@ fn validate_provisional_identity(label: &str, value: &str) -> Result<()> {
 
 fn validate_stream(records: &[SessionStreamRecord], expected_scope: &str) -> Result<()> {
     let mut previous = 0_u64;
+    let mut outbox = sigil_kernel::PublicEventOutboxValidatorV1::default();
     for record in records {
         if record.session_id() != expected_scope {
             bail!("conversation display session scope mismatch");
@@ -1183,7 +1184,9 @@ fn validate_stream(records: &[SessionStreamRecord], expected_scope: &str) -> Res
             .verify_record_checksum()
             .context("conversation display stream checksum verification failed")?;
         previous = record.stream_sequence();
+        outbox.apply_record(record)?;
     }
+    outbox.validate_cut()?;
     Ok(())
 }
 
@@ -1270,6 +1273,49 @@ fn project_record(
         // `session_log_entry` already performed the fail-closed critical decode.
         return Ok(Vec::new());
     };
+    if event_type == DurableEventType::PublicEventOutbox {
+        let outbox: sigil_kernel::PublicEventOutboxEntryV1 =
+            serde_json::from_value(record.stored_event().payload.clone())?;
+        if matches!(
+            outbox.event.event,
+            PublicRunEventKind::RunCancelled | PublicRunEventKind::RunBlocked { .. }
+        ) && terminal_frontier.as_ref().is_some_and(|terminal| {
+            terminal.run_id == outbox.run_id
+                && terminal.status == ConversationDisplayStatusV1::AwaitingUserInput
+        }) {
+            let status = if matches!(outbox.event.event, PublicRunEventKind::RunCancelled) {
+                ConversationDisplayStatusV1::Cancelled
+            } else {
+                ConversationDisplayStatusV1::Blocked
+            };
+            let safe_summary = match &outbox.event.event {
+                PublicRunEventKind::RunBlocked { reason } => Some(reason.clone()),
+                _ => None,
+            };
+            // The outbox validator authenticated the exact UserInputResolved successor. Preserve the
+            // original Awaiting item while advancing the current status from that durable fact.
+            *terminal_frontier = Some(ConversationTerminalFrontierV1 {
+                run_id: outbox.run_id.clone(),
+                session_stream_sequence: record.stream_sequence(),
+                status,
+            });
+            return Ok(vec![new_item(
+                expected_scope,
+                record,
+                0,
+                ConversationDisplayItemKindV1::Terminal,
+                ConversationDisplaySourceV1::DurableRunEvent,
+                Some(outbox.run_id),
+                status,
+                ConversationDisplayContentV1::Terminal {
+                    final_message_id: None,
+                    safe_summary,
+                    summary_truncated: false,
+                },
+            )]);
+        }
+        return Ok(Vec::new());
+    }
     if event_type == DurableEventType::CompactionAppliedV2 {
         let _: CompactionAppliedV2 = serde_json::from_value(record.stored_event().payload.clone())
             .context("failed to decode context compaction display source")?;

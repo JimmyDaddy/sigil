@@ -55,6 +55,7 @@ pub struct ConversationDisplayIndex {
     inputs: InputMetadataProjection,
     row_cache: RowCache,
     surface_cache: SurfaceCache,
+    outbox: sigil_kernel::PublicEventOutboxValidatorV1,
 }
 
 /// Metadata hashing work retained for bounded-query qualification.
@@ -118,6 +119,7 @@ impl ConversationDisplayIndex {
             bail!("conversation display session scope mismatch");
         }
         record.stored_event().verify_record_checksum()?;
+        self.outbox.apply_record(record)?;
         let scope = self
             .scope
             .get_or_insert_with(|| record.session_id().to_owned());
@@ -181,6 +183,7 @@ impl ConversationDisplayIndex {
         limit: usize,
         workspace: Option<&str>,
     ) -> std::result::Result<ConversationDisplayPagePlan, ConversationDisplayProjectionError> {
+        self.outbox.validate_cut()?;
         validate_page_request(expected_scope, limit)?;
         if self
             .scope

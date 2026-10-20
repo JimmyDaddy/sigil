@@ -1051,6 +1051,12 @@ struct ExternalWriteTool {
     external_path: std::path::PathBuf,
 }
 
+struct ArgumentOnlyExternalTool {
+    inner: ExternalWriteTool,
+    preview_calls: Arc<AtomicUsize>,
+    preview_outcome: u8,
+}
+
 fn synthetic_external_test_root() -> Result<PathBuf> {
     let current_dir = std::env::current_dir()?;
     let filesystem_root = current_dir
@@ -2161,6 +2167,10 @@ impl Tool for ExternalWriteTool {
         )
     }
 
+    async fn preview(&self, _ctx: ToolContext, _args: Value) -> Result<Option<ToolPreview>> {
+        panic!("an external file preview must not read before external approval")
+    }
+
     async fn execute(
         &self,
         _ctx: ToolContext,
@@ -2174,6 +2184,44 @@ impl Tool for ExternalWriteTool {
             "wrote external file",
             ToolResultMeta::default(),
         ))
+    }
+}
+
+#[async_trait]
+impl Tool for ArgumentOnlyExternalTool {
+    fn spec(&self) -> crate::ToolSpec {
+        self.inner.spec()
+    }
+
+    fn permission_plan(
+        &self,
+        ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        self.inner.permission_plan(ctx, args)
+    }
+
+    fn argument_only_preview(&self) -> bool {
+        true
+    }
+
+    async fn preview(&self, _ctx: ToolContext, _args: Value) -> Result<Option<ToolPreview>> {
+        self.preview_calls.fetch_add(1, Ordering::SeqCst);
+        match self.preview_outcome {
+            0 => Ok(Some(ToolPreview {
+                title: "Exact argument-only action".to_owned(),
+                summary: "Frozen action context".to_owned(),
+                body: "complete original command\nlast action".to_owned(),
+                changed_files: Vec::new(),
+                file_diffs: Vec::new(),
+            })),
+            1 => Ok(None),
+            _ => anyhow::bail!("pure preview failed"),
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        self.inner.execute(ctx, call_id, args).await
     }
 }
 
@@ -8902,6 +8950,95 @@ async fn agent_requests_approval_for_external_directory_when_disabled_interactiv
                 && approval.external_directory_required
                 && approval.confirmation == Some(crate::PermissionConfirmation::TypePath)
     )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_argument_only_preview_preserves_external_risk_and_missing_review() -> Result<()> {
+    for preview_outcome in 0..3 {
+        let external_path = synthetic_external_test_root()?.join("outside.txt");
+        let executed = Arc::new(AtomicBool::new(false));
+        let preview_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ArgumentOnlyExternalTool {
+            inner: ExternalWriteTool {
+                executed: Arc::clone(&executed),
+                external_path: external_path.clone(),
+            },
+            preview_calls: Arc::clone(&preview_calls),
+            preview_outcome,
+        }));
+        let agent = Agent::new(WriteMockProvider, registry);
+        let mut session = Session::new("mock-write", "mock-model");
+        let mut handler = RecordingEventHandler::default();
+        let mut approval_handler = DenyWritesHandler;
+        agent
+            .run_with_approval(
+                &mut session,
+                "write outside",
+                AgentRunOptions {
+                    workspace_root: std::env::temp_dir(),
+                    max_turns: Some(4),
+                    tool_timeout_secs: 5,
+                    reasoning_effort: Some(ReasoningEffort::Medium),
+                    traffic_partition_key: None,
+                    interaction_mode: InteractionMode::Interactive,
+                    permission_config: PermissionConfig::default(),
+                    permission_mode_override: None,
+                    permission_context: crate::PermissionEvaluationContext::default(),
+                    memory_config: MemoryConfig::with_enabled(false),
+                    compaction_config: CompactionConfig::default(),
+                    tool_authority: None,
+                },
+                &mut handler,
+                &mut approval_handler,
+            )
+            .await?;
+        assert_eq!(preview_calls.load(Ordering::SeqCst), 1);
+        assert!(!executed.load(Ordering::SeqCst));
+        let preview = handler
+            .events
+            .iter()
+            .find_map(|event| {
+                if let RunEvent::ToolApprovalRequested {
+                    preview,
+                    subjects,
+                    confirmation,
+                    ..
+                } = event
+                {
+                    assert!(
+                        subjects
+                            .iter()
+                            .any(|subject| subject.scope == ToolSubjectScope::External)
+                    );
+                    assert_eq!(*confirmation, Some(crate::PermissionConfirmation::TypePath));
+                    Some(preview)
+                } else {
+                    None
+                }
+            })
+            .expect("actual external approval");
+        if preview_outcome == 0 {
+            let preview = preview
+                .as_ref()
+                .expect("complete pure action and external boundary");
+            assert_eq!(preview.title, "Exact argument-only action");
+            assert!(preview.summary.contains("outside the workspace"));
+            assert!(preview.body.contains("External directory access"));
+            assert!(preview.body.contains(&external_path.display().to_string()));
+            assert!(
+                preview
+                    .body
+                    .ends_with("complete original command\nlast action")
+            );
+        } else {
+            assert!(
+                preview.is_none(),
+                "missing/failed exact action must not become an approvable external-path-only or error preview"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -1051,6 +1051,9 @@ impl Session {
         entries.push(SessionLogEntry::Control(ControlEntry::ToolExecution(
             Box::new(execution),
         )));
+        if self.append_user_input_terminal_bundle(&entries)? {
+            return Ok(());
+        }
         if let Some(events) = self.append_bound_application_entries(&entries)? {
             self.advance_durable_session_entry_count(&events);
             return Ok(());

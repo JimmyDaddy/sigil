@@ -168,7 +168,7 @@ fn validate_record_scope(records: &[SessionStreamRecord], scope: &str) -> Result
     Ok(())
 }
 
-fn validate_prepared(
+pub(super) fn validate_prepared(
     records: &[SessionStreamRecord],
     binding: &ApplicationOperationBindingV1,
 ) -> Result<bool> {

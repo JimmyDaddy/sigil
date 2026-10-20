@@ -174,6 +174,207 @@ fn synthetic_display_record(sequence: u64, entry: SessionLogEntry) -> Result<Ses
 }
 
 #[test]
+fn conversation_display_rejects_cancel_without_exact_input_resolution_source() -> Result<()> {
+    let (_temp, store, session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("waiting-root", 1)?)?;
+    lifecycle.append_finalized_with_outbox(
+        &ConversationRunFinalizedEntryV1::new(
+            "waiting-root",
+            ConversationRunTerminalStatusV1::AwaitingUserInput,
+            None,
+            None,
+            10,
+            &SecretRedactor::empty(),
+        )?,
+        &terminal_outbox(
+            &scope,
+            "waiting-root",
+            1,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: "question".to_owned(),
+                generation: 1,
+                request_hash: format!("sha256:{}", "a".repeat(64)),
+            },
+        )?,
+    )?;
+    let mut records = store.read_event_records_writer()?;
+    let mut forged = terminal_outbox(&scope, "waiting-root", 2, PublicRunEventKind::RunCancelled)?;
+    forged.domain_event_id = records
+        .iter()
+        .find(|record| record.stored_event().event_kind() == Some(DurableEventType::RunFinalized))
+        .context("original awaiting terminal")?
+        .event_id()
+        .to_owned();
+    records.push(SessionStreamRecord::Stored(StoredEvent::new(
+        DurableEventType::PublicEventOutbox,
+        EventClass::Critical,
+        forged.public_event_id.clone(),
+        scope.clone(),
+        records.len() as u64 + 1,
+        serde_json::to_value(forged)?,
+    )?));
+    assert!(
+        canonical_display_page_from_records(&records, &scope, None, 50, None).is_err(),
+        "a valid checksum cannot authorize an input cancellation"
+    );
+    assert!(
+        display_index(&records).is_err(),
+        "incremental public entry must enforce the same typed boundary"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() -> Result<()> {
+    use sigil_kernel::{
+        AgentThreadId, LogicalRunId, SessionScopeId, UserInputActionV1, UserInputCommandId,
+        UserInputContinuationBindingV1, UserInputDecisionCommandV1, UserInputDecisionV1,
+        UserInputIdentityV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
+        UserInputRequestV1, UserInputRequestedV1, UserInputSourceV1,
+    };
+    for (decision, expected) in [
+        (
+            UserInputDecisionV1::RunCancelled,
+            ConversationDisplayStatusV1::Cancelled,
+        ),
+        (
+            UserInputDecisionV1::Declined,
+            ConversationDisplayStatusV1::Blocked,
+        ),
+    ] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&ConversationRunStartedEntryV1::new("input-root", 1)?)?;
+        let call = ToolCall {
+            id: "input-call".to_owned(),
+            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        };
+        let assistant = ModelMessage::assistant(None, vec![call.clone()]);
+        let assistant_id = assistant.id.clone();
+        session.append_assistant_message(assistant)?;
+        let request = UserInputRequestedV1::new(UserInputRequestV1 {
+            schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+            identity: UserInputIdentityV1 {
+                session_scope_id: SessionScopeId::new(&scope)?,
+                root_logical_run_id: LogicalRunId::new("input-root")?,
+                source_thread_id: AgentThreadId::new("main")?,
+                request_id: UserInputRequestId::new("input-request")?,
+                generation: 1,
+                source_binding_hash: format!(
+                    "sha256:{}",
+                    sigil_kernel::sha256_hex(&serde_json::to_vec(&call)?)
+                ),
+            },
+            source: UserInputSourceV1::Agent,
+            purpose: UserInputPurposeV1::Clarification,
+            prompt: "Choose the scope".to_owned(),
+            questions: vec![UserInputQuestionV1 {
+                id: "scope".to_owned(),
+                question: "Which scope?".to_owned(),
+                description: None,
+                required: true,
+                options: Vec::new(),
+                multiple: false,
+            }],
+            allowed_actions: vec![
+                UserInputActionV1::Submit,
+                UserInputActionV1::Decline,
+                UserInputActionV1::CancelRun,
+            ],
+            requested_at_unix_ms: 10,
+            continuation: Some(UserInputContinuationBindingV1 {
+                assistant_message_id: assistant_id,
+                tool_call_id: call.id,
+                provider_name: "provider".to_owned(),
+                model_name: "model".to_owned(),
+            }),
+        })?;
+        session.append_controls_with_public_outbox(
+            vec![ControlEntry::UserInputRequested(Box::new(request.clone()))],
+            "input-root",
+            1,
+        )?;
+        lifecycle.append_finalized_with_outbox(
+            &ConversationRunFinalizedEntryV1::new(
+                "input-root",
+                ConversationRunTerminalStatusV1::AwaitingUserInput,
+                None,
+                None,
+                10,
+                &SecretRedactor::empty(),
+            )?,
+            &terminal_outbox(
+                &scope,
+                "input-root",
+                2,
+                PublicRunEventKind::RunAwaitingUserInput {
+                    request_id: "input-request".to_owned(),
+                    generation: 1,
+                    request_hash: request.request_hash.clone(),
+                },
+            )?,
+        )?;
+        sigil_kernel::accept_user_input_decision(
+            &mut session,
+            UserInputDecisionCommandV1 {
+                identity: request.request.identity,
+                request_hash: request.request_hash,
+                command_id: UserInputCommandId::new("input-terminal")?,
+                decision,
+            },
+            20,
+        )?;
+        // Evict the terminal row's cached body. Rebuilding a page must hydrate its exact source
+        // with the original Awaiting context rather than relying on the newest transcript cache.
+        for index in 0..120 {
+            session.append_user_message(ModelMessage::user(format!("later message {index}")))?;
+        }
+        let records = store.read_event_records_writer()?;
+        let mut cursor = None;
+        let mut terminals = Vec::new();
+        loop {
+            let page = conversation_display_page_from_records(
+                &records,
+                &scope,
+                cursor.as_deref(),
+                50,
+                None,
+            )?;
+            assert_eq!(
+                page.terminal_frontier
+                    .as_ref()
+                    .map(|terminal| terminal.status),
+                Some(expected)
+            );
+            assert!(page.user_inputs.is_empty());
+            terminals.extend(
+                page.items
+                    .iter()
+                    .filter(|item| item.kind == ConversationDisplayItemKindV1::Terminal)
+                    .map(|item| item.status),
+            );
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert!(terminals.contains(&ConversationDisplayStatusV1::AwaitingUserInput));
+        assert_eq!(
+            terminals
+                .iter()
+                .filter(|status| **status == expected)
+                .count(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn conversation_display_index_accepts_verified_blank_gaps_and_rejects_overlap() -> Result<()> {
     let records = (1..=3)
         .map(|sequence| {

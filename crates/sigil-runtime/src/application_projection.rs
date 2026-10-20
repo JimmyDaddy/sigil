@@ -798,6 +798,7 @@ struct ProjectionEventState {
     approval_summary: Option<SafeText>,
     user_input_pending: bool,
     user_input_binding: Option<String>,
+    user_input_run_id: Option<String>,
     user_input_prompt: Option<SafeText>,
     revision_waiting_run_id: Option<String>,
     last_notice: Option<SafeText>,
@@ -818,6 +819,7 @@ impl ProjectionEventState {
             approval_summary: None,
             user_input_pending: false,
             user_input_binding: None,
+            user_input_run_id: None,
             user_input_prompt: None,
             revision_waiting_run_id: None,
             last_notice: None,
@@ -844,6 +846,7 @@ impl ProjectionEventState {
                 if state.revision_waiting_run_id.as_deref() == Some(&entry.run_id) {
                     state.user_input_pending = false;
                     state.user_input_binding = None;
+                    state.user_input_run_id = None;
                     state.user_input_prompt = None;
                     state.plan_status = "started";
                     state.revision_waiting_run_id = None;
@@ -868,6 +871,17 @@ impl ProjectionEventState {
                 };
                 state.run_active = false;
                 state.run_binding = None;
+                if matches!(
+                    entry.event.event,
+                    PublicRunEventKind::RunCancelled | PublicRunEventKind::RunBlocked { .. }
+                ) && state.user_input_run_id.as_deref() == Some(&entry.run_id)
+                {
+                    // The validated terminal successor retires only its own suspended input.
+                    state.user_input_pending = false;
+                    state.user_input_binding = None;
+                    state.user_input_run_id = None;
+                    state.user_input_prompt = None;
+                }
             }
             PublicRunEventKind::ApprovalRequested {
                 approval_identity,
@@ -900,6 +914,7 @@ impl ProjectionEventState {
                 state.run_active = false;
                 state.run_binding = None;
                 state.user_input_pending = true;
+                state.user_input_run_id = Some(entry.run_id.clone());
                 state.user_input_binding =
                     Some(format!("{request_id}:{generation}:{request_hash}"));
                 if revision_waiting {
@@ -919,6 +934,7 @@ impl ProjectionEventState {
                 state.user_input_binding = state
                     .user_input_pending
                     .then(|| format!("{request_id}:{generation}:{request_hash}"));
+                state.user_input_run_id = state.user_input_pending.then(|| entry.run_id.clone());
                 state.user_input_prompt = state
                     .user_input_pending
                     .then(|| safe_text(&request.prompt).ok())

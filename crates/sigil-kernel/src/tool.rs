@@ -3023,6 +3023,16 @@ pub trait Tool: Send + Sync {
         Ok(None)
     }
 
+    /// Allows preview formatting before external-directory approval.
+    ///
+    /// Opting in promises that preview uses only the original arguments and immutable tool
+    /// configuration: no filesystem reads, path resolution, process launch, or other effects.
+    /// The host still adds the exact external subjects and their risk notice. Missing or failed
+    /// argument-only previews remain unavailable rather than becoming a generic action review.
+    fn argument_only_preview(&self) -> bool {
+        false
+    }
+
     /// Materializes an immutable, one-shot artifact before permission evaluation.
     ///
     /// Tools whose exact mutation subjects are known only after an external planner response use
@@ -3231,6 +3241,10 @@ impl std::fmt::Debug for ResolvedToolInvocation {
 }
 
 impl ResolvedToolInvocation {
+    pub(crate) fn argument_only_preview(&self) -> bool {
+        self.tool.argument_only_preview()
+    }
+
     pub(crate) async fn prepare(
         &self,
         ctx: ToolContext,

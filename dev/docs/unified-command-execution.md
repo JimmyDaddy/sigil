@@ -32,6 +32,8 @@
 
 所有启动复用 immutable permission plan、结构化 Shell 分析、规范化路径、显式网络授权、受控环境和 RA 管理的资源。PTY 不意味着可信，命令名不意味着只读，等待预算不授予继续运行之外的权限。
 
+`exec_command` 声明 required preview，冻结完整原命令、请求工作目录和实际 shell 等执行上下文。它仅从原参数和不可变配置纯格式化；kernel 的默认关闭 argument-only 契约允许这一预览在外部目录授权前生成，同时保留既有外部目标及风险说明，其他工具不能借此提前读文件。Desktop 从同一审批的安全公开预览恢复审阅；缺失、失败或超预算不能退化成仍可批准的泛化标题、路径清单或截断命令。
+
 不继承任意用户凭据、HOME 或 shell startup 环境。受管执行的保留环境变量由 authority-issued ExecutionTemp 绑定；跨调用临时文件使用 session-scoped `$SIGIL_SCRATCH_DIR`，不能把任意 `/tmp` 路径或错误的 TMPDIR 推断为已授权 scratch。
 
 进程实际退出、取消、超时和清理分别保留真实结果。取消/超时后 owner 负责停止、回收与 artifact 收敛。每个执行的 deadline watchdog 由 process handle 持有，并在结束或 drop 时唤醒并 join；stdin 最多持有一个受管写入工作项，取消时中断并 join，不能丢弃阻塞写入后宣称清理完成。输出静默、用户未读取结果或模型结束等待，均不得使时限失效。旧日志保持 append-only，不重写历史工具名，不在恢复时自动重放悬空命令。历史调用名称可继续按当前记录结构展示，但注册表不保留第二套启动入口。

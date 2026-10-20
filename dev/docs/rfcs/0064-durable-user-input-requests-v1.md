@@ -189,6 +189,18 @@ Requested
 不允许从 terminal generation 回到 pending。重新提问使用同 request id 的新 generation，且 previous
 generation 必须 terminal。
 
+普通 Agent 提问的原 physical run 已以 `AwaitingUserInput` 结束；后续非 Submitted 决定不覆写该记录，
+也不为同一 run 追加第二条 `ConversationRunFinalized`。`RunCancelled` 以精确绑定原
+request identity/hash 的 `UserInputResolved(RunCancelled)` 发布 `RunCancelled` 后继；`Declined`
+以 `UserInputResolved(Declined)` 发布带明确原因的 `RunBlocked`，不伪装成取消或成功完成。
+DecisionAccepted、原内部 tool call 的结果与 Completed audit、Resolved、相邻 public outbox 及
+application operation commit marker（若绑定）必须在同一个 crash-safe batch。恢复和公开投影校验原
+Awaiting 绑定、typed 决定、tool settlement 与相邻 source/outbox，重放使用原公共事件身份与字节。
+continuation 再次提问时，request 的 root lineage 保持原值；终态目标由唯一匹配 request identity/hash 的
+当前 Awaiting run 决定，不能将后续问题的取消写到较早的 root run。两种决定均不 claim 或启动模型
+continuation；仅匹配该等待 run 的 pending input 被清除，独立 paused Task
+的状态保持由其 Task control authority 管理。Submitted 仍沿既有 claim/continuation 流程推进。
+
 ### 6.2 Durable entries
 
 kernel `ControlEntry` 新增 current-only V1 records：

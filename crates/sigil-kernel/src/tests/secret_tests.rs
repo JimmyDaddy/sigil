@@ -4,6 +4,20 @@ use super::{REDACTED_SECRET, SecretRedactor};
 use crate::SecretString;
 
 #[test]
+fn bearer_redaction_is_idempotent_for_complete_safe_markers() {
+    for raw in [
+        "Bearer approval-credential",
+        "Authorization: Bearer approval-credential",
+        "bEaReR\tapproval-credential; ordinary text",
+        "Bearer [redacted]",
+    ] {
+        let safe = super::redact_bearer_tokens(raw);
+        assert!(!safe.contains("approval-credential"));
+        assert_eq!(super::redact_bearer_tokens(&safe), safe);
+    }
+}
+
+#[test]
 fn redacts_known_secret_values_longest_first() {
     let redactor = SecretRedactor::from_values(["sk-secret", "secret"]);
 

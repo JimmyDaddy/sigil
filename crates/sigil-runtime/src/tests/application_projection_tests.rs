@@ -321,6 +321,39 @@ fn resumed_revision_run_started_clears_historical_waiting_projection() {
 }
 
 #[test]
+fn input_terminal_clears_only_its_matching_waiting_root() {
+    let waiting = outbox_entry(
+        1,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: "clarification".to_owned(),
+            generation: 1,
+            request_hash: "sha256:clarification".to_owned(),
+        },
+    );
+    let mut unrelated = outbox_entry(2, PublicRunEventKind::RunCancelled);
+    unrelated.run_id = "other-run".to_owned();
+    unrelated.event.run_id = unrelated.run_id.clone();
+    assert!(
+        ProjectionEventState::from_events(&[&waiting, &unrelated], &BTreeSet::new())
+            .user_input_pending
+    );
+    for terminal in [
+        PublicRunEventKind::RunCancelled,
+        PublicRunEventKind::RunBlocked {
+            reason: "declined".to_owned(),
+        },
+    ] {
+        let terminal = outbox_entry(3, terminal);
+        let state =
+            ProjectionEventState::from_events(&[&waiting, &unrelated, &terminal], &BTreeSet::new());
+        assert!(!state.user_input_pending);
+        assert!(state.user_input_binding.is_none());
+        assert!(state.user_input_prompt.is_none());
+        assert!(state.user_input_run_id.is_none());
+    }
+}
+
+#[test]
 fn awaiting_user_input_rebuild_is_inactive_and_preserves_durable_request() {
     let request = sigil_kernel::PublicUserInputRequestV1 {
         identity: sigil_kernel::UserInputIdentityV1 {

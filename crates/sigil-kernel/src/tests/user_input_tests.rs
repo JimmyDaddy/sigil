@@ -63,6 +63,520 @@ fn text_request_for_session(
     UserInputRequestedV1::new(request)
 }
 
+fn awaiting_input_session() -> Result<(
+    tempfile::TempDir,
+    JsonlSessionStore,
+    Session,
+    UserInputRequestedV1,
+)> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+    recorder.append_started(&crate::ConversationRunStartedEntryV1::new("root_run", 1)?)?;
+    let mut assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call_1".to_owned(),
+            name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    assistant.id = "assistant_1".to_owned();
+    session.append_assistant_message(assistant)?;
+    let requested = text_request_for_session(&session, "request_1", 1)?;
+    session.append_controls_with_public_outbox(
+        vec![ControlEntry::UserInputRequested(Box::new(
+            requested.clone(),
+        ))],
+        "root_run",
+        1,
+    )?;
+    let public = crate::PublicRunEvent::new(
+        session.session_scope_id(),
+        "root_run",
+        2,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: requested.request.identity.request_id.as_str().to_owned(),
+            generation: 1,
+            request_hash: requested.request_hash.clone(),
+        },
+    );
+    recorder.append_finalized_with_outbox(
+        &crate::ConversationRunFinalizedEntryV1::new(
+            "root_run",
+            crate::ConversationRunTerminalStatusV1::AwaitingUserInput,
+            None,
+            None,
+            10,
+            &crate::SecretRedactor::empty(),
+        )?,
+        &crate::PublicEventOutboxEntryV1 {
+            schema_version: crate::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: "awaiting-public".to_owned(),
+            domain_event_id: "awaiting-domain".to_owned(),
+            run_id: "root_run".to_owned(),
+            sequence: 2,
+            payload_digest: crate::stable_event_hash(serde_json::to_vec(&public)?),
+            event: public,
+        },
+    )?;
+    Ok((temp, store, session, requested))
+}
+
+#[test]
+fn ordinary_input_cancel_atomically_publishes_successor_and_replays_after_restart() -> Result<()> {
+    let (_temp, store, mut session, requested) = awaiting_input_session()?;
+    let before = store.read_event_records_writer()?;
+    let command = UserInputDecisionCommandV1 {
+        identity: requested.request.identity.clone(),
+        request_hash: requested.request_hash.clone(),
+        command_id: UserInputCommandId::new("cancel-original-root")?,
+        decision: UserInputDecisionV1::RunCancelled,
+    };
+    let receipt = accept_user_input_decision(&mut session, command.clone(), 20)?;
+    assert!(!receipt.continuation_required);
+    assert_eq!(
+        receipt.request.resolution,
+        Some(UserInputResolutionV1::RunCancelled)
+    );
+    let records = store.read_event_records_writer()?;
+    let appended = &records[before.len()..];
+    assert_eq!(
+        appended.len(),
+        5,
+        "decision, resolution/public successor, exact tool result and audit"
+    );
+    assert!(matches!(
+        appended[0].session_log_entry()?,
+        Some(SessionLogEntry::Control(
+            ControlEntry::UserInputDecisionAccepted(_)
+        ))
+    ));
+    assert!(matches!(
+        appended[1].session_log_entry()?,
+        Some(SessionLogEntry::ToolResultV3(_))
+    ));
+    assert!(
+        matches!(appended[2].session_log_entry()?, Some(SessionLogEntry::Control(ControlEntry::ToolExecution(ref execution))) if execution.status == ToolExecutionStatus::Completed)
+    );
+    assert!(matches!(
+        appended[3].session_log_entry()?,
+        Some(SessionLogEntry::Control(ControlEntry::UserInputResolved(_)))
+    ));
+    assert_eq!(
+        appended[4].stored_event().event_kind(),
+        Some(DurableEventType::PublicEventOutbox)
+    );
+    let outbox = session
+        .user_input_terminal_outbox(&requested.request.identity, &requested.request_hash)?
+        .expect("public cancellation");
+    assert_eq!(outbox.domain_event_id, appended[3].event_id());
+    assert_eq!(outbox.sequence, 3);
+    assert_eq!(
+        records
+            .iter()
+            .filter(
+                |record| record.stored_event().event_kind() == Some(DurableEventType::RunFinalized)
+            )
+            .count(),
+        1,
+        "original Awaiting is immutable"
+    );
+    let full = crate::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let mut incremental = crate::PublicEventOutboxValidatorV1::default();
+    for record in &records {
+        incremental.apply_record(record)?;
+    }
+    incremental.validate_cut()?;
+    assert_eq!(
+        incremental.durable_sequence("root_run"),
+        full.events_in_order().last().expect("last outbox").sequence
+    );
+    let path = store.path().to_owned();
+    let bytes = std::fs::read(&path)?;
+    drop(session);
+    drop(store);
+    // Release the shared writer as well as Session before reloading durable bytes.
+    let store = JsonlSessionStore::new(&path)?;
+    let mut reopened = Session::load_from_store("test", "model", store.clone())?;
+    assert!(accept_user_input_decision(&mut reopened, command.clone(), 99)?.idempotent_replay);
+    assert_eq!(
+        reopened
+            .user_input_terminal_outbox(&requested.request.identity, &requested.request_hash)?
+            .expect("same original outbox")
+            .public_event_id,
+        outbox.public_event_id
+    );
+    let mut drifted = command.clone();
+    drifted.decision = UserInputDecisionV1::Declined;
+    assert!(accept_user_input_decision(&mut reopened, drifted, 100).is_err());
+    let mut drifted = command;
+    drifted.request_hash = digest('b');
+    assert!(accept_user_input_decision(&mut reopened, drifted, 101).is_err());
+    assert_eq!(std::fs::read(store.path())?, bytes);
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_cancel_rejects_unbound_public_successor() -> Result<()> {
+    let (_temp, store, _session, _requested) = awaiting_input_session()?;
+    let mut records = store.read_event_records_writer()?;
+    let sequence = records.len() as u64 + 1;
+    let public = crate::PublicRunEvent::new(
+        records[0].session_id(),
+        "root_run",
+        3,
+        PublicRunEventKind::RunCancelled,
+    );
+    let outbox = crate::PublicEventOutboxEntryV1 {
+        schema_version: crate::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: "forged-cancel".to_owned(),
+        domain_event_id: "awaiting-domain".to_owned(),
+        run_id: "root_run".to_owned(),
+        sequence: 3,
+        payload_digest: crate::stable_event_hash(serde_json::to_vec(&public)?),
+        event: public,
+    };
+    records.push(crate::SessionStreamRecord::Stored(crate::StoredEvent::new(
+        DurableEventType::PublicEventOutbox,
+        EventClass::Critical,
+        outbox.public_event_id.clone(),
+        records[0].session_id().to_owned(),
+        sequence,
+        serde_json::to_value(outbox)?,
+    )?));
+    assert!(crate::PublicEventOutboxProjectionV1::from_records(&records).is_err());
+    let mut incremental = crate::PublicEventOutboxValidatorV1::default();
+    assert!(
+        records
+            .iter()
+            .try_for_each(|record| incremental.apply_record(record))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_terminal_rejects_changed_tool_settlement_or_awaiting_binding() -> Result<()> {
+    let (_temp, store, mut session, requested) = awaiting_input_session()?;
+    accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: requested.request.identity,
+            request_hash: requested.request_hash,
+            command_id: UserInputCommandId::new("cancel-for-validation")?,
+            decision: UserInputDecisionV1::RunCancelled,
+        },
+        20,
+    )?;
+    let records = store.read_event_records_writer()?;
+    for change_tool in [true, false] {
+        let mut changed = records.clone();
+        let (index, payload) = if change_tool {
+            let index = records
+                .iter()
+                .position(|record| {
+                    matches!(
+                        record.session_log_entry(),
+                        Ok(Some(SessionLogEntry::ToolResultV3(_)))
+                    )
+                })
+                .expect("tool settlement");
+            let Some(SessionLogEntry::ToolResultV3(mut result)) =
+                records[index].session_log_entry()?
+            else {
+                unreachable!()
+            };
+            result.call_id = "a-different-call".to_owned();
+            (
+                index,
+                serde_json::json!({"session_log_entry": SessionLogEntry::ToolResultV3(result)}),
+            )
+        } else {
+            let index = records
+                .iter()
+                .position(|record| record.event_id() == "awaiting-public")
+                .expect("original awaiting");
+            let mut outbox: crate::PublicEventOutboxEntryV1 =
+                serde_json::from_value(records[index].stored_event().payload.clone())?;
+            if let PublicRunEventKind::RunAwaitingUserInput { generation, .. } =
+                &mut outbox.event.event
+            {
+                *generation = 2;
+            }
+            outbox.payload_digest = crate::stable_event_hash(serde_json::to_vec(&outbox.event)?);
+            (index, serde_json::to_value(outbox)?)
+        };
+        let original = records[index].stored_event();
+        changed[index] = crate::SessionStreamRecord::Stored(crate::StoredEvent::new(
+            original.event_kind().expect("known event"),
+            original.event_class,
+            original.event_id.clone(),
+            original.session_id.clone(),
+            original.stream_sequence,
+            payload,
+        )?);
+        assert!(crate::PublicEventOutboxProjectionV1::from_records(&changed).is_err());
+        let mut incremental = crate::PublicEventOutboxValidatorV1::default();
+        assert!(
+            changed
+                .iter()
+                .try_for_each(|record| incremental.apply_record(record))
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_decline_is_blocked_without_cancelling_or_starting_continuation() -> Result<()> {
+    let (_temp, store, mut session, requested) = awaiting_input_session()?;
+    let receipt = accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: UserInputCommandId::new("decline-original-root")?,
+            decision: UserInputDecisionV1::Declined,
+        },
+        20,
+    )?;
+    assert_eq!(
+        receipt.request.resolution,
+        Some(UserInputResolutionV1::Declined)
+    );
+    assert!(!receipt.continuation_required);
+    let state = session.user_input_projection()?;
+    let state = state
+        .request(&requested.request.identity)
+        .expect("declined request");
+    assert!(state.claim.is_none());
+    assert!(state.continuation.is_none());
+    let outbox = session
+        .user_input_terminal_outbox(&requested.request.identity, &requested.request_hash)?
+        .expect("declined terminal");
+    assert!(
+        matches!(outbox.event.event, PublicRunEventKind::RunBlocked { ref reason } if reason.contains("declined"))
+    );
+    let records = store.read_event_records_writer()?;
+    crate::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let mut incremental = crate::PublicEventOutboxValidatorV1::default();
+    for record in &records {
+        incremental.apply_record(record)?;
+    }
+    incremental.validate_cut()?;
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_submission_keeps_original_waiting_until_continuation_claim() -> Result<()> {
+    let (_temp, store, mut session, requested) = awaiting_input_session()?;
+    let receipt = accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: UserInputCommandId::new("answer-original-root")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "kernel".to_owned(),
+                    },
+                }],
+            },
+        },
+        20,
+    )?;
+    assert!(receipt.continuation_required);
+    assert!(
+        session
+            .user_input_terminal_outbox(&requested.request.identity, &requested.request_hash)?
+            .is_none()
+    );
+    assert_eq!(
+        crate::PublicEventOutboxProjectionV1::from_records(&store.read_event_records_writer()?)?
+            .events_in_order()
+            .len(),
+        2
+    );
+    assert!(
+        session
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, SessionLogEntry::ToolResultV3(_)))
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_terminal_does_not_cancel_a_separately_paused_task() -> Result<()> {
+    let (_temp, _store, mut session, requested) = awaiting_input_session()?;
+    let task = crate::TaskRunEntry {
+        task_id: crate::TaskId::new("separately-paused-task")?,
+        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl")?,
+        objective: "complete a separate durable task".to_owned(),
+        title: None,
+        status: crate::TaskRunStatus::Paused,
+        reason: Some("paused by user".to_owned()),
+    };
+    session.append_control(ControlEntry::TaskRun(task.clone()))?;
+    accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: UserInputCommandId::new("cancel-clarification-not-task")?,
+            decision: UserInputDecisionV1::RunCancelled,
+        },
+        20,
+    )?;
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::TaskRun(task)) => Some(task),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![&task]
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_input_terminal_targets_the_current_waiting_continuation_not_the_root() -> Result<()> {
+    for decision in [
+        UserInputDecisionV1::RunCancelled,
+        UserInputDecisionV1::Declined,
+    ] {
+        let (_temp, store, mut session, first) = awaiting_input_session()?;
+        accept_user_input_decision(
+            &mut session,
+            UserInputDecisionCommandV1 {
+                identity: first.request.identity.clone(),
+                request_hash: first.request_hash.clone(),
+                command_id: UserInputCommandId::new("answer-first-question")?,
+                decision: UserInputDecisionV1::Submitted {
+                    answers: vec![UserInputAnswerV1 {
+                        question_id: "scope".to_owned(),
+                        value: UserInputAnswerValueV1::Text {
+                            value: "kernel".to_owned(),
+                        },
+                    }],
+                },
+            },
+            20,
+        )?;
+        let continuation = prepare_user_input_continuation(
+            &mut session,
+            &first.request.identity,
+            &first.request_hash,
+            "supervisor",
+            "physical-continuation",
+            30,
+        )?;
+        session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Resolved(
+            UserInputResolvedV1 {
+                schema_version: USER_INPUT_SCHEMA_VERSION,
+                identity: first.request.identity.clone(),
+                request_hash: first.request_hash,
+                resolution: UserInputResolutionV1::Consumed,
+                resolved_at_unix_ms: 40,
+            },
+        )])?;
+        let run_id = continuation
+            .continuation
+            .continuation_logical_run_id
+            .as_str();
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&crate::ConversationRunStartedEntryV1::new(run_id, 40)?)?;
+        let mut assistant = ModelMessage::assistant(
+            None,
+            vec![ToolCall {
+                id: "call_2".to_owned(),
+                name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        );
+        assistant.id = "assistant_2".to_owned();
+        session.append_assistant_message(assistant)?;
+        let mut request = text_request_for_session(&session, "second_question", 1)?.request;
+        let binding = request.continuation.as_mut().expect("agent continuation");
+        binding.assistant_message_id = "assistant_2".to_owned();
+        binding.tool_call_id = "call_2".to_owned();
+        let second = UserInputRequestedV1::new(request)?;
+        assert_ne!(second.request.identity.root_logical_run_id.as_str(), run_id);
+        session.append_controls_with_public_outbox(
+            vec![ControlEntry::UserInputRequested(Box::new(second.clone()))],
+            run_id,
+            1,
+        )?;
+        let public = crate::PublicRunEvent::new(
+            session.session_scope_id(),
+            run_id,
+            2,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: second.request.identity.request_id.as_str().to_owned(),
+                generation: 1,
+                request_hash: second.request_hash.clone(),
+            },
+        );
+        lifecycle.append_finalized_with_outbox(
+            &crate::ConversationRunFinalizedEntryV1::new(
+                run_id,
+                crate::ConversationRunTerminalStatusV1::AwaitingUserInput,
+                None,
+                None,
+                50,
+                &crate::SecretRedactor::empty(),
+            )?,
+            &crate::PublicEventOutboxEntryV1 {
+                schema_version: crate::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: "continuation-awaiting-public".to_owned(),
+                domain_event_id: "continuation-awaiting-domain".to_owned(),
+                run_id: run_id.to_owned(),
+                sequence: 2,
+                payload_digest: crate::stable_event_hash(serde_json::to_vec(&public)?),
+                event: public,
+            },
+        )?;
+        accept_user_input_decision(
+            &mut session,
+            UserInputDecisionCommandV1 {
+                identity: second.request.identity.clone(),
+                request_hash: second.request_hash.clone(),
+                command_id: UserInputCommandId::new("terminal-second-question")?,
+                decision,
+            },
+            60,
+        )?;
+        let public = session
+            .user_input_terminal_outbox(&second.request.identity, &second.request_hash)?
+            .expect("current waiting successor");
+        assert_eq!(public.run_id, run_id);
+        assert_eq!(public.sequence, 3);
+        let records = store.read_event_records_writer()?;
+        crate::PublicEventOutboxProjectionV1::from_records(&records)?;
+        let mut incremental = crate::PublicEventOutboxValidatorV1::default();
+        for record in &records {
+            incremental.apply_record(record)?;
+        }
+        incremental.validate_cut()?;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.stored_event().event_kind()
+                    == Some(DurableEventType::RunFinalized))
+                .count(),
+            2
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn request_user_input_options_allow_free_form_answers() -> Result<()> {
     let question: UserInputQuestionV1 = serde_json::from_value(serde_json::json!({
