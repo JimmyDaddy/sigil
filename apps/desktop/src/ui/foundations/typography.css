@@ -4,8 +4,8 @@
   font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --sg-sys-type-body-size: 14px;
-  --sg-sys-type-body-line-height: 20px;
+  --sg-sys-type-body-size: 15px;
+  --sg-sys-type-body-line-height: 24px;
   --sg-sys-type-label-size: 12px;
   --sg-sys-type-label-line-height: 16px;
   --sg-sys-type-title-size: 16px;
@@ -13,7 +13,7 @@
 }
 
 body {
-  background: radial-gradient(circle at 18% 12%, var(--sg-sys-color-canvas-glow), transparent 34rem), var(--sg-sys-color-canvas);
+  background: var(--sg-sys-color-canvas);
   font-size: var(--sg-sys-type-body-size);
   line-height: var(--sg-sys-type-body-line-height);
 }

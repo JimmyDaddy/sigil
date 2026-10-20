@@ -2407,15 +2407,31 @@ describe("desktop workspace and history shell", () => {
     expect(bootstrap).toHaveBeenCalledTimes(2);
   });
 
+  it("places everyday preferences before workspace extensions", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    const model = await screen.findByRole("heading", { name: "Default model for new conversations" });
+    const appearance = screen.getByRole("heading", { name: "Appearance" });
+    const extensions = screen.getByRole("heading", { name: "Import MCP servers" });
+    expect(model.compareDocumentPosition(extensions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(appearance.compareDocumentPosition(extensions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByRole("button", { name: "Choose JSON file" })).toBeTruthy();
+  });
+
   it("resizes and persists the desktop conversation sidebar", async () => {
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
     })} />);
 
     const separator = await screen.findByRole("separator", { name: "Resize conversation sidebar" });
+    expect(separator.getAttribute("aria-valuenow")).toBe("280");
     fireEvent.keyDown(separator, { key: "ArrowRight" });
-    expect(separator.getAttribute("aria-valuenow")).toBe("336");
-    expect(window.localStorage.getItem("sigil.desktop.navigation-width.v1")).toBe("336");
+    expect(separator.getAttribute("aria-valuenow")).toBe("296");
+    expect(window.localStorage.getItem("sigil.desktop.navigation-width.v1")).toBe("296");
   });
 
   it("opens a workspace, creates a conversation, and closes the owned server", async () => {
@@ -2900,7 +2916,8 @@ describe("desktop workspace and history shell", () => {
     expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
     expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
-    expect(within(workspaceRegion).getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+    await user.click(within(workspaceRegion).getByRole("button", { name: "Context and cache details" }));
+    expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
   });
 
   it("keeps local text and image drafts editable through history failure and retry", async () => {
@@ -6342,7 +6359,9 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
+    await user.click(screen.getByRole("button", { name: "Context and cache details" }));
     expect(screen.getByRole("meter", { name: "Context usage 3%" })).toBeTruthy();
+    await user.keyboard("{Escape}");
     const composer = await readyComposer();
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
     await user.selectOptions(screen.getByRole("combobox", { name: "Reasoning effort" }), "high");

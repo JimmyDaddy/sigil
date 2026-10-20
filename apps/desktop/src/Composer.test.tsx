@@ -379,9 +379,10 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
-  it("shows provider-neutral cache usage beside context pressure", async () => {
+  it("keeps provider-neutral cache diagnostics in the context detail popover", async () => {
     renderComposer();
-
+    expect(screen.queryByLabelText("Prompt cache hit ratio 90%")).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Context and cache details" }));
     const cache = screen.getByLabelText("Prompt cache hit ratio 90%");
     expect(cache.textContent).toBe("Cache 90%");
     const tooltipAnchor = cache.closest(".sg-tooltip-anchor");
@@ -402,7 +403,7 @@ describe("structured composer", () => {
         },
       },
     });
-
+    await userEvent.setup().click(screen.getByRole("button", { name: "Context and cache details" }));
     const cache = screen.getByLabelText("Prompt cache hit ratio 90%");
     expect(cache.classList.contains("cache-warning")).toBe(true);
     const tooltipAnchor = cache.closest(".sg-tooltip-anchor");
@@ -411,6 +412,22 @@ describe("structured composer", () => {
     expect((await screen.findByRole("tooltip")).textContent).toContain(
       "Provider reported a cache miss although the local stable prefix did not change",
     );
+  });
+
+  it("omits unknown context metadata while keeping the prompt and model usable", () => {
+    renderComposer({ runContext: { ...context, lastPromptTokens: undefined, contextWindowTokens: undefined, cacheUsage: undefined } });
+    expect(screen.queryByText("Context —")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Context and cache details" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBeTruthy();
+    expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it("keeps observed cache diagnostics available when context capacity is unknown", async () => {
+    renderComposer({ runContext: { ...context, contextWindowTokens: undefined } });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Context and cache details" }));
+    expect(screen.queryByRole("meter")).toBeNull();
+    expect(screen.getByLabelText("Prompt cache hit ratio 90%")).toBeTruthy();
+    expect(screen.queryByText("Context —")).toBeNull();
   });
 
   it.each(["unverified", "configured_unavailable"] as const)("keeps %s models selectable", async (availability) => {

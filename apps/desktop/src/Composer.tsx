@@ -669,7 +669,6 @@ export function Composer({
               </div>
             ) : null}
             <ContextUsage context={runContext} loading={runContextBusy} />
-            <CacheUsage context={runContext} loading={runContextBusy} />
           </div>
           <div className="composer-actions">
             <Popover
@@ -867,11 +866,12 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
   const { t } = useLocale();
   const used = context?.lastPromptTokens;
   const limit = context?.contextWindowTokens;
-  if (loading) {
-    return <span className="context-usage context-unavailable" aria-label={t("contextLoading")}>{t("contextLoading")}</span>;
-  }
+  if (loading) return null;
   if (used === undefined || limit === undefined || limit === 0) {
-    return <span className="context-usage context-unavailable" aria-label={t("contextUnavailable")}>{t("contextUnavailable")}</span>;
+    const cache = context?.cacheUsage;
+    if (cache === undefined || cache.cacheReadTokens + cache.cacheMissTokens === 0) return null;
+    return <Popover className="composer-context" accessibleLabel={t("contextDetails")}
+      label={<Icon name="stack" />}><CacheUsage context={context} loading={false} /></Popover>;
   }
   const boundedUsed = Math.min(used, limit);
   const ratio = boundedUsed / limit;
@@ -879,7 +879,9 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
   const percentLabel = percent < 1 ? percent.toFixed(1) : Math.round(percent).toString();
   const style = { "--context-used": `${ratio * 100}%` } as CSSProperties;
   return (
-    <Tooltip label={t("contextTokens", { used: formatTokens(used), limit: formatTokens(limit) })}>
+    <Popover className="composer-context" accessibleLabel={t("contextDetails")}
+      label={<span><Icon name="stack" />{percentLabel}%</span>}>
+      <strong>{t("contextTokens", { used: formatTokens(used), limit: formatTokens(limit) })}</strong>
       <span
         className="context-usage"
         role="meter"
@@ -892,7 +894,8 @@ function ContextUsage({ context, loading }: { context?: RunContext; loading: boo
         <span className="context-track" aria-hidden="true"><span /></span>
         <span>{percentLabel}%</span>
       </span>
-    </Tooltip>
+      <CacheUsage context={context} loading={loading} />
+    </Popover>
   );
 }
 

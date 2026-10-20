@@ -311,14 +311,6 @@ export function SettingsPage({
             ) : null}
         </section>
 
-        {workspaceId !== undefined && sessionId !== undefined && <PluginReviewCard key={`${workspaceId}:${sessionId}`} bridge={bridge} workspaceId={workspaceId} sessionId={sessionId} />}
-
-        {workspaceId !== undefined && <McpImportCard key={workspaceId}
-          bridge={bridge} workspaceId={workspaceId}
-          onImported={async () => {
-            if (isWorkspaceActive()) await onProviderConfigurationReloaded(workspaceId);
-          }} />}
-
         <section className="settings-section" aria-labelledby="settings-model">
           <div className="settings-section-heading">
             <Icon name="model" />
@@ -497,6 +489,14 @@ export function SettingsPage({
             onChange={(event) => updateStartup(event.currentTarget.checked)}
           />
         </section>
+
+        {workspaceId !== undefined && sessionId !== undefined && <PluginReviewCard key={`${workspaceId}:${sessionId}`} bridge={bridge} workspaceId={workspaceId} sessionId={sessionId} />}
+
+        {workspaceId !== undefined && <McpImportCard key={workspaceId}
+          bridge={bridge} workspaceId={workspaceId}
+          onImported={async () => {
+            if (isWorkspaceActive()) await onProviderConfigurationReloaded(workspaceId);
+          }} />}
 
         <DesktopUpdateCard bridge={bridge} />
 

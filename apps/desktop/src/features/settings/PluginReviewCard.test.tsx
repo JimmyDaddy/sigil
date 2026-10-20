@@ -11,6 +11,20 @@ const plugin: PluginReview = { pluginId: "review", name: "Review tools", version
   capabilityDigest: "sha256:capabilities", trust: "needs_review",
   capabilities: [{ kind: "mcp", label: "browser", approval: "ask", allowSecrets: false, egressLogging: true }] };
 
+it("keeps an empty catalog compact but exposes a refresh failure", async () => {
+  const user = userEvent.setup();
+  const pluginCatalog = vi.fn().mockResolvedValueOnce({ plugins: [], warningCount: 0 })
+    .mockRejectedValueOnce(new Error("unavailable"));
+  const bridge = { pluginCatalog } as unknown as DesktopBridge;
+  render(<LocaleProvider><PluginReviewCard bridge={bridge} workspaceId="workspace" sessionId="session" /></LocaleProvider>);
+  await screen.findByText("No workspace plugins were found.");
+  const region = screen.getByRole("region", { name: "Workspace plugins" });
+  expect(region.classList.contains("settings-extension-empty")).toBe(true);
+  await user.click(screen.getByRole("button", { name: "Refresh source" }));
+  expect(await screen.findByRole("alert")).toBeTruthy();
+  expect(region.classList.contains("settings-extension-empty")).toBe(false);
+});
+
 it("uses the exact displayed declaration and retains ordinary approvals", async () => {
   const user = userEvent.setup();
   const pluginCatalog = vi.fn().mockResolvedValue({ plugins: [plugin], warningCount: 0 });

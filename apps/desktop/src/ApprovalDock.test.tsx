@@ -13,6 +13,24 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+it("uses a compact acceptance receipt while keeping uncertain delivery actionable", () => {
+  const approval: TimelineApproval = { callId: "receipt-call", toolName: "exec_command",
+    approvalRequestId: "receipt-request", toolCallHash: "a".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false };
+  const props = { approval, busy: false, composerRef: createRef<HTMLTextAreaElement>(),
+    onDecision: vi.fn(), onOpenSettings: vi.fn(), onOpenSupport: vi.fn() };
+  const view = render(<LocaleProvider><ApprovalDock {...props} phase="accepted" /></LocaleProvider>);
+  expect(screen.getByRole("status").classList.contains("approval-receipt")).toBe(true);
+  expect(view.container.querySelector(".approval-dock")).toBeNull();
+  expect(view.container.querySelector("details")?.open).toBe(false);
+  expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+  view.rerender(<LocaleProvider><ApprovalDock {...props} phase="delivery_uncertain" /></LocaleProvider>);
+  expect(view.container.querySelector(".approval-dock-delivery_uncertain")).toBeTruthy();
+  expect(screen.getByText("Approval status needs confirmation")).toBeTruthy();
+  expect(view.container.querySelector(".approval-receipt")).toBeNull();
+  expect(props.onDecision).not.toHaveBeenCalled();
+});
+
 it("focuses the review scroll region for a new exact request without stealing same-guard focus", () => {
   const composerRef = createRef<HTMLTextAreaElement>();
   const onDecision = vi.fn();

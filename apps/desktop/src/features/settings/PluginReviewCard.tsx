@@ -82,7 +82,14 @@ export function PluginReviewCard({ bridge, workspaceId, sessionId }: {
     }
   };
 
-  return <section className="settings-section" aria-label={t("workspacePlugins")}>
+  if (catalog?.plugins.length === 0 && !error && !saved && !catalog.warningCount) {
+    return <section className="settings-section settings-extension-empty" aria-label={t("workspacePlugins")}>
+      <header><h2>{t("workspacePlugins")}</h2><p>{t("noWorkspacePlugins")}</p></header>
+      <Button type="button" variant="quiet" busy={pending} onClick={() => void refresh()}>{t("refreshReview")}</Button>
+    </section>;
+  }
+
+  return <section className="settings-section settings-extensions" aria-label={t("workspacePlugins")}>
     <header><h2>{t("workspacePlugins")}</h2><p>{t("workspacePluginsDetail")}</p></header>
     <Button type="button" busy={pending} onClick={() => void refresh()}>{t("refreshReview")}</Button>
     {error && <p role="alert">{t("pluginReviewFailed")}</p>}

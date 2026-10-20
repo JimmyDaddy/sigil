@@ -156,6 +156,9 @@ describe("Sigil UI primitives", () => {
     const trigger = screen.getByRole("button", { name: "Actions" });
     fireEvent.keyDown(trigger, { key: "ArrowDown" });
     await waitFor(() => expect(document.activeElement?.textContent).toBe("Open"));
+    const menu = screen.getByRole("menu", { name: "Actions" });
+    expect(trigger.getAttribute("aria-controls")).toBe(menu.id);
+    expect(menu.querySelectorAll("[role='menuitem']")).toHaveLength(3);
     fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
     expect(document.activeElement?.textContent).toBe("Save");
     fireEvent.click(document.activeElement as HTMLElement);

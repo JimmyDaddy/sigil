@@ -39,7 +39,7 @@ describe("desktop UI catalog contract", () => {
 
     for (const fixture of catalogFixtures) {
       expect(fixture.themes).toEqual(THEME_PREFERENCES);
-      expect(fixture.viewports).toEqual([1280, 1024, 900, 899, 760, 320]);
+      expect(fixture.viewports).toEqual([1280, 1024, 900, 899, 840, 760, 320]);
       expect(fixture.contrastModes).toEqual(["normal", "forced-colors"]);
       expect(fixture.motionModes).toEqual(["full", "reduced"]);
       expect(fixture.zoomFactors).toEqual([1, 2]);

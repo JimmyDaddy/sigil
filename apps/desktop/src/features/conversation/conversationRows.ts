@@ -17,6 +17,7 @@ interface TimelineRowBase {
   status?: string;
   contentTruncated?: boolean;
   images?: MessageView["images"];
+  presentation?: MessageView["presentation"];
   sourceStreamSequence?: string;
 }
 
@@ -281,6 +282,7 @@ function projectDisplayItem(
           : denied ? t("approvalDeniedDetail") : cancelled ? t("approvalCancelledDetail")
             : closed ? t("approvalClosedDetail") : t("toolWaitingDecision", { tool: content.toolName }),
         status: approved ? "approved" : denied ? "denied" : closed ? item.status : "waiting",
+        ...(approved ? { presentation: "approval_receipt" as const } : {}),
       }];
     }
     case "checkpoint":

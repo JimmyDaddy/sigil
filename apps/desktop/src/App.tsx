@@ -83,7 +83,7 @@ const EMPTY_CATALOG: CatalogPage = {
   entries: [],
 };
 const NAVIGATION_WIDTH_STORAGE_KEY = "sigil.desktop.navigation-width.v1";
-const DEFAULT_NAVIGATION_WIDTH = 320;
+const DEFAULT_NAVIGATION_WIDTH = 280;
 const MIN_NAVIGATION_WIDTH = 280;
 const MAX_NAVIGATION_WIDTH = 480;
 

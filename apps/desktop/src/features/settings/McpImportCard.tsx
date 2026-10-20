@@ -53,9 +53,9 @@ export function McpImportCard({ bridge, workspaceId, onImported }: {
     }
   }
 
-  return <section className="settings-section" aria-labelledby="settings-mcp-import">
-    <h2 id="settings-mcp-import">{t("mcpImportTitle")}</h2>
-    <p>{t("mcpImportDetail")}</p>
+  return <section className="settings-section settings-mcp-import" aria-labelledby="settings-mcp-import">
+    <header><h2 id="settings-mcp-import">{t("mcpImportTitle")}</h2>
+      <p>{t("mcpImportDetail")}</p></header>
     <Button type="button" variant="secondary" disabled={busy} onClick={() => void pick()}>
       {busy ? t("loading") : t("mcpImportPick")}
     </Button>

@@ -26,6 +26,7 @@ export interface PopoverProps {
   readonly panelRole?: "dialog" | "presentation";
   readonly triggerRef?: RefObject<HTMLButtonElement | null>;
   readonly align?: "start" | "end";
+  readonly controlsId?: string;
 }
 
 export function Popover({
@@ -39,6 +40,7 @@ export function Popover({
   panelRole = "dialog",
   triggerRef: externalTriggerRef,
   align = "end",
+  controlsId,
 }: PopoverProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -141,7 +143,7 @@ export function Popover({
         aria-label={accessibleLabel}
         aria-haspopup={triggerPopup}
         aria-expanded={open}
-        aria-controls={open ? panelId : undefined}
+        aria-controls={open ? controlsId ?? panelId : undefined}
         onClick={() => updateOpen(!open)}
         onKeyDown={(event) => {
           if (event.key !== "ArrowDown" || open) return;
@@ -172,6 +174,8 @@ export function Popover({
 
 export function Menu({ label, accessibleLabel, children }: { readonly label: ReactNode; readonly accessibleLabel?: string; readonly children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const menuLabel = accessibleLabel ?? (typeof label === "string" ? label : undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dismiss = () => {
     setOpen(false);
@@ -187,9 +191,10 @@ export function Menu({ label, accessibleLabel, children }: { readonly label: Rea
       triggerPopup="menu"
       panelRole="presentation"
       triggerRef={triggerRef}
+      controlsId={menuId}
     >
       <MenuDismissContext.Provider value={dismiss}>
-        <MenuItems>{children}</MenuItems>
+        <MenuItems id={menuId} label={menuLabel}>{children}</MenuItems>
       </MenuDismissContext.Provider>
     </Popover>
   );
@@ -197,7 +202,7 @@ export function Menu({ label, accessibleLabel, children }: { readonly label: Rea
 
 const MenuDismissContext = createContext<() => void>(() => undefined);
 
-function MenuItems({ children }: { readonly children: ReactNode }) {
+function MenuItems({ id, label, children }: { readonly id: string; readonly label?: string; readonly children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>("[role='menuitem']:not([aria-disabled='true'])")?.focus();
@@ -220,7 +225,7 @@ function MenuItems({ children }: { readonly children: ReactNode }) {
     event.preventDefault();
     items[next]?.focus();
   };
-  return <div className="sg-menu-items" ref={ref} role="menu" onKeyDown={onKeyDown}>{children}</div>;
+  return <div id={id} className="sg-menu-items" ref={ref} role="menu" aria-label={label} onKeyDown={onKeyDown}>{children}</div>;
 }
 
 export function MenuItem({ children, disabled = false, onSelect }: { readonly children: ReactNode; readonly disabled?: boolean; readonly onSelect?: () => void }) {

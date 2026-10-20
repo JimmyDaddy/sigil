@@ -9,6 +9,7 @@ import type {
   TimelineApproval,
 } from "./types";
 import { Button, Collapsible } from "./ui/primitives";
+import { Icon } from "./ui/icons";
 
 export function ApprovalDock({
   approval,
@@ -64,6 +65,21 @@ export function ApprovalDock({
       code === "unsupported_syntax" || code === "invalid_syntax"
     ) === true;
   const deliveryPresentation = presentDeliveryStatus(phase, t);
+  if (phase === "accepted") {
+    return (
+      <section className="approval-receipt" ref={dockRef} role="status"
+        data-approval-product-status={deliveryPresentation.status}>
+        <Icon name="check" />
+        <span>{t("approvalAcceptedTitle")}</span>
+        <Collapsible label={t("showDetails")}>
+          <p>{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</p>
+          <p>{deliveryPresentation.message}</p>
+          <p>{deliveryPresentation.nextStep}</p>
+          <small>{deliveryPresentation.technicalDetail}</small>
+        </Collapsible>
+      </section>
+    );
+  }
   if (phase !== "pending") {
     return (
       <section
@@ -76,7 +92,7 @@ export function ApprovalDock({
         <header>
           <div>
             <p className="eyebrow">
-              {phase === "accepted" ? t("approvalAcceptedTitle") : t("approvalUncertainTitle")}
+              {t("approvalUncertainTitle")}
             </p>
             <h3 id="approval-title">{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3>
           </div>

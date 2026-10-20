@@ -42,6 +42,16 @@ describe("canonical conversation rows", () => {
     content: { type: "approval", callId: "call-approval", toolName: "apply_changeset" },
   } });
 
+  it("marks only a typed approved fact as a compact receipt and preserves every decision", () => {
+    const notice = pendingNotice();
+    for (const status of ["approved", "denied", "interrupted", "failed", "cancelled"] as const) {
+      const rows = projectConversationRows([{ ...notice, item: { ...notice.item, status } }], [], translateEnglish);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].presentation).toBe(status === "approved" ? "approval_receipt" : undefined);
+      expect(rows[0].text).not.toBe("");
+    }
+  });
+
   it("projects a visible exact pending review once without changing its canonical placeholders", () => {
     const entries = [pendingStub(), pendingNotice()];
     expect(projectConversationRows(entries, [], translateEnglish, [], visibleApproval)).toEqual([]);

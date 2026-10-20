@@ -3,6 +3,7 @@ import { useLayoutEffect, useState } from "react";
 import type { ImageReference } from "./types";
 import { Button } from "./ui/primitives";
 import { useLocale } from "./i18n";
+import { Icon } from "./ui/icons";
 import { MessageContent } from "./MessageContent";
 import { MessageContentPager, type ReadMessageContent } from "./MessageContentPager";
 
@@ -21,6 +22,7 @@ export interface MessageView {
   status?: string;
   contentTruncated?: boolean;
   images?: ImageReference[];
+  presentation?: "approval_receipt";
 }
 
 export function Message({
@@ -44,6 +46,14 @@ export function Message({
   useLayoutEffect(() => {
     setDisclosureOpen(false);
   }, [message.key]);
+  if (message.presentation === "approval_receipt") {
+    return (
+      <details className="message-receipt" data-display-id={displayId}>
+        <summary><Icon name="check" /><span>{message.label}</span></summary>
+        <p>{message.text}</p>
+      </details>
+    );
+  }
   if (message.kind === "reasoning" || message.kind === "progress") {
     const preview = message.kind === "progress" ? disclosurePreview(message.text) : "";
     return (

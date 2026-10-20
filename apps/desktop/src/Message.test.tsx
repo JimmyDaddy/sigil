@@ -12,6 +12,21 @@ function content(message: MessageView) {
 }
 
 describe("message disclosures", () => {
+  it("keeps a typed approval receipt compact with its audit detail available", async () => {
+    const user = userEvent.setup();
+    const message: MessageView = { key: "approval-1", kind: "notice", label: "Approved",
+      text: "The tool request was approved.", status: "approved", presentation: "approval_receipt" };
+    const view = render(content(message));
+    const receipt = view.container.querySelector("details.message-receipt") as HTMLDetailsElement;
+    expect(receipt.open).toBe(false);
+    expect(view.container.querySelector("article.message-notice")).toBeNull();
+    await user.click(screen.getByText("Approved"));
+    await waitFor(() => expect(receipt.open).toBe(true));
+    expect(receipt.textContent).toContain(message.text);
+    view.rerender(content({ ...message, kind: "error", status: "failed", presentation: undefined, text: "The write failed" }));
+    expect(view.container.querySelector("details.message-receipt")).toBeNull();
+    expect(view.container.querySelector("article.message-error")?.textContent).toContain("The write failed");
+  });
   it.each(["reasoning", "progress"] as const)("preserves the user's %s choice through updates and completion, then resets for a new message", async (kind) => {
     const user = userEvent.setup();
     const message: MessageView = {

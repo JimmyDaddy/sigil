@@ -14,7 +14,7 @@ import type {
 export const UI_CATALOG_MARKER = "sigil-desktop-dev-ui-catalog";
 
 export type CatalogTheme = ThemePreference;
-export type CatalogViewport = 1280 | 1024 | 900 | 899 | 760 | 320;
+export type CatalogViewport = 1280 | 1024 | 900 | 899 | 840 | 760 | 320;
 export type CatalogContrast = "normal" | "forced-colors";
 export type CatalogMotion = "full" | "reduced";
 
@@ -48,7 +48,7 @@ export interface CatalogFixture {
 }
 
 const allThemes = THEME_PREFERENCES;
-const allViewports = [1280, 1024, 900, 899, 760, 320] as const;
+const allViewports = [1280, 1024, 900, 899, 840, 760, 320] as const;
 const allContrastModes = ["normal", "forced-colors"] as const;
 const allMotionModes = ["full", "reduced"] as const;
 const allZoomFactors = [1, 2] as const;

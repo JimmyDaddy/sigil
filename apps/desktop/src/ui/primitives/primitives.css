@@ -55,9 +55,9 @@
   .sg-popover-trigger { padding: 7px 10px; color: var(--sg-sys-color-on-surface-variant); font-size: 12px; font-weight: 700; }
   .sg-popover-trigger[aria-expanded="true"] { border-color: var(--sg-sys-color-primary); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-hover); }
   .sg-popover-panel { z-index: var(--sg-sys-z-popover); width: min(280px, calc(100vw - var(--sg-sys-space-6))); padding: var(--sg-sys-space-3); border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-lg); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-container-high); box-shadow: var(--sg-sys-elevation-modal); }
-  .sg-menu-panel { width: 136px; }
+  .sg-menu-panel { width: max-content; min-width: 160px; max-width: calc(100vw - var(--sg-sys-space-6)); padding: var(--sg-sys-space-1); }
   .sg-menu-items { display: grid; gap: 2px; }
-  .sg-menu-item { width: 100%; justify-content: flex-start; padding: 7px 9px; border-color: transparent; background: transparent; text-align: left; }
+  .sg-menu-item { width: 100%; justify-content: flex-start; padding: 7px 9px; border-color: transparent; background: transparent; text-align: left; font-size: 13px; font-weight: 400; }
 
   .sg-modal-backdrop { position: fixed; z-index: var(--sg-sys-z-modal); inset: 0; display: grid; place-items: center; padding: var(--sg-sys-space-6); }
   .sg-modal-scrim { position: absolute; inset: 0; border: 0; background: var(--sg-sys-color-overlay); cursor: default; }
