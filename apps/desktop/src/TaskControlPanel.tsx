@@ -44,6 +44,8 @@ export function TaskControlPanel({
   const canPause = runActive
     && task.execution !== undefined
     && isTaskRunningStatus(task.status);
+  const needsAttention = ["paused", "blocked", "uncertain", "failed", "cancelled", "interrupted"]
+    .includes(statusPresentation.status);
 
   return (
     <section
@@ -53,13 +55,12 @@ export function TaskControlPanel({
     >
       <header>
         <div>
-          <span className="task-control-eyebrow">{t("task")}</span>
-          <h3 id="task-control-title">{task.objective ?? t("taskInProgress")}</h3>
+          <h3 id="task-control-title">{task.objective ?? t("task")}</h3>
         </div>
         <div className="task-control-header-actions">
-          <span className={`task-status task-status-${statusPresentation.status}`}>
+          {runActive && !needsAttention ? null : <span className={`task-status task-status-${statusPresentation.status}`}>
             {statusPresentation.label}
-          </span>
+          </span>}
           {canPause ? (
             <Tooltip label={t("pauseTaskDetail")}>
               <Button
@@ -74,10 +75,10 @@ export function TaskControlPanel({
           ) : null}
         </div>
       </header>
-      <section className="task-status-copy" role="status" aria-live="polite">
+      {needsAttention ? <section className="task-status-copy" role="status" aria-live="polite">
         <p>{statusPresentation.message}</p>
         <small><strong>{t("nextStepLabel")}:</strong> {statusPresentation.nextStep}</small>
-      </section>
+      </section> : null}
 
       <div className="task-control-meta">
         {task.planVersion === undefined ? null : <span>{t("taskPlanVersion", { version: task.planVersion })}</span>}
@@ -92,6 +93,7 @@ export function TaskControlPanel({
 
       <details className="task-status-details">
         <summary>{t("showDetails")}</summary>
+        {needsAttention ? null : <p>{statusPresentation.message}</p>}
         <p><strong>{t("technicalDetailsLabel")}:</strong> {statusPresentation.technicalDetail}</p>
         <dl className="task-control-meta">
           <div><dt>{t("taskId")}</dt><dd><code>{task.taskId}</code></dd></div>

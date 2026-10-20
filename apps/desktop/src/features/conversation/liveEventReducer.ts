@@ -91,6 +91,8 @@ export interface LiveEventState {
   routeRecovery?: TimelineEvent;
   /** Most recent provider-turn recovery for the active run, projected without attempt identity. */
   providerTurnRecovery?: TimelineEvent;
+  /** Same-run progress/settlement frontier that retired automatic retry presentation. */
+  retiredProviderRecoverySequences: ReadonlyMap<string, string>;
 }
 
 export type LiveEventAction =
@@ -122,6 +124,7 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     taskEvents: new Map(),
     terminalTasks: new Map(),
     terminalSignals: new Map(),
+    retiredProviderRecoverySequences: new Map(),
   };
 }
 
@@ -302,7 +305,11 @@ export function selectLatestApprovalPresentation(
 ): ApprovalPresentation | undefined {
   const presentations = [...state.controlEvents.entries()]
     .flatMap(([key, event]) => {
-      const phase = state.approvalLifecycles.get(key)?.phase;
+      const lifecycle = state.approvalLifecycles.get(key);
+      if (event.approval !== undefined && (lifecycle?.runId !== event.runId
+        || lifecycle.callId !== event.approval.callId
+        || lifecycle.approvalRequestId !== event.approval.approvalRequestId)) return [];
+      const phase = lifecycle?.phase;
       const presentationPhase = phase === "resolving" || phase === "resolved"
         ? "accepted"
         : phase;
@@ -502,11 +509,26 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
     next = { ...next, routeRecovery: undefined };
   }
   if (event.kind === "provider_turn_recovery" && event.providerTurnRecovery !== undefined) {
-    next = { ...next, providerTurnRecovery: event };
-  } else if (event.kind === "run_started" && next.providerTurnRecovery !== undefined) {
+    const retiredThrough = next.retiredProviderRecoverySequences.get(event.runId) ?? "0";
+    const current = next.providerTurnRecovery;
+    if ((!automaticProviderRecovery(event) || compareRunSequence(event.runSequence, retiredThrough) > 0)
+      && (current?.runId !== event.runId
+        || compareRunSequence(event.runSequence, current.runSequence) > 0)) {
+      next = { ...next, providerTurnRecovery: event };
+    }
+  } else if (event.kind === "run_started" && next.providerTurnRecovery !== undefined
+    && compareRunSequence(event.runSequence, next.retiredProviderRecoverySequences.get(event.runId) ?? "0") > 0
+    && (next.providerTurnRecovery.runId !== event.runId
+      || compareRunSequence(event.runSequence, next.providerTurnRecovery.runSequence) > 0)) {
+    const previous = next.providerTurnRecovery;
+    next = retireProviderTurnRecovery(next, previous.runId, previous.runSequence);
     next = { ...next, providerTurnRecovery: undefined };
   }
   const terminalSignal = terminalSignalFromTimelineEvent(event);
+  if (terminalSignal !== undefined || event.replayable && (event.kind === "assistant_message"
+    || event.kind === "user_input_changed" && event.status === "requested")) {
+    next = retireProviderTurnRecovery(next, event.runId, event.runSequence);
+  }
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(retirePreviewSnapshots(next, event), terminalSignal);
   }
@@ -624,12 +646,10 @@ function receivePreviewSnapshot(state: LiveEventState, event: TimelineEvent): Li
     });
   }
   const semanticItems = new Map(state.semanticItems);
-  if (event.kind === "tool_progress" || event.kind === "tool_call_args_delta") {
+  if (event.kind === "tool_progress") {
     for (const [id, item] of semanticItems) {
       if (item.runId !== event.runId || item.content.type !== "tool" || item.content.callId !== event.itemId) continue;
-      semanticItems.set(id, event.kind === "tool_call_args_delta"
-        ? { ...item, toolInput: event.text }
-        : { ...item, status: toolStatus(event), content: { ...item.content, output: event.text } });
+      semanticItems.set(id, { ...item, status: toolStatus(event), content: { ...item.content, output: event.text } });
     }
   }
   return { ...state, liveSnapshots, previewOwners, deltaBuffers, semanticItems };
@@ -1075,6 +1095,13 @@ function replaceApprovalLifecycle(
 }
 
 function discardRun(state: LiveEventState, runId: string): LiveEventState {
+  // Canonical settlement may arrive before the corresponding live terminal.
+  const recovery = state.providerTurnRecovery;
+  let through = state.durableRunSequences.get(runId) ?? "0";
+  if (recovery?.runId === runId && compareRunSequence(recovery.runSequence, through) > 0) {
+    through = recovery.runSequence;
+  }
+  state = retireProviderTurnRecovery(state, runId, through);
   const liveSnapshots = filterMap(state.liveSnapshots, (event) => event.runId !== runId);
   const semanticItems = filterMap(state.semanticItems, (item) => item.runId !== runId);
   const deltaBuffers = filterMap(state.deltaBuffers, (buffer) => buffer.runId !== runId);
@@ -1102,6 +1129,28 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     terminalSignals,
     liveSnapshots,
   };
+}
+
+function automaticProviderRecovery(event: TimelineEvent | undefined): boolean {
+  const recovery = event?.providerTurnRecovery;
+  return recovery !== undefined && !recovery.userAttentionRequired
+    && (recovery.phase === "waiting" || recovery.phase === "recovering");
+}
+
+function retireProviderTurnRecovery(
+  state: LiveEventState,
+  runId: string,
+  through: string,
+): LiveEventState {
+  const previous = state.retiredProviderRecoverySequences.get(runId) ?? "0";
+  const recovery = state.providerTurnRecovery;
+  const clear = recovery?.runId === runId && automaticProviderRecovery(recovery)
+    && compareRunSequence(recovery.runSequence, through) <= 0;
+  if (!clear && compareRunSequence(through, previous) <= 0) return state;
+  const retiredProviderRecoverySequences = new Map(state.retiredProviderRecoverySequences);
+  if (compareRunSequence(through, previous) > 0) retiredProviderRecoverySequences.set(runId, through);
+  return { ...state, retiredProviderRecoverySequences,
+    providerTurnRecovery: clear ? undefined : recovery };
 }
 
 function clearRunDeltaBuffersThrough(

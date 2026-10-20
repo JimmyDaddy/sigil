@@ -36,6 +36,7 @@ const MAX_COMPOSER_HEIGHT = 176;
 
 export function Composer({
   draftKey,
+  persistentDraftKey,
   active,
   submissionBlocked,
   stopControlBlocked = false,
@@ -56,6 +57,7 @@ export function Composer({
   queuePanel,
   activityState,
   statusPresentation,
+  showActivity = true,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -75,6 +77,7 @@ export function Composer({
   onReleaseImages,
 }: {
   draftKey: string;
+  persistentDraftKey?: string;
   active: boolean;
   submissionBlocked: boolean;
   stopControlBlocked?: boolean;
@@ -95,6 +98,7 @@ export function Composer({
   queuePanel?: ReactNode;
   activityState?: ComposerActivityState;
   statusPresentation?: ProductStatusPresentation;
+  showActivity?: boolean;
   onModelChange: (modelRef: ProviderModelRef) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -114,7 +118,19 @@ export function Composer({
   onCancel: () => void;
 }) {
   const { t } = useLocale();
-  const [prompt, setPrompt] = useState(() => readDraft(draftKey));
+  const storageKey = persistentDraftKey ?? draftKey;
+  const storageKeyRef = useRef(storageKey);
+  storageKeyRef.current = storageKey;
+  const [prompt, setPrompt] = useState(() => readDraft(storageKey));
+  const previousStorageKey = useRef(storageKey);
+  useLayoutEffect(() => {
+    if (previousStorageKey.current === storageKey) return;
+    // Catalog identity can arrive after a new conversation's input is already mounted.
+    // Move only its local text; changing persistence must not remount the editor or images.
+    writeDraft(storageKey, prompt);
+    writeDraft(previousStorageKey.current, "");
+    previousStorageKey.current = storageKey;
+  }, [prompt, storageKey]);
   const draftRevision = useRef(0);
   const [images, setImages] = useState<DraftImage[]>([]);
   const imagesRef = useRef<DraftImage[]>([]);
@@ -261,7 +277,7 @@ export function Composer({
     if (handles.length > 0) void onReleaseImages?.(handles).catch(() => {});
     setSelectedSkill(undefined);
     setSelectedAgent(undefined);
-    writeDraft(draftKey, "");
+    writeDraft(storageKeyRef.current, "");
   };
   const selectSuggestion = (suggestion: ComposerSuggestion) => {
     if (!suggestion.available) {
@@ -381,7 +397,7 @@ export function Composer({
   const replacePrompt = (value: string) => {
     draftRevision.current += 1;
     setPrompt(value);
-    writeDraft(draftKey, value);
+    writeDraft(storageKey, value);
     setSuggestionsDismissedFor(undefined);
     setActiveSuggestion(0);
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
@@ -406,20 +422,11 @@ export function Composer({
       : "—");
   const modelOptionValue = (option: ModelOption) => providerModelRefKey(option.modelRef);
   const modelOptionLabel = (option: ModelOption) => {
-    const identity = option.displayName === option.modelName
-      ? option.modelName
-      : `${option.displayName} · ${option.modelName}`;
+    const identity = option.modelName;
     const connection = connectionFor(option.modelRef);
     const optionConnection = connection?.label ?? option.modelRef.connectionId;
-    const optionProvider = connection?.providerLabel
-      ?? (runContext !== undefined
-        && option.modelRef.connectionId === runContext.modelRef.connectionId
-        ? runContext.providerName
-        : undefined);
-    const route = optionProvider === undefined
-      ? optionConnection
-      : `${optionProvider} · ${optionConnection}`;
-    const routeIdentity = `${route} · ${identity}`;
+    const multipleConnections = new Set(modelOptions.map((candidate) => candidate.modelRef.connectionId)).size > 1;
+    const routeIdentity = multipleConnections ? `${optionConnection} · ${identity}` : identity;
     return option.availability === "configured_unavailable"
       ? `${routeIdentity} · ${t("modelNotListed")}`
       : routeIdentity;
@@ -443,7 +450,7 @@ export function Composer({
   return (
     <>
     <form
-      className={`composer${activity === undefined
+      className={`composer${activity === undefined || !showActivity
         ? ""
         : ` has-activity${activityState === undefined ? "" : ` activity-${activityState}`}`}`}
       data-composer-product-status={activity?.status}
@@ -461,7 +468,7 @@ export function Composer({
           onActiveIndexChange={setActiveSuggestion}
         />
       ) : null}
-      {activity !== undefined ? (
+      {activity !== undefined && showActivity ? (
         <div
           className="composer-activity"
           role={activityState === "connection_error" ? "alert" : "status"}
@@ -558,7 +565,7 @@ export function Composer({
             setPrompt(event.target.value);
             setSuggestionsDismissedFor(undefined);
             setActiveSuggestion(0);
-            writeDraft(draftKey, event.target.value);
+            writeDraft(storageKey, event.target.value);
           }}
           placeholder={
             active

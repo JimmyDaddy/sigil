@@ -454,16 +454,7 @@ function receivePage(
   const merged = mergeCanonicalItems(state, page.items);
   if ("error" in merged) return rejectContract(state, merged.error);
 
-  const waitingSettledByFinalPage = state.observedTerminal?.status === "awaiting_user_input"
-    && state.canonicalTerminal?.runId === state.observedTerminal.runId
-    && state.canonicalTerminal.status === "awaiting_user_input"
-    && page.terminalFrontier?.runId === state.observedTerminal.runId
-    && page.terminalFrontier.status !== "awaiting_user_input"
-    && compareSequence(
-      page.terminalFrontier.sessionStreamSequence,
-      state.canonicalTerminal.sessionStreamSequence,
-    ) > 0
-    && compareSequence(page.throughSessionStreamSequence, page.terminalFrontier.sessionStreamSequence) >= 0;
+  const waitingSettledByFinalPage = pageSettlesWaitingObservation(state, page, merged.canonicalItems);
   const canonicalTerminal = mergeTerminalFrontier(
     state.canonicalTerminal,
     page.terminalFrontier,
@@ -500,12 +491,12 @@ function receivePage(
       page.terminalFrontier,
       page.throughSessionStreamSequence,
     ));
-  const terminalSettled = mode === "refresh"
+  const terminalSettled = (mode === "refresh" || mode === "initial" && waitingSettledByFinalPage)
     && hasPendingTerminal(state)
     && terminalCoveredByRefreshPage;
   const lifecycle = mode === "initial"
     ? state.transcriptLoaded && state.contractError === undefined
-      ? state.lifecycle
+      ? terminalSettled && state.lifecycle === "finalizing" ? "idle" : state.lifecycle
       : "checking_owner"
     : mode === "refresh" && state.lifecycle === "finalizing" && terminalSettled
       ? "idle"
@@ -542,7 +533,7 @@ function receivePage(
     canonicalTerminal: canonicalTerminal.value,
     observedTerminal: terminalSettled ? undefined : state.observedTerminal,
     pendingTerminalRunId: terminalSettled ? undefined : state.pendingTerminalRunId,
-    refreshState: mode === "refresh"
+    refreshState: terminalSettled ? "idle" : mode === "refresh"
       ? terminalSettled || !hasPendingTerminal(state) ? "idle" : "needed"
       : state.refreshState,
     recovery: mode === "refresh" ? undefined : state.recovery,
@@ -773,7 +764,8 @@ function observeTerminal(
     && (state.canonicalTerminal?.status === "succeeded"
       || state.canonicalTerminal?.status === "failed"
       || state.canonicalTerminal?.status === "cancelled"
-      || state.canonicalTerminal?.status === "interrupted")
+      || state.canonicalTerminal?.status === "interrupted"
+      || state.canonicalTerminal?.status === "blocked")
     && terminalRunIsCovered(terminal.runId, state.canonicalTerminal, state.throughSessionStreamSequence)
   ) {
     return state;
@@ -931,6 +923,42 @@ function mergeTerminalFrontier(
       message: "The same terminal frontier was replayed with conflicting run or status facts.",
     },
   };
+}
+
+function pageSettlesWaitingObservation(
+  state: ConversationContinuityState,
+  page: ConversationDisplayPage,
+  canonicalItems: ReadonlyMap<string, DurableConversationDisplayItem>,
+): boolean {
+  const observed = state.observedTerminal;
+  const final = page.terminalFrontier;
+  if (
+    observed?.status !== "awaiting_user_input"
+    || final?.runId !== observed.runId
+    || final.status === "awaiting_user_input"
+    || compareSequence(page.throughSessionStreamSequence, final.sessionStreamSequence) < 0
+  ) return false;
+
+  const waiting = state.canonicalTerminal;
+  if (
+    waiting?.runId === observed.runId
+    && waiting.status === "awaiting_user_input"
+    && compareSequence(final.sessionStreamSequence, waiting.sessionStreamSequence) > 0
+  ) return true;
+
+  // A first refresh can contain both durable input boundaries before any waiting frontier
+  // was loaded. Only the authenticated cancellation/decline pair may settle that observation.
+  if (final.status !== "cancelled" && final.status !== "blocked") return false;
+  let hasWaitingPredecessor = false;
+  let hasExactSuccessor = false;
+  for (const item of canonicalItems.values()) {
+    if (item.runId !== final.runId || item.kind !== "terminal"
+      || item.content.type !== "terminal" || item.source !== "durable_run_event") continue;
+    const order = compareSequence(item.displayOrder.sessionStreamSequence, final.sessionStreamSequence);
+    if (item.status === "awaiting_user_input" && order < 0) hasWaitingPredecessor = true;
+    if (item.status === final.status && order === 0) hasExactSuccessor = true;
+  }
+  return hasWaitingPredecessor && hasExactSuccessor;
 }
 
 function terminalIsCovered(

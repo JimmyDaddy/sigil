@@ -4245,11 +4245,19 @@ export interface components {
             /** Format: uint64 */
             event_sequence: number;
             operation?: string | null;
+            preview?: components["schemas"]["PendingApprovalPreview"];
+            reconciliation_id?: string | null;
             risk?: string | null;
             safe_summary_detail: string;
             safe_summary_title: string;
             snapshot_required: boolean;
             subjects: components["schemas"]["PendingApprovalSubject"][];
+        };
+        /** @description Frozen safe review text bound to the containing exact approval guard. Each field is limited to 128 KiB of UTF-8; an oversized review is absent rather than partial. It is display evidence, not a prepared mutation digest. */
+        PendingApprovalPreview: {
+            body: string;
+            summary: string;
+            title: string;
         };
         PendingApprovalSubject: {
             kind: string;

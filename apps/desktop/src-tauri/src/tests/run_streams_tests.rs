@@ -697,8 +697,91 @@ fn terminal_snapshot_projection_preserves_interrupted_status() {
     );
     assert_eq!(
         terminal_timeline_projection(DesktopRunStatus::Paused),
-        Some((DesktopTimelineEventKind::RunPaused, "paused"))
+        None,
+        "a coarse paused snapshot cannot distinguish AwaitingUserInput from a real pause"
     );
+}
+
+#[test]
+fn coarse_paused_snapshot_does_not_invent_a_task_pause_or_override_exact_cancellation() {
+    let mut projection = RunProjection::new(DesktopRunStatus::Paused, false);
+    assert!(projection.is_settled());
+    assert!(!projection.task_pause_observed);
+    projection.push(timeline(10, DesktopTimelineEventKind::RunCancelled));
+    assert_eq!(projection.run_status, DesktopRunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn actual_input_waiting_projection_and_paused_snapshot_keep_only_transport_terminal() {
+    let native_event = |sequence, event| {
+        let protocol: sigil_desktop::DesktopProtocolEvent = serde_json::from_value(serde_json::json!({
+            "schema_version": sigil_desktop::DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
+            "event_class": "durable", "replay_id": format!("event-{sequence}"),
+            "run_event": { "schema_version": sigil_desktop::DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+                "session_id": "durable-1", "run_id": "run-1", "sequence": sequence, "event": event }
+        })).expect("real public event envelope");
+        protocol
+            .into_timeline("workspace-1", "durable-1", "run-1", "session-1")
+            .expect("actual native narrowing")
+    };
+    let waiting = native_event(
+        9,
+        serde_json::json!({ "type": "run_awaiting_user_input",
+        "request_id": "input-request", "generation": 1, "request_hash": "a".repeat(64) }),
+    );
+    assert_eq!(waiting.kind, DesktopTimelineEventKind::UserInputChanged);
+    assert_eq!(waiting.status.as_deref(), Some("requested"));
+    let owner = DesktopRunStreamOwner::default();
+    owner.streams.lock().await.insert(
+        stream_key("workspace-1", "run-1"),
+        OwnedRunStream {
+            workspace_id: "workspace-1".to_owned(),
+            renderer_session_id: "session-1".to_owned(),
+            durable_session_id: "durable-1".to_owned(),
+            task: None,
+            projection: RunProjection::new(DesktopRunStatus::Running, false),
+        },
+    );
+    assert_eq!(owner.record_stream_event(waiting).await, Some(false));
+    let mut paused = run_snapshot(10, vec![]);
+    paused.status = DesktopRunStatus::Paused;
+    let reconciled = owner
+        .reconcile_run_snapshot("workspace-1", "session-1", &paused)
+        .await
+        .expect("same native owner");
+    assert!(reconciled.settled);
+    assert!(reconciled.terminal_events.is_empty());
+    assert_eq!(terminal_timeline_projection(paused.status), None);
+    owner
+        .record_status(
+            "workspace-1",
+            "run-1",
+            DesktopRunStreamState::Terminal,
+            None,
+        )
+        .await;
+    {
+        let streams = owner.streams.lock().await;
+        let snapshot = streams[&stream_key("workspace-1", "run-1")]
+            .projection
+            .snapshot();
+        assert_eq!(snapshot.stream_state, DesktopRunStreamState::Terminal);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .all(|event| event.kind != DesktopTimelineEventKind::RunPaused)
+        );
+    }
+    let cancelled = native_event(10, serde_json::json!({ "type": "run_cancelled" }));
+    assert_eq!(cancelled.kind, DesktopTimelineEventKind::RunCancelled);
+    assert_eq!(owner.record_stream_event(cancelled).await, Some(true));
+    let exact_pause = native_event(
+        11,
+        serde_json::json!({ "type": "run_paused", "reason": "typed pause" }),
+    );
+    assert_eq!(exact_pause.kind, DesktopTimelineEventKind::RunPaused);
+    assert_eq!(exact_pause.status.as_deref(), Some("paused"));
 }
 
 #[test]
@@ -795,6 +878,146 @@ fn canonical_run_snapshot_rebuilds_clears_and_rejects_stale_pending_approvals() 
 
     assert!(!projection.reconcile_run_snapshot(&waiting, "workspace-1", "session-1"));
     assert!(projection.pending_approvals.is_empty());
+}
+
+#[test]
+fn canonical_pending_approval_reuses_the_real_protocol_anchor_without_live_client_state() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../src/features/conversation/fixtures/native-canonical-pending-approval.json"
+    )))
+    .expect("actual HTTP pending fixture");
+    let pending: sigil_desktop::DesktopPendingApproval =
+        serde_json::from_value(fixture["pending"].clone()).expect("HTTP pending DTO");
+    let mut run = run_snapshot(11, vec![pending.clone()]);
+    run.id = fixture["runId"].as_str().expect("run").to_owned();
+    let workspace = fixture["workspaceId"].as_str().expect("workspace");
+    let renderer_session = fixture["rendererSessionId"]
+        .as_str()
+        .expect("renderer session");
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    assert!(projection.reconcile_run_snapshot(&run, workspace, renderer_session));
+    let actual = &projection.pending_approvals[&pending.call_id];
+    assert_eq!(
+        serde_json::to_value(actual).expect("actual native wire"),
+        fixture["timeline"]
+    );
+    assert_eq!(actual.provisional_id, pending.display.reconciliation_id);
+    let guard = actual.approval.clone();
+    run.pending_approvals[0].display.reconciliation_id = None;
+    run.stream_sequence = 12;
+    assert!(projection.reconcile_run_snapshot(&run, workspace, renderer_session));
+    let legacy = &projection.pending_approvals[&pending.call_id];
+    assert!(
+        legacy.provisional_id.is_none(),
+        "must not borrow an earlier presentation anchor"
+    );
+    assert_eq!(legacy.approval, guard);
+}
+
+#[test]
+fn canonical_approval_review_survives_cold_attach_and_reconnect_without_client_cache() {
+    let mut pending = pending_snapshot("request-file-1", 7);
+    pending.tool_name = "write_file".to_owned();
+    pending.display.effects = vec!["file_write".to_owned()];
+    let body = "+精确修改\n".repeat(3000);
+    pending.display.preview = Some(sigil_desktop::DesktopPublicToolPreview {
+        title: "Edit file".to_owned(),
+        summary: "Frozen review".to_owned(),
+        body: body.clone(),
+    });
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    assert!(projection.reconcile_run_snapshot(
+        &run_snapshot(12, vec![pending.clone()]),
+        "workspace-1",
+        "session-1"
+    ));
+    assert_eq!(
+        projection.pending_approvals["call-1"]
+            .approval
+            .as_ref()
+            .expect("guard")
+            .preview_body
+            .as_deref(),
+        Some(body.as_str())
+    );
+    assert!(projection.reconcile_run_snapshot(
+        &run_snapshot(13, vec![pending.clone()]),
+        "workspace-1",
+        "session-1"
+    ));
+    assert_eq!(
+        projection.pending_approvals["call-1"]
+            .approval
+            .as_ref()
+            .expect("guard")
+            .preview_body
+            .as_deref(),
+        Some(body.as_str())
+    );
+
+    pending.approval_request_id = "request-file-2".to_owned();
+    pending.tool_call_hash = "b".repeat(64);
+    pending.display.preview = None;
+    assert!(projection.reconcile_run_snapshot(
+        &run_snapshot(14, vec![pending]),
+        "workspace-1",
+        "session-1"
+    ));
+    let approval = projection.pending_approvals["call-1"]
+        .approval
+        .as_ref()
+        .expect("new guard");
+    assert_eq!(approval.approval_request_id, "request-file-2");
+    assert_eq!(approval.tool_call_hash, "b".repeat(64));
+    assert!(
+        approval.preview_body.is_none(),
+        "must not borrow review from an older request"
+    );
+}
+
+#[test]
+fn canonical_exec_approval_keeps_frozen_context_and_never_invents_missing_command() {
+    let mut pending = pending_snapshot("request-exec-1", 7);
+    pending.tool_name = "exec_command".to_owned();
+    pending.display.operation = Some("execute_unknown_command".to_owned());
+    let body = "Working directory: .\nShell: sh (posix)\n\nCommand:\npython3 -m unittest discover -s tests";
+    pending.display.preview = Some(sigil_desktop::DesktopPublicToolPreview {
+        title: "Execute a shell command".to_owned(),
+        summary: "Review the complete command and its execution context.".to_owned(),
+        body: body.to_owned(),
+    });
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    for sequence in [12, 13] {
+        assert!(projection.reconcile_run_snapshot(
+            &run_snapshot(sequence, vec![pending.clone()]),
+            "workspace-1",
+            "session-1",
+        ));
+        let approval = projection.pending_approvals["call-1"]
+            .approval
+            .as_ref()
+            .expect("exact guard");
+        assert_eq!(approval.preview_body.as_deref(), Some(body));
+        assert_eq!(
+            approval.operation.as_deref(),
+            Some("execute_unknown_command")
+        );
+    }
+    pending.display.preview = None;
+    assert!(projection.reconcile_run_snapshot(
+        &run_snapshot(14, vec![pending]),
+        "workspace-1",
+        "session-1",
+    ));
+    assert!(
+        projection.pending_approvals["call-1"]
+            .approval
+            .as_ref()
+            .expect("same exact guard")
+            .preview_body
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -947,6 +1170,7 @@ fn pending_snapshot(
         ),
         display: sigil_desktop::DesktopPendingApprovalDisplay {
             event_sequence,
+            reconciliation_id: None,
             effects: vec!["execute_workspace_code".to_owned()],
             subjects: Vec::new(),
             analysis_status: "complete".to_owned(),
@@ -956,6 +1180,7 @@ fn pending_snapshot(
             decision_reasons: vec!["explicit_ask".to_owned()],
             safe_summary_title: "Run validation".to_owned(),
             safe_summary_detail: "Runs workspace validation".to_owned(),
+            preview: None,
             operation: Some("execute_workspace_check_command".to_owned()),
             risk: Some("medium".to_owned()),
             snapshot_required: false,

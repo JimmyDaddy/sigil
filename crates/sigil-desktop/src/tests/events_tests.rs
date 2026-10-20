@@ -3,6 +3,55 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn canonical_pending_approval_preserves_the_frozen_http_reconciliation_identity() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/features/conversation/fixtures/native-canonical-pending-approval.json"
+    )))
+    .expect("safe actual HTTP fixture");
+    let pending: crate::DesktopPendingApproval =
+        serde_json::from_value(fixture["pending"].clone()).expect("HTTP pending DTO");
+    let project = |pending: crate::DesktopPendingApproval| {
+        pending
+            .into_timeline(
+                fixture["workspaceId"].as_str().expect("workspace"),
+                fixture["rendererSessionId"]
+                    .as_str()
+                    .expect("renderer session"),
+                fixture["runId"].as_str().expect("run"),
+            )
+            .expect("actual native producer")
+    };
+    let timeline = project(pending.clone());
+    assert_eq!(timeline.provisional_id, pending.display.reconciliation_id);
+    assert_eq!(timeline.run_sequence, "11");
+    assert_eq!(
+        timeline
+            .approval
+            .as_ref()
+            .expect("guard")
+            .approval_request_id,
+        pending.approval_request_id
+    );
+    assert_eq!(
+        timeline.approval.as_ref().expect("guard").tool_call_hash,
+        pending.tool_call_hash
+    );
+    assert!(timeline.tool_input.is_none());
+    assert_eq!(
+        serde_json::to_value(&timeline).expect("native wire"),
+        fixture["timeline"]
+    );
+    for identity in [None, Some("not-a-protocol-identity".to_owned())] {
+        let mut missing = pending.clone();
+        missing.display.reconciliation_id = identity;
+        let legacy = project(missing);
+        assert!(legacy.provisional_id.is_none());
+        assert_eq!(legacy.approval, timeline.approval);
+    }
+}
+
+#[test]
 fn typed_live_envelope_projects_snapshot_metadata_without_a_public_sequence() {
     let value = json!({
         "schema_version": DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
@@ -438,6 +487,7 @@ fn approval_projection_requires_exact_guard_and_bounds_preview() {
         }),
         display: crate::DesktopPendingApprovalDisplay {
             event_sequence: 1,
+            reconciliation_id: None,
             effects: vec!["file_write".to_owned()],
             subjects: vec![crate::DesktopPendingApprovalSubject {
                 kind: "path".to_owned(),
@@ -451,12 +501,80 @@ fn approval_projection_requires_exact_guard_and_bounds_preview() {
             decision_reasons: vec!["Workspace writes require review".to_owned()],
             safe_summary_title: "Edit file".to_owned(),
             safe_summary_detail: "Writes one workspace file".to_owned(),
+            preview: Some(crate::DesktopPublicToolPreview {
+                title: "Edit file".to_owned(),
+                summary: "One change".to_owned(),
+                body: "diff".to_owned(),
+            }),
             operation: Some("edit_file".to_owned()),
             risk: Some("medium".to_owned()),
             snapshot_required: true,
         },
     });
 
+    let cold_snapshot = event
+        .approval_request
+        .clone()
+        .expect("canonical guard")
+        .into_timeline("workspace-1", "session-1", "run-1")
+        .expect("cold projection");
+    assert_eq!(
+        cold_snapshot
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.preview_body.as_deref()),
+        Some("diff")
+    );
+    assert!(cold_snapshot.tool_input.is_none());
+    assert!(
+        cold_snapshot
+            .approval
+            .as_ref()
+            .expect("guard")
+            .tool_input
+            .is_none()
+    );
+    let mut oversized = event.clone();
+    let body = "界".repeat(50_000);
+    oversized
+        .approval_request
+        .as_mut()
+        .expect("guard")
+        .display
+        .preview
+        .as_mut()
+        .expect("review")
+        .body = body.clone();
+    let DesktopPublicRunEventKind::ApprovalRequested { preview, .. } =
+        &mut oversized.run_event.as_mut().expect("public event").event
+    else {
+        panic!("approval")
+    };
+    preview.as_mut().expect("review").body = body;
+    let cold_oversized = oversized
+        .approval_request
+        .clone()
+        .expect("guard")
+        .into_timeline("workspace-1", "session-1", "run-1")
+        .expect("cold oversized projection");
+    let live_oversized = oversized
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("live oversized projection");
+    assert!(
+        cold_oversized
+            .approval
+            .expect("cold guard")
+            .preview_body
+            .is_none()
+    );
+    assert!(
+        live_oversized
+            .approval
+            .expect("live guard")
+            .preview_body
+            .is_none(),
+        "no clipped diff may remain approvable"
+    );
     let timeline = event
         .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
         .expect("approval should project");

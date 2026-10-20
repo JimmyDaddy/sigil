@@ -5,6 +5,7 @@ import type { ConversationTimelineItem, LiveConversationDisplayItem } from "./co
 import {
   compareRunSequence,
   selectDeltaText,
+  type ApprovalPresentation,
   type LiveDeltaBuffer,
 } from "./liveEventReducer";
 
@@ -39,15 +40,20 @@ export function projectConversationRows(
   deltaBuffers: readonly LiveDeltaBuffer[],
   t: Translate,
   toolSnapshots: readonly LiveConversationDisplayItem[] = [],
+  visibleApproval?: ApprovalPresentation,
 ): ConversationTimelineRow[] {
+  const pendingApprovalAnchored = items.some((entry) => entry.item.content.type === "approval"
+    && isVisibleApprovalPlaceholder(entry, visibleApproval, undefined));
   const projectEntry = (entry: ConversationTimelineItem): ConversationTimelineRow[] => {
+    const identities = entry.source === "durable" ? entry.item.reconciles ?? [] : [entry.identity];
+    const snapshot = toolSnapshots.find((candidate) => candidate.runId === entry.item.runId
+      && candidate.content.type === "tool" && identities.includes(candidate.provisionalId));
+    if ((entry.item.content.type !== "tool" || pendingApprovalAnchored)
+      && isVisibleApprovalPlaceholder(entry, visibleApproval, snapshot)) return [];
     const rows = projectDisplayItem(entry.identity, entry.item, t).map((row) => ({
       ...row,
       sourceStreamSequence: entry.source === "durable" ? entry.item.displayOrder.sessionStreamSequence : undefined,
     }));
-    const identities = entry.source === "durable" ? entry.item.reconciles ?? [] : [entry.identity];
-    const snapshot = toolSnapshots.find((candidate) => candidate.runId === entry.item.runId
-      && candidate.content.type === "tool" && identities.includes(candidate.provisionalId));
     if (snapshot?.content.type !== "tool") return rows;
     const output = snapshot.content.output;
     return rows.map((row) => {
@@ -101,6 +107,48 @@ export function projectConversationRows(
       .sort(compareLiveRowEntries)
       .flatMap((entry) => entry.rows),
   ], durableRows.length, durableTerminals);
+}
+
+function isVisibleApprovalPlaceholder(
+  entry: ConversationTimelineItem,
+  presentation: ApprovalPresentation | undefined,
+  snapshot: LiveConversationDisplayItem | undefined,
+): boolean {
+  const event = presentation?.event;
+  const approval = event?.approval;
+  if (presentation?.phase !== "pending" || approval === undefined || event === undefined
+    || event.provisionalId === undefined || entry.item.runId !== event.runId) return false;
+  const item = entry.item;
+  const content = item.content;
+  const sameCall = content.type === "tool" || content.type === "approval"
+    ? content.callId === approval.callId || event.displayCallId !== undefined && content.callId === event.displayCallId
+    : false;
+  if (!sameCall) return false;
+  if (content.type === "approval") {
+    // Canonical approval content has no request ID; require its exact reconciliation slot
+    // in addition to the currently guarded call rather than matching tool names or copy.
+    const identities = entry.source === "durable" ? entry.item.reconciles ?? [] : [entry.identity];
+    return item.status === "waiting_for_approval" && content.decision === undefined
+      && event.provisionalId !== undefined && identities.includes(event.provisionalId);
+  }
+  if (content.type !== "tool" || !["requested", "pending", "waiting_for_approval"].includes(item.status)) return false;
+  if (entry.source === "durable" && (entry.item.reconciles?.length ?? 0) === 0) return false;
+  if (entry.source === "live" && entry.item.toolApprovalRequestId !== undefined
+    && entry.item.toolApprovalRequestId !== approval.approvalRequestId) return false;
+  return !hasToolResult(content) && !("executionId" in item && item.executionId !== undefined)
+    && !("executionStartedAtMs" in item && item.executionStartedAtMs !== undefined)
+    && !("executionUpdatedAtMs" in item && item.executionUpdatedAtMs !== undefined)
+    && (snapshot === undefined || snapshot.content.type === "tool" && !hasToolResult(snapshot.content)
+      && snapshot.executionId === undefined && snapshot.executionStartedAtMs === undefined && snapshot.executionUpdatedAtMs === undefined
+      && ["requested", "pending", "waiting_for_approval"].includes(snapshot.status)
+      && (snapshot.toolApprovalRequestId === undefined || snapshot.toolApprovalRequestId === approval.approvalRequestId));
+}
+
+function hasToolResult(content: Extract<LiveConversationDisplayItem["content"], { type: "tool" }>): boolean {
+  return content.output !== undefined || content.executionId !== undefined || content.artifactRef !== undefined
+    || content.executionStartedAtMs !== undefined || content.executionUpdatedAtMs !== undefined || content.hasMore === true
+    || content.artifactAvailability !== undefined || content.truncated === true || (content.originalContentBytes ?? 0) > 0
+    || (content.observedBytes ?? 0) > 0 || (content.persistedBytes ?? 0) > 0;
 }
 
 function isTerminalCommandStatus(status: string | undefined): boolean {
@@ -222,14 +270,17 @@ function projectDisplayItem(
     case "approval": {
       const approved = item.status === "approved";
       const denied = item.status === "denied";
+      const cancelled = item.status === "cancelled" || item.status === "interrupted";
+      const closed = cancelled || ["completed", "failed", "expired"].includes(item.status);
       return [{
         key: identity,
         kind: "notice",
-        label: approved ? t("approvalApproved") : denied ? t("approvalDenied") : t("approvalRequired"),
+        label: approved ? t("approvalApproved") : denied ? t("approvalDenied") : closed ? t("approvalClosed") : t("approvalRequired"),
         text: approved
           ? t("approvalApprovedDetail")
-          : denied ? t("approvalDeniedDetail") : t("toolWaitingDecision", { tool: content.toolName }),
-        status: approved ? "approved" : denied ? "denied" : "waiting",
+          : denied ? t("approvalDeniedDetail") : cancelled ? t("approvalCancelledDetail")
+            : closed ? t("approvalClosedDetail") : t("toolWaitingDecision", { tool: content.toolName }),
+        status: approved ? "approved" : denied ? "denied" : closed ? item.status : "waiting",
       }];
     }
     case "checkpoint":

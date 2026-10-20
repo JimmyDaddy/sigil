@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -8,13 +8,119 @@ import {
   reduceLiveTimelineEvent,
   selectSemanticLiveItems,
 } from "./features/conversation/liveEventReducer";
-import type { TimelineEvent } from "./types";
+import type { TimelineEvent, ToolArtifactPage, ToolArtifactSelector } from "./types";
 import { createConversationContinuityState, reduceConversationContinuity, selectConversationTimeline } from "./features/conversation/continuityReducer";
 import { projectConversationRows } from "./features/conversation/conversationRows";
 import { translateEnglish } from "./i18n";
 import { semanticLiveItemFromTimelineEvent } from "./features/conversation/liveEventReducer";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+function deferredArtifactRead(artifactRef: string) {
+  let resolve!: (page: ToolArtifactPage) => void;
+  let reject!: (error: Error) => void;
+  const pending = new Promise<ToolArtifactPage>((success, failure) => {
+    resolve = success;
+    reject = failure;
+  });
+  const read = vi.fn((_selector: ToolArtifactSelector) => pending);
+  return {
+    read,
+    pending,
+    complete: (body: string) => resolve({
+      schemaVersion: 1, requestScope: "deferred-artifact", artifactRef,
+      selector: read.mock.calls[0]![0], body, bodyEncoding: "utf8",
+      returnedBytes: body.length, pageSha256: `sha256:${"b".repeat(64)}`,
+      artifactSha256: `sha256:${"c".repeat(64)}`, eof: true, matchCount: 0,
+    }),
+    fail: () => reject(new Error("late artifact read failure")),
+  };
+}
+
+it.each(["tool key", "artifact ref"])("ignores a late manual output after changing the %s and loading the new short output", async (scope) => {
+  const user = userEvent.setup();
+  const artifactRef = `ta1_${"a".repeat(32)}`;
+  const nextArtifactRef = scope === "artifact ref" ? `ta1_${"d".repeat(32)}` : artifactRef;
+  const previous = deferredArtifactRead(artifactRef);
+  const next = deferredArtifactRead(nextArtifactRef);
+  const tool = { key: "previous-call", toolName: "exec_command", text: "bounded preview",
+    status: "succeeded", artifactRef, artifactAvailability: "available" as const, artifactPersistedBytes: 32_000 };
+  const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
+  await user.click(screen.getByText("Full output and search"));
+  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  expect(previous.read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 16_384 });
+
+  view.rerender(<ToolCard tool={{ ...tool,
+    key: scope === "tool key" ? "next-call" : tool.key,
+    artifactRef: nextArtifactRef, artifactPersistedBytes: 32,
+  }} onReadArtifact={next.read} />);
+  await waitFor(() => expect(next.read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 4_096 }));
+  await act(async () => { next.complete("Current output B"); await next.pending; });
+  expect((await screen.findByLabelText("exec_command saved output page")).textContent).toContain("Current output B");
+  await act(async () => { previous.complete("Obsolete output A"); await previous.pending; });
+  expect(screen.getByLabelText("exec_command saved output page").textContent).toContain("Current output B");
+  expect(screen.queryByText("Obsolete output A")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps the current read busy when an obsolete manual request fails", async () => {
+  const user = userEvent.setup();
+  const artifactRef = `ta1_${"a".repeat(32)}`;
+  const nextArtifactRef = `ta1_${"d".repeat(32)}`;
+  const previous = deferredArtifactRead(artifactRef);
+  const next = deferredArtifactRead(nextArtifactRef);
+  const tool = { key: "previous-call", toolName: "exec_command", text: "bounded preview",
+    status: "succeeded", artifactRef, artifactAvailability: "available" as const, artifactPersistedBytes: 32_000 };
+  const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
+  await user.click(screen.getByText("Full output and search"));
+  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  view.rerender(<ToolCard tool={{ ...tool, key: "next-call", artifactRef: nextArtifactRef, artifactPersistedBytes: 32 }} onReadArtifact={next.read} />);
+  await waitFor(() => expect(next.read).toHaveBeenCalledOnce());
+  await act(async () => { previous.fail(); await previous.pending.catch(() => {}); });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText("Loading output…")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "View saved output" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { next.complete("Current output B"); await next.pending; });
+  expect((await screen.findByLabelText("exec_command saved output page")).textContent).toContain("Current output B");
+});
+
+it("ignores an obsolete automatic read after a newer manual output succeeds", async () => {
+  const user = userEvent.setup();
+  const artifactRef = `ta1_${"a".repeat(32)}`;
+  const nextArtifactRef = `ta1_${"d".repeat(32)}`;
+  const previous = deferredArtifactRead(artifactRef);
+  const next = deferredArtifactRead(nextArtifactRef);
+  const tool = { key: "previous-call", toolName: "exec_command", text: "bounded preview",
+    status: "succeeded", artifactRef, artifactAvailability: "available" as const, artifactPersistedBytes: 32 };
+  const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
+  await waitFor(() => expect(previous.read).toHaveBeenCalledOnce());
+  view.rerender(<ToolCard tool={{ ...tool, key: "next-call", artifactRef: nextArtifactRef, artifactPersistedBytes: 32_000 }} onReadArtifact={next.read} />);
+  await user.click(screen.getByText("Full output and search"));
+  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  await act(async () => { next.complete("Current output B"); await next.pending; });
+  expect((await screen.findByLabelText("exec_command saved output page")).textContent).toContain("Current output B");
+  await act(async () => { previous.complete("Obsolete output A"); await previous.pending; });
+  expect(screen.getByLabelText("exec_command saved output page").textContent).toContain("Current output B");
+  expect(screen.queryByText("Obsolete output A")).toBeNull();
+});
+
+it("shows a short saved output directly and leaves search in details", async () => {
+  const artifactRef = `ta1_${"a".repeat(32)}`;
+  const body = "Ran 55 tests\nOK\n";
+  const read = vi.fn(async (selector: ToolArtifactSelector) => ({
+    schemaVersion: 1 as const, requestScope: "short-output", artifactRef, selector,
+    body, bodyEncoding: "utf8" as const, returnedBytes: body.length,
+    pageSha256: `sha256:${"b".repeat(64)}`, artifactSha256: `sha256:${"c".repeat(64)}`,
+    eof: true, matchCount: 0,
+  }));
+  render(<ToolCard tool={{ key: "short-saved", toolName: "exec_command", text: "saved output",
+    status: "succeeded", artifactRef, artifactAvailability: "available", artifactPersistedBytes: body.length,
+  }} onReadArtifact={read} />);
+  expect((await screen.findByLabelText("exec_command saved output page")).textContent?.trimEnd()).toBe(body.trimEnd());
+  expect(read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 4_096 });
+  expect(screen.getByText("Full output and search").closest("details")?.open).toBe(false);
+  expect(screen.queryByText(/saved bytes are available|bounded pages/)).toBeNull();
+});
 
 describe("command visibility", () => {
   it("ticks elapsed time for a silent execution and freezes the actual final duration", () => {

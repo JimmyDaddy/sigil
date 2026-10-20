@@ -122,6 +122,9 @@ mod user_input_operation;
 #[path = "production_stop_operation_tests.rs"]
 mod stop_operation;
 
+#[path = "production_approval_cancel_tests.rs"]
+mod approval_cancel;
+
 #[path = "production_prompt_operation_tests.rs"]
 mod prompt_operation;
 
@@ -4338,6 +4341,13 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
     let spec = spec(ToolAccess::Write, None);
     let mut identity = approval_identity();
     identity.run_id = "task-direct-execution-attempt-1".to_owned();
+    let preview = sigil_kernel::ToolPreview {
+        title: "Edit file".to_owned(),
+        summary: "Frozen review".to_owned(),
+        body: "+exact change".to_owned(),
+        changed_files: Vec::new(),
+        file_diffs: Vec::new(),
+    };
     let pending = HttpPendingApproval {
         call_id: call.id.clone(),
         tool_name: spec.name.clone(),
@@ -4347,10 +4357,20 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
         expires_at_ms: identity.expires_at_ms,
         session_grant_available: false,
         session_grant_unavailable_reason: unavailable_session_grant_reason(),
-        display: crate::HttpPendingApprovalDisplay {
-            event_sequence: 1,
-            ..Default::default()
-        },
+        display: pending_approval_display(
+            1,
+            &BTreeSet::new(),
+            &ToolAnalysisStatus::Complete,
+            &Default::default(),
+            &Default::default(),
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            Some(&preview),
+            None,
+        ),
     };
     let event = PublicRunEvent::new(
         "durable-session-1",
@@ -4379,7 +4399,7 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
             confirmation: None,
             snapshot_required: false,
             command_permission_matches: Vec::new(),
-            preview: None,
+            preview: Some(preview),
         },
     );
 
@@ -4387,7 +4407,10 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
         .publish_run_event_with_approval(event, Some(pending.clone()))
         .expect("matching HTTP approval guard should publish");
 
-    assert_eq!(published.approval_request, Some(pending));
+    let mut expected = pending;
+    expected.display.reconciliation_id = published.provisional_id.clone();
+    assert!(expected.display.reconciliation_id.is_some());
+    assert_eq!(published.approval_request, Some(expected));
     assert!(matches!(
         published.view(),
         crate::HttpProtocolEventView::Durable(view) if view.approval_request.is_some()
@@ -6051,7 +6074,7 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
     let unavailable_session_path = temp.path().join("revision-receipt-failure.unavailable");
     std::fs::rename(&session_path, &unavailable_session_path)?;
     std::fs::create_dir(&session_path)?;
-    let delivery = deliver_and_reconcile_plan_review_revision_terminal(
+    let delivery = deliver_and_reconcile_user_input_terminal(
         &registry,
         &event_bus,
         &session_path,

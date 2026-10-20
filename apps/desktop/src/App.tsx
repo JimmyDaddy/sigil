@@ -1242,6 +1242,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 bridge={bridge}
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
+                draftSessionId={selectedDurableSessionId}
                 providerInventory={providerInventory}
                 onInitialLoadComplete={finishConversationNavigation}
                 onRunContextChange={captureRunContext}

@@ -9,6 +9,7 @@ import {
   type DurableConversationDisplayItem,
   type LiveConversationDisplayItem,
 } from "./continuityReducer";
+import { terminalSignalFromTimelineEvent } from "./liveEventReducer";
 
 const SESSION_ID = "session-1";
 const REQUEST_SCOPE = "request-scope-1";
@@ -432,7 +433,7 @@ describe("conversation continuity reducer", () => {
     expect(conflictingPage.contractError?.code).toBe("terminal_conflict");
   });
 
-  it.each(["succeeded", "failed", "cancelled", "interrupted"] as const)(
+  it.each(["succeeded", "failed", "cancelled", "interrupted", "blocked"] as const)(
     "ignores replayed waiting after the same run has durably settled as %s",
     (status) => {
       let state = reduceConversationContinuity(receiveInitial([]), {
@@ -468,6 +469,143 @@ describe("conversation continuity reducer", () => {
       expect(unrelatedWaiting.contractError?.code).toBe("terminal_conflict");
     },
   );
+
+  it.each(["cancelled", "blocked"] as const)(
+    "settles the observed input boundary from its first canonical %s successor page in either delivery order",
+    (status) => {
+      const runId = "http-run-e7-2";
+      const waiting = terminalSignalFromTimelineEvent({
+        workspaceId: "workspace-input", sessionId: SESSION_ID, runId,
+        sequence: 33, runSequence: "33", replayable: true,
+        kind: "run_failed", status: "awaiting_user_input",
+      })!;
+      const final = terminalSignalFromTimelineEvent({
+        workspaceId: "workspace-input", sessionId: SESSION_ID, runId,
+        sequence: 34, runSequence: "34", replayable: true,
+        kind: status === "cancelled" ? "run_cancelled" : "run_blocked", status,
+      })!;
+      const finalPage = inputTerminalPage(runId, status);
+      for (const liveFinalFirst of [false, true]) {
+        let state = reduceConversationContinuity(receiveInitial([]), {
+          type: "terminal_observed", sessionId: SESSION_ID, terminal: waiting,
+        });
+        expect(state.canonicalTerminal).toBeUndefined();
+        if (liveFinalFirst) state = reduceConversationContinuity(state, {
+          type: "terminal_observed", sessionId: SESSION_ID, terminal: final,
+        });
+        state = reduceConversationContinuity(state, {
+          type: "refresh_page_received", sessionId: SESSION_ID, page: finalPage,
+        });
+        expect(state.contractError).toBeUndefined();
+        expect(state.lifecycle).toBe("idle");
+        expect(state.refreshState).toBe("idle");
+        expect(state.observedTerminal).toBeUndefined();
+        expect(state.canonicalTerminal).toEqual(finalPage.terminalFrontier);
+        const settled = state;
+        for (const terminal of [waiting, final]) {
+          expect(reduceConversationContinuity(state, {
+            type: "terminal_observed", sessionId: SESSION_ID, terminal,
+          })).toBe(settled);
+        }
+        expect([...state.canonicalItems.values()].filter((item) => item.kind === "terminal")
+          .map((item) => item.status)).toEqual(["awaiting_user_input", status]);
+      }
+    },
+  );
+
+  it.each([
+    "missing_waiting", "missing_successor", "wrong_run", "wrong_source", "wrong_status",
+    "wrong_frontier", "equal_boundary", "reversed_boundary", "uncovered_frontier",
+  ])("keeps input successor reconciliation fail-closed for %s", (invalid) => {
+    const runId = "http-run-e7-2";
+    const waiting = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId, status: "awaiting_user_input", runSequence: "33" },
+    });
+    const finalPage = inputTerminalPage(runId, "cancelled");
+    const items = finalPage.items.map((item) => ({ ...item, displayOrder: { ...item.displayOrder } }));
+    if (invalid === "missing_waiting") items.shift();
+    if (invalid === "missing_successor") items.pop();
+    if (invalid === "wrong_run") items[0]!.runId = "another-run";
+    if (invalid === "wrong_source") items[0]!.source = "durable_transcript";
+    if (invalid === "wrong_status") items[1]!.status = "blocked";
+    if (invalid === "wrong_frontier") finalPage.terminalFrontier!.sessionStreamSequence = "134";
+    if (invalid === "equal_boundary") items[0]!.displayOrder.sessionStreamSequence = "133";
+    if (invalid === "reversed_boundary") items[0]!.displayOrder.sessionStreamSequence = "134";
+    if (invalid === "uncovered_frontier") finalPage.throughSessionStreamSequence = "132";
+    const rejected = reduceConversationContinuity(waiting, {
+      type: "refresh_page_received", sessionId: SESSION_ID, page: { ...finalPage, items },
+    });
+    expect(rejected.lifecycle).toBe("error");
+    expect(rejected.contractError?.code).toBe("terminal_conflict");
+    expect(rejected.observedTerminal).toEqual(waiting.observedTerminal);
+  });
+
+  it.each([true, false])("settles a proven initial input successor with owner-first=%s and retains it across late pages", (ownerFirst) => {
+    const runId = "http-run-e8-1";
+    let state = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId, status: "awaiting_user_input", runSequence: "9" },
+    });
+    state = reduceConversationContinuity(state, { type: "owner_probe_started", sessionId: SESSION_ID });
+    if (ownerFirst) state = reduceConversationContinuity(state, { type: "owner_probe_resolved", sessionId: SESSION_ID });
+    const finalPage = inputTerminalPage(runId, "cancelled", "169", "178", "180");
+    state = reduceConversationContinuity(state, {
+      type: "initial_page_received", sessionId: SESSION_ID, page: finalPage,
+    });
+    expect(state.contractError).toBeUndefined();
+    expect(state.observedTerminal).toBeUndefined();
+    expect(state.refreshState).toBe("idle");
+    expect(state.lifecycle).toBe(ownerFirst ? "idle" : "checking_owner");
+    const oldWaitingPage = page([finalPage.items[0]!], "170", {
+      runId, status: "awaiting_user_input", sessionStreamSequence: "169",
+    });
+    for (const type of ["older_page_received", "refresh_page_received"] as const) {
+      state = reduceConversationContinuity(state, { type, sessionId: SESSION_ID, page: oldWaitingPage });
+      expect(state.contractError).toBeUndefined();
+      expect(state.canonicalTerminal?.status).toBe("cancelled");
+      expect(state.observedTerminal).toBeUndefined();
+    }
+    state = reduceConversationContinuity(state, { type: "owner_probe_resolved", sessionId: SESSION_ID });
+    expect(state.lifecycle).toBe("idle");
+    const settled = state;
+    for (const terminal of [{ runId, status: "awaiting_user_input", runSequence: "9" },
+      { runId, status: "cancelled", runSequence: "10" }] as const) {
+      expect(reduceConversationContinuity(state, { type: "terminal_observed", sessionId: SESSION_ID, terminal })).toBe(settled);
+    }
+  });
+
+  it("does not reinterpret a real semantic pause as input waiting when cancellation arrives", () => {
+    const runId = "http-run-e8-1";
+    const paused = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId, status: "paused", runSequence: "9" },
+    });
+    expect(reduceConversationContinuity(paused, {
+      type: "initial_page_received", sessionId: SESSION_ID,
+      page: inputTerminalPage(runId, "cancelled", "169", "178", "180"),
+    }).contractError?.code).toBe("terminal_conflict");
+    expect(reduceConversationContinuity(paused, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId, status: "cancelled", runSequence: "10" },
+    }).contractError?.code).toBe("terminal_conflict");
+  });
+
+  it("does not let an input successor overwrite a committed successful run", () => {
+    const runId = "http-run-e7-2";
+    const state = reduceConversationContinuity(receiveInitial([]), {
+      type: "refresh_page_received", sessionId: SESSION_ID,
+      page: page([terminalItem("success", "123", runId)], "123", {
+        runId, status: "succeeded", sessionStreamSequence: "123",
+      }),
+    });
+    const rejected = reduceConversationContinuity(state, {
+      type: "refresh_page_received", sessionId: SESSION_ID,
+      page: inputTerminalPage(runId, "cancelled"),
+    });
+    expect(rejected.contractError?.code).toBe("terminal_conflict");
+    expect(rejected.canonicalTerminal?.status).toBe("succeeded");
+  });
 
   it("requires ordered evidence before replacing an observed waiting outcome", () => {
     const waiting = reduceConversationContinuity(receiveInitial([]), {
@@ -969,6 +1107,16 @@ function terminalItem(
     status: "succeeded",
     content: { type: "terminal", finalMessageId: "final", summaryTruncated: false },
   };
+}
+
+function inputTerminalPage(runId: string, status: "cancelled" | "blocked", waiting = "124", final = "133", through = "135"): ConversationDisplayPage {
+  const items: DurableConversationDisplayItem[] = [
+    { ...terminalItem("input-waiting", waiting, runId), status: "awaiting_user_input",
+      content: { type: "terminal", summaryTruncated: false } },
+    { ...terminalItem("input-resolved", final, runId), status,
+      content: { type: "terminal", summaryTruncated: false } },
+  ];
+  return page(items, through, { runId, status, sessionStreamSequence: final });
 }
 
 function toolItem(

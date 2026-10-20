@@ -791,7 +791,7 @@ impl RunProjection {
             },
             stream_message: None,
             run_status,
-            task_pause_observed: run_status == DesktopRunStatus::Paused,
+            task_pause_observed: false,
         }
     }
 
@@ -1263,41 +1263,40 @@ async fn terminal_snapshot(
     if !snapshot.status.is_terminal() || !reconciliation.settled {
         return false;
     }
-    let Some((kind, status)) = terminal_timeline_projection(snapshot.status) else {
-        return false;
-    };
-    let timeline = DesktopTimelineEvent {
-        workspace_id: workspace_id.to_owned(),
-        session_id: renderer_session_id.to_owned(),
-        run_id: run_id.to_owned(),
-        sequence: snapshot.stream_sequence,
-        run_sequence: snapshot.stream_sequence.to_string(),
-        replayable: false,
-        replay_id: None,
-        provisional_id: None,
-        live_preview: None,
-        kind,
-        text: None,
-        item_id: None,
-        tool_name: None,
-        status: Some(status.to_owned()),
-        assistant_kind: None,
-        tool_input: None,
-        execution_id: None,
-        execution_started_at_ms: None,
-        execution_updated_at_ms: None,
-        display_call_id: None,
-        approval: None,
-        approval_request_id: None,
-        tool_execution: None,
-        task: None,
-        terminal_task: None,
-        provider_turn_recovery: None,
-        route_recovery: None,
-        route_transition: None,
-    };
-    owner.record_event(timeline.clone()).await;
-    let _ = app.emit(DESKTOP_RUN_EVENT_NAME, timeline);
+    if let Some((kind, status)) = terminal_timeline_projection(snapshot.status) {
+        let timeline = DesktopTimelineEvent {
+            workspace_id: workspace_id.to_owned(),
+            session_id: renderer_session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            sequence: snapshot.stream_sequence,
+            run_sequence: snapshot.stream_sequence.to_string(),
+            replayable: false,
+            replay_id: None,
+            provisional_id: None,
+            live_preview: None,
+            kind,
+            text: None,
+            item_id: None,
+            tool_name: None,
+            status: Some(status.to_owned()),
+            assistant_kind: None,
+            tool_input: None,
+            execution_id: None,
+            execution_started_at_ms: None,
+            execution_updated_at_ms: None,
+            display_call_id: None,
+            approval: None,
+            approval_request_id: None,
+            tool_execution: None,
+            task: None,
+            terminal_task: None,
+            provider_turn_recovery: None,
+            route_recovery: None,
+            route_transition: None,
+        };
+        owner.record_event(timeline.clone()).await;
+        let _ = app.emit(DESKTOP_RUN_EVENT_NAME, timeline);
+    }
     publish_status(
         owner,
         app,
@@ -1439,7 +1438,9 @@ fn terminal_timeline_projection(
             Some((DesktopTimelineEventKind::RunInterrupted, "interrupted"))
         }
         DesktopRunStatus::Cancelled => Some((DesktopTimelineEventKind::RunCancelled, "cancelled")),
-        DesktopRunStatus::Paused => Some((DesktopTimelineEventKind::RunPaused, "paused")),
+        // HTTP also uses Paused for AwaitingUserInput. Only the exact public event or
+        // canonical display can supply its domain status; the snapshot proves transport end.
+        DesktopRunStatus::Paused => None,
         _ => None,
     }
 }

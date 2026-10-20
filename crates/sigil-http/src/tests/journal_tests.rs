@@ -433,6 +433,248 @@ fn approval_event() -> HttpProtocolEvent {
 }
 
 #[test]
+fn approval_reconciliation_identity_is_frozen_with_the_exact_protocol_envelope() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    let event = approval_event();
+    let source_identity = event.provisional_id.clone().expect("real approval anchor");
+    let journal = Arc::new(HttpDurableProtocolJournal::open(&path, 16).expect("journal"));
+    let bus = crate::HttpLiveEventBus::with_durable_journal(16, Arc::clone(&journal));
+    let published = bus
+        .publish_run_event_with_approval(
+            event.run_event.clone().expect("public source"),
+            event.approval_request.clone(),
+        )
+        .expect("actual publication");
+    assert_eq!(
+        published
+            .approval_request
+            .as_ref()
+            .expect("guard")
+            .display
+            .reconciliation_id,
+        Some(source_identity.clone())
+    );
+    drop(bus);
+    drop(journal);
+    let reopened = HttpDurableProtocolJournal::open(&path, 16).expect("cold journal");
+    let replay = reopened
+        .replay_run_after("session-1", "run-1", None)
+        .expect("replay");
+    assert_eq!(
+        serde_json::to_value(&replay[0]).expect("replayed wire"),
+        serde_json::to_value(&published).expect("published wire")
+    );
+    let mut forged = published;
+    forged
+        .approval_request
+        .as_mut()
+        .expect("guard")
+        .display
+        .reconciliation_id = Some(format!("live-v1:{}", "f".repeat(64)));
+    assert!(!forged.has_valid_approval_metadata());
+    forged.provisional_id = forged
+        .approval_request
+        .as_ref()
+        .expect("guard")
+        .display
+        .reconciliation_id
+        .clone();
+    assert!(
+        !forged.has_valid_approval_metadata(),
+        "a matching pair must still name the real source slot"
+    );
+    assert!(reopened.append(forged).is_err());
+
+    let legacy = approval_event();
+    assert!(
+        legacy
+            .approval_request
+            .as_ref()
+            .expect("legacy guard")
+            .display
+            .reconciliation_id
+            .is_none()
+    );
+    assert!(
+        legacy.has_valid_approval_metadata(),
+        "old absence remains conservative"
+    );
+}
+
+#[test]
+fn approval_review_replays_from_durable_source_with_exact_guard_and_safe_text() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    let mut event = approval_event();
+    let preview = sigil_kernel::ToolPreview {
+        title: "Edit file".to_owned(),
+        summary: "Frozen review".to_owned(),
+        body: "+精确修改\n".repeat(3000),
+        changed_files: Vec::new(),
+        file_diffs: Vec::new(),
+    };
+    let review = crate::sse::approval_preview_for_display(&preview).expect("complete review");
+    let run_event = event.run_event.as_mut().expect("run event");
+    let PublicRunEventKind::ApprovalRequested {
+        preview: source, ..
+    } = &mut run_event.event
+    else {
+        panic!("approval")
+    };
+    *source = Some(preview);
+    event
+        .approval_request
+        .as_mut()
+        .expect("guard")
+        .display
+        .preview = Some(review.clone());
+    assert!(event.has_valid_approval_metadata());
+    {
+        let journal = HttpDurableProtocolJournal::open(&path, 16).expect("journal");
+        journal
+            .append(event.clone())
+            .expect("frozen review persists");
+    }
+    let reopened = HttpDurableProtocolJournal::open(&path, 16).expect("cold journal");
+    let replay = reopened
+        .replay_run_after("session-1", "run-1", None)
+        .expect("replay");
+    let recovered = replay[0]
+        .approval_request
+        .as_ref()
+        .expect("durable exact guard");
+    assert_eq!(
+        recovered,
+        event.approval_request.as_ref().expect("original guard")
+    );
+    assert_eq!(recovered.display.preview.as_ref(), Some(&review));
+    assert!(
+        !serde_json::to_string(&review)
+            .expect("wire")
+            .contains("args_json")
+    );
+
+    let mut forged = event;
+    forged
+        .approval_request
+        .as_mut()
+        .expect("guard")
+        .display
+        .preview
+        .as_mut()
+        .expect("review")
+        .body = "different change".to_owned();
+    assert!(
+        !forged.has_valid_approval_metadata(),
+        "display cannot claim a different preview for the same authority"
+    );
+}
+
+#[test]
+fn approval_review_uses_existing_safety_projection_and_utf8_limit() {
+    let mut preview = sigil_kernel::ToolPreview {
+        title: "Authorization: Bearer secret-approval-token".to_owned(),
+        summary: "Frozen review token=summary-approval-token".to_owned(),
+        body: "界".repeat(50_000),
+        changed_files: Vec::new(),
+        file_diffs: Vec::new(),
+    };
+    assert!(
+        crate::sse::approval_preview_for_display(&preview).is_none(),
+        "oversized UTF-8 review must not become an approvable prefix"
+    );
+    preview.body = "界".repeat(40_000);
+    let review =
+        crate::sse::approval_preview_for_display(&preview).expect("complete bounded review");
+    assert_eq!(
+        review.title,
+        sigil_kernel::safe_persistence_text(&preview.title)
+    );
+    assert!(!review.title.contains("secret-approval-token"));
+    assert!(!review.summary.contains("summary-approval-token"));
+    assert_eq!(
+        review.summary,
+        sigil_kernel::safe_persistence_text(&preview.summary)
+    );
+    assert_eq!(review.body, preview.body);
+    assert_eq!(
+        sigil_kernel::safe_persistence_text(&review.body),
+        review.body
+    );
+}
+
+#[test]
+fn approval_review_does_not_expand_durable_envelope_budget_or_lose_frozen_source() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    let mut event = approval_event();
+    let preview = sigil_kernel::ToolPreview {
+        title: "Edit file".to_owned(),
+        summary: "Frozen review".to_owned(),
+        body: "+exact\n".repeat(16_000),
+        changed_files: Vec::new(),
+        file_diffs: vec![sigil_kernel::ToolPreviewFile {
+            path: "workspace.txt".to_owned(),
+            diff: "x".repeat(850_000),
+        }],
+    };
+    let review = crate::sse::approval_preview_for_display(&preview).expect("bounded review");
+    let PublicRunEventKind::ApprovalRequested {
+        preview: source, ..
+    } = &mut event.run_event.as_mut().expect("public event").event
+    else {
+        panic!("approval")
+    };
+    *source = Some(preview);
+    event
+        .approval_request
+        .as_mut()
+        .expect("guard")
+        .display
+        .preview = Some(review.clone());
+    assert!(serde_json::to_vec(&event).expect("wire").len() > MAX_EVENT_BYTES);
+    {
+        let journal = Arc::new(HttpDurableProtocolJournal::open(&path, 16).expect("journal"));
+        let bus = HttpLiveEventBus::with_durable_journal(16, journal);
+        let published = bus
+            .publish_run_event_with_approval(
+                event.run_event.take().expect("public event"),
+                event.approval_request.take(),
+            )
+            .expect("existing envelope budget is sufficient without redundant review");
+        assert!(
+            published
+                .approval_request
+                .as_ref()
+                .expect("exact guard")
+                .display
+                .preview
+                .is_none()
+        );
+        assert!(serde_json::to_vec(&published).expect("wire").len() <= MAX_EVENT_BYTES);
+    }
+    let reopened = HttpDurableProtocolJournal::open(&path, 16).expect("cold journal");
+    let replay = reopened
+        .replay_run_after("session-1", "run-1", None)
+        .expect("replay");
+    assert!(replay[0].has_valid_approval_metadata());
+    let PublicRunEventKind::ApprovalRequested { preview, .. } = &replay[0]
+        .run_event
+        .as_ref()
+        .expect("frozen public event")
+        .event
+    else {
+        panic!("approval")
+    };
+    assert_eq!(
+        crate::sse::approval_preview_for_display(preview.as_ref().expect("frozen review")),
+        Some(review),
+        "cold display derives only from the same durable event, not renderer memory"
+    );
+}
+
+#[test]
 fn durable_journal_replays_after_process_reopen() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let path = temp.path().join("protocol-journal.json");

@@ -2411,6 +2411,9 @@ pub struct DesktopPendingApproval {
 #[serde(rename_all = "snake_case")]
 pub struct DesktopPendingApprovalDisplay {
     pub event_sequence: u64,
+    /// Opaque anchor already bound by the server to the exact public approval envelope.
+    #[serde(default)]
+    pub reconciliation_id: Option<String>,
     #[serde(default)]
     pub effects: Vec<String>,
     #[serde(default)]
@@ -2426,6 +2429,9 @@ pub struct DesktopPendingApprovalDisplay {
     pub decision_reasons: Vec<String>,
     pub safe_summary_title: String,
     pub safe_summary_detail: String,
+    /// Exact server-owned review text; missing text must not be inferred from a prior call.
+    #[serde(default)]
+    pub preview: Option<crate::DesktopPublicToolPreview>,
     #[serde(default)]
     pub operation: Option<String>,
     #[serde(default)]

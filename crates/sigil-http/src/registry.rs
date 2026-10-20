@@ -70,6 +70,7 @@ const MAX_TASK_INTEGRATION_ID_BYTES: usize = 512;
 const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
 const MAX_PENDING_APPROVALS_PER_RUN: usize = 8;
 const MAX_APPROVAL_LIFECYCLES_PER_RUN: usize = 32;
+const MAX_RUN_APPROVAL_REVIEW_BYTES: usize = 256 * 1024;
 const MAX_CONTINUITY_TERMINAL_RUNS: usize = 16;
 
 /// Errors returned by the HTTP session/run registry.
@@ -2648,8 +2649,10 @@ impl HttpSessionRunRegistry {
         state.transition_run_terminal(run_id, HttpRunTerminalOutcome::Paused)
     }
 
-    /// Replaces the adapter-only resumable pause with the exact durable revision terminal after
-    /// its stream has been reconciled.  No generic run may use this transition.
+    /// Replaces an adapter-only resumable pause after its exact durable successor is validated
+    /// and its stream reconciled. Callers authenticate either a PlanReview revision terminal or
+    /// an ordinary input's Resolved/terminal-outbox bundle; an unrelated terminal cannot replace
+    /// an immutable outcome through this path.
     pub(crate) fn record_supervised_revision_terminal_with_reconciliation<F>(
         &self,
         run_id: &str,
@@ -4377,26 +4380,41 @@ impl HttpSessionRunRegistry {
     /// Rebinds a pre-registered approval projection to the public sequence allocated by the
     /// durable event sequencer. Approval routing is registered before publication so the event
     /// bus never needs to acquire the registry lock while holding its publication lock.
-    pub(crate) fn update_approval_event_sequence(
+    pub(crate) fn update_approval_publication(
         &self,
         run_id: &str,
-        call_id: &str,
-        approval_request_id: &str,
-        event_sequence: u64,
+        publication: &crate::HttpProtocolEvent,
     ) -> bool {
+        let Some(event) = publication.run_event.as_ref() else {
+            return false;
+        };
+        let Some(published) = publication.approval_request.as_ref() else {
+            return false;
+        };
+        if event.run_id != run_id || !publication.has_valid_approval_metadata() {
+            return false;
+        }
         let mut state = self.lock_state();
         let Some(pending) = state
             .runs
             .get_mut(run_id)
-            .and_then(|run| run.pending_approvals.get_mut(call_id))
-            .filter(|pending| pending.approval_request_id == approval_request_id)
+            .and_then(|run| run.pending_approvals.get_mut(&published.call_id))
+            .filter(|pending| {
+                pending.call_id == published.call_id
+                    && pending.tool_name == published.tool_name
+                    && pending.approval_request_id == published.approval_request_id
+                    && pending.tool_call_hash == published.tool_call_hash
+                    && pending.policy_version == published.policy_version
+                    && pending.expires_at_ms == published.expires_at_ms
+            })
         else {
             // A racing user decision or terminal transition may already have consumed the
             // projection after observing the live event. Routing was still registered before
             // publication, so there is no missing approval window to repair.
             return false;
         };
-        pending.display.event_sequence = event_sequence;
+        pending.display.event_sequence = event.sequence;
+        pending.display.reconciliation_id = published.display.reconciliation_id.clone();
         true
     }
 
@@ -6538,6 +6556,33 @@ impl HttpRunState {
     }
 
     fn snapshot(&self) -> HttpRunSnapshot {
+        let mut pending_approvals = self.pending_approvals.values().cloned().collect::<Vec<_>>();
+        let mut approval_lifecycles = self
+            .approval_lifecycles
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for lifecycle in &mut approval_lifecycles {
+            if lifecycle.state == HttpApprovalLifecycleState::Terminal {
+                lifecycle.approval.display.preview = None;
+            }
+        }
+        let mut remaining_review_bytes = MAX_RUN_APPROVAL_REVIEW_BYTES;
+        for approval in pending_approvals.iter_mut().chain(
+            approval_lifecycles
+                .iter_mut()
+                .map(|lifecycle| &mut lifecycle.approval),
+        ) {
+            if let Some(preview) = &approval.display.preview {
+                let bytes = preview.title.len() + preview.summary.len() + preview.body.len();
+                if bytes <= remaining_review_bytes {
+                    remaining_review_bytes -= bytes;
+                } else {
+                    // Keep exact authority facts, but never pretend a partial review is complete.
+                    approval.display.preview = None;
+                }
+            }
+        }
         HttpRunSnapshot {
             id: self.id.clone(),
             session_id: self.session_id.clone(),
@@ -6545,8 +6590,8 @@ impl HttpRunState {
             permission_mode: self.permission_mode,
             reasoning_effort: self.reasoning_effort,
             prompt_preview: self.prompt_preview.clone(),
-            pending_approvals: self.pending_approvals.values().cloned().collect(),
-            approval_lifecycles: self.approval_lifecycles.values().cloned().collect(),
+            pending_approvals,
+            approval_lifecycles,
             terminal_tasks: self.terminal_tasks.values().cloned().collect(),
             stream_sequence: self.stream_sequence,
         }
@@ -7215,3 +7260,7 @@ fn current_unix_time_ms() -> u64 {
             duration.as_millis().min(u128::from(u64::MAX)) as u64
         })
 }
+
+#[cfg(test)]
+#[path = "tests/registry_approval_preview_tests.rs"]
+mod approval_preview_tests;

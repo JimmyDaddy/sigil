@@ -1,0 +1,192 @@
+{
+  "provenance": {
+    "source_run": "http-run-e10-1",
+    "source_public_sequence": 11,
+    "source_approval_record": 501,
+    "reconciliation_source": "frozen protocol envelope provisional_id",
+    "canonical_projection": "source records 492/501, shared stable display and slot identities",
+    "minimal_relevant_canonical_rows": true
+  },
+  "workspaceId": "workspace-0123456789ab",
+  "rendererSessionId": "http-canonical-e10",
+  "runId": "http-run-e10-1",
+  "pending": {
+    "call_id": "call_00_FV1JCNxfHLgXTM1Co97H3204",
+    "tool_name": "exec_command",
+    "approval_request_id": "96a0595a-546e-4c35-8cf8-86805a019ff4",
+    "tool_call_hash": "3a11e50d4ba35f3c9d7198df9707b4ff02b691ecaccfa53cee5084058b2e8a7a",
+    "policy_version": "sha256:0baa836f5ab6292c4d57c5dc9fb56a7132f198dad6d244196ef66789fccf43f6",
+    "expires_at_ms": 9007199254740991,
+    "session_grant_available": false,
+    "session_grant_unavailable_reason": {
+      "code": "analysis_incomplete"
+    },
+    "display": {
+      "event_sequence": 11,
+      "effects": [
+        "unknown"
+      ],
+      "subjects": [
+        {
+          "kind": "command",
+          "scope": "unknown"
+        },
+        {
+          "kind": "path",
+          "scope": "workspace",
+          "workspace_label": "<"
+        },
+        {
+          "kind": "path",
+          "scope": "workspace",
+          "workspace_label": "."
+        }
+      ],
+      "analysis_status": "unsupported",
+      "analysis_reason_codes": [
+        "unsupported_syntax"
+      ],
+      "analysis_reasons": [
+        "unsupported POSIX shell construct: heredoc_redirect"
+      ],
+      "containment": [
+        "filesystem=unspecified",
+        "network=unspecified",
+        "process=owned_tree",
+        "environment=restricted",
+        "persistent_process=true"
+      ],
+      "decision_reasons": [
+        "manual produced ask",
+        "declared effects require at least high risk; ask local policy",
+        "incomplete shell analysis requires an exact interactive decision"
+      ],
+      "safe_summary_title": "Execute a shell command",
+      "safe_summary_detail": "The command could not be fully classified by the structured shell analyzer",
+      "preview": {
+        "title": "Execute a shell command",
+        "summary": "Review the complete command and its execution context.",
+        "body": "Working directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: 60 seconds\n\nCommand:\npython3 - <<'PY'\nfrom pathlib import Path\nfrom decimal import Decimal\nimport ast\nimport csv\n\nroot = Path.cwd()\npeople = (\"小林\", \"小周\", \"小陈\")\nexpected = {\n    \"expenses.csv\": (8, Decimal(\"1240.30\")),\n    \"expenses_partial_refund.csv\": (12, Decimal(\"1439.31\")),\n}\nfor name, (count, total) in expected.items():\n    path = root / name\n    with path.open(encoding=\"utf-8-sig\", newline=\"\") as source:\n        rows = list(csv.DictReader(source))\n    assert len(rows) == count, (name, \"row count\", len(rows))\n    actual = sum((Decimal(row[\"amount\"]) for row in rows), Decimal(\"0\"))\n    assert actual == total, (name, \"total\", actual)\n    for row in rows:\n        assert row[\"payer\"] in people, (name, \"payer\", row[\"payer\"])\n        amount = Decimal(row[\"amount\"])\n        assert amount != 0, (name, \"zero amount\")\n        assert amount.as_tuple().exponent >= -2, (name, \"precision\")\n        participants = row.get(\"participants\", \"\").strip()\n        if participants:\n            members = participants.split(\"|\")\n            assert all(member in people for member in members), (name, members)\n            assert len(members) == len(set(members)), (name, \"duplicate participant\")\n    print(f\"{name}: {len(rows)} rows, total {actual:.2f}\")\n\nreadme = (root / \"README.md\").read_text(encoding=\"utf-8\")\nassert \"split_trip.py\" in readme\nassert \"expenses_partial_refund.csv\" in readme\nassert \"participants\" in readme\nassert \"退款\" in readme\nast.parse((root / \"split_trip.py\").read_text(encoding=\"utf-8\"))\nprint(\"账单、文档和程序语法只读核验通过\")\nPY"
+      },
+      "operation": "execute_unknown_command",
+      "risk": "high",
+      "snapshot_required": false,
+      "reconciliation_id": "live-v1:60af554036c5c48aef3d47aeeaea9ecf91baef3d45764cea0b48788e94d4e8ff"
+    }
+  },
+  "canonicalPage": {
+    "schemaVersion": 1,
+    "requestScope": "canonical-e10-source",
+    "throughSessionStreamSequence": "503",
+    "totalItems": "2",
+    "hasMore": false,
+    "gapFacts": [],
+    "items": [
+      {
+        "schemaVersion": 1,
+        "displayId": "display-sha256:b313bb6c54994679313a3a5c2c90a3299fb3208fb7440c349477df4653769552",
+        "displayOrder": {
+          "sessionStreamSequence": "492",
+          "subindex": 1
+        },
+        "sourceEventId": "0aa06dcf-0753-4190-8de0-2b34b9ba4f43",
+        "source": "durable_transcript",
+        "kind": "tool",
+        "runId": "http-run-e10-1",
+        "status": "requested",
+        "content": {
+          "type": "tool",
+          "callId": "call_00_FV1JCNxfHLgXTM1Co97H3204",
+          "toolName": "exec_command",
+          "truncated": false,
+          "originalContentBytes": 0,
+          "input": "python3 - <<'PY'\nfrom pathlib import Path\nfrom decimal import Decimal\nimport ast\nimport csv\n\nroot = Path.cwd()\npeople = (\"小林\", \"小周\", \"小陈\")\nexpected = {\n    \"expenses.csv\": (8, Decimal(\"1240.30\")),\n    \"expenses_partial_refund.csv\": (12, Decimal(\"1439.31\")),\n}\nfor name, (count, total) in expected.items():\n    path = root / name\n    with path.open(encoding=\"utf-8-sig\", newline=\"\") as source:\n        rows = list(csv.DictReader(source))\n    assert len(rows) == count, (name, \"row count\", len(rows))\n    actual = sum((Decimal(row[\"amount\"]) for row in rows), Decimal(\"0\"))\n    assert actual == total, (name, \"total\", actual)\n    for row in rows:\n        assert row[\"payer\"] in people, (name, \"payer\", row[\"payer\"])\n        amount = Decimal(row[\"amount\"])\n        assert amount != 0, (name, \"zero amount\")\n        assert amount.as_tuple().exponent >= -2, (name, \"precision\")\n        participants = row.get(\"participants\", \"\").strip()\n        if participants:\n            members = participants.split(\"|\")\n            assert all(member in people for member in members), (name, members)\n            assert len(members) == len(set(members)), (name, \"duplicate participant\")\n    print(f\"{name}: {len(rows)} rows, total {actual:.2f}\")\n\nreadme = (root / \"README.md\").read_text(encoding=\"utf-8\")\nassert \"split_trip.py\" in readme\nassert \"expenses_partial_refund.csv\" in readme\nassert \"participants\" in readme\nassert \"退款\" in readme\nast.parse((root / \"split_trip.py\").read_text(encoding=\"utf-8\"))\nprint(\"账单、文档和程序语法只读核验通过\")\nPY"
+        },
+        "reconciles": [
+          "live-v1:81fbbf94133dbea786cf70a3ef6c11292bd7e139b1d71294c9c4dbe3361a2ebd"
+        ]
+      },
+      {
+        "schemaVersion": 1,
+        "displayId": "display-sha256:aa7f9273c5b60ccd1333436ee5dccaeb3749fe7027c1ac5a029632a7f6390fe8",
+        "displayOrder": {
+          "sessionStreamSequence": "501",
+          "subindex": 0
+        },
+        "sourceEventId": "32a9e92b-0d52-5225-b69d-a9f6da436ce7",
+        "source": "durable_run_event",
+        "kind": "approval",
+        "runId": "http-run-e10-1",
+        "status": "waiting_for_approval",
+        "content": {
+          "type": "approval",
+          "callId": "call_00_FV1JCNxfHLgXTM1Co97H3204",
+          "toolName": "exec_command"
+        },
+        "reconciles": [
+          "live-v1:60af554036c5c48aef3d47aeeaea9ecf91baef3d45764cea0b48788e94d4e8ff"
+        ]
+      }
+    ]
+  },
+  "timeline": {
+    "workspaceId": "workspace-0123456789ab",
+    "sessionId": "http-canonical-e10",
+    "runId": "http-run-e10-1",
+    "sequence": 11,
+    "runSequence": "11",
+    "replayable": false,
+    "provisionalId": "live-v1:60af554036c5c48aef3d47aeeaea9ecf91baef3d45764cea0b48788e94d4e8ff",
+    "kind": "approval_requested",
+    "itemId": "call_00_FV1JCNxfHLgXTM1Co97H3204",
+    "toolName": "exec_command",
+    "status": "waiting",
+    "approval": {
+      "callId": "call_00_FV1JCNxfHLgXTM1Co97H3204",
+      "toolName": "exec_command",
+      "approvalRequestId": "96a0595a-546e-4c35-8cf8-86805a019ff4",
+      "toolCallHash": "3a11e50d4ba35f3c9d7198df9707b4ff02b691ecaccfa53cee5084058b2e8a7a",
+      "policyVersion": "sha256:0baa836f5ab6292c4d57c5dc9fb56a7132f198dad6d244196ef66789fccf43f6",
+      "expiresAtMs": 9007199254740991,
+      "sessionGrantAvailable": false,
+      "sessionGrantUnavailableReason": {
+        "code": "analysis_incomplete"
+      },
+      "effects": [
+        "unknown"
+      ],
+      "subjects": [
+        "command · unknown",
+        "<",
+        "."
+      ],
+      "analysisStatus": "unsupported",
+      "analysisReasonCodes": [
+        "unsupported_syntax"
+      ],
+      "analysisReasons": [
+        "unsupported POSIX shell construct: heredoc_redirect"
+      ],
+      "containment": [
+        "filesystem=unspecified",
+        "network=unspecified",
+        "process=owned_tree",
+        "environment=restricted",
+        "persistent_process=true"
+      ],
+      "decisionReasons": [
+        "manual produced ask",
+        "declared effects require at least high risk; ask local policy",
+        "incomplete shell analysis requires an exact interactive decision"
+      ],
+      "safeSummaryTitle": "Execute a shell command",
+      "safeSummaryDetail": "The command could not be fully classified by the structured shell analyzer",
+      "operation": "execute_unknown_command",
+      "risk": "high",
+      "snapshotRequired": false,
+      "previewTitle": "Execute a shell command",
+      "previewSummary": "Review the complete command and its execution context.",
+      "previewBody": "Working directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: 60 seconds\n\nCommand:\npython3 - <<'PY'\nfrom pathlib import Path\nfrom decimal import Decimal\nimport ast\nimport csv\n\nroot = Path.cwd()\npeople = (\"小林\", \"小周\", \"小陈\")\nexpected = {\n    \"expenses.csv\": (8, Decimal(\"1240.30\")),\n    \"expenses_partial_refund.csv\": (12, Decimal(\"1439.31\")),\n}\nfor name, (count, total) in expected.items():\n    path = root / name\n    with path.open(encoding=\"utf-8-sig\", newline=\"\") as source:\n        rows = list(csv.DictReader(source))\n    assert len(rows) == count, (name, \"row count\", len(rows))\n    actual = sum((Decimal(row[\"amount\"]) for row in rows), Decimal(\"0\"))\n    assert actual == total, (name, \"total\", actual)\n    for row in rows:\n        assert row[\"payer\"] in people, (name, \"payer\", row[\"payer\"])\n        amount = Decimal(row[\"amount\"])\n        assert amount != 0, (name, \"zero amount\")\n        assert amount.as_tuple().exponent >= -2, (name, \"precision\")\n        participants = row.get(\"participants\", \"\").strip()\n        if participants:\n            members = participants.split(\"|\")\n            assert all(member in people for member in members), (name, members)\n            assert len(members) == len(set(members)), (name, \"duplicate participant\")\n    print(f\"{name}: {len(rows)} rows, total {actual:.2f}\")\n\nreadme = (root / \"README.md\").read_text(encoding=\"utf-8\")\nassert \"split_trip.py\" in readme\nassert \"expenses_partial_refund.csv\" in readme\nassert \"participants\" in readme\nassert \"退款\" in readme\nast.parse((root / \"split_trip.py\").read_text(encoding=\"utf-8\"))\nprint(\"账单、文档和程序语法只读核验通过\")\nPY"
+    }
+  }
+}

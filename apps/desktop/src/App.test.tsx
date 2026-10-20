@@ -26,6 +26,7 @@ import type {
   SessionSummary,
   TaskIntegrationReview,
   TimelineEvent,
+  UserInputRequest,
   ToolArtifactPage,
   ToolArtifactSelector,
   WorkspaceSummary,
@@ -33,6 +34,7 @@ import type {
 import { Icon } from "./ui/icons";
 import { readLastSession, writeLastSession } from "./preferences";
 import { rendererRunTimings } from "./features/support/runTimings";
+import nativeCanonicalApproval from "./features/conversation/fixtures/native-canonical-pending-approval.json";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
@@ -61,6 +63,117 @@ const emptyCatalog: CatalogPage = {
   truncatedSourceCount: 0,
   entries: [],
 };
+
+it("restores the exact draft after reopening the same durable session with a new renderer id", async () => {
+  const user = userEvent.setup();
+  const startRun = vi.fn();
+  const entry = {
+    sessionRef: "draft-reopen.jsonl", sessionId: "durable-draft-reopen", sourceState: "ready" as const,
+    sourceBytes: 512, sourceModifiedAtUnixMs: 1_784_419_200_000, title: "Draft reopening",
+    userMessageCount: 0, assistantMessageCount: 0, toolResultCount: 0, pinned: false,
+  };
+  let rendererGeneration = 0;
+  const openSession = vi.fn(async () => ({
+    id: `http-draft-reopen-${++rendererGeneration}`, label: entry.title, runCount: 0,
+  }));
+  const bridge = bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    catalog: async () => ({ ...emptyCatalog, entries: [entry] }), openSession, startRun,
+  });
+  const first = render(<App bridge={bridge} />);
+  await user.click(await screen.findByRole("button", { name: /^Draft reopening/ }));
+  const draft = "只修改参与者分摊与退款，保留原账单。\n小林|小周，金额 198.01。";
+  fireEvent.change(await readyComposer(), { target: { value: draft } });
+  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${entry.sessionId}`)).toBe(draft);
+  first.unmount();
+  render(<App bridge={bridge} />);
+  await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+  expect((await readyComposer()).value).toBe(draft);
+  expect(rendererGeneration).toBe(2);
+  expect(startRun).not.toHaveBeenCalled();
+});
+
+it.each(["run_finished", "run_cancelled", "run_blocked"] as const)(
+  "retires only automatic retry presentation on %s without another input", async (kind) => {
+    const user = userEvent.setup();
+    let listener: ((event: TimelineEvent) => void) | undefined;
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+    })} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(await readyComposer(), "Read the recorded result");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(listener).toBeDefined());
+    const attention = kind === "run_blocked";
+    const retry: TimelineEvent = {
+      workspaceId: workspace.id, sessionId: "http-session-new", runId: "run-1", sequence: 5,
+      runSequence: "5", kind: "provider_turn_recovery", replayable: true,
+      providerTurnRecovery: { phase: attention ? "blocked" : "recovering",
+        activeRetryCount: 1, activeMaxRetries: 2, retryCount: 1, maxTransportRetries: 2,
+        userAttentionRequired: attention, availableActions: attention ? ["update_connection", "review_effect"] : ["cancel"] },
+    };
+    const title = attention ? "Model recovery needs attention" : "Retrying the model request";
+    act(() => listener?.(retry));
+    expect(await screen.findByText(title)).toBeTruthy();
+    act(() => listener?.({ ...retry, providerTurnRecovery: undefined,
+      sequence: 16, runSequence: "16", kind }));
+    if (attention) {
+      expect(screen.getByText(title)).toBeTruthy();
+      expect(screen.getByText("This task is preserved. Resolve the indicated connection or effect boundary before continuing.")).toBeTruthy();
+    } else {
+      await waitFor(() => expect(screen.queryByText(title)).toBeNull());
+      act(() => listener?.(retry));
+      expect(screen.queryByText(title)).toBeNull();
+    }
+  },
+);
+
+it("shows one exact pending review instead of its canonical requested stub and notice", async () => {
+  const user = userEvent.setup();
+  let listener: ((event: TimelineEvent) => void) | undefined;
+  const sessionId = nativeCanonicalApproval.rendererSessionId;
+  const runId = nativeCanonicalApproval.runId;
+  // This JSON is the actual DesktopPendingApproval::into_timeline output, verified by
+  // the Rust core/native tests; it is not an invented live event with an ideal anchor.
+  const approvalEvent = nativeCanonicalApproval.timeline as TimelineEvent;
+  const display = nativeCanonicalApproval.canonicalPage as ConversationDisplayPage;
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    catalog: async () => ({ ...emptyCatalog, entries: [{ sessionRef: "review-once.jsonl", sessionId: "durable-review-once",
+      sourceState: "ready", sourceBytes: 1024, sourceModifiedAtUnixMs: 1, title: "Review once",
+      userMessageCount: 1, assistantMessageCount: 0, toolResultCount: 0, pinned: false }] }),
+    openSession: async () => ({ id: sessionId, label: "Review once", runCount: 1, foregroundRunId: runId }),
+    continuity: async () => ({ durableFrontier: { throughStreamSequence: 503 },
+      foregroundOwner: { runId, ownerRevision: `sha256:${"a".repeat(64)}` }, retainedTerminalRuns: [], recoveryActions: [] }),
+    display: async () => display,
+    subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+    attachRun: async () => ({ run: { id: runId, sessionId, status: "waiting_for_approval", permissionMode: "manual", streamSequence: 11 },
+      events: [approvalEvent], streamState: "live", hasGap: false }),
+  })} />);
+  await user.click(await screen.findByRole("button", { name: /^Review once/ }));
+  expect(await screen.findByRole("heading", { name: "Execute a shell command" })).toBeTruthy();
+  expect(screen.getAllByRole("region", { name: "Requested action" })).toHaveLength(1);
+  const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+  expect(within(timeline).queryByText("Needs approval")).toBeNull();
+  expect(within(timeline).queryByText("Command")).toBeNull();
+  expect(within(timeline).queryByText("Show full command")).toBeNull();
+  expect(screen.getByRole("button", { name: "Approve once" }).hasAttribute("disabled")).toBe(false);
+  expect(screen.getByText("high")).toBeTruthy();
+  await waitFor(() => expect(listener).toBeDefined());
+  const retry: TimelineEvent = { ...approvalEvent, approval: undefined, kind: "provider_turn_recovery",
+    sequence: 4, runSequence: "4", providerTurnRecovery: {
+      phase: "recovering", activeRetryCount: 1, activeMaxRetries: 2, retryCount: 1, maxTransportRetries: 2,
+      userAttentionRequired: false, availableActions: ["cancel"],
+    } };
+  act(() => listener?.(retry));
+  expect(screen.queryByText("Retrying the model request")).toBeNull();
+  act(() => listener?.({ ...retry, sequence: 5, runSequence: "5", providerTurnRecovery: {
+    ...retry.providerTurnRecovery!, phase: "blocked", userAttentionRequired: true, availableActions: ["review_effect"],
+  } }));
+  expect(screen.getByText("Model recovery needs attention")).toBeTruthy();
+});
 
 const defaultAppearance: AppearanceSnapshot = {
   preference: "system",
@@ -698,28 +811,26 @@ describe("desktop coding-agent components", () => {
     else Object.defineProperty(navigator, "clipboard", originalClipboard);
   });
 
-  it("opens streaming reasoning, then collapses it to a bounded preview on completion", async () => {
+  it("keeps reasoning collapsed without a preview until opened and preserves the choice on completion", async () => {
     const user = userEvent.setup();
     const text = "first reasoning line\nsecond reasoning line\nthird reasoning line\nhidden reasoning line";
     const { rerender, unmount } = render(
       <Message message={{ key: "reasoning", kind: "reasoning", label: "Working", text, status: "streaming" }} />,
     );
     const disclosure = screen.getByText("Working").closest("details") as HTMLDetailsElement;
-    expect(disclosure.open).toBe(true);
-    expect(screen.getByText("Hide details")).toBeTruthy();
+    expect(disclosure.open).toBe(false);
+    expect(screen.getByText("Show details")).toBeTruthy();
     expect(disclosure.querySelector(".message-disclosure-preview")).toBeNull();
+    expect(disclosure.querySelector("summary")?.textContent).not.toContain("streaming");
+    await user.click(screen.getByText("Show details"));
+    await waitFor(() => expect(disclosure.open).toBe(true));
 
     rerender(
       <Message message={{ key: "reasoning", kind: "reasoning", label: "Reasoning", text }} />,
     );
-    await waitFor(() => expect(disclosure.open).toBe(false));
-    expect(screen.getByText("Show details")).toBeTruthy();
-    const preview = disclosure.querySelector(".message-disclosure-preview");
-    expect(preview?.textContent).toContain("third reasoning line");
-    expect(preview?.textContent).not.toContain("hidden reasoning line");
-    await user.click(screen.getByText("Show details"));
     expect(disclosure.open).toBe(true);
     expect(screen.getByText("Hide details")).toBeTruthy();
+    expect(disclosure.querySelector(".message-disclosure-preview")).toBeNull();
     unmount();
   });
 
@@ -790,13 +901,14 @@ describe("desktop coding-agent components", () => {
           artifactRef: `ta1_${"a".repeat(32)}`,
           artifactAvailability: "available",
           artifactHasMore: true,
-          artifactPersistedBytes: 32,
+          artifactPersistedBytes: 32_000,
         }}
         onReadArtifact={readArtifact}
       />,
     );
 
-    expect(screen.getByText("32 saved bytes are available in bounded pages.")).toBeTruthy();
+    expect(screen.queryByText(/saved bytes are available/)).toBeNull();
+    await user.click(screen.getByText("Full output and search"));
     await user.click(screen.getByRole("button", { name: "View saved output" }));
     expect((await screen.findByLabelText("shell saved output page")).textContent).toContain("saved page");
     expect(readArtifact).toHaveBeenNthCalledWith(1, {
@@ -832,7 +944,7 @@ describe("desktop coding-agent components", () => {
           artifactRef: `ta1_${"d".repeat(32)}`,
           artifactAvailability: "expired",
           artifactHasMore: true,
-          artifactPersistedBytes: 32,
+          artifactPersistedBytes: 32_000,
         }}
         onReadArtifact={readArtifact}
       />,
@@ -2092,7 +2204,7 @@ describe("desktop workspace and history shell", () => {
         cancelRun,
       })} />);
       expect(await screen.findByRole("heading", { name: "Healthy existing session" })).toBeTruthy();
-      await user.click(await screen.findByRole("button", { name: "Stop run" }));
+      await user.click(await screen.findByRole("button", { name: "Cancel work" }));
       await waitFor(() => expect(cancelRun).toHaveBeenCalledWith(workspace.id, "http-live-session", "live-run"));
       expect(screen.getByRole("heading", { name: "Healthy existing session" })).toBeTruthy();
       expect(screen.queryByRole("heading", { name: "Connect a model provider" })).toBeNull();
@@ -2122,7 +2234,7 @@ describe("desktop workspace and history shell", () => {
       cancelRun,
     })} />);
     await screen.findByText("Live controls need attention");
-    const stop = screen.getByRole("button", { name: "Stop run" });
+    const stop = screen.getByRole("button", { name: "Cancel work" });
     expect(stop.hasAttribute("disabled")).toBe(true);
     await user.click(stop);
     expect(cancelRun).not.toHaveBeenCalled();
@@ -2323,7 +2435,8 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("No matching conversation.")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(await screen.findByText("0 recorded runs")).toBeTruthy();
+    expect(await screen.findByRole("combobox", { name: "Message Sigil" })).toBeTruthy();
+    expect(screen.queryByText("0 recorded runs")).toBeNull();
     expect(screen.queryByText("New conversation ready.")).toBeNull();
     expect(document.querySelector(".sg-notification-viewport")).toBeNull();
     expect(document.querySelector(".session-notice")).toBeNull();
@@ -2405,7 +2518,8 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Invalid")).toHaveLength(1);
 
     await user.click(screen.getByRole("button", { name: /^First session/ }));
-    await waitFor(() => expect(screen.getByText("2 recorded runs")).toBeTruthy());
+    expect(await screen.findByRole("heading", { name: "First session" })).toBeTruthy();
+    expect(screen.queryByText("2 recorded runs")).toBeNull();
   });
 
   it("keeps the active conversation selected and ignores repeated opens of the same session", async () => {
@@ -2856,7 +2970,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(attachImage);
     expect(await screen.findByRole("img", { name: "Image 1" })).toBeTruthy();
     expect(pickImage).toHaveBeenCalledWith(workspace.id);
-    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-draft-loading`))
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:durable-draft-loading`))
       .toBe("Draft while history is loading");
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.keyDown(composer, { key: "Enter" });
@@ -2929,7 +3043,7 @@ describe("desktop workspace and history shell", () => {
     expect(secondDraft.closest(".conversation-surface")?.hasAttribute("inert")).toBe(false);
     expect(secondDraft.disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-session-A`))
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:durable-A`))
       .toBe("Keep A's local draft");
   });
 
@@ -3488,7 +3602,7 @@ describe("desktop workspace and history shell", () => {
         },
       },
     ));
-    const stop = screen.getByRole("button", { name: "Stop run" });
+    const stop = screen.getByRole("button", { name: "Cancel work" });
     expect(stop.hasAttribute("disabled")).toBe(false);
     await user.click(stop);
     expect(cancelledRun).toBe("run-active");
@@ -3607,7 +3721,7 @@ describe("desktop workspace and history shell", () => {
         ownerRevision: owner.foregroundOwner?.ownerRevision,
       }));
       await waitFor(() => expect(continuity).toHaveBeenCalledTimes(3));
-      expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+      expect(await screen.findByRole("button", { name: "Cancel work" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
     },
   );
@@ -3854,7 +3968,7 @@ describe("desktop workspace and history shell", () => {
       }
       expect(attachRun).toHaveBeenCalledTimes(1);
       expect(screen.getAllByText("Completed while the owner confirmation was pending.")).toHaveLength(1);
-      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cancel work" })).toBeNull();
     },
   );
 
@@ -4685,7 +4799,7 @@ describe("desktop workspace and history shell", () => {
     await user.type(composer, "Say hello");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(screen.getByText("Say hello")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Cancel work" })).toBeTruthy();
     expect(screen.queryByText("Starting the run…")).toBeNull();
     expect(screen.queryByText("Run started. Live updates are connected.")).toBeNull();
     expect(document.querySelector(".sg-notification-viewport")).toBeNull();
@@ -5052,7 +5166,7 @@ describe("desktop workspace and history shell", () => {
 
       await screen.findByText("No matching conversation.");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
-      await screen.findByRole("button", { name: "Stop run" });
+      await screen.findByRole("button", { name: "Cancel work" });
       const composer = await readyComposer();
       await user.type(composer, prompt);
       const enqueue = screen.getByRole("button", { name: "Queue message" });
@@ -5068,7 +5182,7 @@ describe("desktop workspace and history shell", () => {
       await waitFor(() => expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(8), { timeout: 4_000 });
       expect(continuity.mock.calls.length).toBeLessThanOrEqual(10);
       expect(document.querySelector('[data-continuity-owner-run-id]')).toBeNull();
-      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cancel work" })).toBeNull();
       expect(screen.getByRole("button", { name: "Stop task" })).toBeTruthy();
       expect(screen.getAllByText(prompt)).toHaveLength(1);
       expect(screen.getByText(prompt).closest("article")?.textContent).not.toContain("queued");
@@ -5213,7 +5327,7 @@ describe("desktop workspace and history shell", () => {
 
       await screen.findByText("No matching conversation.");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
-      await screen.findByRole("button", { name: "Stop run" });
+      await screen.findByRole("button", { name: "Cancel work" });
       await user.type(await readyComposer(), "Continue after the delayed owner handoff");
       await user.click(screen.getByRole("button", { name: "Queue message" }));
 
@@ -5250,7 +5364,7 @@ describe("desktop workspace and history shell", () => {
       );
       expect(commandConversationQueue).toHaveBeenCalledTimes(1);
       expect(screen.queryByText("Live controls need attention")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cancel work" })).toBeNull();
     },
   );
 
@@ -5345,7 +5459,7 @@ describe("desktop workspace and history shell", () => {
     })} />);
 
     await user.click(await screen.findByRole("button", { name: /^Status-only session/ }));
-    expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Cancel work" })).toBeTruthy();
     await user.type(screen.getByRole("combobox", { name: "Message Sigil" }), "Next durable turn");
     await waitFor(() => expect(statusListener).toBeDefined());
     act(() => statusListener?.({
@@ -5647,7 +5761,7 @@ describe("desktop workspace and history shell", () => {
       expect(composer.value).toBe("Show immediate feedback");
       expect(within(timeline).queryByText("sending")).toBeNull();
     } else {
-      await screen.findByRole("button", { name: "Stop run" });
+      await screen.findByRole("button", { name: "Cancel work" });
       expect(composer.value).toBe("");
     }
   });
@@ -5665,7 +5779,7 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.type(composer, "Start the first run");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop run" });
+    await screen.findByRole("button", { name: "Cancel work" });
     await waitFor(() => expect(composer.value).toBe(""));
     await user.type(composer, "Follow-up waiting for receipt");
     const queueButton = screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement;
@@ -5723,7 +5837,7 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.type(composer, "Start the first run");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop run" });
+    await screen.findByRole("button", { name: "Cancel work" });
     await user.type(composer, "Queue without panel data");
     const queueButton = screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement;
     expect(queueButton.disabled).toBe(false);
@@ -5758,7 +5872,7 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.type(composer, "Start the first run");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop run" });
+    await screen.findByRole("button", { name: "Cancel work" });
     generation = "external-update";
     await user.type(composer, "Follow-up after another client changed the queue");
     await waitFor(() => expect((screen.getByRole("button", { name: "Queue message" }) as HTMLButtonElement).disabled).toBe(false));
@@ -6410,7 +6524,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     const model = screen.getByRole("combobox", { name: "Model" });
-    const gateway = within(model).getByRole("option", { name: /Gateway model/ }) as HTMLOptionElement;
+    const gateway = within(model).getByRole("option", { name: /Gateway.*gateway-model/ }) as HTMLOptionElement;
     expect(gateway.disabled).toBe(false);
     await user.selectOptions(model, "gateway-team/gateway-model");
     await user.type(composer, "Try this configured route");
@@ -6880,6 +6994,7 @@ describe("desktop workspace and history shell", () => {
           containment: ["filesystem=workspace_read", "network=deny"],
           safeSummaryTitle: "Run cargo test",
           safeSummaryDetail: "Workspace validation",
+          previewBody: "Working directory: .\nShell: sh (posix)\n\nCommand:\ncargo test",
           operation: "execute_workspace_check_command",
           risk: "medium",
           snapshotRequired: false,
@@ -6888,7 +7003,10 @@ describe("desktop workspace and history shell", () => {
     });
 
     await screen.findByText("Run cargo test");
-    await user.click(screen.getByRole("button", { name: "Allow family" }));
+    expect(screen.getByText(/Working directory: \./).textContent).toContain("cargo test");
+    const allowFamily = screen.getByRole("button", { name: "Allow family" }) as HTMLButtonElement;
+    expect(allowFamily.disabled).toBe(false);
+    await user.click(allowFamily);
     expect(approvedCall).toBe("run-1:approval-1:approve_family");
     expect(await screen.findByText("Approval accepted")).toBeTruthy();
   });
@@ -6995,8 +7113,9 @@ describe("desktop workspace and history shell", () => {
     expect(within(approvalDock).getByText("workspace code execution requires an explicit decision")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
     expect(screen.getByRole("button", { name: "Open verification: passed" }).hasAttribute("disabled")).toBe(true);
-    expect(document.activeElement).toBe(approvalDock);
-    fireEvent.keyDown(approvalDock, { key: "Escape" });
+    const approvalReview = within(approvalDock).getByRole("region", { name: "Requested action" });
+    expect(document.activeElement).toBe(approvalReview);
+    fireEvent.keyDown(approvalReview, { key: "Escape" });
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Allow for session" }));
     expect(approvedCall).toBe("run-1:approval-1:approve_session");
@@ -7049,7 +7168,7 @@ describe("desktop workspace and history shell", () => {
     const unavailableApproval = (await screen.findByText("Run unknown command")).closest("section") as HTMLElement;
     expect(within(unavailableApproval).getByText("Session approval is unavailable at this request's risk level.")).toBeTruthy();
     expect(within(unavailableApproval).queryByRole("button", { name: "Allow for session" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Stop run" }));
+    await user.click(screen.getByRole("button", { name: "Cancel work" }));
     await waitFor(() => expect(cancelledRun).toBe("run-1"));
     expect(screen.queryByText("Requesting cancellation…")).toBeNull();
     expect(screen.queryByText("Cancellation requested. Waiting for the run to stop safely.")).toBeNull();
@@ -7307,7 +7426,7 @@ describe("desktop workspace and history shell", () => {
     if (outcome === "failed") {
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
     } else {
-      await screen.findByRole("button", { name: "Stop run" });
+      await screen.findByRole("button", { name: "Cancel work" });
       const runKey = createHash("sha256").update("run-task-restarted").digest("hex");
       const timings = (await rendererRunTimings(workspace.id)).filter((entry) => entry.runKey === runKey);
       expect(timings.map((entry) => entry.phase)).toEqual(expect.arrayContaining(["input_accepted", "admission"]));
@@ -7412,7 +7531,7 @@ describe("desktop workspace and history shell", () => {
       }));
       expect(await screen.findByText("Live controls need attention")).toBeTruthy();
     }
-    const pause = await screen.findByRole("button", { name: "Pause Task" });
+    const pause = await screen.findByRole("button", { name: "Pause to continue later" });
     expect(pause.hasAttribute("disabled")).toBe(false);
     await user.click(pause);
     await waitFor(() => expect(pauseTask).toHaveBeenCalledWith(
@@ -7715,6 +7834,90 @@ describe("desktop workspace and history shell", () => {
       hasCandidate ? candidateHash : undefined,
       "retry_review",
     ));
+  });
+
+  it.each(["page-first", "event-first"] as const)("recovers ordinary input cancellation through actual native event shapes with %s", async (order) => {
+    const user = userEvent.setup();
+    const runId = "http-run-e8-1";
+    let cancelled = false;
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let streamListener: ((status: RunStreamStatus) => void) | undefined;
+    const request: UserInputRequest = {
+      identity: { sessionScopeId: "http-session-new", rootLogicalRunId: runId,
+        sourceThreadId: "thread-input", requestId: "input-request", generation: 1,
+        sourceBindingHash: `sha256:${"a".repeat(64)}` },
+      requestHash: `sha256:${"b".repeat(64)}`, source: { kind: "agent" },
+      purpose: "clarification", prompt: "Choose the billing rule", questions: [],
+      allowedActions: ["cancel_run"], requestedAtUnixMs: 1, status: "requested",
+    };
+    const waitingItem: ConversationDisplayPage["items"][number] = {
+      schemaVersion: 1, displayId: "actual-waiting-169", sourceEventId: "waiting-domain-169",
+      displayOrder: { sessionStreamSequence: "169", subindex: 0 },
+      source: "durable_run_event", kind: "terminal", runId, status: "awaiting_user_input",
+      content: { type: "terminal", summaryTruncated: false },
+    };
+    const finalItem: ConversationDisplayPage["items"][number] = {
+      ...waitingItem, displayId: "actual-cancelled-178", sourceEventId: "cancelled-public-178",
+      displayOrder: { sessionStreamSequence: "178", subindex: 0 }, status: "cancelled",
+    };
+    const emit = (kind: TimelineEvent["kind"], sequence: number, status: string) => eventListener?.({
+      workspaceId: workspace.id, sessionId: "http-session-new", runId, sequence,
+      runSequence: String(sequence), replayable: true, kind, status,
+    });
+    const userInputDecision = vi.fn(async () => {
+      cancelled = true;
+      if (order === "event-first") emit("run_cancelled", 10, "cancelled");
+      return { commandId: "cancel-input", clientId: "desktop-test", sessionId: "http-session-new",
+        request: { ...request, status: "resolved" as const, resolution: { kind: "run_cancelled" as const } },
+        replayed: false };
+    });
+    const startRun = vi.fn(async (_workspaceId: string, sessionId: string, _prompt: string) => ({
+      id: "next-after-input", sessionId, status: "running" as const,
+      permissionMode: "manual" as const, streamSequence: 0,
+    }));
+    const display = vi.fn(async (): Promise<ConversationDisplayPage> => ({
+      schemaVersion: 1, requestScope: "http-session-new",
+      throughSessionStreamSequence: cancelled ? "180" : "170",
+      totalItems: cancelled ? "2" : "1", items: cancelled ? [waitingItem, finalItem] : [waitingItem],
+      terminalFrontier: { runId, sessionStreamSequence: cancelled ? "178" : "169",
+        status: cancelled ? "cancelled" : "awaiting_user_input" },
+      hasMore: false, gapFacts: [], userInputs: cancelled ? [] : [request],
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      display, userInputDecision, startRun,
+      continuity: async () => ({ durableFrontier: { throughStreamSequence: cancelled ? 180 : 170 },
+        retainedTerminalRuns: [], recoveryActions: [] }),
+      subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
+      subscribeRunStreamStatus: async (listener) => { streamListener = listener; return () => undefined; },
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByRole("button", { name: "Cancel run" });
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => eventListener?.({ workspaceId: workspace.id, sessionId: "http-session-new", runId,
+      sequence: 8, runSequence: "8", replayable: true, kind: "provider_turn_recovery",
+      providerTurnRecovery: { phase: "recovering", activeRetryCount: 1, activeMaxRetries: 2,
+        retryCount: 1, maxTransportRetries: 2, availableActions: ["cancel"], userAttentionRequired: false },
+    }));
+    expect(screen.queryByText("Retrying the model request")).toBeNull();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+    act(() => {
+      emit("user_input_changed", 9, "requested");
+      streamListener?.({ workspaceId: workspace.id, sessionId: "http-session-new", runId, state: "terminal" });
+    });
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    await waitFor(() => expect(userInputDecision).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull());
+    const composer = await readyComposer();
+    if (order === "page-first") act(() => emit("run_cancelled", 10, "cancelled"));
+    expect(composer.disabled).toBe(false);
+    expect(screen.queryByText(/conflicting live and durable terminal status facts/)).toBeNull();
+    fireEvent.change(composer, { target: { value: "07 continue in this conversation" } });
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(startRun).toHaveBeenCalledOnce());
+    expect(startRun.mock.calls[0]?.slice(0, 3)).toEqual([workspace.id, "http-session-new", "07 continue in this conversation"]);
   });
 
   it("submits a literal single-select option id without colliding with Other", async () => {
@@ -8282,7 +8485,7 @@ it("branches beside a finalized message without checkpoints, keeps failed select
   expect(draft.value).toBe("");
   await user.type(draft, "Try a different parser");
   expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Keep this parent draft");
-  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:branch-http`)).toBe("Try a different parser");
+  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:branch-durable`)).toBe("Try a different parser");
   expect(commandConversationRecovery.mock.calls[1][1].action).toEqual({ kind: "fork_conversation", sourceTurnDigest: "exact-finalized-turn", modelRef: defaultRunContext.modelRef });
   expect(startRun).not.toHaveBeenCalled();
 });
@@ -8383,7 +8586,7 @@ it("imports a branch conclusion during an active run without replacing the draft
   const composer = await readyComposer();
   await user.type(composer, "Keep working on the current approach");
   await user.click(screen.getByRole("button", { name: "Send message" }));
-  await screen.findByRole("button", { name: "Stop run" });
+  await screen.findByRole("button", { name: "Cancel work" });
   await waitFor(() => expect(composer.value).toBe(""));
   await user.type(composer, "An unsent follow-up draft");
   sourcesAvailable = true;
@@ -8420,7 +8623,7 @@ it.each(["accepted", "failed"] as const)("queues review comments while running a
   const composer = await readyComposer();
   await user.type(composer, "Keep working");
   await user.click(screen.getByRole("button", { name: "Send message" }));
-  await screen.findByRole("button", { name: "Stop run" });
+  await screen.findByRole("button", { name: "Cancel work" });
   await waitFor(() => expect(composer.value).toBe(""));
   await user.type(composer, "Keep my unsent draft");
   await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
@@ -8462,7 +8665,7 @@ it.each(["retired", "terminal"] as const)("A1 records only visible accepted cont
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await user.type(await readyComposer(), "Observe only actual content");
   await user.click(screen.getByRole("button", { name: "Send message" }));
-  await screen.findByRole("button", { name: "Stop run" });
+  await screen.findByRole("button", { name: "Cancel work" });
   await waitFor(() => expect(eventListener).toBeDefined());
   const emit = (overrides: Partial<TimelineEvent>) => act(() => eventListener?.({
     workspaceId: workspace.id, sessionId: "http-session-new", runId, sequence: 0,
@@ -8484,7 +8687,12 @@ it.each(["retired", "terminal"] as const)("A1 records only visible accepted cont
     emit({ kind: "assistant_delta", runSequence: "4", text: "new accepted output", livePreview: {
       attemptId: "new-attempt", slotId: "text", revision: "3", baseSequence: "4", truncated: false,
     } });
-    await screen.findByText("new accepted output");
+    const preview = await screen.findByText("new accepted output", { selector: ".message-disclosure-preview" });
+    const disclosure = preview.closest("details") as HTMLDetailsElement;
+    expect(disclosure.open).toBe(false);
+    await user.click(within(disclosure).getByText("Show details"));
+    await waitFor(() => expect(disclosure.open).toBe(true));
+    expect(within(disclosure).getByText("new accepted output").closest(".message-content")).not.toBeNull();
     expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
   }
 });

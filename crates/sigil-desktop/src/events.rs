@@ -1670,11 +1670,18 @@ impl DesktopProtocolEvent {
             operation: operation.as_deref().map(bounded_text),
             risk: risk.as_deref().map(bounded_text),
             snapshot_required: *snapshot_required,
-            preview_title: preview.as_ref().map(|preview| bounded_text(&preview.title)),
+            preview_title: preview
+                .as_deref()
+                .and_then(complete_approval_preview)
+                .map(|preview| preview.title.clone()),
             preview_summary: preview
-                .as_ref()
-                .map(|preview| bounded_text(&preview.summary)),
-            preview_body: preview.as_ref().map(|preview| bounded_text(&preview.body)),
+                .as_deref()
+                .and_then(complete_approval_preview)
+                .map(|preview| preview.summary.clone()),
+            preview_body: preview
+                .as_deref()
+                .and_then(complete_approval_preview)
+                .map(|preview| preview.body.clone()),
         })
     }
 }
@@ -1753,7 +1760,8 @@ const fn terminal_readiness_kind(kind: DesktopTerminalReadinessKind) -> &'static
 
 impl DesktopPendingApproval {
     /// Projects one server-owned pending approval snapshot into the same bounded timeline shape as
-    /// its durable SSE event. Raw tool arguments and preview bodies are intentionally unavailable.
+    /// its durable SSE event. Review text comes only from the same server-owned exact guard;
+    /// raw tool arguments remain unavailable.
     pub fn into_timeline(
         self,
         workspace_id: &str,
@@ -1765,6 +1773,10 @@ impl DesktopPendingApproval {
         let approval_request_id = bounded_machine_label(&self.approval_request_id)?;
         let tool_call_hash = bounded_machine_label(&self.tool_call_hash)?;
         let policy_version = bounded_machine_label(&self.policy_version)?;
+        let reconciliation_id = self
+            .display
+            .reconciliation_id
+            .filter(|identity| valid_provisional_id(identity));
         if self.session_grant_available != self.session_grant_unavailable_reason.is_none()
             || self.display.event_sequence == 0
             || self.display.effects.len() > 16
@@ -1802,7 +1814,7 @@ impl DesktopPendingApproval {
             run_sequence: sequence.to_string(),
             replayable: false,
             replay_id: None,
-            provisional_id: None,
+            provisional_id: reconciliation_id,
             live_preview: None,
             kind: DesktopTimelineEventKind::ApprovalRequested,
             text: None,
@@ -1862,9 +1874,24 @@ impl DesktopPendingApproval {
                 operation: self.display.operation.as_deref().map(bounded_text),
                 risk: self.display.risk.as_deref().map(bounded_text),
                 snapshot_required: self.display.snapshot_required,
-                preview_title: None,
-                preview_summary: None,
-                preview_body: None,
+                preview_title: self
+                    .display
+                    .preview
+                    .as_ref()
+                    .and_then(complete_approval_preview)
+                    .map(|preview| preview.title.clone()),
+                preview_summary: self
+                    .display
+                    .preview
+                    .as_ref()
+                    .and_then(complete_approval_preview)
+                    .map(|preview| preview.summary.clone()),
+                preview_body: self
+                    .display
+                    .preview
+                    .as_ref()
+                    .and_then(complete_approval_preview)
+                    .map(|preview| preview.body.clone()),
             }),
             approval_request_id: None,
             tool_execution: None,
@@ -2213,6 +2240,15 @@ fn valid_provisional_id(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     })
+}
+
+fn complete_approval_preview(
+    preview: &DesktopPublicToolPreview,
+) -> Option<&DesktopPublicToolPreview> {
+    [&preview.title, &preview.summary, &preview.body]
+        .into_iter()
+        .all(|value| value.len() <= MAX_TIMELINE_TEXT_BYTES)
+        .then_some(preview)
 }
 
 fn bounded_text(value: &str) -> String {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
@@ -10,7 +10,7 @@ import type {
   ToolArtifactSelector,
 } from "./types";
 import { Icon, type IconName } from "./ui/icons";
-import { Button, TextField } from "./ui/primitives";
+import { Button, Collapsible, TextField } from "./ui/primitives";
 
 const MAX_VISIBLE_OUTPUT_LINES = 240;
 const OUTPUT_PREVIEW_LINES = 3;
@@ -107,31 +107,63 @@ export function ToolCard({
   const [artifactBusy, setArtifactBusy] = useState(false);
   const [artifactError, setArtifactError] = useState(false);
   const [artifactQuery, setArtifactQuery] = useState("");
-  useLayoutEffect(() => {
-    setArtifactPage(undefined);
-    setArtifactBusy(false);
-    setArtifactError(false);
-    setArtifactQuery("");
-  }, [tool.key, tool.artifactRef]);
   const canReadArtifact =
     tool.artifactRef !== undefined
     && tool.artifactAvailability === "available"
     && onReadArtifact !== undefined;
+  const artifactReadGeneration = useRef(0);
+  const artifactReadBusy = useRef(false);
+  const readArtifactRef = useRef(onReadArtifact);
+  readArtifactRef.current = onReadArtifact;
+  useLayoutEffect(() => {
+    artifactReadGeneration.current += 1;
+    artifactReadBusy.current = false;
+    setArtifactPage(undefined);
+    setArtifactBusy(false);
+    setArtifactError(false);
+    setArtifactQuery("");
+    return () => {
+      artifactReadGeneration.current += 1;
+      artifactReadBusy.current = false;
+    };
+  }, [tool.key, tool.artifactRef, canReadArtifact]);
+  const readArtifact = useCallback((selector: ToolArtifactSelector) => {
+    const read = readArtifactRef.current;
+    if (!canReadArtifact || read === undefined || artifactReadBusy.current) return;
+    const generation = ++artifactReadGeneration.current;
+    artifactReadBusy.current = true;
+    setArtifactBusy(true);
+    setArtifactError(false);
+    void (async () => {
+      try {
+        const page = await read(selector);
+        if (generation === artifactReadGeneration.current) setArtifactPage(page);
+      } catch {
+        if (generation === artifactReadGeneration.current) setArtifactError(true);
+      } finally {
+        if (generation === artifactReadGeneration.current) {
+          artifactReadBusy.current = false;
+          setArtifactBusy(false);
+        }
+      }
+    })();
+    return () => {
+      if (generation !== artifactReadGeneration.current) return;
+      artifactReadGeneration.current += 1;
+      artifactReadBusy.current = false;
+      setArtifactBusy(false);
+    };
+  }, [canReadArtifact]);
+  const shortOutput = canReadArtifact
+    && tool.artifactPersistedBytes !== undefined
+    && tool.artifactPersistedBytes <= 4_096;
+  useEffect(() => {
+    if (!shortOutput) return;
+    return readArtifact({ kind: "byte_slice", offset: 0, limit: 4_096 });
+  }, [shortOutput, tool.key, tool.artifactRef, readArtifact]);
   const artifactPresentation = tool.artifactAvailability === undefined
     ? undefined
     : presentArtifactStatus(tool.artifactAvailability, t);
-  const readArtifact = async (selector: ToolArtifactSelector) => {
-    if (!canReadArtifact || artifactBusy) return;
-    setArtifactBusy(true);
-    setArtifactError(false);
-    try {
-      setArtifactPage(await onReadArtifact(selector));
-    } catch {
-      setArtifactError(true);
-    } finally {
-      setArtifactBusy(false);
-    }
-  };
   return (
     <article
       className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined ? " tool-card-compact" : ""}`}
@@ -157,7 +189,7 @@ export function ToolCard({
           {presentation.input === undefined ? null : (
             <ToolInput key={tool.key} toolName={tool.toolName} input={presentation.input} language={inputLanguage} />
           )}
-          {presentation.summary === undefined ? null : (
+          {presentation.summary === undefined || (shortOutput && presentation.tone === "success") ? null : (
             <div className="tool-result">
               <small>{presentation.tone === "danger" || presentation.tone === "warning" ? "Status" : "Result"}</small>
               <p>{presentation.summary}</p>
@@ -165,7 +197,16 @@ export function ToolCard({
           )}
         </div>
       )}
-      {presentation.detailKind === "output" ? (
+      {shortOutput ? (
+        artifactPage?.bodyEncoding === "utf8" ? (
+          artifactPage.body === "" ? <p>{t("noToolOutput")}</p>
+            : <HighlightedCode text={artifactPage.body} ariaLabel={`${tool.toolName} saved output page`} />
+        ) : artifactError ? (
+          <p role="alert">{t("artifactReadFailed")}</p>
+        ) : artifactBusy ? (
+          <p role="status">{t("savedOutputLoading")}</p>
+        ) : artifactPage === undefined ? null : <p>{t("savedOutputBinary")}</p>
+      ) : presentation.detailKind === "output" ? (
         <ToolOutputPanel
           key={tool.key}
           toolName={tool.toolName}
@@ -202,17 +243,7 @@ export function ToolCard({
         </details>
       )}
       {canReadArtifact ? (
-        <section className="tool-artifact-retrieval" aria-label={`${presentation.displayName} saved output`}>
-          {artifactPresentation === undefined ? null : (
-            <div className="tool-artifact-status" data-artifact-product-status={artifactPresentation.status}>
-              <strong>{artifactPresentation.message}</strong>
-              <small><strong>{t("nextStepLabel")}:</strong> {artifactPresentation.nextStep}</small>
-              <details>
-                <summary>{t("showDetails")}</summary>
-                <p>{artifactPresentation.technicalDetail}</p>
-              </details>
-            </div>
-          )}
+        <Collapsible className="tool-artifact-retrieval" label={t("savedOutputDetails")}>
           <div className="tool-artifact-actions">
             <Button
               type="button"
@@ -220,7 +251,7 @@ export function ToolCard({
               busy={artifactBusy && artifactPage === undefined}
               onClick={() => void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 })}
             >
-              {artifactPage === undefined ? "View saved output" : "Restart saved output"}
+              {artifactPage === undefined ? t("viewSavedOutput") : t("restartSavedOutput")}
             </Button>
             <form
               onSubmit={(event) => {
@@ -237,7 +268,7 @@ export function ToolCard({
               }}
             >
               <TextField
-                label="Search saved tool output"
+                label={t("searchSavedOutput")}
                 labelHidden
                 containerClassName="tool-artifact-search-field"
                 maxLength={512}
@@ -245,23 +276,17 @@ export function ToolCard({
                 onChange={(event) => setArtifactQuery(event.target.value)}
               />
               <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>
-                Search
+                {t("search")}
               </Button>
             </form>
           </div>
-          {artifactPage === undefined ? (
-            <small>
-              {tool.artifactPersistedBytes === undefined
-                ? "The complete saved output is available in bounded pages."
-                : `${tool.artifactPersistedBytes} saved bytes are available in bounded pages.`}
-            </small>
-          ) : artifactPage.bodyEncoding === "utf8" ? (
+          {artifactPage === undefined || shortOutput ? null : artifactPage.bodyEncoding === "utf8" ? (
             <HighlightedCode
               text={artifactPage.body}
               ariaLabel={`${tool.toolName} saved output page`}
             />
           ) : (
-            <small>Binary output is available, but is not rendered as text.</small>
+            <small>{t("savedOutputBinary")}</small>
           )}
           {artifactPage?.nextSelector === undefined ? null : (
             <Button
@@ -270,11 +295,11 @@ export function ToolCard({
               busy={artifactBusy}
               onClick={() => void readArtifact(artifactPage.nextSelector!)}
             >
-              Next page
+              {t("nextOutputPage")}
             </Button>
           )}
           {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
-        </section>
+        </Collapsible>
       ) : artifactPresentation !== undefined ? (
         <section
           className={`tool-artifact-status tool-status-${artifactPresentation.status}`}

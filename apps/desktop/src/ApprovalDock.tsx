@@ -8,7 +8,7 @@ import type {
   SessionGrantUnavailableReasonCode,
   TimelineApproval,
 } from "./types";
-import { Button } from "./ui/primitives";
+import { Button, Collapsible } from "./ui/primitives";
 
 export function ApprovalDock({
   approval,
@@ -29,13 +29,15 @@ export function ApprovalDock({
 }) {
   const { locale, t } = useLocale();
   const dockRef = useRef<HTMLElement>(null);
+  const reviewRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (phase !== "pending") {
       composerRef.current?.focus({ preventScroll: true });
       return;
     }
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    dockRef.current?.focus();
+    const target = approval.previewBody?.trim() ? reviewRef.current : dockRef.current;
+    target?.focus();
     return () => {
       if (document.contains(composerRef.current)) composerRef.current?.focus({ preventScroll: true });
       else if (document.contains(previousFocus ?? null)) previousFocus?.focus({ preventScroll: true });
@@ -51,6 +53,11 @@ export function ApprovalDock({
       }).format(expiresAt)
     : t("notDescribed");
   const expired = Date.now() >= approval.expiresAtMs;
+  const fileReviewUnavailable = requiresFileReview(approval)
+    && !approval.previewBody?.trim();
+  const commandReviewUnavailable = requiresCommandReview(approval)
+    && !approval.previewBody?.trim();
+  const reviewUnavailable = fileReviewUnavailable || commandReviewUnavailable;
   const unsupportedShellAnalysis = approval.analysisStatus === "unsupported"
     || approval.analysisStatus === "invalid"
     || approval.analysisReasonCodes?.some((code) =>
@@ -104,13 +111,12 @@ export function ApprovalDock({
         <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
         <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
       </header>
-      <p className="approval-status-copy">
-        <strong>{deliveryPresentation.message}</strong>
-        <br />
-        <small><strong>{t("nextStepLabel")}:</strong> {deliveryPresentation.nextStep}</small>
-      </p>
+      <div ref={reviewRef} className="approval-review" role="region" aria-label={t("requestedAction")} tabIndex={0}>
       <p>{approval.previewSummary ?? approval.safeSummaryDetail ?? t("reviewExactToolAction")}</p>
-      {approval.toolInput ? (
+      {approval.analysisStatus === "conservative" ? (
+        <p className="approval-risk-notice" role="note">{t("approvalConservativeNotice")}</p>
+      ) : null}
+      {approval.toolInput && !approval.previewBody?.trim() ? (
         <div className="approval-command">
           <strong>{t("requestedAction")}</strong>
           <pre>{approval.toolInput}</pre>
@@ -121,6 +127,7 @@ export function ApprovalDock({
           ? <DiffViewer diff={approval.previewBody} />
           : <pre>{approval.previewBody}</pre>
       ) : null}
+      <Collapsible label={t("technicalDetailsLabel")} className="approval-technical-details">
       <dl>
         <div><dt>{t("approvalTool")}</dt><dd>{approval.toolName}</dd></div>
         <div><dt>{t("approvalAction")}</dt><dd>{approval.operation ?? t("notDescribed")}</dd></div>
@@ -132,15 +139,16 @@ export function ApprovalDock({
         <div><dt>{t("decisionExpires")}</dt><dd>{expires}</dd></div>
       </dl>
       {approval.analysisReasons?.length || approval.decisionReasons?.length ? (
-        <details className="approval-reasons">
-          <summary>{t("approvalWhy")}</summary>
+        <div className="approval-reasons">
+          <strong>{t("approvalWhy")}</strong>
           <ul>
             {[...(approval.analysisReasons ?? []), ...(approval.decisionReasons ?? [])].map((reason, index) => (
               <li key={`${index}-${reason}`}>{reason}</li>
             ))}
           </ul>
-        </details>
+        </div>
       ) : null}
+      </Collapsible>
       {unsupportedShellAnalysis ? (
         <aside className="approval-remediation" role="note">
           <div>
@@ -153,24 +161,49 @@ export function ApprovalDock({
           </div>
         </aside>
       ) : null}
-      <small>
+      {reviewUnavailable ? (
+        <aside className="approval-remediation" role="alert">
+          <div>
+            <strong>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableTitle" : "approvalFileReviewUnavailableTitle")}</strong>
+            <p>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableDetail" : "approvalFileReviewUnavailableDetail")}</p>
+          </div>
+          <Button variant="quiet" type="button" onClick={onOpenSupport}>{t("openSupport")}</Button>
+        </aside>
+      ) : <small>
         {approval.sessionGrantAvailable
           ? t("approveSessionDetail")
           : t(sessionGrantUnavailableMessageKey(approval.sessionGrantUnavailableReason?.code))}
-      </small>
+      </small>}
+      </div>
       {expired ? <div className="approval-expired" role="alert">{t("approvalExpired")}</div> : null}
       <div className="approval-actions">
         <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision("deny")}>{t("deny")}</Button>
         {approval.commandFamilyAllowPattern ? (
-          <Button variant="quiet" type="button" disabled={busy || expired} onClick={() => onDecision("approve_family")}>{t("approveFamily")}</Button>
+          <Button variant="quiet" type="button" disabled={busy || expired || reviewUnavailable} onClick={() => onDecision("approve_family")}>{t("approveFamily")}</Button>
         ) : null}
         {approval.sessionGrantAvailable ? (
-          <Button variant="quiet" type="button" disabled={busy || expired} onClick={() => onDecision("approve_session")}>{t("approveSession")}</Button>
+          <Button variant="quiet" type="button" disabled={busy || expired || reviewUnavailable} onClick={() => onDecision("approve_session")}>{t("approveSession")}</Button>
         ) : null}
-        <Button variant="primary" type="button" disabled={busy || expired} onClick={() => onDecision("approve_once")}>{t("approveOnce")}</Button>
+        <Button variant="primary" type="button" disabled={busy || expired || reviewUnavailable} onClick={() => onDecision("approve_once")}>{t("approveOnce")}</Button>
       </div>
     </section>
   );
+}
+
+function requiresFileReview(approval: TimelineApproval): boolean {
+  if (approval.effects?.some((effect) => effect === "file_write" || effect === "file_delete")) return true;
+  // These are typed tool operations, never inferred from prompts or tool names.
+  return new Set([
+    "create_file", "edit_file", "overwrite_file", "delete_file", "rename_path",
+    "create_directory", "delete_directory", "recursive_delete", "apply_change_set",
+  ]).has(approval.operation ?? "");
+}
+
+function requiresCommandReview(approval: TimelineApproval): boolean {
+  return new Set([
+    "execute_read_only_command", "execute_workspace_check_command", "execute_mutating_command",
+    "execute_unknown_command", "execute_destructive_command",
+  ]).has(approval.operation ?? "");
 }
 
 function sessionGrantUnavailableMessageKey(code?: SessionGrantUnavailableReasonCode) {

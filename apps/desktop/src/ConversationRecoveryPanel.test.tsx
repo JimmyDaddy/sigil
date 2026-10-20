@@ -31,6 +31,8 @@ describe("ConversationRecoveryPanel compaction action", () => {
 
     expect(screen.queryByRole("button", { name: /preview compaction/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /apply compaction/i })).toBeNull();
+    expect(screen.getByText("Compact context", { selector: "summary span" }).closest("details")?.open).toBe(false);
+    await userEvent.click(screen.getByText("Compact context", { selector: "summary span" }));
     await userEvent.click(screen.getByRole("button", { name: "Compact now" }));
     expect(compact).toHaveBeenCalledOnce();
   });

@@ -26,6 +26,80 @@ function previewEvent(revision: string, text: string, overrides: Partial<Timelin
 }
 
 describe("replacement preview snapshots", () => {
+  it("never promotes argument assembly previews into a tool input or retains them after completion", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({
+      kind: "tool_started", runSequence: "3", replayable: true,
+      itemId: "call-1", toolName: "request_user_input", provisionalId: "tool-1",
+    }));
+    const argumentsPreview = previewEvent("1", "parameters · 34 bytes", {
+      kind: "tool_call_args_delta", itemId: "call-1", toolName: "request_user_input",
+      livePreview: { attemptId: "attempt-1", slotId: "call-1", revision: "1", baseSequence: "3", truncated: false },
+    });
+    state = reduceLiveTimelineEvent(state, argumentsPreview);
+    expect(selectSemanticLiveItems(state)[0]?.toolInput).toBeUndefined();
+    expect(selectSemanticLiveItems(state)[0]?.content).toMatchObject({ output: undefined });
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "tool_completed", runSequence: "4", replayable: true,
+      itemId: "call-1", toolName: "request_user_input", provisionalId: "tool-1",
+    }));
+    expect(state.liveSnapshots.size).toBe(0);
+    const complete = state;
+    expect(reduceLiveTimelineEvent(state, { ...argumentsPreview,
+      runSequence: "4", livePreview: { ...argumentsPreview.livePreview!, revision: "2", baseSequence: "4" },
+    })).toBe(complete);
+    expect(selectSemanticLiveItems(state)[0]?.toolInput).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "tool_result", runSequence: "5", replayable: true,
+      itemId: "call-1", toolName: "request_user_input", provisionalId: "tool-1",
+      status: "failed", text: "The requested input could not be delivered",
+    }));
+    expect(selectSemanticLiveItems(state)[0]).toMatchObject({
+      status: "failed", content: { output: "The requested input could not be delivered" },
+    });
+    expect(selectSemanticLiveItems(state)[0]?.toolInput).toBeUndefined();
+    const otherSession = liveEventReducer(state, { type: "session_selected", sessionId: "session-2" });
+    expect(reduceLiveTimelineEvent(otherSession, argumentsPreview)).toBe(otherSession);
+    expect(selectSemanticLiveItems(otherSession)).toHaveLength(0);
+  });
+
+  it("keeps completed safe command input, frozen approval and real errors when argument previews retire", () => {
+    const command = "printf '34 bytes\\n'";
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({
+      kind: "tool_started", runSequence: "3", replayable: true,
+      itemId: "call-1", toolName: "exec_command", provisionalId: "tool-1",
+    }));
+    const argumentsPreview = previewEvent("1", "unreviewable assembly bytes", {
+      kind: "tool_call_args_delta", itemId: "call-1", toolName: "exec_command",
+      livePreview: { attemptId: "attempt-1", slotId: "call-1", revision: "1", baseSequence: "3", truncated: false },
+    });
+    state = reduceLiveTimelineEvent(state, argumentsPreview);
+    expect(selectSemanticLiveItems(state)[0]?.toolInput).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "tool_completed", runSequence: "4", replayable: true,
+      itemId: "call-1", toolName: "exec_command", provisionalId: "tool-1", toolInput: command,
+    }));
+    const frozen = { ...exactApproval(), operation: "execute_unknown_command",
+      previewBody: `Working directory: .\nShell: sh\nCommand:\n${command}` };
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "approval_requested", runSequence: "5", replayable: true,
+      itemId: "call-1", approval: frozen,
+    }));
+    const approvedReview = state;
+    expect(reduceLiveTimelineEvent(state, { ...argumentsPreview,
+      runSequence: "5", livePreview: { ...argumentsPreview.livePreview!, revision: "2", baseSequence: "5" },
+    })).toBe(approvedReview);
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(frozen);
+    expect(selectSemanticLiveItems(state).find((item) => item.provisionalId === "tool-1")?.toolInput).toBe(command);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "tool_result", runSequence: "6", replayable: true,
+      itemId: "call-1", toolName: "exec_command", provisionalId: "tool-1",
+      status: "failed", text: "command failed after writing 34 bytes",
+    }));
+    expect(selectSemanticLiveItems(state).find((item) => item.provisionalId === "tool-1")).toMatchObject({
+      toolInput: command, status: "failed", content: { output: "command failed after writing 34 bytes" },
+    });
+  });
+
   it("retires equal-base late frames and accepts the next attempt and a resumed source", () => {
     let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({ kind: "run_started", runSequence: "3", replayable: true }));
     state = reduceLiveTimelineEvent(state, previewEvent("100000", "partial"));
@@ -588,7 +662,7 @@ describe("live event reducer", () => {
     }]);
   });
 
-  it("keeps provider-turn recovery typed and clears it only for the next run", () => {
+  it("keeps provider-turn recovery typed and clears it for the next run", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
       kind: "provider_turn_recovery",
@@ -619,6 +693,98 @@ describe("live event reducer", () => {
     expect(selectProviderTurnRecovery(state)).toBeUndefined();
   });
 
+  const retryEvent = (overrides: Partial<TimelineEvent> = {}): TimelineEvent => event({
+    kind: "provider_turn_recovery", runSequence: "10", replayable: true,
+    providerTurnRecovery: { phase: "recovering", activeRetryCount: 1, activeMaxRetries: 2,
+      retryCount: 1, maxTransportRetries: 2, availableActions: ["cancel"], userAttentionRequired: false },
+    ...overrides,
+  });
+
+  it.each(["run_finished", "run_cancelled", "run_failed", "run_blocked", "run_paused"] as const)(
+    "retires automatic retry on same-run %s without replay resurrection", (kind) => {
+      const retry = retryEvent();
+      let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), retry);
+      state = reduceLiveTimelineEvent(state, event({ kind, runSequence: "16", replayable: true }));
+      expect(selectProviderTurnRecovery(state)).toBeUndefined();
+      state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "run-1" });
+      state = reduceLiveTimelineEvent(state, retry);
+      expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    },
+  );
+
+  it("retires the sole retry banner on canonical settlement and accepts fresh ordered retry", () => {
+    const retry = retryEvent();
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), retry);
+    state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "run-1" });
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, retry);
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, retryEvent({ runSequence: "12" }));
+    expect(selectProviderTurnRecovery(state)?.runSequence).toBe("12");
+    state = reduceLiveTimelineEvent(state, retry);
+    expect(selectProviderTurnRecovery(state)?.runSequence).toBe("12");
+  });
+
+  it("does not let an old run recovery replay replace the successor run recovery", () => {
+    const old = retryEvent();
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), old);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_started", runId: "run-2", runSequence: "1" }));
+    const current = retryEvent({ runId: "run-2", runSequence: "5" });
+    state = reduceLiveTimelineEvent(state, current);
+    state = reduceLiveTimelineEvent(state, old);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_started", runSequence: "1" }));
+    expect(selectProviderTurnRecovery(state)).toEqual(current);
+  });
+
+  it.each(["recovering", "blocked", "paused"] as const)("does not let a same-run old start clear newer %s recovery", (phase) => {
+    const recovery = retryEvent({ runSequence: "5", providerTurnRecovery: {
+      ...retryEvent().providerTurnRecovery!, phase, userAttentionRequired: phase !== "recovering",
+    } });
+    const start = event({ kind: "run_started", runSequence: "1", replayable: true });
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), start);
+    state = reduceLiveTimelineEvent(state, recovery);
+    state = reduceLiveTimelineEvent(state, start);
+    expect(selectProviderTurnRecovery(state)).toEqual(recovery);
+    state = reduceLiveTimelineEvent(state, { ...start, runSequence: "6" });
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+  });
+
+  it("retires retries only after newer same-run durable progress, preserving attention failures", () => {
+    const retry = retryEvent();
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), retry);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_finished", runId: "other-run", runSequence: "16" }));
+    state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "other-run" });
+    state = reduceLiveTimelineEvent(state, event({ kind: "assistant_delta", runSequence: "11", text: "partial" }));
+    state = reduceLiveTimelineEvent(state, event({ kind: "assistant_message", runSequence: "9", replayable: true }));
+    expect(selectProviderTurnRecovery(state)).toEqual(retry);
+    state = reduceLiveTimelineEvent(state, event({ kind: "assistant_message", runSequence: "11", replayable: true }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, retry);
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    const blocked = retryEvent({ runSequence: "12", providerTurnRecovery: {
+      ...retry.providerTurnRecovery!, phase: "blocked", userAttentionRequired: true,
+      availableActions: ["review_effect", "update_connection"], reasonCode: "effect_review_required",
+    } });
+    state = reduceLiveTimelineEvent(state, blocked);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_blocked", runSequence: "13" }));
+    state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "run-1" });
+    expect(selectProviderTurnRecovery(state)).toEqual(blocked);
+  });
+
+  it("retires retry presentation at an exact user-input boundary without swallowing paused attention", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), retryEvent());
+    state = reduceLiveTimelineEvent(state, event({ kind: "user_input_changed", status: "requested",
+      runSequence: "11", replayable: true }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    const paused = retryEvent({ runSequence: "12", providerTurnRecovery: {
+      ...retryEvent().providerTurnRecovery!, phase: "paused", userAttentionRequired: true,
+      availableActions: ["retry_now", "cancel"],
+    } });
+    state = reduceLiveTimelineEvent(state, paused);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_paused", runSequence: "13" }));
+    expect(selectProviderTurnRecovery(state)).toEqual(paused);
+  });
+
   it("maps child approval display identities to one command without changing the authority guard", () => {
     const approval = exactApproval();
     let state = createLiveEventState(SESSION_ID);
@@ -638,6 +804,17 @@ describe("live event reducer", () => {
     expect(command("child-b-call")?.status).toBe("denied");
     expect(command("child-a-call")?.status).toBe("requested");
     expect(selectLatestPendingApproval(state)).toBeUndefined();
+  });
+
+  it("does not present a stale approval guard as the current pending review", () => {
+    const approval = exactApproval();
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({
+      kind: "approval_requested", runSequence: "10", itemId: approval.callId, approval,
+    }));
+    expect(selectLatestApprovalPresentation(state)?.event.approval).toEqual(approval);
+    state = { ...state, controlEvents: new Map([...state.controlEvents].map(([key, pending]) => [key,
+      { ...pending, approval: { ...approval, approvalRequestId: "stale-request" } }])) };
+    expect(selectLatestApprovalPresentation(state)).toBeUndefined();
   });
 
   it("keeps parallel command approval display independent of reused provider call IDs", () => {
@@ -788,6 +965,30 @@ describe("live event reducer", () => {
       },
     });
     expect(selectLatestPendingApproval(state)).toBeUndefined();
+  });
+
+  it("uses canonical file review on cold attachment and never borrows an older request's review", () => {
+    const approval = { ...exactApproval(), effects: ["file_write"], previewBody: "+精确修改\n".repeat(3000) };
+    const canonical = (review: TimelineApproval, registryRevision: number) => ({
+      type: "approval_snapshot_received" as const,
+      sessionId: SESSION_ID,
+      snapshot: {
+        workspaceId: "workspace-1", sessionId: SESSION_ID, runId: "run-1", registryRevision,
+        pendingApprovals: [event({ kind: "approval_requested", runSequence: "10", itemId: review.callId, toolName: review.toolName, approval: review })],
+        approvalLifecycles: [],
+      },
+    });
+    let state = liveEventReducer(createLiveEventState(SESSION_ID), canonical(approval, 12));
+    expect(selectLatestPendingApproval(state)?.approval?.previewBody).toBe(approval.previewBody);
+    state = liveEventReducer(state, canonical(approval, 13));
+    expect(selectLatestPendingApproval(state)?.approval?.previewBody).toBe(approval.previewBody);
+
+    // A newer authoritative no-review snapshot must remain honest, even for the same guard.
+    state = liveEventReducer(state, canonical({ ...approval, previewBody: undefined }, 14));
+    expect(selectLatestPendingApproval(state)?.approval?.previewBody).toBeUndefined();
+    state = liveEventReducer(state, canonical({ ...approval, approvalRequestId: "new-request", toolCallHash: "new-hash", previewBody: undefined }, 15));
+    expect(selectLatestPendingApproval(state)?.approval).toMatchObject({ approvalRequestId: "new-request", toolCallHash: "new-hash" });
+    expect(selectLatestPendingApproval(state)?.approval?.previewBody).toBeUndefined();
   });
 
   it("recovers accepted approval identity and closes it only on exact typed execution", () => {

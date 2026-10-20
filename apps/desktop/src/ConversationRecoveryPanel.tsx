@@ -9,7 +9,7 @@ import type {
   ConversationRecoveryView,
 } from "./types";
 import { Icon } from "./ui/icons";
-import { Button } from "./ui/primitives";
+import { Button, Collapsible } from "./ui/primitives";
 
 export function ConversationRecoveryPanel({
   recovery,
@@ -51,7 +51,7 @@ export function ConversationRecoveryPanel({
 
   return (
     <div className="conversation-recovery-panel sg-bounded-content">
-      <section className="conversation-recovery-section compaction-review">
+      <Collapsible label={t("compactContext")} className="conversation-recovery-section compaction-review">
         <header>
           <div>
             <h3>{t("compactContext")}</h3>
@@ -70,15 +70,7 @@ export function ConversationRecoveryPanel({
             {t("compactingContext")}
           </p>
         ) : null}
-      </section>
-
-      <section className="conversation-recovery-safety" role="note">
-        <Icon name="shield" />
-        <div>
-          <strong>{t("controlledRestoreOnly")}</strong>
-          <p>{t("controlledRestoreOnlyDetail")}</p>
-        </div>
-      </section>
+      </Collapsible>
 
       {recovery === undefined ? (
         <div
@@ -108,9 +100,9 @@ export function ConversationRecoveryPanel({
         <header>
           <div>
             <h3>{t("checkpoints")}</h3>
-            <p>{t("checkpointRecoveryDetail")}</p>
+            {recovery.checkpoints.length === 0 ? null : <p>{t("checkpointRecoveryDetail")}</p>}
           </div>
-          <span>{recovery.checkpoints.length}</span>
+          {recovery.checkpoints.length === 0 ? null : <span>{recovery.checkpoints.length}</span>}
         </header>
         {recovery.checkpoints.length === 0 ? (
           <p className="conversation-recovery-empty-copy">{t("noCheckpoints")}</p>
@@ -169,6 +161,7 @@ export function ConversationRecoveryPanel({
             </article>
           ))}
           <div className="conversation-recovery-actions">
+            <p className="conversation-recovery-safety" role="note">{t("controlledRestoreOnlyDetail")}</p>
             <Button
               type="button"
               variant="danger"
@@ -182,7 +175,7 @@ export function ConversationRecoveryPanel({
         </section>
       ) : null}
 
-      <section className="conversation-recovery-section">
+      <Collapsible label={t("conversationForks")} className="conversation-recovery-section">
         <header>
           <div>
             <h3>{t("conversationForks")}</h3>
@@ -208,7 +201,7 @@ export function ConversationRecoveryPanel({
             ))}
           </ol>
         )}
-      </section>
+      </Collapsible>
       </>}
     </div>
   );

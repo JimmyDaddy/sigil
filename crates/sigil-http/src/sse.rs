@@ -301,6 +301,7 @@ impl HttpProtocolEvent {
                     approval_identity,
                     call,
                     spec,
+                    preview,
                     ..
                 },
             ) => {
@@ -318,6 +319,17 @@ impl HttpProtocolEvent {
                     && approval_identity.call_id == call.id
                     && approval_guard_is_persistence_safe(approval)
                     && approval.display.event_sequence == run_event.sequence
+                    && approval.display.reconciliation_id.as_ref().is_none_or(|identity| {
+                        self.provisional_id.as_ref() == Some(identity)
+                            && protocol_provisional_id(run_event).is_ok_and(|source| {
+                                source.as_ref() == Some(identity)
+                            })
+                    })
+                    && approval.display.preview.as_ref().is_none_or(|review| {
+                        preview.as_ref().is_some_and(|source| {
+                            Some(review) == approval_preview_for_display(source).as_ref()
+                        })
+                    })
             }
             (Some(_), _) => false,
         }
@@ -415,6 +427,14 @@ fn approval_guard_is_persistence_safe(approval: &HttpPendingApproval) -> bool {
 
 fn approval_display_is_persistence_safe(display: &crate::HttpPendingApprovalDisplay) -> bool {
     display.event_sequence > 0
+        && display.preview.as_ref().is_none_or(|preview| {
+            [&preview.title, &preview.summary, &preview.body]
+                .into_iter()
+                .all(|value| {
+                    value.len() <= APPROVAL_PREVIEW_TEXT_BYTES
+                        && safe_persistence_text(value) == *value
+                })
+        })
         && display.effects.len() <= 16
         && display.subjects.len() <= 16
         && display.analysis_reason_codes.len() <= 8
@@ -467,6 +487,24 @@ fn approval_display_is_persistence_safe(display: &crate::HttpPendingApprovalDisp
 
 fn safe_bounded_approval_fact(value: &str) -> bool {
     value.len() <= 2_048 && safe_persistence_text(value) == value
+}
+
+const APPROVAL_PREVIEW_TEXT_BYTES: usize = 128 * 1024;
+
+/// Reuses the canonical HTTP public-event safety projection, then the existing
+/// Desktop text boundary. Never regenerates a tool preview or a prepared digest.
+pub(crate) fn approval_preview_for_display(
+    preview: &sigil_kernel::ToolPreview,
+) -> Option<crate::HttpPendingApprovalPreview> {
+    let preview = crate::HttpPendingApprovalPreview {
+        title: safe_persistence_text(&preview.title),
+        summary: safe_persistence_text(&preview.summary),
+        body: safe_persistence_text(&preview.body),
+    };
+    let within_limit = [&preview.title, &preview.summary, &preview.body]
+        .into_iter()
+        .all(|value| value.len() <= APPROVAL_PREVIEW_TEXT_BYTES);
+    within_limit.then_some(preview)
 }
 
 fn is_lower_hex_sha256(value: &str) -> bool {
@@ -1324,6 +1362,24 @@ impl HttpLiveEventBus {
         event.approval_request = approval_request;
         if !event.has_valid_approval_metadata() {
             return Err(HttpEventPublishError::ApprovalMetadata);
+        }
+        if let Some(approval) = &mut event.approval_request {
+            // Reuse the envelope's real semantic identity only after its exact request
+            // metadata has passed validation. No renderer or pending-call reconstruction
+            // derives a replacement live identity.
+            approval.display.reconciliation_id = event.provisional_id.clone();
+        }
+        // The durable event already owns the frozen public preview. Do not let a redundant
+        // display copy make a previously valid envelope exceed its existing publication limit.
+        if event
+            .approval_request
+            .as_ref()
+            .is_some_and(|approval| approval.display.preview.is_some())
+            && serde_json::to_vec(&event)
+                .is_ok_and(|bytes| bytes.len() > sigil_kernel::MAX_EVENT_BYTES)
+            && let Some(approval) = &mut event.approval_request
+        {
+            approval.display.preview = None;
         }
         if event.is_durable()
             && let Some(journal) = &self.durable_journal

@@ -3,9 +3,97 @@ import { describe, expect, it } from "vitest";
 import { translateEnglish } from "../../i18n";
 import type { ConversationTimelineItem, LiveConversationDisplayItem } from "./continuityReducer";
 import { projectConversationRows } from "./conversationRows";
+import type { ApprovalPresentation } from "./liveEventReducer";
 import restoredCommand from "./fixtures/restored-command.json";
+import nativeCanonicalApproval from "./fixtures/native-canonical-pending-approval.json";
+import type { ConversationDisplayPage, TimelineEvent } from "../../types";
 
 describe("canonical conversation rows", () => {
+  it("coalesces the real native canonical pending output and preserves missing or mismatched source identity", () => {
+    const page = nativeCanonicalApproval.canonicalPage as ConversationDisplayPage;
+    const entries = page.items.map((item): ConversationTimelineItem => {
+      if (item.source === "live_transient") throw new Error("expected canonical fixture");
+      return { identity: item.displayId, source: "durable", item: { ...item, source: item.source } };
+    });
+    const presentation: ApprovalPresentation = { phase: "pending", event: nativeCanonicalApproval.timeline as TimelineEvent };
+    expect(projectConversationRows(entries, [], translateEnglish, [], presentation)).toEqual([]);
+    for (const identity of [undefined, `live-v1:${"f".repeat(64)}`]) {
+      expect(projectConversationRows(entries, [], translateEnglish, [], { ...presentation,
+        event: { ...presentation.event, provisionalId: identity } })).toHaveLength(2);
+    }
+  });
+  const visibleApproval: ApprovalPresentation = { phase: "pending", event: {
+    workspaceId: "workspace", sessionId: "session", runId: "run-approval", sequence: 3,
+    runSequence: "3", replayable: true, kind: "approval_requested", provisionalId: "approval-slot",
+    approval: { callId: "call-approval", toolName: "apply_changeset", approvalRequestId: "request-current",
+      toolCallHash: "a".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+      snapshotRequired: false, previewBody: "-before\n+after" },
+  } };
+  const pendingStub = (): Extract<ConversationTimelineItem, { source: "durable" }> => ({ identity: "stub", source: "durable", item: {
+    schemaVersion: 1, displayId: "stub", displayOrder: { sessionStreamSequence: "10", subindex: 0 },
+    sourceEventId: "stub-event", source: "durable_transcript", kind: "tool", runId: "run-approval",
+    reconciles: ["tool-slot"], status: "requested",
+    content: { type: "tool", callId: "call-approval", toolName: "apply_changeset", truncated: false, originalContentBytes: 0 },
+  } });
+  const pendingNotice = (): Extract<ConversationTimelineItem, { source: "durable" }> => ({ identity: "notice", source: "durable", item: {
+    schemaVersion: 1, displayId: "notice", displayOrder: { sessionStreamSequence: "11", subindex: 0 },
+    sourceEventId: "approval-event", source: "durable_run_event", kind: "approval", runId: "run-approval",
+    reconciles: ["approval-slot"], status: "waiting_for_approval",
+    content: { type: "approval", callId: "call-approval", toolName: "apply_changeset" },
+  } });
+
+  it("projects a visible exact pending review once without changing its canonical placeholders", () => {
+    const entries = [pendingStub(), pendingNotice()];
+    expect(projectConversationRows(entries, [], translateEnglish, [], visibleApproval)).toEqual([]);
+    expect(entries).toMatchObject([{ item: { status: "requested" } }, { item: { status: "waiting_for_approval" } }]);
+    expect(projectConversationRows(entries, [], translateEnglish)).toHaveLength(2);
+    expect(projectConversationRows(entries, [], translateEnglish, [], { ...visibleApproval,
+      event: { ...visibleApproval.event, provisionalId: undefined } })).toHaveLength(2);
+    expect(projectConversationRows(entries, [], translateEnglish, [], { ...visibleApproval,
+      event: { ...visibleApproval.event, provisionalId: `live-v1:${"f".repeat(64)}` } })).toHaveLength(2);
+    expect(projectConversationRows([pendingStub()], [], translateEnglish, [], visibleApproval)).toHaveLength(1);
+    for (const phase of ["accepted", "delivery_uncertain"] as const) {
+      expect(projectConversationRows(entries, [], translateEnglish, [], { ...visibleApproval, phase })).toHaveLength(2);
+    }
+  });
+
+  it("keeps mismatched calls, runs, missing approval anchors and stale request-bound live stubs", () => {
+    const stub = pendingStub();
+    const notice = pendingNotice();
+    const entries: ConversationTimelineItem[] = [
+      { ...stub, item: { ...stub.item, runId: "other-run" } },
+      { ...stub, item: { ...stub.item, reconciles: undefined } },
+      { ...stub, item: { ...stub.item, content: { type: "tool", callId: "other-call", truncated: false, originalContentBytes: 0 } } },
+      { ...notice, item: { ...notice.item, reconciles: ["other-request-slot"] } },
+      { ...notice, item: { ...notice.item, reconciles: undefined } },
+      { identity: "stale-live-stub", source: "live", item: {
+        provisionalId: "stale-live-stub", runId: "run-approval", runSequence: "2", kind: "tool", status: "requested",
+        toolApprovalRequestId: "request-old", content: { type: "tool", callId: "call-approval", toolName: "apply_changeset", truncated: false, originalContentBytes: 0 },
+      } },
+    ];
+    expect(projectConversationRows(entries, [], translateEnglish, [], visibleApproval)).toHaveLength(entries.length);
+  });
+
+  it("keeps real results, execution, artifacts, errors and decided approval history beside the review", () => {
+    const stub = pendingStub();
+    if (stub.item.content.type !== "tool") throw new Error("expected tool fixture");
+    const contents = [{ output: "actual output" }, { output: "" }, { executionId: "execution" },
+      { artifactRef: "artifact" }, { persistedBytes: 1 }, { observedBytes: 1 }, { truncated: true },
+      { executionStartedAtMs: 1 }, { executionUpdatedAtMs: 2 }, { hasMore: true }];
+    for (const content of contents) {
+      const entry: ConversationTimelineItem = { ...stub, item: { ...stub.item,
+        content: { ...stub.item.content, ...content } } };
+      expect(projectConversationRows([entry], [], translateEnglish, [], visibleApproval)).toHaveLength(1);
+    }
+    for (const status of ["failed", "denied", "cancelled", "interrupted", "completed", "approved"] as const) {
+      const notice = pendingNotice();
+      expect(projectConversationRows([{ ...notice, item: { ...notice.item, status } }], [], translateEnglish,
+        [], visibleApproval)).toHaveLength(1);
+    }
+    const snapshot: LiveConversationDisplayItem = { provisionalId: "tool-slot", runId: "run-approval", runSequence: "4",
+      kind: "tool", status: "failed", content: { type: "tool", callId: "call-approval", output: "real failure" } };
+    expect(projectConversationRows([stub], [], translateEnglish, [snapshot], visibleApproval)).toHaveLength(1);
+  });
   it("restores a command and coalesces follow-up execution facts without a live overlay", () => {
     const make = (key: string, name: string): ConversationTimelineItem => ({ identity: key, source: "durable", item: {
       schemaVersion: 1, displayId: key, displayOrder: { sessionStreamSequence: key === "start" ? "2" : "3", subindex: 0 },
@@ -291,3 +379,15 @@ function durableAssistant(
     },
   };
 }
+
+it.each(["completed", "cancelled", "interrupted", "failed"] as const)("does not present a closed historical approval as waiting (%s)", (status) => {
+  const entry: ConversationTimelineItem = { identity: "closed-approval", source: "durable", item: {
+    schemaVersion: 1, displayId: "closed-approval", displayOrder: { sessionStreamSequence: "4", subindex: 0 },
+    sourceEventId: "approval-settled", source: "durable_run_event", kind: "approval", runId: "run-closed",
+    status, content: { type: "approval", callId: "call-closed", toolName: "write_file" },
+  } };
+  expect(projectConversationRows([entry], [], translateEnglish)).toEqual([expect.objectContaining({
+    label: "Approval closed", status,
+  })]);
+  expect(projectConversationRows([entry], [], translateEnglish)[0].text).not.toContain("waiting");
+});

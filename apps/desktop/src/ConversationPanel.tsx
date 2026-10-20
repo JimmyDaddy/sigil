@@ -115,6 +115,7 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
+  draftSessionId?: string;
   providerInventory?: ProviderConnectionInventory;
   onInitialLoadComplete?: (sessionId: string) => void;
   onRunContextChange?: (context: RunContext) => void;
@@ -184,6 +185,7 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
+  draftSessionId,
   providerInventory,
   onInitialLoadComplete,
   onRunContextChange,
@@ -1177,7 +1179,7 @@ export function ConversationPanel({
             supersedesRunId,
             supersededByRunId,
           });
-          setRunAnnouncement(status.message ?? t("runFinishedAnnouncement"));
+          setRunAnnouncement(t("runFinishedAnnouncement"));
           setRunContextReload((value) => value + 1);
           setAgentActivityReload((value) => value + 1);
           setTaskIntegrationReload((value) => value + 1);
@@ -1435,12 +1437,17 @@ export function ConversationPanel({
     setDisplayReload((value) => value + 1);
   }, [conversationQueue, pendingPrompt]);
 
+  const approvalPresentation = useMemo(
+    () => selectLatestApprovalPresentation(liveEventState),
+    [liveEventState],
+  );
   const rows = useMemo(() => {
     const next = projectConversationRows(
       selectConversationTimeline(continuityState),
       selectDeltaBuffers(liveEventState),
       t,
       selectSemanticLiveItems(liveEventState),
+      continuityState.lifecycle === "live" ? approvalPresentation : undefined,
     );
     if (pendingPrompt === undefined) return next;
     return [...next, {
@@ -1451,11 +1458,7 @@ export function ConversationPanel({
       skill: pendingPrompt.skill,
       status: pendingPrompt.queueAccepted ? "queued" : "sending",
     }];
-  }, [continuityState, liveEventState, pendingPrompt, t]);
-  const approvalPresentation = useMemo(
-    () => selectLatestApprovalPresentation(liveEventState),
-    [liveEventState],
-  );
+  }, [continuityState, liveEventState, approvalPresentation, pendingPrompt, t]);
   const pendingApproval = approvalPresentation?.phase === "pending"
     ? approvalPresentation.event
     : undefined;
@@ -2415,7 +2418,16 @@ export function ConversationPanel({
           recoveryBinding: canonicalRouteRecovery.recoveryBinding,
           retryable: canonicalRouteRecovery.retryable,
         });
-  const providerTurnRecovery = providerTurnRecoveryEvent?.providerTurnRecovery;
+  const recovery = providerTurnRecoveryEvent?.providerTurnRecovery;
+  const pendingDecisionForRecovery = providerTurnRecoveryEvent !== undefined && (
+    continuityState.lifecycle === "live" && pendingApproval?.approval !== undefined
+      && pendingApproval.runId === providerTurnRecoveryEvent.runId
+    || durableUserInput?.status === "requested"
+      && durableUserInput.identity.rootLogicalRunId === providerTurnRecoveryEvent.runId
+  );
+  const providerTurnRecovery = recovery !== undefined && !recovery.userAttentionRequired
+    && (recovery.phase === "waiting" || recovery.phase === "recovering") && pendingDecisionForRecovery
+    ? undefined : recovery;
   return (
     <div className="conversation-layout">
       <section
@@ -2434,7 +2446,6 @@ export function ConversationPanel({
         <div>
           <span className="conversation-title-row">
             <h2 id="conversation-title">{session.label ?? t("untitledConversation")}</h2>
-            <small>{t("recordedRuns", { count: session.runCount })}</small>
           </span>
         </div>
         <div className="conversation-header-actions">
@@ -2932,6 +2943,7 @@ export function ConversationPanel({
       <Composer
         key={draftStorageKey(workspaceId, session.id)}
         draftKey={draftStorageKey(workspaceId, session.id)}
+        persistentDraftKey={draftSessionId === undefined ? undefined : draftStorageKey(workspaceId, draftSessionId)}
         active={active}
         submissionBlocked={submissionBlocked}
         stopControlBlocked={stopControlBlocked}
@@ -2951,6 +2963,7 @@ export function ConversationPanel({
         queueBusy={conversationQueueBusy}
         activityState={composerActivityState}
         statusPresentation={composerStatusPresentation}
+        showActivity={false}
         queuePanel={(
           <ConversationQueuePanel
             queue={conversationQueue}
@@ -3209,8 +3222,11 @@ function ConversationActivity({
   readonly presentation?: ProductStatusPresentation;
   readonly t: Translate;
 }) {
-  const effectiveState = state ?? "idle";
-  if (effectiveState === "idle" || effectiveState === "terminal") return null;
+  const transportState = state ?? "idle";
+  if ((transportState === "idle" || transportState === "terminal") && presentation === undefined) return null;
+  const effectiveState = transportState === "idle" || transportState === "terminal"
+    ? presentation?.status === "failed" ? "error" : "connecting"
+    : transportState;
   const label = presentation?.label ?? (() => {
     switch (effectiveState) {
       case "connecting": return t("conversationConnecting");

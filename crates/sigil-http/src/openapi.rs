@@ -4802,6 +4802,7 @@ fn public_event_schemas() -> Map<String, Value> {
             "required": ["event_sequence", "effects", "subjects", "analysis_status", "analysis_reason_codes", "analysis_reasons", "containment", "decision_reasons", "safe_summary_title", "safe_summary_detail", "snapshot_required"],
             "properties": {
                 "event_sequence": { "type": "integer", "format": "uint64", "minimum": 1 },
+                "reconciliation_id": { "type": ["string", "null"], "pattern": "^live-v1:[0-9a-f]{64}$", "maxLength": 72 },
                 "effects": { "type": "array", "maxItems": 16, "items": { "type": "string", "maxLength": 2048 } },
                 "subjects": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/PendingApprovalSubject" } },
                 "analysis_status": { "type": "string", "maxLength": 2048 },
@@ -4811,10 +4812,24 @@ fn public_event_schemas() -> Map<String, Value> {
                 "decision_reasons": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 2048 } },
                 "safe_summary_title": { "type": "string", "maxLength": 2048 },
                 "safe_summary_detail": { "type": "string", "maxLength": 2048 },
+                "preview": { "$ref": "#/components/schemas/PendingApprovalPreview" },
                 "operation": { "type": ["string", "null"], "maxLength": 2048 },
                 "risk": { "type": ["string", "null"], "maxLength": 2048 },
                 "snapshot_required": { "type": "boolean" },
                 "command_family_allow_pattern": { "type": ["string", "null"], "maxLength": 2048 }
+            }
+        }),
+    );
+    schemas.insert(
+        "PendingApprovalPreview".to_owned(),
+        json!({
+            "type": "object",
+            "description": "Frozen safe review text bound to the containing exact approval guard. Each field is limited to 128 KiB of UTF-8; an oversized review is absent rather than partial. It is display evidence, not a prepared mutation digest.",
+            "required": ["title", "summary", "body"],
+            "properties": {
+                "title": { "type": "string", "maxLength": 131072 },
+                "summary": { "type": "string", "maxLength": 131072 },
+                "body": { "type": "string", "maxLength": 131072 }
             }
         }),
     );

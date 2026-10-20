@@ -40,12 +40,12 @@ export function Message({
 }) {
   const { t } = useLocale();
   const streaming = message.status === "streaming";
-  const [disclosureOpen, setDisclosureOpen] = useState(streaming);
+  const [disclosureOpen, setDisclosureOpen] = useState(false);
   useLayoutEffect(() => {
-    setDisclosureOpen(streaming);
-  }, [message.key, streaming]);
+    setDisclosureOpen(false);
+  }, [message.key]);
   if (message.kind === "reasoning" || message.kind === "progress") {
-    const preview = disclosurePreview(message.text);
+    const preview = message.kind === "progress" ? disclosurePreview(message.text) : "";
     return (
       <details
         className={`message-disclosure message-${message.kind}`}
@@ -56,7 +56,7 @@ export function Message({
         <summary>
           <span className="message-disclosure-title">
             <span>{message.label}</span>
-            {message.status ? <small>{message.status}</small> : null}
+            {message.status && !streaming ? <small>{message.status}</small> : null}
           </span>
           <small>{t(disclosureOpen ? "hideDetails" : "showDetails")}</small>
         </summary>

@@ -5791,6 +5791,17 @@
               "null"
             ]
           },
+          "preview": {
+            "$ref": "#/components/schemas/PendingApprovalPreview"
+          },
+          "reconciliation_id": {
+            "maxLength": 72,
+            "pattern": "^live-v1:[0-9a-f]{64}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "risk": {
             "maxLength": 2048,
             "type": [
@@ -5829,6 +5840,29 @@
           "safe_summary_title",
           "safe_summary_detail",
           "snapshot_required"
+        ],
+        "type": "object"
+      },
+      "PendingApprovalPreview": {
+        "description": "Frozen safe review text bound to the containing exact approval guard. Each field is limited to 128 KiB of UTF-8; an oversized review is absent rather than partial. It is display evidence, not a prepared mutation digest.",
+        "properties": {
+          "body": {
+            "maxLength": 131072,
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 131072,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 131072,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "summary",
+          "body"
         ],
         "type": "object"
       },

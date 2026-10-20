@@ -2499,7 +2499,8 @@ pub struct HttpRunSnapshot {
     /// Canonical pending approvals in deterministic call-id order.
     ///
     /// This bounded projection is the recovery source of truth after an SSE gap. It intentionally
-    /// excludes raw tool arguments, absolute paths, command text, and preview bodies.
+    /// excludes raw tool arguments and path-bearing tool input. Review text uses only the
+    /// existing safe public preview, bound to the same exact request.
     #[serde(default)]
     pub pending_approvals: Vec<HttpPendingApproval>,
     /// Canonical non-pending approval lifecycle states used to recover exact UI state after an
@@ -3318,6 +3319,9 @@ pub struct HttpPendingApproval {
 pub struct HttpPendingApprovalDisplay {
     /// Sequence of the durable approval request event.
     pub event_sequence: u64,
+    /// Existing opaque semantic anchor copied from this exact frozen protocol envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation_id: Option<String>,
     #[serde(default)]
     pub effects: Vec<String>,
     #[serde(default)]
@@ -3333,6 +3337,9 @@ pub struct HttpPendingApprovalDisplay {
     pub decision_reasons: Vec<String>,
     pub safe_summary_title: String,
     pub safe_summary_detail: String,
+    /// Frozen, policy-safe review from this exact approval event; absent means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<HttpPendingApprovalPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3342,6 +3349,18 @@ pub struct HttpPendingApprovalDisplay {
     /// Derived durable allow pattern (`cargo test*`) offered as the "Allow family" decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_family_allow_pattern: Option<String>,
+}
+
+/// The existing public approval preview narrowed to renderer-safe review text.
+///
+/// This is display evidence bound by its containing exact approval guard, not a new
+/// authority or a replacement for the kernel's prepared mutation digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpPendingApprovalPreview {
+    pub title: String,
+    pub summary: String,
+    pub body: String,
 }
 
 /// One path-safe approval subject. External identities are represented only by kind and scope.

@@ -1874,6 +1874,7 @@ export interface TimelineApproval {
   snapshotRequired: boolean;
   previewTitle?: string;
   previewSummary?: string;
+  /** Review evidence for this exact approval guard; absence must not reuse an older request. */
   previewBody?: string;
 }
 

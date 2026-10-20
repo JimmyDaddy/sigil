@@ -212,9 +212,11 @@ describe("desktop UI catalog contract", () => {
       expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
       expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     });
-    expect(await screen.findByRole("button", { name: "Stop run" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Cancel work" })).toBeTruthy();
     expect(await screen.findByText("External directory access for bash")).toBeTruthy();
-    await waitFor(() => expect(document.querySelectorAll(".timeline > *")).toHaveLength(12));
+    await waitFor(() => expect(document.querySelectorAll(".timeline > *")).toHaveLength(11));
+    expect(screen.queryByText("bash is waiting for a decision.")).toBeNull();
+    expect(screen.getAllByRole("region", { name: "Requested action" })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Open verification: check failed" }).hasAttribute("disabled")).toBe(true);
     await waitFor(() => expect(document.querySelectorAll(".app-shell")).toHaveLength(1));
   });

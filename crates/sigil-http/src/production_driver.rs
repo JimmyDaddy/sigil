@@ -442,6 +442,12 @@ pub struct HttpProductionRunDriver {
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
     session_attachments: Mutex<BTreeMap<String, HttpAttachedSession>>,
+    session_attachment_index: Mutex<
+        BTreeMap<
+            String,
+            Weak<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        >,
+    >,
     session_projection_stores: Mutex<HttpSessionProjectionStoreCache>,
     readonly_query_owners: Mutex<HttpSessionQueryOwnerCache>,
     reconciled_terminal_sessions: Mutex<BTreeSet<String>>,
@@ -1342,7 +1348,7 @@ fn publish_exact_plan_review_revision_terminal_outbox(
         || outbox.event.run_id != run_id
     {
         return Err(anyhow!(
-            "plan-review revision terminal outbox belongs to another HTTP run"
+            "durable terminal outbox belongs to another HTTP run"
         ));
     }
     publish_exact_http_outbox_event(
@@ -1356,11 +1362,11 @@ fn publish_exact_plan_review_revision_terminal_outbox(
     close_result.map_err(anyhow::Error::new)
 }
 
-/// Delivers the exact durable revision terminal and always attempts the registry/stream
+/// Delivers an exact durable input/revision terminal and always attempts the registry/stream
 /// projection afterwards. A protocol/receipt error leaves the original outbox pending for attach
-/// replay, but must not strand the registered revision in `Paused` or `ExecutionUncertain` when
+/// replay, but must not strand the registered run in `Paused` or `ExecutionUncertain` when
 /// its domain terminal is already known.
-fn deliver_and_reconcile_plan_review_revision_terminal(
+fn deliver_and_reconcile_user_input_terminal(
     registry: &HttpSessionRunRegistry,
     event_bus: &HttpLiveEventBus,
     session_log_path: &Path,
@@ -1372,7 +1378,7 @@ fn deliver_and_reconcile_plan_review_revision_terminal(
         record_plan_review_revision_terminal_delivery_receipt(session_log_path, outbox).map_err(
             |error| {
                 HttpRunDriverError::new(format!(
-                    "durable plan-review revision delivery receipt failed: {error:#}"
+                    "durable user-input terminal delivery receipt failed: {error:#}"
                 ))
             },
         )
@@ -1386,7 +1392,7 @@ fn deliver_and_reconcile_plan_review_revision_terminal(
         )
         .map_err(|error| {
             HttpRunDriverError::new(format!(
-                "durable plan-review revision terminal delivery failed: {error:#}"
+                "durable user-input terminal delivery failed: {error:#}"
             ))
         })
     };
@@ -1402,7 +1408,7 @@ fn deliver_and_reconcile_plan_review_revision_terminal(
         (Err(delivery_error), Ok(())) => Err(delivery_error),
         (Ok(()), Err(registry_error)) => Err(registry_error),
         (Err(delivery_error), Err(registry_error)) => Err(HttpRunDriverError::new(format!(
-            "durable plan-review revision delivery failed ({delivery_error}); registry reconciliation also failed ({registry_error})"
+            "durable user-input terminal delivery failed ({delivery_error}); registry reconciliation also failed ({registry_error})"
         ))),
     }
 }
@@ -1540,18 +1546,11 @@ impl HttpProductionRunDriver {
     > {
         let canonical_session_path = canonical_http_session_path(session_log_path)
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        let attachments = self
-            .session_attachments
-            .lock()
-            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        if let Some(attached) = attachments.get(durable_session_scope_id) {
-            return if attached.attachment.session_path() == canonical_session_path {
-                Ok(Arc::clone(&attached.attachment))
-            } else {
-                Err(HttpRunAdmissionError::Unavailable)
-            };
+        if let Some(attachment) =
+            self.owned_session_attachment(durable_session_scope_id, &canonical_session_path)?
+        {
+            return Ok(attachment);
         }
-        drop(attachments);
         let attachment =
             sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
                 &canonical_session_path,
@@ -1568,6 +1567,42 @@ impl HttpProductionRunDriver {
                 _ => HttpRunAdmissionError::Unavailable,
             })?;
         Ok(Arc::new(attachment))
+    }
+
+    fn owned_session_attachment(
+        &self,
+        durable_session_scope_id: &str,
+        canonical_session_path: &Path,
+    ) -> Result<
+        Option<
+            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        >,
+        HttpRunAdmissionError,
+    > {
+        let attachments = self
+            .session_attachments
+            .lock()
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        if let Some(attached) = attachments.get(durable_session_scope_id) {
+            return if attached.attachment.session_path() == canonical_session_path {
+                Ok(Some(Arc::clone(&attached.attachment)))
+            } else {
+                Err(HttpRunAdmissionError::Unavailable)
+            };
+        }
+        drop(attachments);
+        let mut index = self
+            .session_attachment_index
+            .lock()
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        let Some(attachment) = index.get(durable_session_scope_id).and_then(Weak::upgrade) else {
+            index.remove(durable_session_scope_id);
+            return Ok(None);
+        };
+        if attachment.session_path() != canonical_session_path {
+            return Err(HttpRunAdmissionError::Unavailable);
+        }
+        Ok(Some(attachment))
     }
 
     /// Creates a production driver. Call `build_registry` before starting runs.
@@ -1713,6 +1748,7 @@ impl HttpProductionRunDriver {
             exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
             pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
             session_attachments: Mutex::new(BTreeMap::new()),
+            session_attachment_index: Mutex::new(BTreeMap::new()),
             session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
             readonly_query_owners: Mutex::new(HttpSessionQueryOwnerCache::default()),
             reconciled_terminal_sessions: Mutex::new(BTreeSet::new()),
@@ -2413,6 +2449,10 @@ impl HttpProductionRunDriver {
         let queued_session = start.session.clone();
         let terminal_exact_queue_prompts = Arc::clone(&self.exact_queue_prompts);
         let post_run_maintenance = Arc::new(Mutex::new(None));
+        let terminal_recovery_session = start.session.clone();
+        let terminal_recovery_event_bus = Arc::clone(&self.event_bus);
+        let terminal_recovery_attachment = Arc::clone(&session_attachment);
+        let joined_execution_scope = Arc::new(OnceLock::new());
 
         let supervisor = HttpRunSupervisor {
             options: self.options.clone(),
@@ -2431,6 +2471,7 @@ impl HttpProductionRunDriver {
             cancel_receiver,
             post_run_maintenance: Arc::clone(&post_run_maintenance),
             projection_owner,
+            joined_execution_scope: Arc::clone(&joined_execution_scope),
         };
         let task = self.runtime.spawn(supervisor.run(preprepared));
         let active_runs = Arc::clone(&self.active_runs);
@@ -2440,10 +2481,35 @@ impl HttpProductionRunDriver {
         let registry = Arc::downgrade(&registry);
         let run_id = start.run.id;
         self.runtime.spawn(async move {
+            // A failed supervisor still owns the attachment until its exact durable terminal
+            // has been reconciled or the unresolved failure has been quarantined.
+            let _terminal_recovery_attachment = terminal_recovery_attachment;
             let mut uncertain = match task.await {
                 Ok(Ok(())) => false,
-                Ok(Err(_)) | Err(_) => true,
+                Ok(Err(error)) => {
+                    let detail = safe_persistence_text(&error.to_string());
+                    tracing::warn!(%run_id, error = %detail, "production run supervisor failed before terminal reconciliation");
+                    true
+                }
+                Err(error) => {
+                    let detail = safe_persistence_text(&error.to_string());
+                    tracing::warn!(%run_id, error = %detail, "production run supervisor did not join successfully");
+                    true
+                }
             };
+            if uncertain && let Some(run_scope_id) = joined_execution_scope.get()
+                && let Some(registry) = registry.upgrade() {
+                match reconcile_failed_http_supervisor_terminal(
+                    Arc::clone(&registry), Arc::clone(&terminal_recovery_event_bus),
+                    terminal_recovery_session, run_id.clone(), run_scope_id.clone(),
+                ).await {
+                    Ok(reconciled) => uncertain = !reconciled,
+                    Err(error) => {
+                        let detail = safe_persistence_text(&error.to_string());
+                        tracing::warn!(%run_id, error = %detail, "failed production supervisor terminal remains unreconciled");
+                    }
+                }
+            }
             if let Some(queued_terminal) = queued_terminal {
                 let unpromoted_terminal = registry
                     .upgrade()
@@ -2477,6 +2543,7 @@ impl HttpProductionRunDriver {
             if uncertain && let Some(registry) = registry.upgrade() {
                 let _ = registry.record_run_execution_uncertain(&run_id);
             }
+            drop(_terminal_recovery_attachment);
             if let Ok(mut runs) = active_runs.lock() {
                 runs.remove(&run_id);
                 active_runs_ready.notify_all();
@@ -2662,6 +2729,18 @@ impl HttpProductionRunDriver {
                 background_agent_monitor,
             },
         );
+        drop(attachments);
+        let mut index = self
+            .session_attachment_index
+            .lock()
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        // Selection may release the strong cache while a supervisor still owns this exact
+        // lease. A weak index makes that capability discoverable without extending its life.
+        index.retain(|_, attachment| attachment.upgrade().is_some());
+        index.insert(
+            durable_session_scope_id.to_owned(),
+            Arc::downgrade(&attachment),
+        );
         Ok(attachment)
     }
 
@@ -2691,13 +2770,11 @@ impl HttpProductionRunDriver {
         let canonical_session_path =
             canonical_http_session_path(Path::new(&session.session_log_path))
                 .map_err(|_| HttpRunDriverError::new("session attachment state unavailable"))?;
-        let owned = self
-            .session_attachments
-            .lock()
+        if self
+            .owned_session_attachment(&session.durable_session_scope_id, &canonical_session_path)
             .map_err(|_| HttpRunDriverError::new("session attachment state unavailable"))?
-            .get(&session.durable_session_scope_id)
-            .is_some_and(|attached| attached.attachment.session_path() == canonical_session_path);
-        if owned {
+            .is_some()
+        {
             return Ok(None);
         }
         match sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
@@ -5127,7 +5204,14 @@ impl HttpRunDriver for HttpProductionRunDriver {
         &self,
         session: &crate::HttpSessionSnapshot,
     ) -> Result<Option<HttpQueuedRunAdmission>, HttpConversationQueueDriverError> {
-        self.acquire_session_attachment(session)
+        // A background release callback may inspect this queue after the user selected another
+        // session. Retain the exact authority lease for this inspection without changing UI
+        // selection; an actual queued start installs its owner through start_queued_run.
+        let _attachment = self
+            .acquire_exact_session_attachment(
+                &session.durable_session_scope_id,
+                Path::new(&session.session_log_path),
+            )
             .map_err(|error| match error {
                 HttpRunAdmissionError::SessionAlreadyActive { .. }
                 | HttpRunAdmissionError::RouteRecovery(_) => {
@@ -5504,7 +5588,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| {
                 HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
             })?;
-        let revision_terminal_outbox = prepared.revision_terminal_outbox().cloned();
+        let terminal_outbox = prepared.terminal_outbox().cloned();
         let (receipt, continuation, revision_request) = prepared.into_parts();
         let continuation_run_id = continuation.as_ref().map(|_| run_id.clone()).or_else(|| {
             revision_request
@@ -5553,14 +5637,25 @@ impl HttpRunDriver for HttpProductionRunDriver {
         if let Some(revision_request) = revision_request {
             self.spawn_plan_review_revision_from_current_config(session, revision_request)?;
         }
-        if let Some(outbox) = revision_terminal_outbox {
-            deliver_and_reconcile_plan_review_revision_terminal(
+        if let Some(outbox) = terminal_outbox {
+            // An ordinary Awaiting physical run may already have sealed its adapter stream.
+            // Reconcile the exact new durable successor through the existing verified-source
+            // replay seam. It admits a later source frontier without reopening an unchanged
+            // sealed window or changing any previously published event identity.
+            replay_pending_http_public_outbox(
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &outbox.run_id,
+                &self.event_bus,
+                &registry,
+            )?;
+            deliver_and_reconcile_user_input_terminal(
                 &registry,
                 &self.event_bus,
                 Path::new(&session.session_log_path),
                 &session.durable_session_scope_id,
                 &outbox,
-                false,
+                true,
             )?;
         }
         Ok(HttpUserInputDecisionCommandReceipt {
@@ -6391,6 +6486,7 @@ struct HttpRunSupervisor {
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
     post_run_maintenance: Arc<Mutex<Option<ApplicationPostRunMaintenance>>>,
     projection_owner: Arc<Mutex<Option<HttpBoundProjectionOwner>>>,
+    joined_execution_scope: Arc<OnceLock<String>>,
 }
 
 impl HttpRunSupervisor {
@@ -6765,11 +6861,23 @@ impl HttpRunSupervisor {
         let approval_handler = HttpProductionApprovalHandler {
             broker: Arc::clone(&self.broker),
         };
-        let mut execution = Box::pin(execution.execute_on_owned_blocking(
-            event_handler.clone(),
-            approval_handler,
-            Arc::clone(&self.post_run_maintenance),
-        ));
+        let execution_events = event_handler.clone();
+        let execution_maintenance = Arc::clone(&self.post_run_maintenance);
+        let joined_execution_scope = Arc::clone(&self.joined_execution_scope);
+        let execution_scope = control.handle().scope_id().to_owned();
+        let mut execution = Box::pin(async move {
+            let result = execution
+                .execute_on_owned_blocking(
+                    execution_events,
+                    approval_handler,
+                    execution_maintenance,
+                )
+                .await;
+            // Publish the exact cancellation scope only after the owned worker really joined.
+            // A dropped future or outer supervisor JoinError cannot manufacture this proof.
+            let _ = joined_execution_scope.set(execution_scope);
+            result
+        });
         'run: loop {
             tokio::select! {
                 biased;
@@ -8072,6 +8180,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                 operation,
                 risk,
                 snapshot_required,
+                preview,
                 ..
             } => {
                 let registry = self
@@ -8089,6 +8198,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     *operation,
                     *risk,
                     *snapshot_required,
+                    preview.as_ref(),
                     session_grant_available
                         .then(|| sigil_kernel::derive_command_family_allow_pattern_for_call(call))
                         .flatten(),
@@ -8120,14 +8230,13 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     let sequence = protocol
                         .public_sequence()
                         .ok_or_else(|| anyhow!("approval publication has no public sequence"))?;
-                    registry.update_approval_event_sequence(
-                        &self.run_id,
-                        &pending.call_id,
-                        &pending.approval_request_id,
-                        sequence,
-                    );
+                    registry.update_approval_publication(&self.run_id, protocol);
                     if let Some(approval) = approval_request.as_mut() {
                         approval.display.event_sequence = sequence;
+                        approval.display.reconciliation_id = protocol
+                            .approval_request
+                            .as_ref()
+                            .and_then(|published| published.display.reconciliation_id.clone());
                     }
                 }
                 published.map(|_| ()).map_err(anyhow::Error::new)
@@ -8429,6 +8538,7 @@ fn pending_approval_display(
     operation: Option<ToolOperation>,
     risk: Option<PermissionRisk>,
     snapshot_required: bool,
+    preview: Option<&sigil_kernel::ToolPreview>,
     command_family_allow_pattern: Option<String>,
 ) -> HttpPendingApprovalDisplay {
     let (analysis_status, analysis_reason_facts) = match analysis {
@@ -8454,6 +8564,7 @@ fn pending_approval_display(
         .collect();
     HttpPendingApprovalDisplay {
         event_sequence,
+        reconciliation_id: None,
         effects: effects.iter().take(16).map(stable_enum_label).collect(),
         subjects: subjects
             .iter()
@@ -8490,6 +8601,7 @@ fn pending_approval_display(
             .collect(),
         safe_summary_title: bounded_approval_text(&safe_summary.title),
         safe_summary_detail: bounded_approval_text(&safe_summary.detail),
+        preview: preview.and_then(crate::sse::approval_preview_for_display),
         operation: operation.map(|value| value.as_str().to_owned()),
         risk: risk.map(|value| stable_enum_label(&value)),
         snapshot_required,
@@ -8570,6 +8682,148 @@ fn quarantine_cancellation_failure(
     };
     let _ = acknowledgement.send(Err(error.clone()));
     error
+}
+
+/// Reconciles only a joined owner's exact, durably clean cancellation after a supervisor error.
+/// Other terminals do not prove cleanup and retain the original uncertain foreground state.
+/// This does not change the cancellation command's published receipt.
+async fn reconcile_failed_http_supervisor_terminal(
+    registry: Arc<HttpSessionRunRegistry>,
+    event_bus: Arc<HttpLiveEventBus>,
+    session: crate::HttpSessionSnapshot,
+    run_id: String,
+    joined_run_scope_id: String,
+) -> Result<bool, HttpRunDriverError> {
+    tokio::task::spawn_blocking(move || {
+        let store = JsonlSessionStore::new(&session.session_log_path)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let records = store
+            .read_event_records_writer()
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let terminal = projection
+            .events_in_order()
+            .into_iter()
+            .rev()
+            .filter(|entry| entry.run_id == run_id)
+            .find(|entry| http_terminal_from_durable_public_event(&entry.event.event).is_some());
+        let Some(terminal) = terminal else {
+            return Ok(false);
+        };
+        if !matches!(terminal.event.event, PublicRunEventKind::RunCancelled)
+            || !joined_scope_has_clean_cancellation(
+                &records,
+                &joined_run_scope_id,
+                &terminal.domain_event_id,
+                &run_id,
+            )?
+        {
+            return Ok(false);
+        }
+        let current = registry.get_run(&run_id).map_err(registry_driver_error)?;
+        let registered_session = registry
+            .get_session(&current.session_id)
+            .map_err(registry_driver_error)?;
+        if terminal.event.session_id != session.durable_session_scope_id
+            || registered_session.durable_session_scope_id != session.durable_session_scope_id
+            || canonical_http_session_path(Path::new(&registered_session.session_log_path))
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?
+                != canonical_http_session_path(Path::new(&session.session_log_path))
+                    .map_err(|error| HttpRunDriverError::new(error.to_string()))?
+        {
+            return Err(HttpRunDriverError::new(
+                "clean cancellation does not belong to the joined HTTP run attachment",
+            ));
+        }
+        replay_pending_http_public_outbox(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &run_id,
+            &event_bus,
+            &registry,
+        )?;
+        record_run_terminal_and_reconcile_stream(
+            &registry,
+            &event_bus,
+            &session.durable_session_scope_id,
+            &run_id,
+            HttpRunTerminalOutcome::Cancelled,
+        )?;
+        let current = registry.get_run(&run_id).map_err(registry_driver_error)?;
+        Ok(current.status == crate::HttpRunStatus::Cancelled)
+    })
+    .await
+    .map_err(|error| {
+        HttpRunDriverError::new(format!(
+            "failed-supervisor terminal reconciliation worker did not join: {error}"
+        ))
+    })?
+}
+
+fn joined_scope_has_clean_cancellation(
+    records: &[sigil_kernel::SessionStreamRecord],
+    joined_run_scope_id: &str,
+    terminal_domain_event_id: &str,
+    run_id: &str,
+) -> Result<bool, HttpRunDriverError> {
+    let mut requested: Option<sigil_kernel::RunCancellationRequestedEntry> = None;
+    let mut finalized: Option<sigil_kernel::RunCancellationFinalizedEntry> = None;
+    for record in records {
+        let event = record.stored_event();
+        if event.event_id == terminal_domain_event_id {
+            let terminal = sigil_kernel::conversation_run_lifecycle_record_from_stream(record)
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+            return Ok(matches!(terminal,
+                Some(sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(entry))
+                    if entry.run_id() == run_id
+                        && entry.status() == sigil_kernel::ConversationRunTerminalStatusV1::Cancelled)
+                && matches!((requested, finalized), (Some(request), Some(cleanup))
+                    if request.request_id == cleanup.request_id
+                        && cleanup.outcome == sigil_kernel::RunCancellationTerminalOutcome::Cancelled
+                        && cleanup.cleanup_complete
+                        && cleanup.active_effects == 0
+                        && cleanup.active_tasks == 0));
+        }
+        // These are schema tags, not user text. Cancellation records share their durable event
+        // categories with conversation lifecycle records, so decode only their exact variants.
+        match (
+            event.event_kind(),
+            event
+                .payload
+                .get("record")
+                .and_then(serde_json::Value::as_str),
+        ) {
+            (Some(sigil_kernel::DurableEventType::RunStatusChanged), Some("requested")) => {
+                let request: sigil_kernel::RunCancellationRequestedEntry =
+                    serde_json::from_value(event.payload.clone())
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+                if request.run_scope_id == joined_run_scope_id {
+                    if requested.is_some() || finalized.is_some() {
+                        return Ok(false);
+                    }
+                    requested = Some(request);
+                }
+            }
+            (Some(sigil_kernel::DurableEventType::RunFinalized), Some("finalized")) => {
+                let cleanup: sigil_kernel::RunCancellationFinalizedEntry =
+                    serde_json::from_value(event.payload.clone())
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+                if cleanup.run_scope_id == joined_run_scope_id {
+                    if finalized.is_some()
+                        || requested
+                            .as_ref()
+                            .is_none_or(|request| request.request_id != cleanup.request_id)
+                    {
+                        return Ok(false);
+                    }
+                    finalized = Some(cleanup);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn record_run_terminal_and_reconcile_stream(
@@ -9012,7 +9266,28 @@ fn reconcile_registered_http_terminal_outboxes(
             .or_insert(record);
     }
     let mut reconciled = 0usize;
-    for entry in projection.events_in_order() {
+    // An ordinary Awaiting terminal can have an exact input-cancellation successor. Replaying
+    // its older pause after the successor would regress (or conflict with) the known terminal.
+    let terminal_frontiers = projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| http_terminal_from_durable_public_event(&entry.event.event).is_some())
+        .map(|entry| (entry.run_id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    for entry in terminal_frontiers.into_values() {
+        let input_terminal = records_by_event_id
+            .get(entry.domain_event_id.as_str())
+            .map(|record| record.session_log_entry())
+            .transpose()
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?
+            .flatten()
+            .is_some_and(|source| {
+                matches!(source,
+                SessionLogEntry::Control(ControlEntry::UserInputResolved(resolved))
+                    if matches!((&resolved.resolution, &entry.event.event),
+                        (sigil_kernel::UserInputResolutionV1::RunCancelled, PublicRunEventKind::RunCancelled)
+                        | (sigil_kernel::UserInputResolutionV1::Declined, PublicRunEventKind::RunBlocked { .. })))
+            });
         let revision_attempt = records_by_event_id
             .get(entry.domain_event_id.as_str())
             .map(|record| {
@@ -9070,7 +9345,7 @@ fn reconcile_registered_http_terminal_outboxes(
                         "registered HTTP run does not belong to the durable terminal outbox attachment",
                     ));
                 }
-                if revision_terminal {
+                if revision_terminal || input_terminal {
                     reconcile_plan_review_revision_terminal_registry_event(
                         registry,
                         event_bus,

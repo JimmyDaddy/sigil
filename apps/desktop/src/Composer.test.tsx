@@ -266,6 +266,7 @@ const context: RunContext = {
 };
 
 function renderComposer(overrides: {
+  persistentDraftKey?: string;
   active?: boolean;
   submissionBlocked?: boolean;
   queueCount?: number;
@@ -317,10 +318,11 @@ function renderComposer(overrides: {
     credentialSource: "environment",
     readiness: "ready",
   }];
-  render(
+  const content = (persistentDraftKey = overrides.persistentDraftKey) => (
     <LocaleProvider>
       <Composer
         draftKey="composer-test"
+        persistentDraftKey={persistentDraftKey}
         active={overrides.active ?? false}
         submissionBlocked={overrides.submissionBlocked ?? false}
         submitting={false}
@@ -356,9 +358,12 @@ function renderComposer(overrides: {
         onReleaseImages={overrides.onReleaseImages}
         onCancel={() => undefined}
       />
-    </LocaleProvider>,
+    </LocaleProvider>
   );
+  const rendered = render(content());
   return {
+    ...rendered,
+    bindPersistentDraftKey: (key: string) => rendered.rerender(content(key)),
     onSubmit,
     onOpenQueue,
     onReasoningEffortChange,
@@ -422,7 +427,7 @@ describe("structured composer", () => {
 
     const model = screen.getByRole("combobox", { name: "Model" });
     const unverified = within(model).getByRole("option", {
-      name: /DeepSeek 1.*DeepSeek V4 Pro/,
+      name: /deepseek-v4-pro/,
     }) as HTMLOptionElement;
     expect(unverified.disabled).toBe(false);
     expect(unverified.textContent).not.toMatch(/Not confirmed by provider/);
@@ -455,7 +460,7 @@ describe("structured composer", () => {
       });
 
       const model = screen.getByRole("combobox", { name: "Model" });
-      const pro = within(model).getByRole("option", { name: /DeepSeek V4 Pro/ }) as HTMLOptionElement;
+      const pro = within(model).getByRole("option", { name: /deepseek-v4-pro/ }) as HTMLOptionElement;
       expect(pro.disabled).toBe(false);
       await userEvent.setup().selectOptions(model, "deepseek-default/deepseek-v4-pro");
       expect(onModelChange).toHaveBeenCalledWith({
@@ -479,7 +484,7 @@ describe("structured composer", () => {
 
     const model = screen.getByRole("combobox", { name: "Model" });
     expect(within(model).getByRole("option", {
-      name: /DeepSeek 1.*DeepSeek V4 Flash.*deepseek-v4-flash/,
+      name: /deepseek-v4-flash/,
     })).toBeTruthy();
 
     const tooltipAnchor = model.closest(".sg-tooltip-anchor");
@@ -531,7 +536,7 @@ describe("structured composer", () => {
 
     const model = screen.getByRole("combobox", { name: "Model" });
     expect(within(model).getByRole("option", {
-      name: /OpenAI-compatible.*Team gateway.*Gateway Flash.*deepseek-v4-flash/,
+      name: /Team gateway.*deepseek-v4-flash/,
     })).toBeTruthy();
     await userEvent.setup().selectOptions(model, "gateway-team/deepseek-v4-flash");
     expect(onModelChange).toHaveBeenCalledWith({
@@ -996,4 +1001,25 @@ describe("image attachments", () => {
     await act(async () => { settle(draftImage); await pending; });
     expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
   });
+});
+
+it.each([true, false])("settles the current draft key when durable identity arrives during a pending send (%s)", async (accepted) => {
+  let settle: ((value: boolean) => void) | undefined;
+  const submit = vi.fn(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+  const view = renderComposer({ onSubmit: submit });
+  const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+  const draft = "保留中文草稿，金额 198.01。\n参与者：小林|小周。";
+  fireEvent.change(input, { target: { value: draft } });
+  await userEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  act(() => view.bindPersistentDraftKey("stable-durable-draft"));
+  expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(input);
+  expect(window.localStorage.getItem("stable-durable-draft")).toBe(draft);
+  await act(async () => settle?.(accepted));
+  await waitFor(() => expect(input.value).toBe(accepted ? "" : draft));
+  expect(window.localStorage.getItem("stable-durable-draft")).toBe(accepted ? null : draft);
+  view.unmount();
+  renderComposer({ persistentDraftKey: "stable-durable-draft", onSubmit: submit });
+  expect((screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement).value).toBe(accepted ? "" : draft);
+  expect(submit).toHaveBeenCalledOnce();
 });
