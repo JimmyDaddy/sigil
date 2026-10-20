@@ -2,6 +2,9 @@
 
 Alpha dogfood 是发布证据，不是遥测。Sigil 不会上传 campaign artifact、session history、prompt、tool material、credential 或 workspace content。
 
+Desktop 与终端 TUI 的真实用户场景另按[双端体验与验收基线](product-experience-acceptance.md)
+检查功能和 UI/UX，并分别记录实际覆盖；自动化 campaign 通过不能替代真实界面体验。
+
 ## 公开分发 smoke
 
 发布 alpha 后，手动运行 `Published Distribution Smoke`。该 workflow 会在 Linux、Windows、macOS ARM 和 macOS Intel 上安装当前 npm alpha，在两种 macOS 架构上安装公开 Homebrew formula，并验证 GitHub Release checksum 与 artifact attestation。

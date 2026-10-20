@@ -69,6 +69,10 @@ pnpm --dir apps/desktop package --bundles nsis  # Windows
 
 ## 4. 必做 smoke
 
+真实需求场景同时使用 [Desktop / TUI 体验与验收基线](product-experience-acceptance.md)，
+记录功能正确性、状态与审批、恢复、信息层级及可访问性。两端分别验收；
+下列 smoke 与结构化测试不能单独代替完整用户任务和独立产物检查。
+
 1. 启动 package，确认出现 `Sigil` 主窗口，而不是创建窗口前退出。
 2. 选择一个含有效 `sigil.toml` 的工作区；确认只显示工作区名，不显示绝对路径或 bearer。
 3. 新建会话并发送包含中文、emoji 与多行文本的 prompt；输入法合成期间不得提前提交。

@@ -292,6 +292,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - 架构边界没有被破坏
 - TUI 用户心智没有被命令式入口反向带偏
 - 用户操作复杂度已被审计：新增入口是否服务高频用户目标，是否可以合并为更粗粒度动作，是否应改放到当前任务 action、doctor、配置文件或高级流程，而不是进入默认菜单、footer、slash command 或 `/config` 主路径
+- Desktop/TUI 用户流程变化按[真实需求体验与验收基线](../docs/product-experience-acceptance.md)检查功能与 UI/UX：两端简洁明了、突出重点，默认信息服务当前任务与必要决策；真实界面、结构化行为和业务产物分别保留证据，未覆盖或被阻塞不记为通过
 - 文档和实现一致
 - 关键验证已完成
 - 后续扩展点没有被临时实现锁死

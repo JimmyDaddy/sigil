@@ -2,6 +2,11 @@
 
 Alpha dogfood is release evidence, not telemetry. Sigil does not upload campaign artifacts, session history, prompts, tool material, credentials, or workspace content.
 
+For real user journeys in Desktop and the terminal TUI, also apply the
+[cross-surface experience acceptance baseline (Chinese)](product-experience-acceptance.md).
+Record functional and UI/UX coverage separately for each surface; an automated campaign
+does not replace native user experience checks.
+
 ## Public distribution smoke
 
 After publishing an alpha, manually run `Published Distribution Smoke`. The workflow installs the current npm alpha on Linux, Windows, macOS ARM and macOS Intel; installs the public Homebrew formula on both macOS architectures; and verifies GitHub Release checksums and artifact attestations.
