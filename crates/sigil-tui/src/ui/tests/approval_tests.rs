@@ -39,7 +39,6 @@ fn render_approval_file_row_includes_diagnostic_summary() {
             warnings: 2,
         }),
         action: None,
-        risk: None,
     };
 
     let line = render_approval_file_row(0, &row);
@@ -50,13 +49,12 @@ fn render_approval_file_row_includes_diagnostic_summary() {
 }
 
 #[test]
-fn render_approval_file_row_includes_changeset_action_and_risk() {
+fn render_approval_file_row_keeps_action_without_model_risk() {
     let row = ApprovalFileRow {
         path: "src/lib.rs".to_owned(),
         selected: false,
         diagnostics: None,
         action: Some("update".to_owned()),
-        risk: Some("high".to_owned()),
     };
 
     let line = render_approval_file_row(0, &row);
@@ -64,7 +62,38 @@ fn render_approval_file_row_includes_changeset_action_and_risk() {
 
     assert!(text.contains("src/lib.rs"));
     assert!(text.contains("update"));
-    assert!(text.contains("risk high"));
+    assert!(!text.contains("risk high"));
+}
+
+#[test]
+fn single_hunk_approval_has_one_view_control_and_only_host_risk() {
+    let view = ApprovalModalView {
+        has_diff_preview: true,
+        hunk_total: 1,
+        active_hunk_index: 1,
+        risk: sigil_kernel::PermissionRisk::Destructive,
+        diff_label: "src/lib.rs".to_owned(),
+        ..modal_view("file write")
+    };
+    let status = plain_line_text(&approval_diff_status_line(&view));
+    assert!(!status.contains("Prev"));
+    assert!(!status.contains("Next"));
+    assert!(!status.contains("hunk"));
+    assert!(!status.contains("mode full"));
+    assert!(status.contains("View full"));
+    let footer = approval_footer_lines(&view)
+        .iter()
+        .map(plain_line_text)
+        .collect::<String>();
+    assert!(!footer.contains("[/] hunk"));
+    assert!(footer.contains("Y allow"));
+    assert!(footer.contains("N deny"));
+    assert!(plain_line_text(&approval_header_lines(&view, 100)[0]).contains("risk destructive"));
+    let change_set = ApprovalChangeSetSummary {
+        id: "model-suggested".to_owned(),
+        format_hint: "unified".to_owned(),
+    };
+    assert!(!plain_line_text(&approval_change_set_line(&change_set)).contains("risk low"));
 }
 
 #[test]
@@ -88,7 +117,6 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
                     warnings: 0,
                 }),
                 action: None,
-                risk: None,
             },
             ApprovalFileRow {
                 path: "src/lib.rs".to_owned(),
@@ -98,7 +126,6 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
                     warnings: 1,
                 }),
                 action: None,
-                risk: None,
             },
         ],
         changed_files: vec!["src/lib.rs".to_owned()],
@@ -283,11 +310,10 @@ fn approval_review_lines_with_palette_use_configured_markdown_colors() {
 }
 
 #[test]
-fn approval_details_render_changeset_risk_format_and_agent() {
+fn approval_details_render_changeset_format_and_agent_without_model_risk() {
     let view = ApprovalModalView {
         change_set: Some(ApprovalChangeSetSummary {
             id: "change-123".to_owned(),
-            risk: "high".to_owned(),
             format_hint: "cargo fmt --all".to_owned(),
         }),
         ..modal_view("file write")
@@ -297,7 +323,7 @@ fn approval_details_render_changeset_risk_format_and_agent() {
 
     assert!(text.contains("change set"));
     assert!(text.contains("change-123"));
-    assert!(text.contains("risk high"));
+    assert!(!text.contains("risk high"));
     assert!(text.contains("format cargo fmt --all"));
 
     let view = ApprovalModalView {
@@ -329,7 +355,6 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
             selected: true,
             diagnostics: None,
             action: None,
-            risk: None,
         }],
         changed_files: vec!["src/lib.rs".to_owned()],
         diff_mode_label: "full",
@@ -351,14 +376,12 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
                 selected: true,
                 diagnostics: None,
                 action: None,
-                risk: None,
             },
             ApprovalFileRow {
                 path: "src/main.rs".to_owned(),
                 selected: false,
                 diagnostics: None,
                 action: None,
-                risk: None,
             },
         ],
         ..single.clone()
@@ -529,14 +552,12 @@ fn approval_footer_lines_only_show_file_navigation_for_multiple_files() {
                 selected: true,
                 diagnostics: None,
                 action: None,
-                risk: None,
             },
             ApprovalFileRow {
                 path: "src/main.rs".to_owned(),
                 selected: false,
                 diagnostics: None,
                 action: None,
-                risk: None,
             },
         ],
         ..modal_view("file read")
@@ -571,14 +592,15 @@ fn approval_diff_status_line_handles_empty_hunks_without_diagnostics() {
                 warnings: 0,
             }),
             action: None,
-            risk: None,
         }],
         hunk_total: 0,
         active_hunk_index: 9,
         ..modal_view("mcp read · network unknown")
     }));
 
-    assert!(text.contains("hunk 0/0"));
+    assert!(!text.contains("hunk"));
+    assert!(!text.contains("Prev"));
+    assert!(!text.contains("Next"));
     assert!(!text.contains("diagnostics"));
 }
 
@@ -1015,7 +1037,6 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
             selected: true,
             diagnostics: None,
             action: None,
-            risk: None,
         }],
         changed_files: vec!["src/lib.rs".to_owned()],
         diff_mode_label: "full",

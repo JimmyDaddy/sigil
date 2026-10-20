@@ -14,6 +14,71 @@ use super::{
 };
 
 #[test]
+fn session_pricing_coverage_tracks_known_zero_missing_inputs_and_compaction() -> Result<()> {
+    let snapshot = ModelPricingSnapshotV1 {
+        schema_version: ModelPricingSnapshotV1::SCHEMA_VERSION,
+        snapshot_id: "zero-price-fixture".to_owned(),
+        currency: "USD".to_owned(),
+        unit_tokens: 1_000_000,
+        cache_read_per_unit: 0.0,
+        cache_write_per_unit: None,
+        uncached_input_per_unit: 0.0,
+        output_per_unit: 0.0,
+        source: "https://example.invalid/pricing".to_owned(),
+        verified_at: "2026-10-21".to_owned(),
+    };
+    let measured = UsageStats {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        cache_usage: Some(CacheUsageV1 {
+            schema_version: CacheUsageV1::SCHEMA_VERSION,
+            read: Some(CacheTokenCountV1::provider_reported(4)),
+            write: None,
+            uncached: Some(CacheTokenCountV1::provider_reported(6)),
+            local_layout_mutation: None,
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    };
+    let mut stats = SessionStats::default();
+    assert_eq!(
+        (stats.estimated_requests, stats.unestimated_requests),
+        (0, 0)
+    );
+    stats.apply_usage(&snapshot.apply_to_usage(measured.clone())?);
+    assert_eq!(
+        (stats.estimated_requests, stats.unestimated_requests),
+        (1, 0)
+    );
+    assert_eq!(stats.input_cost + stats.output_cost, 0.0);
+    stats.apply_usage(&measured);
+    let incomplete = snapshot.apply_to_usage(UsageStats::default())?;
+    assert!(incomplete.pricing_snapshot.is_some());
+    stats.apply_semantic_compaction_usage(&incomplete);
+    assert_eq!(stats.last_prompt_tokens, 10);
+    let mut write_without_rate = measured;
+    write_without_rate
+        .cache_usage
+        .as_mut()
+        .expect("measured usage")
+        .write = Some(CacheTokenCountV1::provider_reported(3));
+    write_without_rate
+        .cache_usage
+        .as_mut()
+        .expect("measured usage")
+        .uncached = Some(CacheTokenCountV1::provider_reported(3));
+    stats.apply_usage(&snapshot.apply_to_usage(write_without_rate)?);
+    assert_eq!(
+        (stats.estimated_requests, stats.unestimated_requests),
+        (1, 3)
+    );
+    assert_eq!(stats.last_prompt_tokens, 10);
+    assert_eq!(SessionStats::default().estimated_requests, 0);
+    assert_eq!(SessionStats::default().unestimated_requests, 0);
+    Ok(())
+}
+
+#[test]
 fn assistant_batch_run_binding_survives_safe_persistence_and_reload() -> Result<()> {
     let run_id = crate::LogicalRunId::new("assistant-batch-run")?;
     let mut message = ModelMessage::assistant_with_kind(

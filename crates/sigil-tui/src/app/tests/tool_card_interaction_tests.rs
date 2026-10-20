@@ -970,5 +970,9 @@ fn tool_card_interaction_private_helpers_cover_stale_selection_and_reveal_guards
     assert_eq!(app.timeline_scroll_back, 0);
 
     app.rerender_tool_selection_change(Some(0), 0);
+    assert!(app.timeline_render_lines().is_empty());
+
+    app.push_timeline(TimelineRole::User, "inspect this workspace");
+    app.rerender_tool_selection_change(Some(0), 0);
     assert!(!app.timeline_render_lines().is_empty());
 }

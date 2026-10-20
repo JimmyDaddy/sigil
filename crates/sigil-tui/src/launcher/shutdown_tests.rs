@@ -161,10 +161,51 @@ fn confirmed_panic_is_preserved_while_other_owners_still_join() -> Result<()> {
 }
 
 #[test]
-fn bootstrap_cleanup_error_is_returned_after_its_thread_joins() -> Result<()> {
+fn bootstrap_cleanup_before_workspace_trust_materializes_no_session() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let mut app = fixture_app(fixture.path());
-    app.session_log_path = fixture.path().join("missing/session-bootstrap.jsonl");
+    app.enter_workspace_trust_gate()?;
+    let session_path = app.session_log_path.clone();
+    assert!(!session_path.exists());
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ))?;
+    assert!(app.should_quit);
+    assert!(app.is_workspace_trust_gate_mode());
+
+    shutdown_tui_owners(
+        &mut app,
+        &mut None,
+        &mut TuiShutdownState::default(),
+        &mut None,
+        true,
+        |_| {},
+    )?;
+
+    assert!(!session_path.exists());
+    assert!(!app.current_session_has_resumable_activity());
+    assert!(!app.workspace_is_trusted_from_history());
+    let file_name = session_path.file_name().context("session file name")?;
+    for suffix in [".writer-lock", ".attachment-lock", ".attachment-generation"] {
+        let sidecar =
+            session_path.with_file_name(format!("{}{suffix}", file_name.to_string_lossy()));
+        assert!(
+            !sidecar.exists(),
+            "cleanup must not materialize {}",
+            sidecar.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bootstrap_cleanup_io_error_is_returned_after_its_thread_joins() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut app = fixture_app(fixture.path());
+    let blocker = fixture.path().join("file-is-not-a-session-directory");
+    std::fs::write(&blocker, "keep this file")?;
+    app.session_log_path = blocker.join("session-bootstrap.jsonl");
     let error = shutdown_tui_owners(
         &mut app,
         &mut None,
@@ -175,5 +216,30 @@ fn bootstrap_cleanup_error_is_returned_after_its_thread_joins() -> Result<()> {
     )
     .expect_err("read failure must not be reported as successful cleanup");
     assert!(format!("{error:#}").contains("bootstrap-session-cleanup"));
+    assert_eq!(std::fs::read_to_string(blocker)?, "keep this file");
+    Ok(())
+}
+
+#[test]
+fn bootstrap_cleanup_invalid_stream_is_returned_after_its_thread_joins() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut app = fixture_app(fixture.path());
+    let path = fixture.path().join("session-invalid.jsonl");
+    let invalid = "not a durable session event\n";
+    std::fs::write(&path, invalid)?;
+    app.session_log_path = path.clone();
+
+    let error = shutdown_tui_owners(
+        &mut app,
+        &mut None,
+        &mut TuiShutdownState::default(),
+        &mut None,
+        true,
+        |_| {},
+    )
+    .expect_err("invalid durable state must not be treated as an absent bootstrap");
+
+    assert!(format!("{error:#}").contains("bootstrap-session-cleanup"));
+    assert_eq!(std::fs::read_to_string(path)?, invalid);
     Ok(())
 }

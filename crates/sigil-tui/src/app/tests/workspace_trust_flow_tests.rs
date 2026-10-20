@@ -17,6 +17,8 @@ fn workspace_trust_gate_enter_persists_decision() -> Result<()> {
 
     app.enter_workspace_trust_gate()?;
     assert!(app.is_workspace_trust_gate_mode());
+    assert!(app.timeline.is_empty());
+    assert!(app.timeline_plain_lines().is_empty());
     assert!(
         app.workspace_trust_gate_lines()
             .join("\n")

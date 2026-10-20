@@ -113,11 +113,15 @@ pub(super) fn discard_bootstrap_only_session_file(
     path: &Path,
     session_log_dir: &Path,
 ) -> std::io::Result<bool> {
-    if session_log_has_resumable_activity(path) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Ok(false);
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if session_log_has_resumable_activity(path) {
         return Ok(false);
     }
     let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {

@@ -1232,6 +1232,8 @@ pub enum WorkerMessage {
         run_id: String,
         sequence: u64,
     },
+    /// Replaces the previous advisory startup stage; successful stages are not conversation history.
+    StartupProgress(String),
     WorkerReady,
     RuntimeReady(sigil_kernel::SessionRuntimeReadyV1),
     SessionAttachmentTransferred {

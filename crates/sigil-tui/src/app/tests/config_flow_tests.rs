@@ -27,6 +27,31 @@ fn assert_stored_credential_without_plaintext(config: &RootConfig, secret: &str)
 }
 
 #[test]
+fn permission_mode_toggle_keeps_warnings_without_adding_a_history_notice() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut config = config_for_workspace(temp.path());
+    config.permission.mode = sigil_kernel::PermissionMode::Manual;
+    config.save(&config_path)?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.handle(RunEvent::Notice(
+        "MCP server unavailable; continuing".to_owned(),
+    ))?;
+    let history = app.timeline_plain_lines();
+    let history_len = app.timeline.len();
+
+    assert!(app.toggle_runtime_permission_mode()?.is_some());
+
+    assert_eq!(app.runtime.permission_mode, "auto-edit");
+    assert_eq!(app.timeline.len(), history_len);
+    assert_eq!(app.timeline_plain_lines(), history);
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "MCP server unavailable; continuing"
+    }));
+    Ok(())
+}
+
+#[test]
 fn session_model_route_does_not_pollute_persisted_config_cas() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");

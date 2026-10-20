@@ -672,6 +672,7 @@ pub struct AppState {
     pending_mouse_left_down: bool,
     pending_tool_card_body_click_entry: Option<usize>,
     last_notice: Option<String>,
+    worker_startup_progress: Option<String>,
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
     agent_panel: AgentPanelState,
@@ -1398,6 +1399,7 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: None,
+            worker_startup_progress: None,
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             agent_panel: AgentPanelState::default(),
@@ -1568,6 +1570,7 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: startup_error,
+            worker_startup_progress: None,
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             agent_panel: AgentPanelState::default(),
@@ -1617,6 +1620,16 @@ impl AppState {
         lines
     }
 
+    pub(crate) fn code_intelligence_attention_lines(&self) -> Vec<String> {
+        self.runtime
+            .code_intelligence_diagnostics_by_path
+            .iter()
+            .filter(|(_, summary)| !summary.is_clean())
+            .take(4)
+            .map(|(path, summary)| format!("{path}: {}", diagnostic_summary_label(*summary)))
+            .collect()
+    }
+
     fn code_intelligence_diagnostic_file_lines(&self) -> Vec<String> {
         if self
             .runtime
@@ -1660,21 +1673,8 @@ impl AppState {
         self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
-        if !self.worker_ready {
-            self.last_notice = Some("sigil starting; waiting for agent worker".to_owned());
-        }
-        self.push_timeline(
-            if self.worker_ready {
-                TimelineRole::System
-            } else {
-                TimelineRole::Notice
-            },
-            if self.worker_ready {
-                "sigil ready."
-            } else {
-                "sigil starting; waiting for agent worker."
-            },
-        );
+        self.worker_startup_progress =
+            (!self.worker_ready).then(|| "sigil starting; waiting for agent worker".to_owned());
         self.push_event("session", format!("active {}", self.session_id));
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event(

@@ -377,7 +377,11 @@ fn render_main_screen_keeps_error_notice_visible() -> anyhow::Result<()> {
 
 #[test]
 fn render_main_screen_collapses_info_rail_on_narrow_terminals() -> anyhow::Result<()> {
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::Usage(sigil_kernel::UsageStats {
+        prompt_tokens: 100_000,
+        ..Default::default()
+    }))?;
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
@@ -392,13 +396,13 @@ fn render_main_screen_collapses_info_rail_on_narrow_terminals() -> anyhow::Resul
         .collect::<String>();
     assert!(!rendered.contains("info"));
     assert!(rendered.contains("Build"));
-    assert!(rendered.contains("ctx"));
+    assert!(rendered.contains("ctx: 10%"));
     Ok(())
 }
 
 #[test]
 fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> {
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let backend = TestBackend::new(140, 24);
     let mut terminal = Terminal::new(backend)?;
 
@@ -413,6 +417,14 @@ fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> 
         .collect::<String>();
     assert!(rendered.contains("info"));
     assert!(rendered.contains("session"));
+    assert!(rendered.contains("state: ready"));
+    assert!(rendered.contains("permissions"));
+    assert!(!rendered.contains("LSP"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+    let mut terminal = Terminal::new(TestBackend::new(140, 60))?;
+    terminal.draw(|frame| render(frame, &app))?;
+    let rendered = rendered_content(&terminal);
     assert!(rendered.contains("LSP"));
     Ok(())
 }
@@ -959,6 +971,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
         "# Tool\n`tool-code`",
         meta,
     )))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1563,6 +1576,141 @@ fn render_status_workspace_trust_mode_uses_trust_copy() -> anyhow::Result<()> {
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Workspace trust"));
     assert!(rendered.contains("review workspace"));
+    Ok(())
+}
+
+#[test]
+fn workspace_trust_gate_uses_production_surface_until_confirmed() -> anyhow::Result<()> {
+    let fixture = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("cache").display().to_string());
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    app.mark_worker_not_ready();
+    app.enter_workspace_trust_gate()?;
+    assert!(
+        !app.is_setup_mode(),
+        "trust is a distinct application state"
+    );
+
+    for (width, height) in [(140, 44), (80, 24)] {
+        let surface = crate::surface_adapter::build_surface_model(
+            ratatui::layout::Rect::new(0, 0, width, height),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        assert!(surface.is_setup());
+        assert_eq!(surface.layout.mode, crate::ui::LayoutMode::Setup);
+        assert!(surface.setup.as_ref().is_some_and(|setup| setup.trust_gate));
+        assert!(
+            surface
+                .setup
+                .as_ref()
+                .is_some_and(|setup| { setup.lines.iter().all(|line| !line.starts_with("id:")) })
+        );
+        assert_eq!(surface.layout.composer, ratatui::layout::Rect::default());
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rendered = rendered_content(&terminal);
+        assert!(rendered.contains("Workspace Trust"));
+        assert!(rendered.contains("path:"));
+        assert!(rendered.contains("Enter trust and continue"));
+        assert!(rendered.contains("Ctrl-C quit"));
+    }
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(app.composer.input.is_empty());
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?,
+        Some(crate::app::AppAction::TrustWorkspace)
+    ));
+    app.confirm_workspace_trust_gate()?;
+    app.handle_worker_message(WorkerMessage::WorkerReady)?;
+    let surface = crate::surface_adapter::build_surface_model(
+        ratatui::layout::Rect::new(0, 0, 140, 44),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 2,
+            terminal_epoch: 1,
+        },
+    );
+    assert!(!surface.is_setup());
+    assert_eq!(surface.layout.mode, crate::ui::LayoutMode::Main);
+    assert!(surface.setup.is_none());
+    assert!(surface.layout.composer.width > 0);
+    assert!(surface.footer.context_label.is_empty());
+    assert!(app.timeline.is_empty());
+    assert!(app.timeline_plain_lines().is_empty());
+    let mut terminal = Terminal::new(TestBackend::new(140, 44))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let rendered = rendered_content(&terminal);
+    assert!(!rendered.contains("sigil starting"));
+    assert!(!rendered.contains("sigil ready."));
+    assert!(!rendered.contains("workspace trust"));
+    assert!(!rendered.contains("trust this workspace before using sigil"));
+    assert!(!rendered.contains("ctx:"));
+    Ok(())
+}
+
+#[test]
+fn production_surface_collapses_thinking_without_hiding_final_answer_or_error() -> anyhow::Result<()>
+{
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ReasoningDelta(
+        "Internal analysis line one\nInternal analysis line two".to_owned(),
+    ))?;
+
+    for (generation, expanded) in [(1, false), (2, true), (3, false)] {
+        if generation > 1 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+        }
+        if generation == 3 {
+            app.handle(RunEvent::AssistantMessage(
+                ModelMessage::assistant_with_kind(
+                    Some("Here is the final answer".to_owned()),
+                    Vec::new(),
+                    sigil_kernel::AssistantMessageKind::FinalAnswer,
+                ),
+            ))?;
+            app.handle(RunEvent::Notice(
+                "permission denied for requested file".to_owned(),
+            ))?;
+        }
+        let surface = crate::surface_adapter::build_surface_model(
+            ratatui::layout::Rect::new(0, 0, 140, 44),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: generation,
+                terminal_epoch: 1,
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 44))?;
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rendered = rendered_content(&terminal);
+        assert_eq!(rendered.contains("Internal analysis line one"), expanded);
+        assert_eq!(rendered.contains("Internal analysis line two"), expanded);
+        assert!(rendered.contains(if expanded {
+            "Ctrl-T collapse"
+        } else {
+            "Ctrl-T expand"
+        }));
+        if generation == 3 {
+            assert!(rendered.contains("thought"));
+            assert!(rendered.contains("Here is the final answer"));
+            assert!(rendered.contains("permission denied for requested file"));
+        } else {
+            assert!(rendered.contains("thinking"));
+        }
+    }
     Ok(())
 }
 
@@ -2386,6 +2534,10 @@ fn render_footer_status_uses_empty_workspace_space_for_context() -> anyhow::Resu
 fn render_main_screen_supports_activity_pane_without_cursor_logic() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.active_pane = PaneFocus::Activity;
+    app.handle(RunEvent::Usage(sigil_kernel::UsageStats {
+        prompt_tokens: 100_000,
+        ..Default::default()
+    }))?;
     let backend = TestBackend::new(120, 24);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2393,7 +2545,7 @@ fn render_main_screen_supports_activity_pane_without_cursor_logic() -> anyhow::R
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Build"));
-    assert!(rendered.contains("ctx"));
+    assert!(rendered.contains("ctx: 10%"));
     Ok(())
 }
 

@@ -224,6 +224,7 @@ impl AppState {
             self.timeline_state
                 .provisional_provider_output_indices
                 .insert(index);
+            self.rerender_timeline_entry_deferred(index);
         }
     }
 
@@ -447,10 +448,16 @@ impl AppState {
     }
 
     pub(super) fn has_collapsible_thinking_blocks(&self) -> bool {
-        self.timeline
-            .iter()
-            .enumerate()
-            .any(|(index, entry)| self.thinking_entry_is_collapsible(index, entry))
+        let entries = match self.agent_panel.active_view {
+            AgentView::Main => &self.timeline,
+            AgentView::Child { .. } => {
+                let Some(transcript) = &self.agent_panel.active_child_transcript else {
+                    return false;
+                };
+                &transcript.timeline_entries
+            }
+        };
+        entries.iter().any(Self::thinking_entry_is_collapsible)
     }
 
     pub(crate) fn collapsible_thinking_entry_indices(&self) -> Vec<usize> {
@@ -458,24 +465,20 @@ impl AppState {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                self.thinking_entry_is_collapsible(index, entry)
-                    .then_some(index)
+                Self::thinking_entry_is_collapsible(entry).then_some(index)
             })
             .collect()
     }
 
-    fn thinking_entry_is_collapsible(&self, entry_index: usize, entry: &TimelineEntry) -> bool {
+    fn thinking_entry_is_collapsible(entry: &TimelineEntry) -> bool {
         entry.role == TimelineRole::Thinking
-            && self.timeline_state.streaming_reasoning_index != Some(entry_index)
             && crate::ui::thinking_has_collapsed_content(&entry.text)
     }
 
     fn thinking_entry_is_expanded(&self, entry_index: usize) -> bool {
-        self.timeline_state.streaming_reasoning_index == Some(entry_index)
-            || self
-                .timeline_state
-                .expanded_thinking_entry_indices
-                .contains(&entry_index)
+        self.timeline_state
+            .expanded_thinking_entry_indices
+            .contains(&entry_index)
             || (matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded)
                 && !self
                     .timeline_state

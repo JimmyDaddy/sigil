@@ -103,7 +103,7 @@ fn recv_worker_ready(message_rx: &mpsc::Receiver<WorkerMessage>) -> Result<Vec<S
     let mut startup_notices = Vec::new();
     loop {
         match recv_message(message_rx)? {
-            WorkerMessage::Notice(notice) if notice.starts_with("startup: ") => {
+            WorkerMessage::StartupProgress(notice) => {
                 startup_notices.push(notice);
             }
             WorkerMessage::WorkerReady => return Ok(startup_notices),
@@ -311,12 +311,12 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
     assert!(
         startup_notices
             .iter()
-            .any(|notice| notice == "startup: loading provider credentials")
+            .any(|notice| notice == "loading provider credentials")
     );
     assert!(
         startup_notices
             .iter()
-            .any(|notice| notice == "startup: attaching session observers")
+            .any(|notice| notice == "attaching session observers")
     );
     command_tx.send(WorkerCommand::Shutdown)?;
     Ok(())
@@ -392,7 +392,7 @@ fn worker_rebinds_same_origin_route_after_endpoint_correction() -> Result<()> {
     let mut saw_rebind_notice = false;
     loop {
         match recv_message(&message_rx)? {
-            WorkerMessage::Notice(message) if message.starts_with("startup: ") => {}
+            WorkerMessage::StartupProgress(_) => {}
             WorkerMessage::Notice(message) if message.contains("连接配置已更新") => {
                 saw_rebind_notice = true;
             }
@@ -486,9 +486,7 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
     let mut startup_notices = Vec::new();
     let failure = loop {
         let message = recv_message(&message_rx)?;
-        if let WorkerMessage::Notice(notice) = &message
-            && notice.starts_with("startup: ")
-        {
+        if let WorkerMessage::StartupProgress(notice) | WorkerMessage::Notice(notice) = &message {
             startup_notices.push(notice.clone());
         }
         if matches!(
@@ -505,12 +503,12 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
     assert!(
         startup_notices
             .iter()
-            .any(|notice| notice == "startup: starting MCP server required-eager")
+            .any(|notice| notice == "starting MCP server required-eager")
     );
     assert!(
-        startup_notices.iter().any(|notice| {
-            notice == "startup: MCP server required-eager unavailable; continuing"
-        })
+        startup_notices
+            .iter()
+            .any(|notice| { notice == "MCP server required-eager unavailable; continuing" })
     );
 
     assert!(matches!(
@@ -591,9 +589,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
     let mut startup_notices = Vec::new();
     let ready = loop {
         let message = recv_message(&message_rx)?;
-        if let WorkerMessage::Notice(notice) = &message
-            && notice.starts_with("startup: ")
-        {
+        if let WorkerMessage::StartupProgress(notice) | WorkerMessage::Notice(notice) = &message {
             startup_notices.push(notice.clone());
         }
         if matches!(
@@ -610,12 +606,12 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
     assert!(
         startup_notices
             .iter()
-            .any(|notice| notice == "startup: starting MCP server ready-eager")
+            .any(|notice| notice == "starting MCP server ready-eager")
     );
     assert!(
         startup_notices
             .iter()
-            .any(|notice| notice == "startup: MCP server ready-eager ready")
+            .any(|notice| notice == "MCP server ready-eager ready")
     );
 
     assert!(matches!(

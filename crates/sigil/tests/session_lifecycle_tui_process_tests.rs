@@ -447,13 +447,25 @@ fn configure_isolated_process_home(command: &mut CommandBuilder, workspace: &Pat
     Ok(())
 }
 
+enum TuiProcessExit {
+    QuitCommand,
+    CtrlC,
+}
+
 fn run_tui_process(
     config_path: &Path,
     workspace: &Path,
     ready_text: &str,
     interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
 ) -> Result<()> {
-    run_tui_process_with_optional_config(Some(config_path), workspace, ready_text, true, interact)
+    run_tui_process_with_optional_config(
+        Some(config_path),
+        workspace,
+        ready_text,
+        true,
+        TuiProcessExit::QuitCommand,
+        interact,
+    )
 }
 
 fn run_tui_process_with_default_config(
@@ -461,7 +473,14 @@ fn run_tui_process_with_default_config(
     ready_text: &str,
     interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
 ) -> Result<()> {
-    run_tui_process_with_optional_config(None, workspace, ready_text, false, interact)
+    run_tui_process_with_optional_config(
+        None,
+        workspace,
+        ready_text,
+        false,
+        TuiProcessExit::QuitCommand,
+        interact,
+    )
 }
 
 fn run_tui_process_with_optional_config(
@@ -469,6 +488,7 @@ fn run_tui_process_with_optional_config(
     workspace: &Path,
     ready_text: &str,
     inject_deepseek_test_env: bool,
+    exit: TuiProcessExit,
     interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
 ) -> Result<()> {
     let pty_system = native_pty_system();
@@ -529,8 +549,13 @@ fn run_tui_process_with_optional_config(
     let result = (|| -> Result<()> {
         wait_for_text(&output, ready_text)?;
         interact(&output, writer.as_mut())?;
-        write_input(writer.as_mut(), &[0x01, 0x0b])?;
-        write_input(writer.as_mut(), b"/quit\r")?;
+        match exit {
+            TuiProcessExit::QuitCommand => {
+                write_input(writer.as_mut(), &[0x01, 0x0b])?;
+                write_input(writer.as_mut(), b"/quit\r")?;
+            }
+            TuiProcessExit::CtrlC => write_input(writer.as_mut(), &[0x03])?,
+        }
         let deadline = Instant::now() + PROCESS_TIMEOUT;
         loop {
             if let Some(status) = child.try_wait()? {
@@ -545,7 +570,7 @@ fn run_tui_process_with_optional_config(
             }
             if Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "sigil TUI process did not exit after /quit: {}",
+                    "sigil TUI process did not exit after its requested gesture: {}",
                     captured_text(&output)
                 ));
             }
@@ -577,6 +602,7 @@ fn real_plain_tui_process_starts_fresh_without_persisting_an_empty_session() -> 
             .map_err(anyhow::Error::new)?;
     let existing_path = session_dir.join("session-existing.jsonl");
     write_trusted_finalized_session(&existing_path, &workspace, model_route)?;
+    let mut captured = None;
 
     run_tui_process(
         &config_path,
@@ -586,9 +612,13 @@ fn real_plain_tui_process_starts_fresh_without_persisting_an_empty_session() -> 
             let screen = captured_text(output);
             assert!(!screen.contains("process lifecycle fixture"));
             assert!(!screen.contains("fixture completed"));
+            captured = Some(Arc::clone(output));
             Ok(())
         },
     )?;
+    let output = captured_text(&captured.context("fresh process output")?);
+    assert!(!output.contains("Sigil session:"), "{output}");
+    assert!(!output.contains("Resume with:"), "{output}");
 
     let session_logs = fs::read_dir(&session_dir)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -608,6 +638,68 @@ fn real_plain_tui_process_starts_fresh_without_persisting_an_empty_session() -> 
         .any(|entry| matches!(entry, sigil_kernel::SessionLogEntry::User(message) if message.content.as_deref() == Some("process lifecycle fixture"))));
 
     fs::remove_dir_all(&workspace)?;
+    Ok(())
+}
+
+#[test]
+fn real_untrusted_tui_ctrl_c_exits_without_materializing_a_session() -> Result<()> {
+    fn regular_files(root: &Path) -> Result<Vec<PathBuf>> {
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut directories = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    directories.push(entry.path());
+                } else if kind.is_file() {
+                    files.push(entry.path());
+                }
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    let workspace = test_workspace()?;
+    let config_path = workspace.join("sigil.toml");
+    let session_dir = workspace.join("sessions");
+    fs::create_dir(&session_dir)?;
+    write_config(&config_path, &workspace, &session_dir)?;
+    let config_before = fs::read(&config_path)?;
+    let managed_sessions = workspace.join("state/managed/session-log");
+    let mut before_exit_files = Vec::new();
+    let mut captured = None;
+
+    run_tui_process_with_optional_config(
+        Some(&config_path),
+        &workspace,
+        "Enter trust and continue",
+        false,
+        TuiProcessExit::CtrlC,
+        |output, _writer| {
+            before_exit_files = regular_files(&managed_sessions)?;
+            assert!(
+                before_exit_files
+                    .iter()
+                    .all(|path| !path.ends_with("records.jsonl"))
+            );
+            assert!(regular_files(&session_dir)?.is_empty());
+            captured = Some(Arc::clone(output));
+            Ok(())
+        },
+    )?;
+
+    let output = captured_text(&captured.context("trust process output")?);
+    assert!(!output.contains("bootstrap-session-cleanup"), "{output}");
+    assert!(!output.contains("Sigil session:"), "{output}");
+    assert!(!output.contains("Resume with:"), "{output}");
+    assert_eq!(regular_files(&managed_sessions)?, before_exit_files);
+    assert!(regular_files(&session_dir)?.is_empty());
+    assert_eq!(fs::read(config_path)?, config_before);
     Ok(())
 }
 
@@ -639,7 +731,6 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 write_input(writer, b"\r")?;
                 thread::sleep(Duration::from_millis(150));
 
-                let setup_complete_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\r")?;
                 thread::sleep(Duration::from_millis(100));
                 write_input(writer, &[0x7f; 64])?;
@@ -682,6 +773,7 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
 
                 // Context window and max output tokens are optional. Leave both automatic and
                 // move from the model row to the save action.
+                let setup_complete_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\x1b[B\x1b[B\r")?;
 
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
@@ -695,7 +787,10 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                     }
                     thread::sleep(Duration::from_millis(25));
                 }
-                wait_for_text_after(output, setup_complete_offset, "sigil ready.")?;
+                // Readiness is now the live main-screen phase, not a successful startup notice
+                // retained in conversation history. Both markers must be painted after Save.
+                wait_for_text_after(output, setup_complete_offset, "Build · agent: main")?;
+                wait_for_text_after(output, setup_complete_offset, "ready")?;
 
                 let first_request_offset = captured_len(output);
                 write_input(writer, b"reply with the first-run canary\r")?;

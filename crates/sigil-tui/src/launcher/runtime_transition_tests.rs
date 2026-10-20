@@ -1,5 +1,227 @@
 use super::*;
 
+fn real_runtime_transition_fixture() -> Result<(tempfile::TempDir, AppState, Option<WorkerRuntime>)>
+{
+    let fixture = tempfile::tempdir()?;
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let config_path = fixture.path().join("sigil.toml");
+    let state = fixture.path().join("state");
+    let cache = fixture.path().join("cache");
+    for path in [&state, &cache] {
+        std::fs::create_dir(path)?;
+        sigil_kernel::config::secure_private_path_permissions(path)?;
+    }
+    let mut config = crate::app::tests::common::test_config();
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    config.workspace.root = workspace.display().to_string();
+    config.storage.state_root = sigil_kernel::StorageRoot::Path(state.display().to_string());
+    config.storage.cache_root = sigil_kernel::StorageRoot::Path(cache.display().to_string());
+    config.session.log_dir = None;
+    config.agent.runtime_provider.clear();
+    config.agent.connection = Some(sigil_kernel::ConnectionId::new("local-test")?);
+    config.agent.model = "local-model".to_owned();
+    config.connections = std::collections::BTreeMap::from([(
+        "local-test".to_owned(),
+        serde_json::json!({
+            "label": "local",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:1",
+            "credential": { "source": "none" }
+        }),
+    )]);
+    config.save(&config_path)?;
+    let boot = sigil_runtime::application_host::boot_current_schema(&config_path, fixture.path())?;
+    let (config, _, _, cutover, composition, _) = boot.into_published_parts();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.set_authority_composition(Arc::new(composition));
+    app.set_boot_cutover(Arc::new(cutover));
+    app.enter_workspace_trust_gate()?;
+    app.confirm_workspace_trust_gate()?;
+    let spawned = runner::spawn_agent_worker_with_route_directive_and_attachment(
+        config,
+        config_path,
+        app.session_log_path.clone(),
+        app.workspace_root.clone(),
+        sigil_kernel::InteractionMode::Interactive,
+        runner::WorkerSessionRouteDirective::default(),
+        app.authority_composition().cloned(),
+        app.boot_cutover().cloned(),
+        app.worker_session_attachment(),
+    )?;
+    let application = Arc::new(application_bridge::build_for_worker(
+        &app,
+        spawned.command_tx.clone(),
+        app.runtime.reasoning_effort.clone(),
+        spawned.projection_owner,
+    )?);
+    let mut worker = WorkerRuntime {
+        worker_tx: spawned.command_tx,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        worker_rx: spawned.message_rx,
+        join_handle: Some(spawned.join_handle),
+        ready: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !worker.ready {
+        let message = worker
+            .worker_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        anyhow::ensure!(
+            !matches!(
+                &message,
+                WorkerMessage::RunFailed(_) | WorkerMessage::SessionRouteRecoveryRequired { .. }
+            ),
+            "real fixture worker failed before Ready: {message:?}"
+        );
+        apply_worker_message_state(&mut worker, None, &message);
+        app.handle_worker_message(message)?;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(
+            worker
+                .application
+                .as_ref()
+                .context("real application")?
+                .refresh(),
+        )?;
+    Ok((fixture, app, Some(worker)))
+}
+
+fn wait_for_real_transition(app: &AppState) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app
+        .runtime_transition
+        .as_ref()
+        .context("transition owner must remain installed")?
+        .is_running()
+    {
+        anyhow::ensure!(Instant::now() < deadline, "real transition did not finish");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    Ok(())
+}
+
+#[test]
+fn real_runtime_transition_and_replay_refresh_under_owned_tokio_runtime() -> Result<()> {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let (_fixture, mut app, mut worker) = real_runtime_transition_fixture()?;
+    let original = std::fs::read(&app.session_log_path)?;
+    let route = app
+        .current_session_route()
+        .context("initial session route")?;
+    app.composer.input = "preserve this draft across permission changes".to_owned();
+    for (index, mode) in [
+        sigil_kernel::PermissionMode::AutoEdit,
+        sigil_kernel::PermissionMode::Manual,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut config = app
+            .persisted_config_snapshot()
+            .cloned()
+            .context("saved configuration")?;
+        config.permission.mode = mode;
+        config.save(&app.config_path)?;
+        app.apply_persisted_config_snapshot(&config);
+        start(&mut app, &mut worker, route.clone())?;
+        wait_for_real_transition(&app)?;
+        if index == 0 {
+            // Exercise the retry entry with the original durable command identity. Replaying a
+            // settled transition must refresh under the same owned reactor without a new effect.
+            let owner = app
+                .runtime_transition
+                .as_mut()
+                .context("retained transition")?;
+            owner
+                .handle
+                .take()
+                .context("completed transition thread")?
+                .join()
+                .map_err(|_| anyhow::anyhow!("session controller panicked"))?;
+            owner.launch(true)?;
+            wait_for_real_transition(&app)?;
+        }
+        assert!(poll(&mut app, &mut worker)?);
+        let owner = app.runtime_transition.as_ref().context("completed owner")?;
+        assert!(owner.completed);
+        assert!(owner.activation_acknowledged);
+        assert_eq!(owner.intent_bound, Some(true));
+        assert!(
+            owner
+                .cleanup_failure
+                .lock()
+                .expect("cleanup ledger")
+                .is_none()
+        );
+        assert!(owner.application.current_projection()?.is_some());
+        assert_eq!(owner.application.pending_observations(), 0);
+        let mut phases = [0; 3];
+        for record in owner.application.read_handle()?.read_event_records()? {
+            if let Some(sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionRuntimeTransitionV1(transition),
+            )) = record.session_log_entry()?
+            {
+                let phase = match transition.transition {
+                    sigil_kernel::SessionRuntimeTransitionPhaseV1::Intent { .. } => 0,
+                    sigil_kernel::SessionRuntimeTransitionPhaseV1::Configured { .. } => 1,
+                    sigil_kernel::SessionRuntimeTransitionPhaseV1::Activated { .. } => 2,
+                };
+                phases[phase] += 1;
+            }
+        }
+        assert_eq!(
+            phases,
+            [index + 1; 3],
+            "replay must not duplicate durable effects"
+        );
+        assert!(worker.as_ref().is_some_and(|runtime| runtime.ready));
+        assert_eq!(app.runtime.permission_mode, mode.as_str());
+        assert_eq!(
+            app.composer.input,
+            "preserve this draft across permission changes"
+        );
+        assert!(std::fs::read(&app.session_log_path)?.starts_with(&original));
+    }
+    shutdown::shutdown_tui_owners(
+        &mut app,
+        &mut worker,
+        &mut TuiShutdownState::default(),
+        &mut None,
+        false,
+        |_| {},
+    )?;
+    assert!(worker.is_none());
+    assert!(app.runtime_transition.is_none());
+    Ok(())
+}
+
+#[test]
+fn exit_joins_real_session_controller_runtime_and_replacement_worker() -> Result<()> {
+    let (_fixture, mut app, mut worker) = real_runtime_transition_fixture()?;
+    let route = app
+        .current_session_route()
+        .context("initial session route")?;
+    start(&mut app, &mut worker, route)?;
+    shutdown::shutdown_tui_owners(
+        &mut app,
+        &mut worker,
+        &mut TuiShutdownState::default(),
+        &mut None,
+        false,
+        |_| {},
+    )?;
+    assert!(worker.is_none());
+    assert!(app.runtime_transition.is_none());
+    Ok(())
+}
+
 #[test]
 fn ordinary_transition_cleanup_failure_survives_consuming_the_worker() -> Result<()> {
     let (worker_tx, _) = runner::WorkerCommandSender::test_channel();

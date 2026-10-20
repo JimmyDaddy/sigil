@@ -9,6 +9,57 @@ use crate::runner::{
 };
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
+#[test]
+fn startup_progress_replaces_stages_without_polluting_history_and_clears_on_ready_or_failure()
+-> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.mark_worker_not_ready();
+    app.bootstrap();
+    assert!(app.timeline.is_empty());
+    assert_eq!(
+        app.last_notice(),
+        Some("sigil starting; waiting for agent worker")
+    );
+    let history = app.timeline.len();
+    app.handle_worker_message(WorkerMessage::StartupProgress("loading session".to_owned()))?;
+    app.handle_worker_message(WorkerMessage::StartupProgress(
+        "registering tools".to_owned(),
+    ))?;
+    assert_eq!(app.last_notice(), Some("registering tools"));
+    assert_eq!(app.timeline.len(), history);
+    app.handle_worker_message(WorkerMessage::Notice(
+        "MCP server unavailable; continuing".to_owned(),
+    ))?;
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("MCP server unavailable"))
+    );
+    app.handle_worker_message(WorkerMessage::WorkerReady)?;
+    assert_eq!(
+        app.timeline.len(),
+        history + 1,
+        "only the warning belongs in history"
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP server unavailable; continuing")
+    );
+    app.handle_worker_message(WorkerMessage::StartupProgress("obsolete stage".to_owned()))?;
+    assert!(
+        app.last_notice()
+            .is_none_or(|notice| notice != "obsolete stage")
+    );
+    app.mark_worker_not_ready();
+    app.handle_worker_message(WorkerMessage::StartupProgress(
+        "reloading session".to_owned(),
+    ))?;
+    app.handle_worker_message(WorkerMessage::RunFailed("provider unavailable".to_owned()))?;
+    assert_eq!(app.last_notice(), Some("provider unavailable"));
+    assert!(app.worker_startup_progress.is_none());
+    Ok(())
+}
+
 fn connection_catalog_result(
     app: &AppState,
     state: sigil_runtime::provider_connections::ModelCatalogState,

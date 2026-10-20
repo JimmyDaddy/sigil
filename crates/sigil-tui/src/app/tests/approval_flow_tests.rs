@@ -713,13 +713,11 @@ fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
     let change_set = view.change_set.expect("change set metadata should exist");
 
     assert_eq!(change_set.id, "change-123");
-    assert_eq!(change_set.risk, "high");
+    assert_eq!(view.risk, sigil_kernel::PermissionRisk::Destructive);
     assert!(change_set.format_hint.contains("cargo fmt --all"));
     assert!(change_set.format_hint.contains("Markdown"));
     assert_eq!(view.file_rows[0].action.as_deref(), Some("update"));
-    assert_eq!(view.file_rows[0].risk.as_deref(), Some("high"));
     assert_eq!(view.file_rows[1].action.as_deref(), Some("create"));
-    assert_eq!(view.file_rows[1].risk.as_deref(), Some("high"));
     Ok(())
 }
 

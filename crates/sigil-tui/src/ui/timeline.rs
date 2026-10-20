@@ -25,9 +25,6 @@ use super::{
     tool_card::render_tool_entry_lines,
 };
 
-const COLLAPSED_THINKING_PREVIEW_LINES: usize = 2;
-const THINKING_COLLAPSE_THRESHOLD_LINES: usize = 4;
-
 #[cfg(test)]
 use super::theme::{accent_blue, accent_gold, ink};
 
@@ -93,10 +90,9 @@ pub(crate) fn render_timeline_entry_lines_with_options_and_cursor(
         render_phase_entry_lines(entry, &options.theme.palette)
     } else if entry.role == TimelineRole::Thinking {
         let active = options.streaming_reasoning_index == Some(entry_index);
-        let expanded = active
-            || options
-                .expanded_thinking_entry_indices
-                .contains(&entry_index)
+        let expanded = options
+            .expanded_thinking_entry_indices
+            .contains(&entry_index)
             || (options.expand_thinking_blocks
                 && !options
                     .collapsed_thinking_entry_indices
@@ -396,8 +392,6 @@ fn render_thinking_entry_lines(
         .add_modifier(Modifier::ITALIC);
     let total_lines = thinking_line_count(&entry.text);
     let has_hidden_content = thinking_has_collapsed_content(&entry.text);
-    let preview_lines = collapsed_thinking_preview_lines(&entry.text);
-    let hidden_lines = total_lines.saturating_sub(preview_lines.len());
     let mut lines = vec![Line::from(vec![
         Span::styled("●", marker_style),
         Span::raw(" "),
@@ -420,26 +414,6 @@ fn render_thinking_entry_lines(
         ),
     ])];
     if !expanded && has_hidden_content {
-        let preview = preview_lines.join("\n");
-        let mut body = render_markdown_timeline_lines_with_palette(
-            accent,
-            body_style,
-            &preview,
-            MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
-            palette,
-        );
-        if hidden_lines > 0 {
-            body.push(timeline_content_line(
-                accent,
-                vec![Span::styled(
-                    format!("… {} hidden", thinking_line_label(hidden_lines)),
-                    Style::default()
-                        .fg(palette.text_muted)
-                        .add_modifier(Modifier::ITALIC | Modifier::BOLD),
-                )],
-            ));
-        }
-        lines.extend(frame_thinking_body_lines(body, marker_style, palette));
         return lines;
     }
     let body = render_markdown_timeline_lines_with_palette(
@@ -555,14 +529,7 @@ fn thinking_line_label(count: usize) -> String {
 }
 
 pub(crate) fn thinking_has_collapsed_content(text: &str) -> bool {
-    text.lines().filter(|line| !line.trim().is_empty()).count() > THINKING_COLLAPSE_THRESHOLD_LINES
-}
-
-fn collapsed_thinking_preview_lines(text: &str) -> Vec<&str> {
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(COLLAPSED_THINKING_PREVIEW_LINES)
-        .collect()
+    !text.trim().is_empty()
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {

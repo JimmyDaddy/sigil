@@ -466,6 +466,10 @@ impl RuntimeTransitionOwner {
     }
 
     fn launch(&mut self, resume: bool) -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build session controller runtime")?;
         let application = Arc::clone(&self.application);
         let controller = Arc::clone(&self.controller);
         let request = self.request.clone();
@@ -474,25 +478,28 @@ impl RuntimeTransitionOwner {
             std::thread::Builder::new()
                 .name("sigil-session-controller".to_owned())
                 .spawn(move || {
-                    // The application service revalidates the original Intent, command generation
-                    // and durable effect gate before resuming this retained operation.
-                    let result = if resume {
-                        futures::executor::block_on(
-                            application.resume_session_runtime_transition(request.clone()),
-                        )
-                    } else {
-                        futures::executor::block_on(application.execute_prepared(request.clone()))
-                    };
-                    let intent_bound = controller
-                        .controller
-                        .get()
-                        .map_or(Some(false), |owner| owner.has_bound_intent(&request).ok());
-                    // Refresh the bounded client frontier independently after the domain result. A
-                    // failed activation still permits a later settings repair using the same service.
-                    let _ = futures::executor::block_on(application.refresh());
-                    let _ = sender.send(RuntimeTransitionResult {
-                        receipt: result,
-                        intent_bound,
+                    // Keep the reactor alive through both the operation and its final projection;
+                    // joining this thread also waits for the runtime's blocking work to finish.
+                    runtime.block_on(async move {
+                        // The service revalidates the original Intent, command generation and
+                        // durable effect gate before resuming this retained operation.
+                        let result = if resume {
+                            application
+                                .resume_session_runtime_transition(request.clone())
+                                .await
+                        } else {
+                            application.execute_prepared(request.clone()).await
+                        };
+                        let intent_bound = controller
+                            .controller
+                            .get()
+                            .map_or(Some(false), |owner| owner.has_bound_intent(&request).ok());
+                        // Failed activation still permits settings repair using the same service.
+                        let _ = application.refresh().await;
+                        let _ = sender.send(RuntimeTransitionResult {
+                            receipt: result,
+                            intent_bound,
+                        });
                     });
                 })
                 .context("failed to start session controller")?,

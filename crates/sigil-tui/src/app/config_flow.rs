@@ -2441,6 +2441,38 @@ impl AppState {
             .collect()
     }
 
+    pub(crate) fn mcp_attention_sidebar_lines(&self) -> Vec<String> {
+        let Some(config) = self.config_snapshot.as_ref().filter(|config| {
+            config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Mcp)
+        }) else {
+            return Vec::new();
+        };
+        config
+            .mcp_servers
+            .iter()
+            .filter_map(|server| {
+                let status = self.runtime.mcp_server_statuses.get(&server.name)?;
+                matches!(
+                    status,
+                    super::McpServerRuntimeStatus::AuthenticationRequired
+                        | super::McpServerRuntimeStatus::Activating
+                        | super::McpServerRuntimeStatus::Refreshing
+                        | super::McpServerRuntimeStatus::Stale { .. }
+                        | super::McpServerRuntimeStatus::Failed { .. }
+                )
+                .then(|| {
+                    format!(
+                        "{}: {}",
+                        server.name,
+                        status.label_for_server(Some(&server.name))
+                    )
+                })
+            })
+            .collect()
+    }
+
     fn mcp_runtime_status_label(&self, server: &McpServerConfig) -> String {
         if !self.config_snapshot.as_ref().is_some_and(|config| {
             config

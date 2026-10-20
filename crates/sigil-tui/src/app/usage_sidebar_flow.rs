@@ -11,6 +11,22 @@ use super::formatting::{format_token_compact, format_token_count, ratio_to_perce
 use super::runtime_status::ResolvedUsageCostCurrency;
 use super::{AppState, TimelineRole};
 
+fn estimated_cost_label(
+    currency: ResolvedUsageCostCurrency,
+    stats: &sigil_kernel::SessionStats,
+    amount: f64,
+) -> String {
+    match (stats.estimated_requests, stats.unestimated_requests) {
+        (0, 0) => "not estimated (no usage)".to_owned(),
+        (0, _) => "not estimated (pricing unavailable)".to_owned(),
+        (_, 0) => currency.format_cost(amount),
+        (estimated, unknown) => format!(
+            "partially estimated ({estimated}/{} requests; pricing unavailable)",
+            estimated.saturating_add(unknown)
+        ),
+    }
+}
+
 impl AppState {
     pub(crate) fn context_usage_line(&self) -> String {
         let resolved = self.resolved_context_window();
@@ -30,6 +46,31 @@ impl AppState {
                 format_token_compact(self.runtime.stats.last_prompt_tokens)
             ),
         }
+    }
+
+    pub(crate) fn compact_context_usage_line(&self) -> String {
+        let used = self.runtime.stats.last_prompt_tokens;
+        if used == 0 {
+            return String::new();
+        }
+        let Some(cap) = self.resolved_context_window().tokens.filter(|cap| *cap > 0) else {
+            return format!("ctx: {} · capacity unknown", format_token_compact(used));
+        };
+        let percent = self.context_usage_percent(cap);
+        let occupied = if percent == 0 {
+            "<1%".to_owned()
+        } else {
+            format!("{percent}%")
+        };
+        // Capacity remains relevant even when automatic compaction is disabled.
+        let warning = if used >= threshold_token_count(cap, COMPACTION_EMERGENCY_RATIO) {
+            " · near limit"
+        } else if used >= threshold_token_count(cap, COMPACTION_PREPARATION_RATIO) {
+            " · filling up"
+        } else {
+            ""
+        };
+        format!("ctx: {occupied}{warning}")
     }
 
     pub(crate) fn compaction_policy_line(&self) -> String {
@@ -58,9 +99,10 @@ impl AppState {
         let delta_spent = self.runtime.session_delta_stats.input_cost
             + self.runtime.session_delta_stats.output_cost;
         let saved = self.runtime.stats.cache_savings;
-        let session_spent = currency.format_cost(session_spent);
-        let delta_spent = currency.format_cost(delta_spent);
-        let saved = currency.format_cost(saved);
+        let session_spent = estimated_cost_label(currency, &self.runtime.stats, session_spent);
+        let delta_spent =
+            estimated_cost_label(currency, &self.runtime.session_delta_stats, delta_spent);
+        let saved = estimated_cost_label(currency, &self.runtime.stats, saved);
         let balance_line = self.balance_sidebar_line();
         let mut lines = vec![
             self.context_usage_line(),
@@ -153,8 +195,9 @@ impl AppState {
         let session_spent = self.runtime.stats.input_cost + self.runtime.stats.output_cost;
         let delta_spent = self.runtime.session_delta_stats.input_cost
             + self.runtime.session_delta_stats.output_cost;
-        let session_spent = currency.format_cost(session_spent);
-        let delta_spent = currency.format_cost(delta_spent);
+        let session_spent = estimated_cost_label(currency, &self.runtime.stats, session_spent);
+        let delta_spent =
+            estimated_cost_label(currency, &self.runtime.session_delta_stats, delta_spent);
         let token_line = format!(
             "tok {}",
             format_token_compact(self.runtime.stats.last_prompt_tokens)

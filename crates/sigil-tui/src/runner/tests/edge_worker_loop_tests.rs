@@ -1683,7 +1683,7 @@ impl ManualLoopWorker {
                 anyhow::anyhow!("timed out waiting for worker message: {error}")
             })?;
             if !matches!(message, WorkerMessage::WorkerReady)
-                && !matches!(message, WorkerMessage::Notice(ref notice) if notice.starts_with("startup: "))
+                && !matches!(message, WorkerMessage::StartupProgress(_))
             {
                 return Ok(message);
             }

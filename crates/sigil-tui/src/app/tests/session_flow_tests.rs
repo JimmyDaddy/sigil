@@ -722,9 +722,14 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     assert!(!rendered.contains("thinking"));
     assert!(rendered.contains("2 lines"));
     assert!(!rendered.contains("hidden"));
-    assert!(!rendered.contains("Ctrl-T expand"));
-    assert!(rendered.contains("step 1"));
-    assert!(rendered.contains("step 2"));
+    assert!(rendered.contains("Ctrl-T expand"));
+    assert!(!rendered.contains("step 1"));
+    assert!(!rendered.contains("step 2"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = plain_transcript(&app, 20);
+    assert!(expanded.contains("step 1"));
+    assert!(expanded.contains("step 2"));
+    assert!(expanded.contains("Ctrl-T collapse"));
     Ok(())
 }
 
@@ -1896,7 +1901,8 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
 }
 
 #[test]
-fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> Result<()> {
+fn restored_reasoning_trace_before_final_answer_stays_available_as_collapsed_thinking() -> Result<()>
+{
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
     let entries = vec![
@@ -1926,7 +1932,11 @@ fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> R
 
     let rendered = plain_transcript(&app, 20);
     assert!(rendered.contains("final answer"));
-    assert!(rendered.contains("draft summary that should stay visible"));
+    assert!(!rendered.contains("draft summary that should stay visible"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = plain_transcript(&app, 40);
+    assert!(expanded.contains("draft summary that should stay visible"));
+    assert!(expanded.contains("final answer"));
     assert_eq!(
         app.timeline
             .iter()
@@ -1945,7 +1955,7 @@ fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> R
 }
 
 #[test]
-fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result<()> {
+fn restored_reasoning_traces_between_tools_before_final_stay_available() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
     let entries = vec![
@@ -1995,8 +2005,13 @@ fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result
 
     let rendered = plain_transcript(&app, 20);
     assert!(rendered.contains("final answer"));
-    assert!(rendered.contains("first draft summary that should stay visible"));
-    assert!(rendered.contains("second draft summary that should stay visible"));
+    assert!(!rendered.contains("first draft summary that should stay visible"));
+    assert!(!rendered.contains("second draft summary that should stay visible"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = plain_transcript(&app, 80);
+    assert!(expanded.contains("first draft summary that should stay visible"));
+    assert!(expanded.contains("second draft summary that should stay visible"));
+    assert!(expanded.contains("final answer"));
     assert_eq!(
         app.timeline
             .iter()

@@ -869,6 +869,46 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
         layout.hit_target(child.area.x, child.area.y),
         HitTarget::InfoRailAgentRow { index: 2 }
     );
+
+    for detail in [false, true] {
+        if detail {
+            app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+        }
+        app.set_terminal_size(140, 80);
+        let surface = crate::surface_adapter::build_surface_model(
+            Rect::new(0, 0, 140, 80),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 80))?;
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rows = app.agent_sidebar_rows();
+        assert_eq!(surface.layout.info_rail_agent_rows.len(), 3);
+        for hit in &surface.layout.info_rail_agent_rows {
+            let mut continuation_cells = 0;
+            let rendered = (hit.area.x..hit.area.right())
+                .filter_map(|x| {
+                    if continuation_cells > 0 {
+                        continuation_cells -= 1;
+                        return None;
+                    }
+                    let symbol = terminal.backend().buffer()[(x, hit.area.y)].symbol();
+                    // Ratatui stores empty continuation cells after a wide grapheme. They are
+                    // terminal columns, not spaces between the characters in the agent label.
+                    continuation_cells = crate::ui::terminal_cell_width(symbol).saturating_sub(1);
+                    Some(symbol)
+                })
+                .collect::<String>();
+            assert!(
+                rendered.contains(&rows[hit.index].label),
+                "detail={detail}, hit row {} must match the production renderer: {rendered:?}",
+                hit.index
+            );
+        }
+    }
     Ok(())
 }
 
@@ -960,14 +1000,8 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         ),
         HitTarget::ApprovalDiffArea
     );
-    assert_eq!(
-        approval.hit_target(hit_areas.hunk_previous.x, hit_areas.hunk_previous.y),
-        HitTarget::ApprovalHunkPrevious
-    );
-    assert_eq!(
-        approval.hit_target(hit_areas.hunk_next.x, hit_areas.hunk_next.y),
-        HitTarget::ApprovalHunkNext
-    );
+    assert_eq!(hit_areas.hunk_previous, Rect::default());
+    assert_eq!(hit_areas.hunk_next, Rect::default());
     assert_eq!(
         approval.hit_target(hit_areas.diff_view_toggle.x, hit_areas.diff_view_toggle.y),
         HitTarget::ApprovalDiffViewToggle
@@ -1248,7 +1282,6 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
             selected: true,
             diagnostics: None,
             action: None,
-            risk: None,
         }],
         changed_files: Vec::new(),
         diff_mode_label: "full",
@@ -1280,7 +1313,6 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         approval_header_line_count(&ApprovalModalView {
             change_set: Some(ApprovalChangeSetSummary {
                 id: "change-1".to_owned(),
-                risk: "medium".to_owned(),
                 format_hint: "cargo fmt --all".to_owned(),
             }),
             ..view.clone()
@@ -1307,6 +1339,11 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         }
     );
     let controls = approval_diff_control_hit_areas(Rect::new(3, 7, 30, 1), &view);
+    assert_eq!(controls.hunk_previous, Rect::default());
+    assert_eq!(controls.hunk_next, Rect::default());
+    assert_eq!(controls.diff_view_toggle.x, 3);
+    view.hunk_total = 2;
+    let controls = approval_diff_control_hit_areas(Rect::new(3, 7, 60, 1), &view);
     assert_eq!(controls.hunk_previous, Rect::new(3, 7, 6, 1));
     assert_eq!(controls.hunk_next.y, 7);
     assert!(controls.diff_view_toggle.x > controls.hunk_next.x);

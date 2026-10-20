@@ -1016,20 +1016,19 @@ impl ModelPricingSnapshotV1 {
     ///
     /// Returns an error when the price or cache usage evidence is malformed.
     pub fn apply_to_usage(&self, mut usage: UsageStats) -> Result<UsageStats> {
-        self.validate()?;
-        let Some(cache_usage) = usage.cache_usage.as_ref() else {
-            usage.pricing_snapshot = Some(self.clone());
-            return Ok(usage);
-        };
-        cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
-        let (Some(read), Some(uncached)) = (&cache_usage.read, &cache_usage.uncached) else {
-            usage.pricing_snapshot = Some(self.clone());
-            return Ok(usage);
-        };
-        if cache_usage.write.is_some() && self.cache_write_per_unit.is_none() {
+        if !self.can_estimate_usage(&usage)? {
             usage.pricing_snapshot = Some(self.clone());
             return Ok(usage);
         }
+        let cache_usage = usage.cache_usage.as_ref().expect("validated cache usage");
+        let read = cache_usage
+            .read
+            .as_ref()
+            .expect("validated cache read count");
+        let uncached = cache_usage
+            .uncached
+            .as_ref()
+            .expect("validated uncached count");
 
         let unit = self.unit_tokens as f64;
         let write_cost = match (&cache_usage.write, self.cache_write_per_unit) {
@@ -1049,6 +1048,17 @@ impl ModelPricingSnapshotV1 {
         );
         usage.pricing_snapshot = Some(self.clone());
         Ok(usage)
+    }
+
+    fn can_estimate_usage(&self, usage: &UsageStats) -> Result<bool> {
+        self.validate()?;
+        let Some(cache) = usage.cache_usage.as_ref() else {
+            return Ok(false);
+        };
+        cache.validate_for_prompt_tokens(usage.prompt_tokens)?;
+        Ok(cache.read.is_some()
+            && cache.uncached.is_some()
+            && (cache.write.is_none() || self.cache_write_per_unit.is_some()))
     }
 }
 
@@ -1192,6 +1202,12 @@ pub struct SessionStats {
     pub input_cost: f64,
     pub output_cost: f64,
     pub cache_savings: f64,
+    /// Requests whose frozen pricing and measured billable categories permit a full estimate.
+    #[serde(default)]
+    pub estimated_requests: u64,
+    /// Observed requests with missing or incomplete pricing evidence, including compaction.
+    #[serde(default)]
+    pub unestimated_requests: u64,
     #[serde(default)]
     pub last_prompt_tokens: u64,
     #[serde(default)]
@@ -1225,6 +1241,15 @@ impl SessionStats {
     }
 
     fn apply_usage_totals(&mut self, usage: &UsageStats) {
+        if usage
+            .pricing_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| matches!(snapshot.can_estimate_usage(usage), Ok(true)))
+        {
+            self.estimated_requests = self.estimated_requests.saturating_add(1);
+        } else {
+            self.unestimated_requests = self.unestimated_requests.saturating_add(1);
+        }
         self.prompt_tokens += usage.prompt_tokens;
         self.completion_tokens += usage.completion_tokens;
         self.cache_hit_tokens += usage.cache_hit_tokens;

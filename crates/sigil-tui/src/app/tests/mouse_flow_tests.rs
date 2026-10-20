@@ -799,6 +799,8 @@ fn layout_snapshot_hits_visible_thinking_block_over_live_panel() -> Result<()> {
         }
     );
 
+    assert!(app.toggle_thinking_entry(thinking_entry_index));
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
 
     assert_eq!(
@@ -1336,7 +1338,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     assert!(!collapsed_plain.contains("planning step 5"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
-    let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
+    let (column, row) = thinking_header_point(&layout, thinking_entry_index);
     let revision = app.timeline_revision();
     let hover = app.handle_mouse_event(mouse(MouseInputKind::Moved, column, row), &layout)?;
 
@@ -1374,7 +1376,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     assert!(expanded_plain.contains("planning step 5"));
 
     let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
-    let (column, row) = thinking_header_point(&expanded_layout, thinking_entry_index);
+    let (column, row) = thinking_block_body_point(&expanded_layout, thinking_entry_index);
     let collapse = app.handle_mouse_event(
         mouse(MouseInputKind::LeftDown, column, row),
         &expanded_layout,
@@ -1388,7 +1390,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
 }
 
 #[test]
-fn mouse_single_line_thinking_block_has_no_toggle_target() -> Result<()> {
+fn mouse_single_line_thinking_block_has_a_reversible_header_toggle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
@@ -1401,17 +1403,25 @@ fn mouse_single_line_thinking_block_has_no_toggle_target() -> Result<()> {
     let plain = rendered_plain(app.transcript_lines(20));
     assert!(plain.contains("1 line"));
     assert!(!plain.contains("1 line hidden"));
-    assert!(!plain.contains("Ctrl-T expand"));
-    assert!(plain.contains("single visible step"));
+    assert!(plain.contains("Ctrl-T expand"));
+    assert!(!plain.contains("single visible step"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
 
-    assert_eq!(layout.thinking_blocks.len(), 0);
+    assert_eq!(layout.thinking_blocks.len(), 1);
+    let entry_index = layout.thinking_blocks[0].entry_index;
+    let (column, row) = thinking_header_point(&layout, entry_index);
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ThinkingBlock { entry_index }
+    );
+    app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(rendered_plain(app.transcript_lines(20)).contains("single visible step"));
     Ok(())
 }
 
 #[test]
-fn mouse_short_thinking_block_has_no_toggle_target() -> Result<()> {
+fn mouse_short_thinking_block_has_a_reversible_header_toggle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle(RunEvent::ReasoningDelta(
@@ -1425,13 +1435,17 @@ fn mouse_short_thinking_block_has_no_toggle_target() -> Result<()> {
 
     let plain = rendered_plain(app.transcript_lines(20));
     assert!(plain.contains("4 lines"));
-    assert!(plain.contains("planning step 4"));
+    assert!(!plain.contains("planning step"));
     assert!(!plain.contains("hidden"));
-    assert!(!plain.contains("Ctrl-T expand"));
+    assert!(plain.contains("Ctrl-T expand"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
 
-    assert_eq!(layout.thinking_blocks.len(), 0);
+    assert_eq!(layout.thinking_blocks.len(), 1);
+    let entry_index = layout.thinking_blocks[0].entry_index;
+    let (column, row) = thinking_header_point(&layout, entry_index);
+    app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(rendered_plain(app.transcript_lines(20)).contains("planning step 4"));
     Ok(())
 }
 
@@ -1450,7 +1464,7 @@ fn mouse_stale_thinking_block_hit_without_collapsed_content_is_noop() -> Result<
     }))?;
     let thinking_entry_index = app.collapsible_thinking_entry_indices()[0];
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
+    let (column, row) = thinking_header_point(&layout, thinking_entry_index);
     app.timeline[thinking_entry_index].text = " \n ".to_owned();
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
@@ -1826,6 +1840,11 @@ fn mouse_agent_row_left_up_and_scroll_cover_fallback_edges() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.active_pane = PaneFocus::Composer;
+    app.sync_current_session_state(child_agent_entries(
+        Some("仓库审查"),
+        sigil_kernel::AgentThreadStatus::Completed,
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
+    )?);
     let mut invalid_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let unavailable_row = invalid_layout.info_rail_agent_rows[0];
     invalid_layout.info_rail_agent_rows[0].index = 99;

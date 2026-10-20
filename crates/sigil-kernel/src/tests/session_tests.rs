@@ -5157,7 +5157,7 @@ fn route_rebind_and_trust_are_durable_and_cut_off_private_continuation_material(
 
 #[test]
 fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
-    let entries = vec![
+    let mut entries = vec![
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
             prompt_tokens: 120,
             completion_tokens: 10,
@@ -5184,13 +5184,45 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
         })),
     ];
 
+    let priced = crate::ModelPricingSnapshotV1 {
+        schema_version: crate::ModelPricingSnapshotV1::SCHEMA_VERSION,
+        snapshot_id: "restore-zero-price".to_owned(),
+        currency: "USD".to_owned(),
+        unit_tokens: 1_000_000,
+        cache_read_per_unit: 0.0,
+        cache_write_per_unit: None,
+        uncached_input_per_unit: 0.0,
+        output_per_unit: 0.0,
+        source: "https://example.invalid/pricing".to_owned(),
+        verified_at: "2026-10-21".to_owned(),
+    }
+    .apply_to_usage(UsageStats {
+        prompt_tokens: 10,
+        completion_tokens: 3,
+        cache_usage: Some(crate::CacheUsageV1 {
+            schema_version: crate::CacheUsageV1::SCHEMA_VERSION,
+            read: Some(crate::CacheTokenCountV1::provider_reported(0)),
+            write: None,
+            uncached: Some(crate::CacheTokenCountV1::provider_reported(10)),
+            local_layout_mutation: None,
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    })?;
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::SemanticCompactionUsageSnapshot(priced),
+    ));
     let stats = session_stats_from_entries(&entries);
     let session = Session::from_entries("deepseek", "deepseek-v4-flash", entries);
 
-    assert_eq!(stats.prompt_tokens, 168);
+    assert_eq!(stats.prompt_tokens, 178);
     assert_eq!(stats.last_prompt_tokens, 48);
-    assert_eq!(session.stats().prompt_tokens, 168);
+    assert_eq!(session.stats().prompt_tokens, 178);
     assert_eq!(session.stats().last_prompt_tokens, 48);
+    assert_eq!(stats.estimated_requests, 1);
+    assert_eq!(stats.unestimated_requests, 2);
+    assert_eq!(session.stats().unestimated_requests, 2);
+    assert_eq!(session.stats().estimated_requests, 1);
     Ok(())
 }
 

@@ -788,12 +788,6 @@ fn approval_change_set_line_with_palette(
             change_set.id.clone(),
             Style::default().fg(palette.text_primary),
         ),
-        Span::raw("  "),
-        approval_badge_with_palette(
-            &format!("risk {}", change_set.risk),
-            approval_risk_color_with_palette(&change_set.risk, palette),
-            palette,
-        ),
     ])
 }
 
@@ -859,7 +853,12 @@ fn approval_footer_lines_with_palette(
         )
     };
     let navigation_hint = if view.has_diff_preview {
-        format!(" · [/] hunk{file_hint} · ↑/↓ scroll")
+        let hunk_hint = if view.hunk_total > 1 {
+            " · [/] hunk"
+        } else {
+            ""
+        };
+        format!("{hunk_hint}{file_hint} · ↑/↓ scroll")
     } else {
         String::new()
     };
@@ -957,15 +956,6 @@ fn render_approval_file_row_with_palette(
             ),
         ]);
     }
-    if let Some(risk) = &row.risk {
-        spans.extend([
-            Span::raw(" "),
-            Span::styled(
-                format!("risk {risk}"),
-                approval_file_meta_style_with_palette(risk, row.selected, palette),
-            ),
-        ]);
-    }
     if let Some(diagnostics) = row.diagnostics {
         spans.extend([
             Span::raw("  "),
@@ -1010,21 +1000,21 @@ fn approval_diff_status_line_with_palette(
     view: &ApprovalModalView,
     palette: &ThemePalette,
 ) -> Line<'static> {
-    let hunk_label = if view.hunk_total == 0 {
-        "hunk 0/0".to_owned()
-    } else {
-        format!("hunk {}/{}", view.active_hunk_index, view.hunk_total)
-    };
     let target_label = if view.file_rows.is_empty() && view.changed_files.is_empty() {
         "target"
     } else {
         "path"
     };
-    let mut spans = vec![
-        approval_badge_with_palette("Prev", palette.text_muted, palette),
-        Span::raw(" "),
-        approval_badge_with_palette("Next", palette.text_muted, palette),
-        Span::raw(" "),
+    let mut spans = Vec::new();
+    if view.hunk_total > 1 {
+        spans.extend([
+            approval_badge_with_palette("Prev", palette.text_muted, palette),
+            Span::raw(" "),
+            approval_badge_with_palette("Next", palette.text_muted, palette),
+            Span::raw(" "),
+        ]);
+    }
+    spans.extend([
         approval_badge_with_palette(
             &approval_diff_view_control_label(view.diff_mode_label),
             palette.accent_info,
@@ -1043,16 +1033,16 @@ fn approval_diff_status_line_with_palette(
             view.diff_label.clone(),
             Style::default().fg(palette.text_primary),
         ),
-        Span::raw("  "),
-        Span::styled("mode", Style::default().fg(palette.text_muted)),
-        Span::raw(" "),
-        Span::styled(
-            view.diff_mode_label,
-            Style::default().fg(palette.accent_info),
-        ),
-        Span::raw("  "),
-        Span::styled(hunk_label, Style::default().fg(palette.diff_hunk_fg)),
-    ];
+    ]);
+    if view.hunk_total > 1 {
+        spans.extend([
+            Span::raw("  "),
+            Span::styled(
+                format!("hunk {}/{}", view.active_hunk_index, view.hunk_total),
+                Style::default().fg(palette.diff_hunk_fg),
+            ),
+        ]);
+    }
     if let Some(diagnostics) = selected_approval_diagnostics(view) {
         spans.extend([
             Span::raw("  "),

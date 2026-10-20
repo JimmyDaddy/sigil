@@ -162,31 +162,15 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert_eq!(view_model.composer.model_name, "deepseek-v4-flash");
     assert_eq!(view_model.composer.input_rows, 1);
     assert_eq!(view_model.footer.run_label, "ready");
+    assert!(view_model.footer.context_label.is_empty());
     assert!(view_model.footer.hints.contains("Enter send"));
     assert!(view_model.footer.hints.contains("Ctrl-J newline"));
     assert!(!view_model.footer.hints.contains("Shift-Enter newline"));
     assert!(!view_model.info_rail.workspace_label.is_empty());
-    assert!(
-        view_model
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line == "model: deepseek-v4-flash · max")
-    );
-    assert!(
-        view_model
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line.starts_with("state: ready · "))
-    );
-    assert!(
-        view_model
-            .info_rail
-            .code_lines
-            .iter()
-            .any(|line| line == "status: off")
-    );
+    assert_eq!(view_model.composer.reasoning_effort_label, "max");
+    assert_eq!(view_model.info_rail.session_lines, ["state: ready"]);
+    assert!(!view_model.info_rail.permission_lines.is_empty());
+    assert!(view_model.info_rail.code_lines.is_empty());
     assert!(
         view_model
             .info_rail
@@ -199,8 +183,51 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .info_rail
             .controls
             .iter()
-            .any(|line| line.starts_with("Ctrl-C: quit"))
+            .any(|line| line.starts_with("Shift-F2:"))
     );
+}
+
+#[test]
+fn compact_footer_omits_empty_statistics_and_keeps_capacity_warnings() -> anyhow::Result<()> {
+    let mut config = test_config();
+    config.compaction.enabled = false;
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+    assert!(UiViewModel::from_app(&app).footer.context_label.is_empty());
+    for (prompt_tokens, expected) in [
+        (1_234, "ctx: <1%"),
+        (100_000, "ctx: 10%"),
+        (700_000, "ctx: 70% · filling up"),
+        (920_000, "ctx: 92% · near limit"),
+    ] {
+        app.handle(RunEvent::Usage(sigil_kernel::UsageStats {
+            prompt_tokens,
+            ..sigil_kernel::UsageStats::default()
+        }))?;
+        assert_eq!(UiViewModel::from_app(&app).footer.context_label, expected);
+    }
+    app.toggle_info_rail_detail();
+    let detail = UiViewModel::from_app(&app);
+    assert!(detail.info_rail.usage_lines.iter().any(|line| {
+        line.starts_with("ctx:") && line.contains("cache=0%") && line.contains("prompt")
+    }));
+    assert!(detail.info_rail.usage_lines.iter().any(|line| {
+        line.starts_with("policy:") && line.contains("soft") && line.contains("hard")
+    }));
+    config.agent.runtime_provider = "custom".to_owned();
+    config.agent.model = "custom-model".to_owned();
+    config.compaction.context_window_tokens = None;
+    let mut unknown_capacity = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+    unknown_capacity.handle(RunEvent::Usage(sigil_kernel::UsageStats {
+        prompt_tokens: 1_234,
+        ..sigil_kernel::UsageStats::default()
+    }))?;
+    assert_eq!(
+        UiViewModel::from_app(&unknown_capacity)
+            .footer
+            .context_label,
+        "ctx: 1.2K · capacity unknown"
+    );
+    Ok(())
 }
 
 #[test]
@@ -262,6 +289,29 @@ fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
     let detail = UiViewModel::from_app(&app);
 
     assert!(app.info_rail_detail_enabled());
+    for expected in ["model: deepseek-v4-flash", "effort: max", "phase: ready"] {
+        assert!(
+            detail
+                .info_rail
+                .session_lines
+                .iter()
+                .any(|line| line == expected)
+        );
+    }
+    assert!(
+        detail
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line.starts_with("session: "))
+    );
+    assert!(
+        detail
+            .info_rail
+            .controls
+            .iter()
+            .any(|line| line.starts_with("Ctrl-C: quit"))
+    );
     assert!(
         detail
             .info_rail
@@ -743,7 +793,8 @@ fn ui_view_model_projects_enabled_code_intelligence_status() {
         server_startup: CodeIntelStartup::Lazy,
         ..CodeIntelligenceConfig::default()
     };
-    let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+    app.toggle_info_rail_detail();
     let view_model = UiViewModel::from_app(&app);
 
     assert!(
@@ -815,6 +866,7 @@ fn code_tool_result_projects_per_server_lsp_status_lines() -> anyhow::Result<()>
         },
     )))?;
 
+    app.toggle_info_rail_detail();
     let view_model = UiViewModel::from_app(&app);
 
     assert!(
@@ -881,6 +933,7 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
         app.runtime.code_intelligence_status,
         "diagnostics 1 errors 2 warnings"
     );
+    app.toggle_info_rail_detail();
     let view_model = UiViewModel::from_app(&app);
     assert!(
         view_model
@@ -938,6 +991,7 @@ fn code_diagnostics_tool_result_projects_latest_file_summaries() -> anyhow::Resu
         },
     )))?;
 
+    app.toggle_info_rail_detail();
     let view_model = UiViewModel::from_app(&app);
     let code_lines = view_model.info_rail.code_lines;
 
@@ -1365,13 +1419,33 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
 }
 
 #[test]
-fn info_rail_projects_memory_off_and_agent_rows() {
+fn compact_info_rail_folds_inactive_modules_and_statistics_into_details() -> anyhow::Result<()> {
     let mut config = test_config();
     config.memory.enabled = false;
-    let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
 
     let view_model = UiViewModel::from_app(&app);
 
+    assert!(
+        !view_model
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "memory: off")
+    );
+    assert!(view_model.info_rail.agent_lines.is_empty());
+    assert!(view_model.info_rail.code_lines.is_empty());
+    assert!(view_model.info_rail.mcp_lines.is_empty());
+    assert!(view_model.info_rail.usage_lines.is_empty());
+    assert!(
+        view_model
+            .info_rail
+            .controls
+            .iter()
+            .any(|line| line.starts_with("Shift-F2:"))
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+    let view_model = UiViewModel::from_app(&app);
     assert!(
         view_model
             .info_rail
@@ -1393,6 +1467,27 @@ fn info_rail_projects_memory_off_and_agent_rows() {
             .iter()
             .all(|line| !line.contains("no child agents recorded"))
     );
+    assert!(!view_model.info_rail.usage_lines.is_empty());
+    Ok(())
+}
+
+#[test]
+fn compact_info_rail_retains_actionable_diagnostics() {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.runtime.code_intelligence_diagnostics_by_path.insert(
+        "src/broken.rs".to_owned(),
+        crate::approval::ApprovalDiagnosticSummary {
+            errors: 1,
+            warnings: 0,
+        },
+    );
+    app.runtime.code_intelligence_diagnostics_by_path.insert(
+        "src/clean.rs".to_owned(),
+        crate::approval::ApprovalDiagnosticSummary::default(),
+    );
+    let model = UiViewModel::from_app(&app);
+    assert_eq!(model.info_rail.code_lines, ["src/broken.rs: 1 error"]);
+    assert!(model.info_rail.usage_lines.is_empty());
 }
 
 #[test]

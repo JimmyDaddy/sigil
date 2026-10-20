@@ -17,6 +17,91 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
+fn priced_usage_fixture(mut usage: UsageStats) -> UsageStats {
+    usage.cache_usage = Some(sigil_kernel::CacheUsageV1 {
+        schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+        read: Some(sigil_kernel::CacheTokenCountV1::provider_reported(
+            usage.cache_hit_tokens,
+        )),
+        write: None,
+        uncached: Some(sigil_kernel::CacheTokenCountV1::provider_reported(
+            usage.cache_miss_tokens,
+        )),
+        local_layout_mutation: None,
+        provider_miss_without_local_mutation: false,
+    });
+    sigil_kernel::ModelPricingSnapshotV1 {
+        schema_version: sigil_kernel::ModelPricingSnapshotV1::SCHEMA_VERSION,
+        snapshot_id: "usage-display-fixture".to_owned(),
+        currency: "USD".to_owned(),
+        unit_tokens: 100,
+        cache_read_per_unit: 0.08,
+        cache_write_per_unit: None,
+        uncached_input_per_unit: 0.24,
+        output_per_unit: 0.075,
+        source: "https://example.invalid/pricing".to_owned(),
+        verified_at: "2026-10-21".to_owned(),
+    }
+    .apply_to_usage(usage)
+    .expect("priced usage fixture")
+}
+
+#[test]
+fn usage_display_distinguishes_unknown_partial_and_trusted_zero_prices() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: not estimated (no usage)")
+    );
+    let mut free = priced_usage_fixture(UsageStats {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        cache_miss_tokens: 10,
+        ..UsageStats::default()
+    });
+    let mut snapshot = free.pricing_snapshot.clone().expect("frozen pricing");
+    snapshot.cache_read_per_unit = 0.0;
+    snapshot.uncached_input_per_unit = 0.0;
+    snapshot.output_per_unit = 0.0;
+    free = snapshot.apply_to_usage(free)?;
+    app.handle(RunEvent::Usage(free))?;
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: USD 0.0000")
+    );
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 5,
+        input_cost: 2.0,
+        ..UsageStats::default()
+    }))?;
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line
+                == "total spent: partially estimated (1/2 requests; pricing unavailable)")
+    );
+    let mut unknown = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    unknown.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 5,
+        ..UsageStats::default()
+    }))?;
+    assert!(
+        unknown
+            .usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: not estimated (pricing unavailable)")
+    );
+    assert!(
+        !unknown
+            .usage_sidebar_lines()
+            .iter()
+            .any(|line| line.contains("USD 0.0000"))
+    );
+    Ok(())
+}
+
 #[test]
 fn active_disclosure_reduces_the_timeline_viewport_by_reserved_rows() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -390,7 +475,7 @@ fn timeline_selection_clears_on_resize_rerender_to_avoid_stale_lines() {
 }
 
 #[test]
-fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<()> {
+fn reasoning_delta_stays_collapsed_until_explicitly_expanded() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
@@ -417,17 +502,23 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     let streaming_plain = transcript_plain(streaming.clone());
     assert!(streaming_plain.contains("thinking"));
     assert!(!streaming_plain.contains("thought"));
-    assert!(app.collapsible_thinking_entry_indices().is_empty());
+    assert_eq!(app.collapsible_thinking_entry_indices().len(), 1);
     assert!(streaming.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("Ctrl-T collapse"))
+            .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     }));
-    assert!(streaming.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("planning step 5"))
-    }));
+    assert!(!streaming_plain.contains("planning step"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = transcript_plain(app.transcript_lines(20));
+    assert!(expanded.contains("thinking"));
+    assert!(expanded.contains("Ctrl-T collapse"));
+    assert!(expanded.contains("planning step 5"));
+    app.handle(RunEvent::ReasoningDelta("\nplanning step 6".to_owned()))?;
+    assert!(transcript_plain(app.transcript_lines(20)).contains("planning step 6"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    assert!(!transcript_plain(app.transcript_lines(20)).contains("planning step"));
 
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),
@@ -445,11 +536,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
             .iter()
             .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     }));
-    assert!(!collapsed.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("planning step 5"))
-    }));
+    assert!(!collapsed_plain.contains("planning step"));
     Ok(())
 }
 
@@ -506,26 +593,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
             .iter()
             .any(|span| span.content.as_ref().contains("5 lines"))
     }));
-    assert!(collapsed.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("planning step 1"))
-    }));
-    assert!(collapsed.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("planning step 2"))
-    }));
-    assert!(collapsed.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("3 lines hidden"))
-    }));
-    assert!(!collapsed.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("planning step 5"))
-    }));
+    assert!(!transcript_plain(collapsed).contains("planning step"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
@@ -615,7 +683,7 @@ fn ctrl_o_expands_latest_diagram_source_and_copy_preserves_raw_markdown() -> Res
 }
 
 #[test]
-fn single_line_thinking_block_stays_visible_without_toggle() -> Result<()> {
+fn single_line_thinking_block_is_collapsed_and_reversibly_expandable() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
@@ -627,8 +695,8 @@ fn single_line_thinking_block_stays_visible_without_toggle() -> Result<()> {
     let rendered = transcript_plain(app.transcript_lines(20));
     assert!(rendered.contains("1 line"));
     assert!(!rendered.contains("1 line hidden"));
-    assert!(!rendered.contains("Ctrl-T expand"));
-    assert!(rendered.contains("single visible step"));
+    assert!(rendered.contains("Ctrl-T expand"));
+    assert!(!rendered.contains("single visible step"));
     let thinking_view_events_before = app
         .events
         .iter()
@@ -639,21 +707,23 @@ fn single_line_thinking_block_stays_visible_without_toggle() -> Result<()> {
 
     let rendered_after = transcript_plain(app.transcript_lines(20));
     assert!(rendered_after.contains("single visible step"));
-    assert!(!rendered_after.contains("Ctrl-T collapse"));
+    assert!(rendered_after.contains("Ctrl-T collapse"));
     assert_eq!(
         app.events
             .iter()
             .filter(|event| event.label == "thinking:view")
             .count(),
-        thinking_view_events_before
+        thinking_view_events_before + 1
     );
-    assert_ne!(app.last_notice(), Some("thinking expanded"));
-    assert_ne!(app.last_notice(), Some("thinking collapsed"));
+    assert_eq!(app.last_notice(), Some("thinking expanded"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    assert!(!transcript_plain(app.transcript_lines(20)).contains("single visible step"));
+    assert_eq!(app.last_notice(), Some("thinking collapsed"));
     Ok(())
 }
 
 #[test]
-fn short_thinking_block_stays_visible_without_toggle() -> Result<()> {
+fn short_thinking_block_is_collapsed_and_reversibly_expandable() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
@@ -667,10 +737,12 @@ fn short_thinking_block_stays_visible_without_toggle() -> Result<()> {
 
     let rendered = transcript_plain(app.transcript_lines(20));
     assert!(rendered.contains("4 lines"));
-    assert!(rendered.contains("planning step 4"));
+    assert!(!rendered.contains("planning step"));
     assert!(!rendered.contains("hidden"));
-    assert!(!rendered.contains("Ctrl-T expand"));
-    assert!(app.collapsible_thinking_entry_indices().is_empty());
+    assert!(rendered.contains("Ctrl-T expand"));
+    assert_eq!(app.collapsible_thinking_entry_indices().len(), 1);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    assert!(transcript_plain(app.transcript_lines(20)).contains("planning step 4"));
     Ok(())
 }
 
@@ -873,6 +945,8 @@ fn streaming_assistant_defers_code_highlight_until_finished() -> Result<()> {
         args_json: "{}".to_owned(),
     }))?;
 
+    assert!(timeline_span_style_containing(&app, "fn main").is_none());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
     let finished_style =
         timeline_span_style_containing(&app, "fn").expect("finished fn should render");
     assert_ne!(finished_style, plain_code_style);
@@ -976,7 +1050,7 @@ fn assistant_message_before_tool_remains_visible() -> Result<()> {
 }
 
 #[test]
-fn live_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> Result<()> {
+fn live_reasoning_trace_before_final_answer_stays_available_as_collapsed_thinking() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
@@ -992,7 +1066,12 @@ fn live_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> Resul
 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
     assert!(rendered.contains("final answer"));
-    assert!(rendered.contains("draft summary that should stay visible"));
+    assert!(!rendered.contains("draft summary that should stay visible"));
+    assert!(rendered.contains("Ctrl-T expand"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = transcript_plain(app.transcript_lines(40));
+    assert!(expanded.contains("draft summary that should stay visible"));
+    assert!(expanded.contains("final answer"));
     assert_eq!(
         app.timeline
             .iter()
@@ -1068,7 +1147,7 @@ fn terminal_final_blocker_notice_removes_the_rejected_candidate() -> Result<()> 
 }
 
 #[test]
-fn rejected_final_candidate_notice_keeps_finished_thinking_visible() -> Result<()> {
+fn rejected_final_candidate_notice_keeps_finished_thinking_available() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
@@ -1089,10 +1168,14 @@ fn rejected_final_candidate_notice_keeps_finished_thinking_visible() -> Result<(
     ))?;
 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
-    assert!(rendered.contains("reasoning that should stay visible"));
+    assert!(!rendered.contains("reasoning that should stay visible"));
     assert!(!rendered.contains("candidate summary before facts"));
     assert!(rendered.contains("recorded run facts added before final answer"));
     assert!(rendered.contains("accepted final summary"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    assert!(
+        transcript_plain(app.transcript_lines(40)).contains("reasoning that should stay visible")
+    );
     assert_eq!(
         app.timeline
             .iter()
@@ -1104,7 +1187,7 @@ fn rejected_final_candidate_notice_keeps_finished_thinking_visible() -> Result<(
 }
 
 #[test]
-fn live_reasoning_trace_between_tools_stays_visible_when_final_answer_arrives() -> Result<()> {
+fn live_reasoning_trace_between_tools_stays_available_when_final_answer_arrives() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.push_timeline(TimelineRole::User, "inspect and summarize");
@@ -1135,8 +1218,13 @@ fn live_reasoning_trace_between_tools_stays_visible_when_final_answer_arrives() 
 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
     assert!(rendered.contains("final answer"));
-    assert!(rendered.contains("first draft summary that should remain visible"));
-    assert!(rendered.contains("second draft summary that should remain visible"));
+    assert!(!rendered.contains("first draft summary that should remain visible"));
+    assert!(!rendered.contains("second draft summary that should remain visible"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    let expanded = transcript_plain(app.transcript_lines(80));
+    assert!(expanded.contains("first draft summary that should remain visible"));
+    assert!(expanded.contains("second draft summary that should remain visible"));
+    assert!(expanded.contains("final answer"));
     assert_eq!(
         app.timeline
             .iter()
@@ -1775,7 +1863,10 @@ fn running_child_agent_transcript_keeps_latest_thinking_active() -> Result<()> {
 
     assert!(rendered.contains("thinking"));
     assert!(!rendered.contains("thought"));
-    assert!(rendered.contains("child step 4"));
+    assert!(rendered.contains("Ctrl-T expand"));
+    assert!(!rendered.contains("child step"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    assert!(transcript_plain(app.transcript_lines(24)).contains("child step 4"));
     Ok(())
 }
 
@@ -1938,7 +2029,7 @@ fn thinking_mode_change_rerenders_the_active_child_cache() -> Result<()> {
         load_error: None,
     });
 
-    app.toggle_thinking_block_mode();
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
     let expanded = &app
         .agent_panel
@@ -2658,7 +2749,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
 fn usage_display_shows_session_and_delta_costs() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    app.handle(RunEvent::Usage(UsageStats {
+    app.handle(RunEvent::Usage(priced_usage_fixture(UsageStats {
         prompt_tokens: 100,
         completion_tokens: 40,
         cache_hit_tokens: 75,
@@ -2669,7 +2760,7 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
         system_fingerprint: None,
         cache_usage: None,
         pricing_snapshot: None,
-    }))?;
+    })))?;
 
     assert!(
         app.usage_sidebar_lines()
@@ -2679,7 +2770,7 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
     assert!(
         app.usage_sidebar_lines()
             .iter()
-            .any(|line| line == "cache: 75% · save USD 0.4500")
+            .any(|line| line == "cache: 75% · save USD 0.1200")
     );
     assert!(
         app.usage_sidebar_lines()
@@ -2716,7 +2807,7 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         .workspace_root
         .join(".sigil/sessions/session-restored.jsonl");
 
-    app.handle(RunEvent::Usage(UsageStats {
+    app.handle(RunEvent::Usage(priced_usage_fixture(UsageStats {
         prompt_tokens: 100,
         completion_tokens: 10,
         cache_hit_tokens: 50,
@@ -2727,8 +2818,8 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         system_fingerprint: None,
         cache_usage: None,
         pricing_snapshot: None,
-    }))?;
-    assert_eq!(app.runtime.session_delta_stats.input_cost, 0.20);
+    })))?;
+    assert_eq!(app.runtime.session_delta_stats.input_cost, 0.16);
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_id: crate::app::tests::common::fixture_session_id(&restored_path),
@@ -2736,7 +2827,7 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
         entries: vec![SessionLogEntry::Control(ControlEntry::UsageSnapshot(
-            UsageStats {
+            priced_usage_fixture(UsageStats {
                 prompt_tokens: 200,
                 completion_tokens: 20,
                 cache_hit_tokens: 120,
@@ -2747,14 +2838,17 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
                 system_fingerprint: None,
                 cache_usage: None,
                 pricing_snapshot: None,
-            },
+            }),
         ))],
     })?;
 
-    assert_eq!(
-        app.runtime.stats.input_cost + app.runtime.stats.output_cost,
-        1.50
+    assert!(
+        (app.runtime.stats.input_cost + app.runtime.stats.output_cost - 0.303).abs() < f64::EPSILON
     );
+    assert_eq!(app.runtime.stats.estimated_requests, 1);
+    assert_eq!(app.runtime.stats.unestimated_requests, 0);
+    assert_eq!(app.runtime.session_delta_stats.estimated_requests, 0);
+    assert_eq!(app.runtime.session_delta_stats.unestimated_requests, 0);
     assert_eq!(
         app.runtime.session_delta_stats.input_cost + app.runtime.session_delta_stats.output_cost,
         0.0
@@ -2762,15 +2856,15 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
     assert!(
         app.usage_sidebar_lines()
             .iter()
-            .any(|line| line == "total spent: CNY 10.8000")
+            .any(|line| line == "total spent: CNY 2.1816")
     );
     assert!(
         app.usage_sidebar_lines()
             .iter()
-            .any(|line| line == "spent since opening: CNY 0.0000")
+            .any(|line| line == "spent since opening: not estimated (no usage)")
     );
 
-    app.handle(RunEvent::Usage(UsageStats {
+    app.handle(RunEvent::Usage(priced_usage_fixture(UsageStats {
         prompt_tokens: 100,
         completion_tokens: 40,
         cache_hit_tokens: 75,
@@ -2781,12 +2875,12 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         system_fingerprint: None,
         cache_usage: None,
         pricing_snapshot: None,
-    }))?;
+    })))?;
 
     assert!(
         app.usage_sidebar_lines()
             .iter()
-            .any(|line| line == "total spent: CNY 11.8800")
+            .any(|line| line == "total spent: CNY 3.2616")
     );
     assert!(
         app.usage_sidebar_lines()
@@ -2795,7 +2889,7 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
     );
     assert!(
         app.footer_status_line()
-            .contains("spent CNY 1.0800 since opening / CNY 11.8800 total")
+            .contains("spent CNY 1.0800 since opening / CNY 3.2616 total")
     );
     Ok(())
 }
@@ -2812,7 +2906,7 @@ fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Res
         status: "USD 3.25".to_owned(),
     };
 
-    app.handle(RunEvent::Usage(UsageStats {
+    app.handle(RunEvent::Usage(priced_usage_fixture(UsageStats {
         prompt_tokens: 100,
         completion_tokens: 40,
         cache_hit_tokens: 75,
@@ -2823,7 +2917,7 @@ fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Res
         system_fingerprint: None,
         cache_usage: None,
         pricing_snapshot: None,
-    }))?;
+    })))?;
 
     assert!(
         app.usage_sidebar_lines()

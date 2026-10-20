@@ -8,9 +8,7 @@ use crate::{
     },
     config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
-    view_model::{
-        displayed_info_rail_agent_row_entries, info_rail_permission_lines, info_rail_session_lines,
-    },
+    view_model::{InfoRailViewModel, displayed_info_rail_agent_row_entries},
 };
 
 use super::{
@@ -246,7 +244,7 @@ impl LayoutSnapshot {
 
     pub fn from_app(screen: Rect, app: &AppState) -> Self {
         let _phase_timing = crate::phase_timing::PhaseTimer::new("layout_snapshot");
-        if app.is_setup_mode() {
+        if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Setup);
             snapshot.setup_hit_areas = setup_hit_areas(screen, app);
             snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
@@ -1100,23 +1098,16 @@ fn info_rail_agent_row_hit_areas(info_rail: Rect, app: &AppState) -> Vec<InfoRai
         return Vec::new();
     }
 
-    let session_line_count = if app.info_rail_detail_enabled() {
-        app.session_sidebar_lines()
-            .len()
+    let model = InfoRailViewModel::from_app(app);
+    let theme = super::theme::resolve_for_app(app);
+    let agent_row_start =
+        super::info_rail::info_rail_header_row_count(&model, inner.width as usize, &theme)
+            .saturating_add(info_section_row_count(model.session_lines.len()))
+            .saturating_add(info_section_row_count(model.permission_lines.len()))
             .saturating_add(1)
-            .saturating_add(app.task_memory_sidebar_lines().len())
-    } else {
-        info_rail_session_lines(app).len()
-    };
-    let permission_line_count = if app.info_rail_detail_enabled() {
-        app.permission_card_lines().len()
-    } else {
-        info_rail_permission_lines(app).len()
-    };
-    let agent_row_start = 3usize
-        .saturating_add(info_section_row_count(session_line_count))
-        .saturating_add(info_section_row_count(permission_line_count))
-        .saturating_add(1);
+            .saturating_add(usize::from(
+                app.info_rail_detail_enabled() && app.agent_graph_summary_line().is_some(),
+            ));
 
     displayed_info_rail_agent_row_entries(app)
         .into_iter()
@@ -1136,7 +1127,11 @@ fn info_rail_agent_row_hit_areas(info_rail: Rect, app: &AppState) -> Vec<InfoRai
 }
 
 fn info_section_row_count(value_count: usize) -> usize {
-    value_count.saturating_add(2)
+    if value_count == 0 {
+        0
+    } else {
+        value_count.saturating_add(2)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1503,8 +1498,14 @@ pub(super) fn approval_diff_control_hit_areas(
             metadata_toggle,
         };
     }
-    let hunk_previous = approval_status_badge_rect(status_area.y, &mut cursor, end, "Prev");
-    let hunk_next = approval_status_badge_rect(status_area.y, &mut cursor, end, "Next");
+    let (hunk_previous, hunk_next) = if view.hunk_total > 1 {
+        (
+            approval_status_badge_rect(status_area.y, &mut cursor, end, "Prev"),
+            approval_status_badge_rect(status_area.y, &mut cursor, end, "Next"),
+        )
+    } else {
+        (Rect::default(), Rect::default())
+    };
     let diff_view_toggle = approval_status_badge_rect(
         status_area.y,
         &mut cursor,

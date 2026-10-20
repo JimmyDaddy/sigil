@@ -44,6 +44,29 @@ fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
 }
 
 #[test]
+fn render_info_rail_skips_empty_optional_sections() -> anyhow::Result<()> {
+    let mut model = sample_view_model();
+    model.agent_lines.clear();
+    model.task_lines.clear();
+    model.mcp_lines.clear();
+    model.code_lines.clear();
+    model.usage_lines.clear();
+    let mut terminal = Terminal::new(TestBackend::new(54, 32))?;
+    terminal.draw(|frame| render_info_rail(frame, frame.area(), &model))?;
+    let text = rendered_text(&terminal);
+    assert!(text.contains("session"));
+    assert!(text.contains("permissions"));
+    assert!(text.contains("controls"));
+    for hidden in ["agents", "task", "MCP", "LSP", "usage"] {
+        assert!(
+            !text.contains(hidden),
+            "empty section {hidden} must not occupy the rail"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
     let backend = TestBackend::new(54, 32);
     let mut terminal = Terminal::new(backend)?;

@@ -25,7 +25,9 @@ impl AppState {
     }
 
     pub fn last_notice(&self) -> Option<&str> {
-        self.last_notice.as_deref()
+        self.worker_startup_progress
+            .as_deref()
+            .or(self.last_notice.as_deref())
     }
 
     pub(crate) fn set_last_notice(&mut self, notice: impl Into<String>) {

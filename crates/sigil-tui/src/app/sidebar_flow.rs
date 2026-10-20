@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::{
-    AppAction, AppState, SidebarCard, TimelineRole, config_flow::cycle_permission_mode,
+    AppAction, AppState, SidebarCard, config_flow::cycle_permission_mode,
     formatting::persisted_root_config,
 };
 
@@ -56,10 +56,6 @@ impl AppState {
             next_config.permission.mode.as_str()
         ));
         self.push_event("permission_mode", self.runtime.permission_mode.clone());
-        self.push_timeline(
-            TimelineRole::Notice,
-            format!("permission mode -> {}", self.runtime.permission_mode),
-        );
         self.schedule_balance_refresh();
         #[cfg(not(test))]
         {

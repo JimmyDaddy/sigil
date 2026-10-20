@@ -63,8 +63,8 @@ pub(in crate::runner) fn send_startup_notice(
         })
         .collect();
     let suffix = if chars.next().is_some() { "…" } else { "" };
-    let _ = message_tx.send(WorkerMessage::Notice(format!(
-        "startup: {bounded_stage}{suffix}"
+    let _ = message_tx.send(WorkerMessage::StartupProgress(format!(
+        "{bounded_stage}{suffix}"
     )));
 }
 
@@ -919,10 +919,9 @@ fn spawn_eager_mcp_startup_tasks(
                 });
             }
             Err(error) => {
-                send_startup_notice(
-                    &message_tx,
-                    &format!("MCP server {server_name} unavailable; continuing"),
-                );
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "MCP server {server_name} unavailable; continuing"
+                )));
                 let error = format!("{error:#}");
                 let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                     server_name: Some(server_name.clone()),

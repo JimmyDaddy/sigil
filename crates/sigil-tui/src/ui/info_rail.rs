@@ -251,6 +251,10 @@ fn push_info_section<I>(
 ) where
     I: IntoIterator<Item = String>,
 {
+    let mut values = values.into_iter().peekable();
+    if values.peek().is_none() {
+        return;
+    }
     lines.push(Line::from(vec![section_badge_with_palette(
         title,
         accent,
@@ -260,6 +264,19 @@ fn push_info_section<I>(
         lines.push(render_info_line_with_theme(&value, width, theme));
     }
     lines.push(Line::raw(String::new()));
+}
+
+pub(super) fn info_rail_header_row_count(
+    view_model: &InfoRailViewModel,
+    width: usize,
+    theme: &Theme,
+) -> usize {
+    3 + view_model
+        .workspace_git_status
+        .as_ref()
+        .map_or(0, |status| {
+            render_workspace_git_status(status, width, theme).len()
+        })
 }
 
 #[cfg(test)]

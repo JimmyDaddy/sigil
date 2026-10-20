@@ -7,28 +7,22 @@ use sigil_kernel::{
     stable_event_uuid, stable_workspace_id,
 };
 
-use super::{AppAction, AppState, TimelineRole};
+use super::{AppAction, AppState};
 use crate::workspace_trust::WorkspaceTrustGateState;
 
 impl AppState {
     pub(crate) fn enter_workspace_trust_gate(&mut self) -> Result<()> {
-        let workspace_id = stable_workspace_id(&self.workspace_root)?;
-        self.workspace_trust_gate_state = Some(WorkspaceTrustGateState::new(workspace_id));
+        stable_workspace_id(&self.workspace_root)?;
+        self.workspace_trust_gate_state = Some(WorkspaceTrustGateState);
         self.bootstrap_workspace_trust_gate();
         Ok(())
     }
 
     pub(crate) fn workspace_trust_gate_lines(&self) -> Vec<String> {
-        let workspace_id = self
-            .workspace_trust_gate_state
-            .as_ref()
-            .map(|state| state.workspace_id.as_str())
-            .unwrap_or("unknown");
         vec![
             "Workspace trust".to_owned(),
             "[workspace]".to_owned(),
             format!("path: {}", self.workspace_root.display()),
-            format!("id: {workspace_id}"),
             String::new(),
             "[what this means]".to_owned(),
             "Trust this workspace before Sigil loads repo-local instructions or checks.".to_owned(),
@@ -156,11 +150,6 @@ impl AppState {
         self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
-        self.push_timeline(TimelineRole::System, "workspace trust");
-        self.push_timeline(
-            TimelineRole::Notice,
-            "trust this workspace before using sigil",
-        );
         self.push_event("mode", "workspace_trust");
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event("session_log", self.session_log_path.display().to_string());

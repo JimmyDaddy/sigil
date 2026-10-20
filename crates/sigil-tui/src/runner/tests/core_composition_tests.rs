@@ -586,14 +586,21 @@ fn core_worker_runs_chat_queue_after_rejecting_plan_and_task_without_role_runtim
         target: ConversationInputTarget::MainThread,
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    worker.recv_until(|message| {
+    let WorkerMessage::ConversationQueueUpdated { items, .. } = worker.recv_until(|message| {
         matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 1)
-    })?;
+    })?
+    else {
+        bail!("queued core chat must publish its queued identity");
+    };
+    let queue_id = items[0].queued.queue_id.clone();
     gate.notify_one();
 
     let mut answers = Vec::new();
     let mut final_message_ids = std::collections::HashSet::new();
-    while answers.len() < 2 {
+    let mut finished_runs = 0;
+    // Final assistant events precede settlement. Shutdown must wait for both actual run
+    // completions so it cannot cancel the queued run before Delivered is persisted.
+    while finished_runs < 2 {
         match worker.recv_with_timeout(Duration::from_secs(10))? {
             WorkerMessage::Event(event) => {
                 if let RunEvent::AssistantMessage(message) = event.as_ref()
@@ -603,19 +610,22 @@ fn core_worker_runs_chat_queue_after_rejecting_plan_and_task_without_role_runtim
                     answers.push(message.content.clone().unwrap_or_default());
                 }
             }
-            WorkerMessage::RunFinished { result, .. }
+            WorkerMessage::RunFinished { result, .. } => {
+                finished_runs += 1;
                 if result
                     .final_message_id
                     .as_ref()
-                    .is_none_or(|id| final_message_ids.insert(id.clone())) =>
-            {
-                answers.push(result.final_text)
+                    .is_none_or(|id| final_message_ids.insert(id.clone()))
+                {
+                    answers.push(result.final_text);
+                }
             }
             WorkerMessage::RunFailed(error) => bail!("core conversation failed: {error}"),
             _ => {}
         }
     }
     assert_eq!(answers, ["first core answer", "queued core answer"]);
+    stream_started.recv_timeout(Duration::from_secs(5))?;
     worker.shutdown()?;
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
@@ -632,7 +642,7 @@ fn core_worker_runs_chat_queue_after_rejecting_plan_and_task_without_role_runtim
     assert!(seals[0].capabilities.is_empty());
     assert!(entries.iter().any(|entry| matches!(entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
-            if status.status == ConversationInputStatus::Delivered
+            if status.queue_id == queue_id && status.status == ConversationInputStatus::Delivered
     )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,

@@ -73,6 +73,7 @@ impl AppState {
 
     pub(crate) fn mark_worker_not_ready(&mut self) {
         self.worker_ready = false;
+        self.worker_startup_progress = None;
     }
 
     fn timeline_has_user_prompt(&self, prompt: &str) -> bool {
@@ -227,20 +228,16 @@ impl AppState {
                 // The host controller consumes this handshake; it is not a UI activation fact.
             }
             WorkerMessage::ApplicationRunOwnerReturned { .. } => {}
-            WorkerMessage::WorkerReady => {
-                self.worker_ready = true;
-                if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {
-                    self.last_notice = None;
+            WorkerMessage::StartupProgress(stage) => {
+                if !self.worker_ready {
+                    self.worker_startup_progress = Some(stage);
                 }
+            }
+            WorkerMessage::WorkerReady => {
+                self.worker_startup_progress = None;
+                self.worker_ready = true;
                 self.clear_pending_session_route_startup();
                 self.record_started_model_route();
-                if !self
-                    .timeline
-                    .iter()
-                    .any(|entry| entry.role == TimelineRole::System && entry.text == "sigil ready.")
-                {
-                    self.push_timeline(TimelineRole::System, "sigil ready.");
-                }
                 self.push_event("worker", "ready");
             }
             WorkerMessage::SessionAttachmentTransferred {
@@ -256,6 +253,7 @@ impl AppState {
                 retryable,
                 target_session,
             } => {
+                self.worker_startup_progress = None;
                 self.worker_ready = false;
                 if let Some(target) = target_session {
                     self.restore_session_view(
@@ -1515,6 +1513,7 @@ impl AppState {
                 self.open_egress_disclosure(disclosure, receipt_tx);
             }
             WorkerMessage::RunFailed(error) => {
+                self.worker_startup_progress = None;
                 self.worker_ready = false;
                 self.clear_checkpoint_interaction();
                 self.clear_worker_run_state();

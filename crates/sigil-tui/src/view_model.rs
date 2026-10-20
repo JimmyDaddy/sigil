@@ -54,7 +54,7 @@ pub(crate) struct InfoRailViewModel {
 }
 
 impl InfoRailViewModel {
-    fn from_app(app: &AppState) -> Self {
+    pub(crate) fn from_app(app: &AppState) -> Self {
         let detail = app.info_rail_detail_enabled();
         let controls = info_rail_controls(app, detail);
 
@@ -72,8 +72,9 @@ impl InfoRailViewModel {
             } else {
                 info_rail_permission_lines(app)
             },
-            agent_lines: app
-                .agent_graph_summary_line()
+            agent_lines: detail
+                .then(|| app.agent_graph_summary_line())
+                .flatten()
                 .into_iter()
                 .chain(
                     displayed_info_rail_agent_rows(app, detail)
@@ -89,8 +90,16 @@ impl InfoRailViewModel {
                         }),
                 )
                 .collect(),
-            mcp_lines: app.mcp_sidebar_lines(),
-            code_lines: app.code_intelligence_sidebar_lines(),
+            mcp_lines: if detail {
+                app.mcp_sidebar_lines()
+            } else {
+                app.mcp_attention_sidebar_lines()
+            },
+            code_lines: if detail {
+                app.code_intelligence_sidebar_lines()
+            } else {
+                app.code_intelligence_attention_lines()
+            },
             task_lines: if detail {
                 app.task_sidebar_lines()
             } else {
@@ -99,7 +108,7 @@ impl InfoRailViewModel {
             usage_lines: if detail {
                 detail_info_rail_usage_lines(app)
             } else {
-                compact_info_rail_usage_lines(app)
+                Vec::new()
             },
             controls,
         }
@@ -133,6 +142,9 @@ pub(crate) fn displayed_info_rail_agent_row_entries(
 
 pub(crate) fn info_rail_agent_row_entries(app: &AppState) -> Vec<(usize, SidebarAgentRow)> {
     let rows = app.agent_sidebar_rows();
+    if rows.len() <= 1 {
+        return Vec::new();
+    }
     if rows.len() <= INFO_RAIL_AGENT_ROW_LIMIT {
         return rows.into_iter().enumerate().collect();
     }
@@ -186,34 +198,7 @@ pub(crate) fn info_rail_agent_row_entries(app: &AppState) -> Vec<(usize, Sidebar
 }
 
 pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
-    let mut lines = vec![
-        format!(
-            "model: {} · {}",
-            app.runtime.model_name,
-            app.reasoning_effort_label()
-        ),
-        format!(
-            "state: {} · {}",
-            app.run_phase_label(),
-            short_session_label(&app.session_id)
-        ),
-    ];
-    if app.runtime.memory_enabled {
-        lines.push(format!(
-            "memory: {} docs · {}",
-            app.runtime.memory_document_count, app.runtime.memory_last_status
-        ));
-    } else {
-        lines.push("memory: off".to_owned());
-    }
-    let task_memory = app.task_memory_sidebar_lines();
-    if task_memory
-        .first()
-        .is_some_and(|line| line != "task memory: none yet")
-    {
-        lines.extend(task_memory);
-    }
-    lines
+    vec![format!("state: {}", app.run_phase_label())]
 }
 
 fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
@@ -261,15 +246,6 @@ fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
     }
     compact.truncate(INFO_RAIL_TASK_LINE_LIMIT);
     compact
-}
-
-fn compact_info_rail_usage_lines(app: &AppState) -> Vec<String> {
-    let lines = app.usage_sidebar_lines();
-    let preferred = ["ctx:", "compact:", "spent since opening:", "balance:"];
-    preferred
-        .iter()
-        .filter_map(|prefix| lines.iter().find(|line| line.starts_with(prefix)).cloned())
-        .collect()
 }
 
 fn detail_info_rail_usage_lines(app: &AppState) -> Vec<String> {
@@ -322,21 +298,23 @@ fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
         }
     }
     if compact.len() < INFO_RAIL_CONTROL_LIMIT {
-        for line in controls {
-            if compact.iter().any(|existing| existing == &line) {
+        for line in &controls {
+            if compact.iter().any(|existing| existing == line) {
                 continue;
             }
-            compact.push(line);
+            compact.push(line.clone());
             if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
                 break;
             }
         }
     }
+    if let Some(details) = controls.iter().find(|line| line.starts_with("Shift-F2:")) {
+        if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
+            compact.pop();
+        }
+        compact.push(details.clone());
+    }
     compact
-}
-
-fn short_session_label(session_id: &str) -> String {
-    session_id.chars().take(8).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -958,7 +936,7 @@ impl FooterViewModel {
                     .map(|status| status.compact_label())
                     .unwrap_or_default()
             },
-            context_label: app.context_usage_line(),
+            context_label: app.compact_context_usage_line(),
         }
     }
 }

@@ -30,13 +30,12 @@ fn app_uses_provider_supported_default_reasoning_effort() {
 
 #[test]
 fn app_state_domain_bundles_start_clean_without_hiding_public_timeline_fields() {
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    assert!(!app.timeline.is_empty());
+    assert!(app.timeline.is_empty());
     assert!(!app.events.is_empty());
     assert_eq!(app.timeline_scroll_back, 0);
     assert_eq!(app.activity_scroll_back, 0);
-    assert!(app.timeline_revision() > 0);
     assert!(app.timeline_state.tool_activity_cache.is_empty());
     assert!(app.review.checkpoint_restore_preview.is_none());
     assert!(!app.review.verification_card_focused);
@@ -45,6 +44,10 @@ fn app_state_domain_bundles_start_clean_without_hiding_public_timeline_fields() 
     assert!(app.egress_disclosure.pending.is_empty());
     assert!(app.egress_disclosure.recent.is_none());
     assert!(!app.egress_disclosure.rendered.get());
+    let revision = app.timeline_revision();
+    app.push_timeline(TimelineRole::User, "Inspect this workspace");
+    assert_eq!(app.timeline.len(), 1);
+    assert!(app.timeline_revision() > revision);
 }
 
 #[test]

@@ -1084,7 +1084,8 @@ def run_direct_task_acceptance(
     runner.start()
     SUPPORT.wait_for_main_tui(runner, deadline.remaining())
     wait_for_visible_screen(
-        lambda text: "sigil ready." in text
+        lambda text: re.search(r"\bstate:\s*ready\b", text) is not None
+        and SUPPORT.looks_like_main_tui(text)
         and "Working..." not in text
         and "Thinking..." not in text,
         deadline.remaining(60.0),

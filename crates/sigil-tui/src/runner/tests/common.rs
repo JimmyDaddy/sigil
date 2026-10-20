@@ -221,7 +221,7 @@ impl TestWorker {
     pub(super) fn recv(&self) -> Result<WorkerMessage> {
         self.recv_until(|message| {
             !matches!(message, WorkerMessage::WorkerReady)
-                && !matches!(message, WorkerMessage::Notice(notice) if notice.starts_with("startup: "))
+                && !matches!(message, WorkerMessage::StartupProgress(_))
         })
     }
 

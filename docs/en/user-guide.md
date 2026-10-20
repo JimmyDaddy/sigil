@@ -26,9 +26,11 @@ Type ordinary tasks in the composer. Use slash commands for a small set of contr
 
 ## Common Controls
 
-Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse the current task list, thinking, or activity. A collapsed task list also exposes a clickable `+N more tasks` row. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
+Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse the current task list, thinking, or activity. Thinking text starts fully collapsed, including while running; its header shows the state and can be expanded with `Ctrl-T` or a click. Final answers, errors, and approval details remain visible. A collapsed task list also exposes a clickable `+N more tasks` row. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
 
-The info rail is enabled by default when the terminal is wide enough. Its Git summary keeps the branch and total on the first row, then places staged, modified, untracked, conflict, and ahead/behind counts on a compact second row instead of truncating one long sentence. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
+The info rail is enabled by default when the terminal is wide enough. Its compact view prioritizes the current workspace, permission, and activity; use `Shift-F2` for module and usage details. Costs without trustworthy pricing or required billing inputs are shown as unestimated, and partial estimates are identified. Startup progress replaces one status rather than filling the conversation with successful startup notices; failures stay visible. Its Git summary keeps the branch and total on the first row, then places staged, modified, untracked, conflict, and ahead/behind counts on a compact second row instead of truncating one long sentence. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
+
+The footer omits zero context statistics before the first request. Once usage is reported, it shows occupancy and any capacity warning; `Shift-F2` keeps cache counts, configuration sources, and thresholds available in details. The first trust prompt shows the workspace path and decision controls without its internal identifier.
 
 Drag across transcript text and release the mouse to copy immediately. Sigil attempts both the system clipboard and, when enabled, the OSC52 terminal bridge; either path can complete the copy. A successful copy clears the highlight, while a failed copy keeps it available for `Ctrl-C` retry. `Ctrl-L` copies an active selection first; with no selection, it copies the latest assistant reply. All of these paths use transcript content, so the info rail is excluded. With no selection, `Ctrl-C` keeps its normal cancel or exit behavior.
 
@@ -133,7 +135,7 @@ Local Plan actions remain available after a model connection is removed. A faile
 
 Read-only file and search tools usually run directly. Writes, deletes, commands, network access, and external tools follow the configured permission policy.
 
-The approval modal centers the content that needs review: commands and tool requests use a dedicated high-contrast area, while file writes use the exact diff. Tool type and risk stay in a compact header; press `M` for policy, effect, and containment details. Requests without a file diff do not show empty panels.
+The approval modal centers the content that needs review: commands and tool requests use a dedicated high-contrast area, while file writes use the exact diff. Host permission risk stays in a compact header without a second model-reported risk label. Single-hunk reviews omit unused navigation; press `M` for policy, effect, and containment details. Requests without a file diff do not show empty panels.
 
 Before allowing a risky action, check:
 
@@ -184,7 +186,7 @@ When the current session has accepted Intent Stack history, press `Alt-S` or run
 
 ## Long Context and Compaction
 
-The info rail shows reported context use and warns as the model window fills. `/compact` directly generates, validates, and atomically activates one recoverable semantic checkpoint; there is no confirmation modal. On an admitted route this performs one billed semantic-summary request. Sigil shows progress and then an applied receipt or the exact refusal reason. A failed summary, token proof, economics check, or concurrent conversation change leaves the active context unchanged. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
+The footer shows reported context use and warns as the model window fills; use `Shift-F2` for detailed counts and policy. `/compact` directly generates, validates, and atomically activates one recoverable semantic checkpoint; there is no confirmation modal. On an admitted route this performs one billed semantic-summary request. Sigil shows progress and then an applied receipt or the exact refusal reason. A failed summary, token proof, economics check, or concurrent conversation change leaves the active context unchanged. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
 
 ## Code Intelligence
 

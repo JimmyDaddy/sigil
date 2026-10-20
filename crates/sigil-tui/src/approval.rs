@@ -134,13 +134,11 @@ pub(crate) struct ApprovalFileRow {
     pub selected: bool,
     pub diagnostics: Option<ApprovalDiagnosticSummary>,
     pub action: Option<String>,
-    pub risk: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ApprovalChangeSetSummary {
     pub id: String,
-    pub risk: String,
     pub format_hint: String,
 }
 

@@ -440,9 +440,6 @@ impl AppState {
                     action: change_set_files
                         .get(&normalize_approval_diagnostic_path(&file.path))
                         .map(|metadata| metadata.action.clone()),
-                    risk: change_set_files
-                        .get(&normalize_approval_diagnostic_path(&file.path))
-                        .map(|metadata| metadata.risk.clone()),
                     path: file.path.clone(),
                     selected: index == self.approval.selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(&file.path),
@@ -457,9 +454,6 @@ impl AppState {
                     action: change_set_files
                         .get(&normalize_approval_diagnostic_path(path))
                         .map(|metadata| metadata.action.clone()),
-                    risk: change_set_files
-                        .get(&normalize_approval_diagnostic_path(path))
-                        .map(|metadata| metadata.risk.clone()),
                     path: path.clone(),
                     selected: index == self.approval.selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(path),
@@ -1097,7 +1091,6 @@ fn approval_subject_label(subject: &sigil_kernel::ToolSubject) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApprovalChangeSetFileMetadata {
     action: String,
-    risk: String,
 }
 
 fn approval_changeset_summary(
@@ -1119,9 +1112,6 @@ fn approval_changeset_summary(
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned(),
-        risk: normalize_changeset_label(
-            args.get("risk").and_then(Value::as_str).unwrap_or("medium"),
-        ),
         format_hint: approval_format_hint(&paths),
     })
 }
@@ -1136,8 +1126,6 @@ fn approval_changeset_file_metadata(
     let Ok(args) = serde_json::from_str::<Value>(args_json) else {
         return BTreeMap::new();
     };
-    let default_risk =
-        normalize_changeset_label(args.get("risk").and_then(Value::as_str).unwrap_or("medium"));
     let Some(files) = args.get("files").and_then(Value::as_array) else {
         return BTreeMap::new();
     };
@@ -1151,14 +1139,9 @@ fn approval_changeset_file_metadata(
                 .and_then(Value::as_str)
                 .map(normalize_changeset_label)
                 .unwrap_or_else(|| "change".to_owned());
-            let risk = file
-                .get("risk")
-                .and_then(Value::as_str)
-                .map(normalize_changeset_label)
-                .unwrap_or_else(|| default_risk.clone());
             Some((
                 normalize_approval_diagnostic_path(path),
-                ApprovalChangeSetFileMetadata { action, risk },
+                ApprovalChangeSetFileMetadata { action },
             ))
         })
         .collect()
