@@ -8,7 +8,7 @@ use ratatui::{
 
 #[cfg(test)]
 use crate::app::AppState;
-use crate::config_panel::{CONFIG_HEADER_NOTICE, ConfigSection};
+use crate::config_panel::ConfigSection;
 use crate::surface::{ConfigSurface, SurfaceModel};
 
 use super::{
@@ -279,121 +279,99 @@ fn render_config_header_surface(
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
-    let content_width = area.width as usize;
-    let section = config.section_title.as_deref().unwrap_or("Config");
-    let (state, state_kind) = if config.save_error.is_some() {
-        ("save failed", StatusKind::Error)
-    } else if config.dirty {
-        ("unsaved", StatusKind::Warning)
-    } else {
-        ("saved", StatusKind::Success)
-    };
-    let state_style = if config.save_error.is_some() {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_danger)
-            .add_modifier(Modifier::BOLD)
-    } else if config.dirty {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_warning)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_primary)
-            .add_modifier(Modifier::BOLD)
-    };
-    let field = config.selected_field_label.as_deref().unwrap_or("summary");
-    let file_label = if config.file_label.is_empty() {
-        "config"
-    } else {
-        config.file_label.as_str()
-    };
-    let notice = config
-        .save_error
-        .as_deref()
-        .or_else(|| (!config.footer_hint.is_empty()).then_some(config.footer_hint.as_str()))
-        .unwrap_or(CONFIG_HEADER_NOTICE);
-    let title = " Sigil config ";
-    let mut summary_spans = Vec::new();
-    let mut remaining = content_width;
-    push_config_header_span(
-        &mut summary_spans,
-        &mut remaining,
-        title,
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.button_selected_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    push_config_header_pair_with_palette(
-        &mut summary_spans,
-        &mut remaining,
-        "section",
-        section,
+    let lines = config_header_lines(
+        &config.file_label,
+        config.dirty,
+        config.save_error.as_deref(),
+        config
+            .close_guard_armed
+            .then_some(config.footer_hint.as_str()),
+        area.width as usize,
         palette,
     );
-    push_config_header_span(
-        &mut summary_spans,
-        &mut remaining,
-        &format!(
-            " {} {state} ",
-            StatusIndicator::static_kind(state_kind).symbol()
-        ),
-        state_style,
-    );
-    push_config_header_pair_with_palette(
-        &mut summary_spans,
-        &mut remaining,
-        "field",
-        field,
-        palette,
-    );
-    let notice_min_width = "hint ".chars().count() + 12;
-    let file_value_width = content_width
-        .saturating_sub("file ".chars().count() + 2 + notice_min_width)
-        .min(content_width / 3);
-    let file_value = fit_config_value(file_label, file_value_width);
-    let notice_width = content_width.saturating_sub(
-        "file ".chars().count() + file_value.chars().count() + "  ".chars().count(),
-    );
-    let mut file_spans = vec![
-        Span::styled("file ", Style::default().fg(palette.text_muted)),
-        Span::styled(file_value, Style::default().fg(palette.text_secondary)),
-        Span::raw("  "),
-    ];
-    file_spans.extend(render_config_header_notice_with_palette(
-        notice,
-        notice_width,
-        palette,
-    ));
     frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(summary_spans),
-            Line::from(file_spans),
-        ]))
-        .style(Style::default().bg(panel_bg))
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(panel_bg)),
         area,
     );
+}
+
+fn config_header_lines(
+    file_label: &str,
+    dirty: bool,
+    save_error: Option<&str>,
+    close_warning: Option<&str>,
+    width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let (state, kind, accent) = if save_error.is_some() {
+        ("save failed", StatusKind::Error, palette.config_danger)
+    } else if dirty {
+        ("unsaved", StatusKind::Warning, palette.config_warning)
+    } else {
+        ("saved", StatusKind::Success, palette.config_primary)
+    };
+    let state = format!("{} {state}", StatusIndicator::static_kind(kind).symbol());
+    let state_width = super::text::terminal_cell_width(&state).min(width);
+    let title = super::text::truncate_display_width(
+        "Settings",
+        width.saturating_sub(state_width + 2).max(1),
+    );
+    let mut spans = Vec::new();
+    let mut remaining = width;
+    if width > state_width + 2 {
+        push_config_header_span(
+            &mut spans,
+            &mut remaining,
+            &title,
+            Style::default()
+                .fg(palette.text_primary)
+                .add_modifier(Modifier::BOLD),
+        );
+        let gap = " ".repeat(remaining.saturating_sub(state_width));
+        push_config_header_span(&mut spans, &mut remaining, &gap, Style::default());
+    }
+    push_config_header_span(
+        &mut spans,
+        &mut remaining,
+        &state,
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    );
+    let navigation = if let Some(warning) = close_warning {
+        Line::from(footer_status_spans_with_palette(
+            warning,
+            width,
+            Style::default()
+                .fg(palette.config_danger)
+                .add_modifier(Modifier::BOLD),
+            palette,
+        ))
+    } else {
+        let context = if matches!(file_label, "" | "config" | "sigil.toml") {
+            "Tab section · Up/Down field · Enter edit".to_owned()
+        } else {
+            format!("Config: {file_label}")
+        };
+        Line::from(Span::styled(
+            super::text::truncate_display_width(&context, width),
+            Style::default().fg(palette.text_secondary),
+        ))
+    };
+    vec![Line::from(spans), navigation]
 }
 
 fn render_config_context_panel_surface(
     frame: &mut Frame,
     area: Rect,
-    config: &ConfigSurface,
+    _config: &ConfigSurface,
     context_lines: Vec<String>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
     let lines = if context_lines.is_empty() {
-        vec![
-            config.status_summary.clone(),
-            String::new(),
-            "Move to a field to inspect its key and behavior.".to_owned(),
-            config.footer_hint.clone(),
-        ]
+        vec!["Move to a field to inspect its key and behavior.".to_owned()]
     } else {
         context_lines
     };
@@ -469,6 +447,13 @@ fn render_config_footer_surface(
         ));
         actions_width += footer_action_width(label, is_selected, compact);
     }
+    if config.save_error.is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::from(action_spans)).style(Style::default().bg(panel_bg)),
+            area,
+        );
+        return;
+    }
     let gap_width = if compact {
         " | ".chars().count()
     } else {
@@ -530,194 +515,25 @@ fn render_config_header(
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
-    let content_width = area.width as usize;
-    let section = app.config_section_title().unwrap_or("Config");
-    let (state, state_kind) = if app.config_save_error().is_some() {
-        ("save failed", StatusKind::Error)
-    } else if app.config_is_dirty() {
-        ("unsaved", StatusKind::Warning)
-    } else {
-        ("saved", StatusKind::Success)
-    };
-    let state_style = if app.config_save_error().is_some() {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_danger)
-            .add_modifier(Modifier::BOLD)
-    } else if app.config_is_dirty() {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_warning)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.config_primary)
-            .add_modifier(Modifier::BOLD)
-    };
-    let field = app.config_selected_field_label().unwrap_or("summary");
-    let file_label = config_file_label(app);
-    let notice = app.last_notice().unwrap_or(CONFIG_HEADER_NOTICE);
-    let title = " Sigil config ";
-    let mut summary_spans = Vec::new();
-    let mut remaining = content_width;
-    push_config_header_span(
-        &mut summary_spans,
-        &mut remaining,
-        title,
-        Style::default()
-            .fg(palette.button_selected_fg)
-            .bg(palette.button_selected_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    push_config_header_gap(&mut summary_spans, &mut remaining);
-    push_config_header_span(
-        &mut summary_spans,
-        &mut remaining,
-        section,
-        Style::default()
-            .fg(palette.config_detail)
-            .add_modifier(Modifier::BOLD),
-    );
-    push_config_header_gap(&mut summary_spans, &mut remaining);
-    push_config_header_span(
-        &mut summary_spans,
-        &mut remaining,
-        &format!(
-            " {} {state} ",
-            StatusIndicator::static_kind(state_kind).symbol()
-        ),
-        state_style,
-    );
-    push_config_header_pair_with_palette(
-        &mut summary_spans,
-        &mut remaining,
-        "field",
-        field,
-        palette,
-    );
-
-    let notice_min_width = "hint ".chars().count() + 12;
-    let file_value_width = content_width
-        .saturating_sub("file ".chars().count() + 2 + notice_min_width)
-        .min(content_width / 3);
-    let file_value = fit_config_value(&file_label, file_value_width);
-    let notice_width = content_width.saturating_sub(
-        "file ".chars().count() + file_value.chars().count() + "  ".chars().count(),
-    );
-    let mut file_spans = vec![
-        Span::styled("file ", Style::default().fg(palette.text_muted)),
-        Span::styled(file_value, Style::default().fg(palette.text_secondary)),
-        Span::raw("  "),
-    ];
-    file_spans.extend(render_config_header_notice_with_palette(
-        notice,
-        notice_width,
-        palette,
-    ));
-    let lines = vec![Line::from(summary_spans), Line::from(file_spans)];
-    let header = Paragraph::new(Text::from(lines))
-        .style(Style::default().bg(panel_bg))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(header, area);
-}
-
-#[cfg(test)]
-fn config_file_label(app: &AppState) -> String {
-    app.config_path
+    let file_label = app
+        .config_path
         .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("config")
-        .to_owned()
-}
-
-#[allow(dead_code)]
-fn render_config_header_notice(notice: &str, width: usize) -> Vec<Span<'static>> {
-    let palette = theme::default_palette();
-    render_config_header_notice_with_palette(notice, width, &palette)
-}
-
-fn render_config_header_notice_with_palette(
-    notice: &str,
-    width: usize,
-    palette: &ThemePalette,
-) -> Vec<Span<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let (marker, value_style) = if notice == CONFIG_HEADER_NOTICE {
-        ("hint ", Style::default().fg(palette.text_secondary))
-    } else {
-        (
-            "note ",
-            Style::default()
-                .fg(palette.config_warning)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-    let marker_width = marker.chars().count();
-    let marker_style = Style::default()
-        .fg(palette.text_muted)
-        .bg(palette.config_tab_bg)
-        .add_modifier(Modifier::BOLD);
-    if width <= marker_width {
-        return vec![Span::styled(fit_config_value(marker, width), marker_style)];
-    }
-    vec![
-        Span::styled(marker, marker_style),
-        Span::styled(
-            fit_config_value(notice, width.saturating_sub(marker_width)),
-            value_style,
-        ),
-    ]
-}
-
-fn push_config_header_gap(spans: &mut Vec<Span<'static>>, remaining: &mut usize) -> bool {
-    push_config_header_span(spans, remaining, "  ", Style::default())
-}
-
-#[allow(dead_code)]
-fn push_config_header_pair(
-    spans: &mut Vec<Span<'static>>,
-    remaining: &mut usize,
-    label: &str,
-    value: &str,
-) {
-    let palette = theme::default_palette();
-    push_config_header_pair_with_palette(spans, remaining, label, value, &palette);
-}
-
-fn push_config_header_pair_with_palette(
-    spans: &mut Vec<Span<'static>>,
-    remaining: &mut usize,
-    label: &str,
-    value: &str,
-    palette: &ThemePalette,
-) {
-    if !push_config_header_gap(spans, remaining) {
-        return;
-    }
-    let label = format!("{label}: ");
-    if *remaining <= label.chars().count() {
-        push_config_header_span(
-            spans,
-            remaining,
-            &label,
-            Style::default().fg(palette.text_muted),
-        );
-        return;
-    }
-    push_config_header_span(
-        spans,
-        remaining,
-        &label,
-        Style::default().fg(palette.text_muted),
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let close_warning = app
+        .config_close_guard_armed()
+        .then(|| app.config_footer_hint());
+    let lines = config_header_lines(
+        file_label,
+        app.config_is_dirty(),
+        app.config_save_error(),
+        close_warning.as_deref(),
+        area.width as usize,
+        palette,
     );
-    push_config_header_span(
-        spans,
-        remaining,
-        value,
-        Style::default().fg(palette.text_primary),
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(panel_bg)),
+        area,
     );
 }
 
@@ -773,7 +589,7 @@ fn render_config_panel(
                 .then_some(index)
         })
         .collect::<Vec<_>>();
-    let block = config_block_with_palette("Config", palette.config_primary, panel_bg, palette);
+    let block = config_block_with_palette("", palette.config_primary, panel_bg, palette);
     let content_area = block.inner(area);
     let content_width = content_area.width as usize;
     let detail = lines
@@ -850,18 +666,13 @@ fn render_config_selected_row_bgs(
 fn render_config_context_panel(
     frame: &mut Frame,
     area: Rect,
-    app: &AppState,
+    _app: &AppState,
     context_lines: Vec<String>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
     let lines = if context_lines.is_empty() {
-        vec![
-            app.config_status_summary(),
-            String::new(),
-            "Move to a field to inspect its key and behavior.".to_owned(),
-            app.config_footer_hint(),
-        ]
+        vec!["Move to a field to inspect its key and behavior.".to_owned()]
     } else {
         context_lines
     };
@@ -1047,6 +858,13 @@ fn render_config_footer(
         ));
         actions_width += footer_action_width(label, is_selected, compact);
     }
+    if app.config_save_error().is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::from(action_spans)).style(Style::default().bg(panel_bg)),
+            area,
+        );
+        return;
+    }
     let gap_width = if compact {
         " | ".chars().count()
     } else {
@@ -1133,6 +951,12 @@ pub(super) fn footer_action_width(label: &str, selected: bool, compact: bool) ->
 }
 
 fn footer_action_text(label: &str, selected: bool, compact: bool) -> String {
+    let label = match label {
+        "save" => "Ctrl-S save",
+        "save+close" => "F3 save+close",
+        "close" => "Esc close",
+        label => label,
+    };
     let inner = if selected {
         format!("> {label} <")
     } else {

@@ -42,8 +42,6 @@ pub(crate) const CONFIG_SECTION_NAV_HINT: &str = "Tab section";
 pub(crate) const CONFIG_FIELD_NAV_HINT: &str = "Up/Down field";
 pub(crate) const CONFIG_EDIT_OR_TOGGLE_HINT: &str = "Enter edit/toggle";
 pub(crate) const CONFIG_SAVE_HINT: &str = "Ctrl-S save";
-pub(crate) const CONFIG_HEADER_NOTICE: &str =
-    "Tab section · Up/Down field · Enter edit · Ctrl-S save";
 pub(crate) const CONFIG_CONTROLS_HINT: &str = "controls: Tab section · Up/Down field · Enter edit";
 pub(crate) const CONFIG_ACTIONS_HINT: &str = "actions: Down to actions · Ctrl-S save · Esc close";
 

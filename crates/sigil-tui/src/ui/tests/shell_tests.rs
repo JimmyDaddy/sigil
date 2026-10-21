@@ -840,7 +840,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Config"));
+    assert!(rendered.contains("Settings"));
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("Provider 1/13"));
     assert!(rendered.contains("▸ Connection"));
@@ -1066,7 +1066,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
 fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
     let mut config = test_config();
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let mut app = AppState::from_root_config(Path::new("project-settings.toml"), &config);
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(120, 28);
@@ -1089,7 +1089,11 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
         expected.palette.text_primary
     );
     assert_eq!(
-        cell_fg_at_text(&terminal, "file sigil.toml", "sigil.toml"),
+        cell_fg_at_text(
+            &terminal,
+            "Config: project-settings.toml",
+            "project-settings.toml"
+        ),
         expected.palette.text_secondary
     );
     Ok(())
@@ -1151,7 +1155,7 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
 
             let rendered = rendered_content(&terminal);
             assert!(
-                rendered.contains("Sigil config"),
+                rendered.contains("Settings"),
                 "width {width} should keep the config header for {title}"
             );
             assert!(
@@ -1163,7 +1167,7 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
                 "width {width} should keep details row {selected}"
             );
             assert!(
-                rendered.contains("[save]") || rendered.contains("> save <"),
+                rendered.contains("[Ctrl-S save]") || rendered.contains("> Ctrl-S save <"),
                 "width {width} should keep footer save action for {title}"
             );
         }
@@ -1204,16 +1208,15 @@ fn render_config_centers_content_on_very_wide_terminals() -> anyhow::Result<()> 
     let rows = rendered_rows(&terminal);
     let header_x = rows
         .iter()
-        .find_map(|row| char_index_of(row, "Sigil config"))
+        .find_map(|row| char_index_of(row, "Settings"))
         .expect("config header should render");
     let panel_x = rows
         .iter()
-        .filter(|row| !row.contains("Sigil config"))
-        .find_map(|row| char_index_of(row, "Config"))
+        .find_map(|row| char_index_of(row, "Provider 1/13"))
         .expect("config panel should render");
     let footer_x = rows
         .iter()
-        .find_map(|row| char_index_of(row, "[save]"))
+        .find_map(|row| char_index_of(row, "[Ctrl-S save]"))
         .expect("config footer should render");
     let details_x = rows
         .iter()
@@ -1233,30 +1236,43 @@ fn render_config_centers_content_on_very_wide_terminals() -> anyhow::Result<()> 
 }
 
 #[test]
-fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
+fn render_config_header_uses_single_state_and_clear_section() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let backend = TestBackend::new(96, 28);
+    let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
-
-    terminal.draw(|frame| render(frame, &app))?;
-
+    // Exercise the same ConfigSurface renderer used by the product.
+    let surface = crate::surface_adapter::build_surface_model(
+        ratatui::layout::Rect::new(0, 0, 80, 24),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    terminal.draw(|frame| super::super::render_surface(frame, &surface))?;
+    let rendered = rendered_content(&terminal);
     let rows = rendered_rows(&terminal);
-    let title_row = rows
+    let title = rows
         .iter()
-        .find(|row| row.contains("Sigil config"))
-        .expect("config title row should render");
-    let file_row = rows
-        .iter()
-        .find(|row| row.contains("file sigil.toml"))
-        .expect("config file row should render");
-
-    assert!(title_row.contains("Provider"));
-    assert!(title_row.contains(" saved "));
-    assert!(title_row.contains("field: Connection"));
-    assert!(!title_row.contains("Provider · saved"));
-    assert!(file_row.contains("note opened config"));
+        .find(|row| row.contains("Settings"))
+        .expect("settings title");
+    assert!(title.contains("✓ saved"));
+    assert_eq!(rendered.matches("✓ saved").count(), 1);
+    assert!(rendered.contains("Provider 1/13"));
+    assert!(rendered.contains("> Connection"));
+    assert!(rendered.contains("Tab section"));
+    assert!(rendered.contains("[Ctrl-S save]"));
+    assert!(rendered.contains("[F3 save+close]"));
+    assert!(rendered.contains("[Esc close]"));
+    assert!(rendered.contains("more v"));
+    for redundant in ["section:", "field:", "file sigil.toml", "note status:"] {
+        assert!(
+            !rendered.contains(redundant),
+            "unnecessary metadata: {redundant}"
+        );
+    }
     Ok(())
 }
 
@@ -1274,7 +1290,7 @@ fn render_config_footer_follows_short_content() -> anyhow::Result<()> {
     let rows = rendered_rows(&terminal);
     let footer_y = rows
         .iter()
-        .position(|row| row.contains("[save]"))
+        .position(|row| row.contains("[Ctrl-S save]"))
         .expect("config footer should render");
     let buffer = terminal.backend().buffer();
     let panel_bottom_y = (0..buffer.area.height)
@@ -1301,38 +1317,52 @@ fn render_config_footer_follows_short_content() -> anyhow::Result<()> {
 }
 
 #[test]
-fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Result<()> {
+fn render_config_footer_uses_keyed_actions_with_matching_hit_rectangles() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let backend = TestBackend::new(160, 36);
-    let mut terminal = Terminal::new(backend)?;
-
-    terminal.draw(|frame| render(frame, &app))?;
-
-    let rows = rendered_rows(&terminal);
-    let footer_y = rows
-        .iter()
-        .position(|row| row.contains("[save]") && row.contains("✓ saved"))
-        .expect("config footer toolbar should render");
-    let footer_row = &rows[footer_y];
-    let close_x = char_index_of(footer_row, "[close]").expect("close action should render");
-    let status_x = char_index_of(footer_row, "✓ saved").expect("status should render");
-    let chip_bg_cells = (0..terminal.backend().buffer().area.width)
-        .filter(|x| {
-            terminal
-                .backend()
-                .buffer()
-                .cell((*x, footer_y as u16))
-                .expect("cell in bounds")
-                .bg
-                == config_tab_bg()
-        })
-        .count();
-
-    assert!(status_x > close_x + 32);
-    assert!(footer_row.trim_end().ends_with("✓ saved"));
-    assert!(chip_bg_cells > 20);
+    for width in [80, 160] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 36))?;
+        terminal.draw(|frame| render(frame, &app))?;
+        let rows = rendered_rows(&terminal);
+        let footer_y = rows
+            .iter()
+            .position(|row| row.contains("[Ctrl-S save]"))
+            .expect("footer");
+        let footer = &rows[footer_y];
+        assert!(footer.contains("[F3 save+close]"));
+        assert!(footer.contains("[Esc close]"));
+        assert!(!footer.contains("saved"));
+        assert!(!footer.contains("status:"));
+        let layout =
+            crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, width, 36), &app);
+        let areas = &layout
+            .config_hit_areas
+            .as_ref()
+            .expect("config geometry")
+            .footer_actions;
+        assert_eq!(areas.len(), 3);
+        for (index, label) in ["[Ctrl-S save]", "[F3 save+close]", "[Esc close]"]
+            .into_iter()
+            .enumerate()
+        {
+            let area = areas[index].area;
+            assert_eq!(usize::from(area.y), footer_y);
+            let button = (area.x..area.right())
+                .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
+                .collect::<String>();
+            assert!(
+                button.contains(label),
+                "button {label} must stay inside its clickable area: {button:?}"
+            );
+            for x in [area.x, area.right() - 1] {
+                assert_eq!(
+                    layout.hit_target(x, area.y),
+                    crate::mouse::HitTarget::ConfigFooterAction { index }
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2070,7 +2100,7 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Config"));
+    assert!(rendered.contains("Settings"));
     assert!(!rendered.contains("Details"));
     assert!(rendered.contains("> Connection"));
     assert!(rendered.contains("active after save"));
@@ -2103,20 +2133,37 @@ fn render_config_screen_keeps_save_failure_visible() -> anyhow::Result<()> {
 
 #[test]
 fn render_config_header_truncates_long_status_summary() -> anyhow::Result<()> {
-    let long_config_name = "sigil-config-file-name-with-a-very-very-long-project-suffix.toml";
+    let long_config_name = "sigil-config-file-name-with-a-very-very-long-project-suffix-and-another-long-identifier.toml";
     let mut app = AppState::from_root_config(Path::new(long_config_name), &test_config());
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let backend = TestBackend::new(80, 28);
-    let mut terminal = Terminal::new(backend)?;
-
-    terminal.draw(|frame| render(frame, &app))?;
-
-    let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Sigil config"));
-    assert!(rendered.contains("field: Connection"));
-    assert!(rendered.contains("..."));
-    assert!(!rendered.contains(long_config_name));
+    let surface = crate::surface_adapter::build_surface_model(
+        ratatui::layout::Rect::new(0, 0, 80, 24),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    for production_surface in [false, true] {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        terminal.draw(|frame| {
+            if production_surface {
+                super::super::render_surface(frame, &surface);
+            } else {
+                render(frame, &app);
+            }
+        })?;
+        let rendered = rendered_content(&terminal);
+        let rows = rendered_rows(&terminal);
+        assert!(rendered.contains("Settings"));
+        assert!(rendered.contains("> Connection"));
+        assert!(!rendered.contains("field:"));
+        assert!(rows[1].contains("Config: sigil-config-file-name"));
+        assert!(rows[1].contains("..."));
+        assert!(rendered.contains("..."));
+        assert!(!rendered.contains(long_config_name));
+    }
     Ok(())
 }
 
@@ -2258,16 +2305,17 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("△ unsaved - save before close"));
-    assert!(rendered.contains("[save]"));
-    assert!(rendered.contains("[close]"));
+    assert!(rendered.contains("△ unsaved"));
+    assert_eq!(rendered.matches("△ unsaved").count(), 1);
+    assert!(rendered.contains("[Ctrl-S save]"));
+    assert!(rendered.contains("[Esc close]"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("✕ confirm"));
-    assert!(rendered.contains("> save <"));
+    assert!(rendered.contains("> Ctrl-S save <"));
     Ok(())
 }
 
@@ -2286,9 +2334,9 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("> save <"));
-    assert!(rendered.contains("[close]"));
-    assert!(rendered.contains("..."));
+    assert!(rendered.contains("> Ctrl-S save <"));
+    assert!(rendered.contains("[Esc close]"));
+    assert!(rendered.contains("confirm close - Esc discards"));
     assert!(rendered.contains("✕ confirm"));
     Ok(())
 }

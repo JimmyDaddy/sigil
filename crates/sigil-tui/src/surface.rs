@@ -36,10 +36,7 @@ pub(crate) struct SetupSurface {
 pub(crate) struct ConfigSurface {
     /// A bounded, display-only file label.  The renderer never receives the authority path.
     pub file_label: String,
-    pub section_title: Option<String>,
-    pub selected_field_label: Option<String>,
     pub detail_lines: Vec<String>,
-    pub status_summary: String,
     pub footer_hint: String,
     pub selected_footer_action: Option<String>,
     pub footer_actions: Vec<String>,

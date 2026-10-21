@@ -99,10 +99,7 @@ fn config_surface(app: &AppState) -> Option<ConfigSurface> {
     }
     Some(ConfigSurface {
         file_label: display_file_label(&app.config_path),
-        section_title: app.config_section_title().map(str::to_owned),
-        selected_field_label: app.config_selected_field_label().map(str::to_owned),
         detail_lines: app.config_detail_lines(),
-        status_summary: app.config_status_summary(),
         footer_hint: app.config_footer_hint(),
         selected_footer_action: app.config_selected_footer_action_label().map(str::to_owned),
         footer_actions: app

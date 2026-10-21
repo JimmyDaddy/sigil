@@ -1,4 +1,4 @@
-use crate::config_panel::{CONFIG_CONTROLS_HINT, CONFIG_HEADER_NOTICE};
+use crate::config_panel::CONFIG_CONTROLS_HINT;
 
 use super::*;
 
@@ -73,18 +73,48 @@ fn config_context_selected_field_uses_focus_chip() {
 }
 
 #[test]
-fn config_header_notice_uses_hint_and_note_chips() {
-    let hint_line = Line::from(render_config_header_notice(CONFIG_HEADER_NOTICE, 32));
-    let note_line = Line::from(render_config_header_notice("opened config", 32));
-    let hint_text = line_text(&hint_line);
-    let note_text = line_text(&note_line);
-    let hint_chip_width = highlighted_width(&hint_line);
-    let note_chip_width = highlighted_width(&note_line);
-
-    assert!(hint_text.contains("hint Tab section"));
-    assert!(note_text.contains("note opened config"));
-    assert_eq!(hint_chip_width, "hint ".chars().count());
-    assert_eq!(note_chip_width, "note ".chars().count());
+fn config_header_shows_one_state_and_navigation_without_internal_labels() {
+    let palette = theme::default_palette();
+    let lines = config_header_lines("sigil.toml", false, None, None, 80, &palette);
+    assert_eq!(lines.len(), 2);
+    assert!(line_text(&lines[0]).contains("Settings"));
+    assert!(line_text(&lines[0]).contains("✓ saved"));
+    assert_eq!(
+        line_text(&lines[1]),
+        "Tab section · Up/Down field · Enter edit"
+    );
+    assert!(lines.iter().all(|line| {
+        let text = line_text(line);
+        !text.contains("section:")
+            && !text.contains("field:")
+            && !text.contains("sigil.toml")
+            && !text.contains("status:")
+    }));
+    let custom = config_header_lines("project.toml", true, None, None, 80, &palette);
+    assert!(line_text(&custom[0]).contains("△ unsaved"));
+    assert_eq!(custom.len(), 2);
+    assert_eq!(line_text(&custom[1]), "Config: project.toml");
+    let closing = config_header_lines(
+        "project.toml",
+        true,
+        None,
+        Some("status: confirm close - Esc discards"),
+        80,
+        &palette,
+    );
+    assert_eq!(closing.len(), 2);
+    assert!(line_text(&closing[1]).contains("confirm close - Esc discards"));
+    assert!(!line_text(&closing[1]).contains("project.toml"));
+    let failed = config_header_lines(
+        "sigil.toml",
+        true,
+        Some("actual failure"),
+        None,
+        80,
+        &palette,
+    );
+    assert!(line_text(&failed[0]).contains("✕ save failed"));
+    assert!(!line_text(&failed[0]).contains("unsaved"));
 }
 
 #[test]
@@ -213,14 +243,21 @@ fn centered_config_area_respects_narrow_and_wide_bounds() {
 }
 
 #[test]
-fn render_config_header_notice_handles_zero_and_marker_only_widths() {
-    assert!(render_config_header_notice(CONFIG_HEADER_NOTICE, 0).is_empty());
-
-    let marker_only = Line::from(render_config_header_notice(CONFIG_HEADER_NOTICE, 4));
-
-    assert_eq!(marker_only.spans.len(), 1);
-    assert!(line_text(&marker_only).chars().count() <= 4);
-    assert_eq!(marker_only.spans[0].style.bg, Some(theme::config_tab_bg()));
+fn config_header_keeps_state_bounded_on_zero_and_narrow_widths() {
+    let palette = theme::default_palette();
+    assert!(config_header_lines("sigil.toml", false, None, None, 0, &palette).is_empty());
+    for width in [1, 4, 12, 80] {
+        let lines = config_header_lines("sigil.toml", false, None, None, width, &palette);
+        assert!(
+            lines
+                .iter()
+                .all(|line| super::super::text::terminal_cell_width(&line_text(line)) <= width)
+        );
+        assert_eq!(
+            lines[0].spans.last().expect("status").style.fg,
+            Some(palette.config_primary)
+        );
+    }
 }
 
 #[test]
@@ -236,14 +273,19 @@ fn config_header_span_helpers_stop_when_remaining_width_is_exhausted() {
     ));
 
     remaining = 3;
-    push_config_header_pair(&mut spans, &mut remaining, "field", "Model");
+    assert!(push_config_header_span(
+        &mut spans,
+        &mut remaining,
+        "Settings",
+        Style::default()
+    ));
     let text = spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert!(!text.contains("Model"));
-    assert!(text.chars().count() <= 3);
+    assert_eq!(remaining, 0);
+    assert_eq!(text.chars().count(), 3);
 }
 
 #[test]
@@ -289,14 +331,11 @@ fn footer_helpers_cover_compact_toolbar_and_status_prefix_stripping() {
     assert_eq!(footer_action_accent("activate"), theme::config_detail());
     assert_eq!(footer_action_accent("close"), theme::config_danger());
     assert_eq!(footer_action_accent("other"), theme::config_primary());
-    assert_eq!(footer_action_text("save", false, true), "[save]");
-    assert_eq!(
-        footer_action_text("save", true, false).chars().count(),
-        CONFIG_FOOTER_BUTTON_WIDTH
-    );
+    assert_eq!(footer_action_text("save", false, true), "[Ctrl-S save]");
+    assert_eq!(footer_action_text("save", true, false), "> Ctrl-S save <");
     assert_eq!(
         footer_action_width("save", true, false),
-        CONFIG_FOOTER_BUTTON_WIDTH
+        "> Ctrl-S save <".chars().count()
     );
     assert_eq!(footer_status_value("status: saved"), "saved");
     assert_eq!(footer_status_value("saved"), "saved");
