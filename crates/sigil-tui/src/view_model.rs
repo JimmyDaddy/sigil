@@ -1033,13 +1033,11 @@ fn footer_hints(app: &AppState) -> String {
             };
             return format!("{state} · Esc input");
         }
-        let session = pending.session_grant_available;
-        let shortcut_hint = if session {
-            "Shortcuts: Tab switch · Enter select · Y allow once · N deny"
-        } else {
-            "Shortcuts: Y allow once · N deny"
-        };
-        return format!("{shortcut_hint} · V details");
+        if !app.approval_review_open() {
+            return "Approval pending · Shift-Tab review · Enter queue · Ctrl-C cancel".to_owned();
+        }
+        return "Esc input · Y allow once · N deny · Tab switch · Enter select · M details"
+            .to_owned();
     }
     if app.verification_card_focused() {
         let action = if app.verification_card_has_action() {

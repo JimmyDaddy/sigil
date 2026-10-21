@@ -3,6 +3,8 @@ mod app_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod approval_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod approval_review_focus_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod branch_knowledge_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod change_review_flow_tests;

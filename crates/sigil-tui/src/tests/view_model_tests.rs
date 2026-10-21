@@ -1501,7 +1501,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     );
     assert_eq!(
         view_model.footer.hints,
-        "Shortcuts: Y allow once · N deny · V details"
+        "Esc input · Y allow once · N deny · Tab switch · Enter select · M details"
     );
     Ok(())
 }

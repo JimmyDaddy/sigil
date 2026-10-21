@@ -29,6 +29,18 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if layout.approval_modal.is_some() || layout.approval_modal_hit_areas.is_some() {
+            let same_request = layout
+                .approval_request_identity
+                .as_ref()
+                .zip(self.approval.pending.as_ref())
+                .is_some_and(|((call_id, request_id), pending)| {
+                    *call_id == pending.call.id && *request_id == pending.approval_request_id
+                });
+            if !self.approval_review_open() || !same_request {
+                return Ok(crate::mouse::AppMouseOutcome::Noop);
+            }
+        }
         if self.info_rail_detail_enabled() {
             let code = match input.kind {
                 crate::mouse::MouseInputKind::ScrollUp => KeyCode::Up,
@@ -247,50 +259,36 @@ impl AppState {
             crate::mouse::HitTarget::ConfigFooterAction { index } if self.is_config_mode() => {
                 self.handle_config_mouse_footer_action(index)
             }
-            crate::mouse::HitTarget::ApprovalFileRow { index }
-                if self.approval.has_actionable_pending() =>
-            {
+            crate::mouse::HitTarget::ApprovalFileRow { index } if self.approval_review_open() => {
                 if self.select_approval_file_index(index) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkPrevious
-                if self.approval.has_actionable_pending() =>
-            {
+            crate::mouse::HitTarget::ApprovalHunkPrevious if self.approval_review_open() => {
                 if self.jump_approval_hunk(false) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkNext if self.approval.has_actionable_pending() => {
+            crate::mouse::HitTarget::ApprovalHunkNext if self.approval_review_open() => {
                 if self.jump_approval_hunk(true) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalDiffViewToggle
-                if self.approval.has_actionable_pending() =>
-            {
+            crate::mouse::HitTarget::ApprovalDiffViewToggle if self.approval_review_open() => {
                 self.cycle_approval_diff_mode();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ApprovalMetadataToggle
-                if self.approval.has_actionable_pending() =>
-            {
+            crate::mouse::HitTarget::ApprovalMetadataToggle if self.approval_review_open() => {
                 self.toggle_approval_metadata();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ApprovalAction { action }
-                if self
-                    .approval
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.actions_available()) =>
-            {
+            crate::mouse::HitTarget::ApprovalAction { action } if self.approval_review_open() => {
                 let (call_id, approval_request_id) = self
                     .approval
                     .pending
@@ -386,7 +384,7 @@ impl AppState {
                 }
             }
             crate::mouse::HitTarget::ComposerQueueItem { index }
-                if !self.approval.has_actionable_pending() =>
+                if !self.approval_review_open() =>
             {
                 self.cancel_tool_card_body_click();
                 self.clear_timeline_text_selection();
@@ -397,7 +395,7 @@ impl AppState {
                 }
             }
             crate::mouse::HitTarget::ComposerQueueAction { action }
-                if !self.approval.has_actionable_pending() =>
+                if !self.approval_review_open() =>
             {
                 self.cancel_tool_card_body_click();
                 self.clear_timeline_text_selection();
@@ -405,7 +403,7 @@ impl AppState {
                     self.execute_composer_queue_action(action),
                 ))
             }
-            crate::mouse::HitTarget::Composer if !self.approval.has_actionable_pending() => {
+            crate::mouse::HitTarget::Composer if !self.approval_review_open() => {
                 Ok(self.click_composer(input, layout))
             }
             crate::mouse::HitTarget::InfoRailAgentRow { index }
@@ -611,6 +609,9 @@ impl AppState {
         upward: bool,
     ) -> Result<crate::mouse::AppMouseOutcome> {
         if self.approval.has_actionable_pending() {
+            if !self.approval_review_open() {
+                return Ok(crate::mouse::AppMouseOutcome::Noop);
+            }
             return match target {
                 crate::mouse::HitTarget::ApprovalModal
                 | crate::mouse::HitTarget::ApprovalDiffArea

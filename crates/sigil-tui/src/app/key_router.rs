@@ -71,6 +71,19 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> anyhow::Result<Option<Option<AppAction>>> {
+        if self.approval.has_actionable_pending()
+            && !self.approval_review_open()
+            && key.code == KeyCode::BackTab
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.approval.review_open = true;
+            self.active_pane = PaneFocus::Activity;
+            self.blur_composer_aux_panels();
+            self.last_notice = Some("reviewing pending approval".to_owned());
+            return Ok(Some(None));
+        }
         let context = resolve_input_context(self, key);
         let Some(command) = resolve_binding(context, key) else {
             return Ok(None);
@@ -227,6 +240,7 @@ impl AppState {
                 None
             }
             RoutedKeyCommand::ApprovalSlashComposer => {
+                self.approval.review_open = false;
                 self.active_pane = PaneFocus::Composer;
                 self.insert_input_character('/');
                 self.reset_input_history_navigation();
@@ -334,7 +348,7 @@ impl AppState {
 }
 
 pub(crate) fn resolve_input_context(app: &AppState, key: KeyEvent) -> InputContext {
-    if app.approval.has_actionable_pending() {
+    if app.approval_review_open() {
         return InputContext::ApprovalModal;
     }
     if app.composer.queue_panel_focused {
@@ -393,7 +407,10 @@ pub(crate) fn resolve_binding(context: InputContext, key: KeyEvent) -> Option<Ro
 }
 
 fn resolve_approval_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         return None;
     }
     match key.code {

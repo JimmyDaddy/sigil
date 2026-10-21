@@ -706,6 +706,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     );
 
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    approval_app.approval.review_open = true;
     approval_app.approval.pending = Some(PendingApproval {
         approval_request_id: "approval-layout".to_owned(),
         call: ToolCall {
@@ -922,6 +923,7 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
 #[test]
 fn layout_snapshot_hits_approval_file_rows_and_actions() {
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    approval_app.approval.review_open = true;
     approval_app.approval.pending = Some(PendingApproval {
         approval_request_id: "approval-layout-files".to_owned(),
         call: ToolCall {
@@ -1223,6 +1225,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
     app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::AssistantMessage(
         sigil_kernel::ModelMessage::assistant(Some("visible".to_owned()), Vec::new()),
     ))))?;
+    app.approval.review_open = true;
     app.approval.pending = Some(PendingApproval {
         approval_request_id: "approval-tight".to_owned(),
         call: ToolCall {

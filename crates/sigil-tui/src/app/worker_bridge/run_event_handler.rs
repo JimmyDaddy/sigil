@@ -157,6 +157,7 @@ impl EventHandler for AppState {
                 let activity_label = approval_activity_label(&pending);
                 self.dismiss_read_only_modal_for_attention();
                 self.approval.pending = Some(pending);
+                self.approval.review_open = true;
                 self.active_pane = PaneFocus::Activity;
                 self.approval.scroll_back = 0;
                 self.approval.metadata_collapsed = true;
@@ -220,6 +221,7 @@ impl EventHandler for AppState {
                         .and_then(|pending| spawn_agent_profile_id(&pending.call))
                 });
                 self.approval.pending = None;
+                self.approval.review_open = false;
                 self.active_pane = PaneFocus::Composer;
                 if let Some(Some(profile_id)) = approved_agent_profile {
                     self.set_agent_wait_phase(&profile_id);

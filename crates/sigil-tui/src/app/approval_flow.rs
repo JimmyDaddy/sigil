@@ -132,24 +132,38 @@ impl AppState {
 
         lines.push(String::new());
         if spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json).is_some() {
-            lines.push("Shortcuts: Y allow once · B background · N deny".to_owned());
+            lines.push("Shortcuts: Esc input · Y allow once · B background · N deny".to_owned());
         } else if pending.command_family_allow_pattern.is_some() {
             lines.push(
-                "Shortcuts: Tab switch · Enter select · Y allow once · F allow family · N deny"
+                "Shortcuts: Esc input · Tab switch · Enter select · Y allow once · F allow family · N deny"
                     .to_owned(),
             );
         } else if pending.session_grant_available {
-            lines.push("Shortcuts: Tab switch · Enter select · Y allow once · N deny".to_owned());
+            lines.push(
+                "Shortcuts: Esc input · Tab switch · Enter select · Y allow once · N deny"
+                    .to_owned(),
+            );
         } else {
-            lines.push("Shortcuts: Y allow once · N deny".to_owned());
+            lines.push("Shortcuts: Esc input · Y allow once · N deny".to_owned());
         }
         lines
+    }
+
+    pub(crate) fn approval_review_open(&self) -> bool {
+        self.approval.has_actionable_pending() && self.approval.review_open
     }
 
     pub(super) fn handle_pending_approval_key_event(
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
+        if !self.approval_review_open()
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
         if let Some(pending) = &self.approval.pending
             && pending.actions_available()
         {
@@ -242,6 +256,7 @@ impl AppState {
 
         match key.code {
             KeyCode::Char(character) if normalize_command_prefix_character(character).is_some() => {
+                self.approval.review_open = false;
                 self.active_pane = PaneFocus::Composer;
                 self.insert_input_character('/');
                 self.reset_input_history_navigation();
@@ -317,7 +332,10 @@ impl AppState {
                 Some(None)
             }
             KeyCode::Esc => {
-                self.active_pane = PaneFocus::Activity;
+                self.approval.review_open = false;
+                self.active_pane = PaneFocus::Composer;
+                self.blur_composer_aux_panels();
+                self.last_notice = Some("approval pending; input ready".to_owned());
                 Some(None)
             }
             KeyCode::Char(_) | KeyCode::Backspace => Some(None),
@@ -327,7 +345,7 @@ impl AppState {
 
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.approval.pending.as_ref()?;
-        if !pending.actions_available() {
+        if !self.approval_review_open() {
             return None;
         }
         let access_label = approval_pending_access_label(pending);

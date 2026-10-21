@@ -785,6 +785,7 @@ impl AppState {
                 self.runtime.is_busy = false;
                 self.runtime.allow_projection_run_recovery = false;
                 self.approval.pending = None;
+                self.approval.review_open = false;
                 self.clear_pending_plan_approval();
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use sigil_kernel::{
@@ -13,7 +14,9 @@ use sigil_kernel::{
 
 use super::*;
 use crate::{
-    app::tests::common::test_config,
+    app::tests::common::{
+        inject_write_file_approval, sample_approval_preview, test_approval_identity, test_config,
+    },
     mouse::{AppMouseOutcome, HitTarget, MouseInput, MouseInputKind},
     ui::LayoutSnapshot,
     view_model::UiViewModel,
@@ -346,4 +349,46 @@ fn verification_entries() -> Vec<SessionLogEntry> {
             workspace_snapshot_id: Some("snapshot-1".to_owned()),
         })),
     ]
+}
+
+#[test]
+fn approval_review_verification_focus_does_not_reopen_hidden_approval() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.session_browser.current_entries = verification_entries();
+    assert!(
+        app.task_strip_view()
+            .is_some_and(|view| view.verification.is_some())
+    );
+    app.runtime.is_busy = true;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.approval_review_open());
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT))?
+            .is_none()
+    );
+    assert!(app.verification_card_focused());
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert!(!app.approval_review_open());
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    for character in ['y', 'n'] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?
+                .is_none()
+        );
+    }
+    assert_eq!(app.composer.input, "yn");
+    let expected = test_approval_identity("call-1");
+    let pending = app.approval.pending.as_ref().expect("same pending request");
+    assert_eq!(pending.call.id, expected.call_id);
+    assert_eq!(pending.approval_request_id, expected.approval_request_id);
+    assert!(pending.actions_available());
+    assert!(!app.approval_review_open());
+    Ok(())
 }

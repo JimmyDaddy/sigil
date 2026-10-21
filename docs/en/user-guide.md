@@ -137,6 +137,8 @@ Read-only file and search tools usually run directly. Writes, deletes, commands,
 
 The approval modal centers the content that needs review: commands and tool requests use a dedicated high-contrast area, while file writes use the exact diff. Host permission risk stays in a compact header without a second model-reported risk label. Single-hunk reviews omit unused navigation; press `M` for policy, effect, and containment details. Requests without a file diff do not show empty panels.
 
+Press `Esc` to hide the review and return to the composer without allowing or denying the pending request. Type or paste a follow-up and press ordinary `Enter` to queue it; `Shift-Tab` returns to the same review. Approval letters such as `Y` and `N` decide only while the review is open. `Ctrl-C` still cancels the active run.
+
 Before allowing a risky action, check:
 
 - what will run;

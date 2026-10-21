@@ -122,7 +122,7 @@ impl AppState {
             self.handle_config_paste_text(&pasted);
             return;
         }
-        if self.approval.has_actionable_pending() {
+        if self.approval_review_open() {
             return;
         }
 

@@ -153,6 +153,7 @@ fn application_admission_failure_preserves_pending_approval_and_live_worker() ->
     let fixture = tempfile::tempdir()?;
     let mut app = application_admission_test_app(fixture.path());
     app.runtime.is_busy = true;
+    app.approval.review_open = true;
     app.approval.pending = Some(crate::app::PendingApproval {
         approval_request_id: "approval-1".to_owned(),
         call: ToolCall {

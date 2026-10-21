@@ -756,6 +756,7 @@ impl AppState {
         self.sync_current_session_state(entries.clone());
         self.restore_durable_attention_surfaces();
         self.approval.pending = None;
+        self.approval.review_open = false;
         self.runtime.run_phase = RunPhase::Idle;
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);

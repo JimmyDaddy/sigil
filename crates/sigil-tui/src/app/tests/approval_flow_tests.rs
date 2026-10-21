@@ -1187,12 +1187,14 @@ fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert!(app.approval.pending.is_some());
+    assert!(app.approval_modal_view().is_none());
     Ok(())
 }
 
 #[test]
-fn escape_in_pending_approval_only_changes_focus() -> Result<()> {
+fn escape_in_pending_approval_returns_to_composer_without_deciding() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.active_pane = PaneFocus::Composer;
     inject_write_file_approval(&mut app, sample_approval_preview())?;
@@ -1200,9 +1202,9 @@ fn escape_in_pending_approval_only_changes_focus() -> Result<()> {
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.approval.pending.is_some());
-    assert!(app.approval_modal_view().is_some());
+    assert!(app.approval_modal_view().is_none());
     Ok(())
 }
 

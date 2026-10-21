@@ -1687,6 +1687,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.runtime.is_busy = true;
+    app.approval.review_open = true;
     app.approval.pending = Some(PendingApproval {
         approval_request_id: "approval-1".to_owned(),
         call: ToolCall {
@@ -1741,6 +1742,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
 
     assert!(!app.runtime.is_busy);
     assert!(app.approval.pending.is_none());
+    assert!(!app.approval.review_open);
     assert!(app.modal_state.is_none());
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("agent idle"));
@@ -1789,6 +1791,8 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             .any(|entry| entry.role == TimelineRole::Notice && entry.text == "worker failed hard")
     );
 
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    assert!(app.approval_review_open());
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         session_log_path: restored_path.clone(),
@@ -1797,6 +1801,8 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         entries: entries.clone(),
     })?;
     assert_eq!(app.session_log_path, restored_path);
+    assert!(app.approval.pending.is_none());
+    assert!(!app.approval.review_open);
     assert_eq!(app.runtime.provider_name, "restored-provider");
     assert_eq!(app.runtime.model_name, "restored-model");
     assert_eq!(app.last_notice(), Some("restored from disk"));
@@ -5497,6 +5503,7 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert!(!app.has_modal());
     assert!(app.approval.pending.is_none());
+    assert!(!app.approval.review_open);
     assert!(
         app.pending_user_input().is_none(),
         "the returned durable session is authoritative after a continuation settles"

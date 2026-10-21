@@ -313,6 +313,8 @@ pub(crate) struct QueueEditComposerDraft {
 #[derive(Debug)]
 pub(crate) struct ApprovalState {
     pub(crate) pending: Option<PendingApproval>,
+    // Activity focus is shared by other attention surfaces; it cannot authorize review keys.
+    pub(crate) review_open: bool,
     pub(crate) scroll_back: usize,
     pub(crate) metadata_collapsed: bool,
     pub(crate) selected_file_index: usize,
@@ -325,6 +327,7 @@ impl Default for ApprovalState {
     fn default() -> Self {
         Self {
             pending: None,
+            review_open: false,
             scroll_back: 0,
             metadata_collapsed: true,
             selected_file_index: 0,

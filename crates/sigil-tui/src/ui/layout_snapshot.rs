@@ -55,6 +55,8 @@ pub struct LayoutSnapshot {
     pub info_rail_agent_rows: Vec<InfoRailAgentRowHitArea>,
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
+    // Mouse decisions must match the request whose controls were actually presented.
+    pub(crate) approval_request_identity: Option<(String, String)>,
     pub approval_modal_hit_areas: Option<ApprovalModalHitAreas>,
     pub(crate) session_modal_hit_areas: Option<SessionModalHitAreas>,
     pub(crate) intent_stack_modal_hit_areas: Option<IntentStackModalHitAreas>,
@@ -293,6 +295,12 @@ impl LayoutSnapshot {
             approval_modal: app
                 .approval_modal_view()
                 .map(|view| approval_modal_area(screen, &view)),
+            approval_request_identity: app
+                .approval
+                .pending
+                .as_ref()
+                .filter(|_| app.approval_review_open())
+                .map(|pending| (pending.call.id.clone(), pending.approval_request_id.clone())),
             approval_modal_hit_areas: app
                 .approval_modal_view()
                 .and_then(|view| approval_modal_hit_areas(screen, &view)),
@@ -327,6 +335,7 @@ impl LayoutSnapshot {
             info_rail_agent_rows: Vec::new(),
             slash_overlay: None,
             approval_modal: None,
+            approval_request_identity: None,
             approval_modal_hit_areas: None,
             session_modal_hit_areas: None,
             intent_stack_modal_hit_areas: None,

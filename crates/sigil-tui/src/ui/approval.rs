@@ -819,11 +819,11 @@ fn approval_footer_lines_with_palette(
     };
     let action_hint = if view.has_diff_preview {
         format!(
-            "Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · V view"
+            "Esc input · Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · V view"
         )
     } else {
         format!(
-            "Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · ↑/↓ scroll"
+            "Esc input · Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · ↑/↓ scroll"
         )
     };
     let navigation_hint = if view.has_diff_preview {
