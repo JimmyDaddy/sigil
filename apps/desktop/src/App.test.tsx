@@ -1315,7 +1315,7 @@ describe("new conversation persistence", () => {
       render(<App bridge={bridge} />);
       await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
       expect(openSession).toHaveBeenLastCalledWith(workspace.id, {
-        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId, label: created.label,
+        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId,
       });
       expect(editorText(await readyComposer())).toBe(draft);
     },
@@ -1361,7 +1361,7 @@ describe("new conversation persistence", () => {
       view.unmount();
       render(<App bridge={bridge} />);
       await waitFor(() => expect(openSession).toHaveBeenLastCalledWith(workspace.id, {
-        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId, label: created.label,
+        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId,
       }));
       expect(editorText(await readyComposer())).toBe(draft);
     },
@@ -2422,8 +2422,145 @@ describe("desktop workspace and history shell", () => {
     expect(openSession).toHaveBeenCalledWith(workspace.id, {
       sessionRef: "last-session.jsonl",
       sessionId: "durable-last-session",
-      label: "Last selected conversation",
     });
+  });
+
+  it.each(["startup", "catalog"] as const)("opens an exact session with the native multiline catalog title through %s", async (path) => {
+    const user = userEvent.setup();
+    // Exact own C11 catalog metadata: 159 UTF8 bytes, including two LF characters.
+    const title = "**C11_FORMAT_SELECTION\n活动说明：保留中文与 emoji 🌿。\n**请使用 request_user_input 提出一个必填自由文本问题，问题为“活动…";
+    const entry: CatalogEntry = { sessionRef: "multiline-title.jsonl", sessionId: "durable-multiline-title",
+      sourceState: "ready", sourceBytes: 1_024, sourceModifiedAtUnixMs: 1, title,
+      userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 1, pinned: false };
+    expect(new TextEncoder().encode(title)).toHaveLength(159);
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async (_workspaceId, input) => {
+      // Match the native label contract; the source identity itself is valid.
+      if (input.label?.includes("\n")) throw { code: "session_label_invalid" };
+      return { id: "http-multiline-title", runCount: 1 };
+    });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }), openSession,
+    });
+    if (path === "startup") writeLastSession(workspace.id, { sessionRef: entry.sessionRef, sessionId: entry.sessionId!, label: title });
+    const view = render(<App bridge={bridge} />);
+    if (path === "catalog") await user.click(await screen.findByRole("button", { name: /^\*\*C11_FORMAT_SELECTION/ }));
+    await screen.findByRole("heading", { name: /C11_FORMAT_SELECTION/ });
+    expect(openSession).toHaveBeenCalledExactlyOnceWith(workspace.id, {
+      sessionRef: entry.sessionRef, sessionId: entry.sessionId,
+    });
+    expect(openSession.mock.calls[0]?.[1]).not.toHaveProperty("label");
+    expect(readLastSession(workspace.id)).toEqual({ sessionRef: entry.sessionRef, sessionId: entry.sessionId, label: title });
+    view.unmount();
+    render(<App bridge={bridge} />);
+    await screen.findByRole("heading", { name: /C11_FORMAT_SELECTION/ });
+    expect(openSession).toHaveBeenCalledTimes(2);
+    expect(openSession.mock.calls[1]?.[1]).toEqual({ sessionRef: entry.sessionRef, sessionId: entry.sessionId });
+  });
+
+  it.each(["session_label_invalid", "workspace_request_failed"] as const)("preserves a remembered identity and exposes manual recovery after %s", async (code) => {
+    const user = userEvent.setup();
+    const remembered = { sessionRef: "recoverable-last.jsonl", sessionId: "durable-recoverable-last", label: "Recoverable last conversation" };
+    writeLastSession(workspace.id, remembered);
+    const openSession = vi.fn<DesktopBridge["openSession"]>()
+      .mockRejectedValueOnce({ code, ...(code === "workspace_request_failed" ? { recoveryActions: ["retry_current"] } : {}) })
+      .mockResolvedValueOnce({ id: "http-recovered-last", label: remembered.label, runCount: 1 });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [{ ...remembered, title: remembered.label, sourceState: "ready",
+        sourceBytes: 512, sourceModifiedAtUnixMs: 1, userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false }] }),
+      openSession,
+    })} />);
+    expect(await screen.findByRole("heading", { name: "Conversation unavailable" })).toBeTruthy();
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    expect(openSession).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Retry conversation" }));
+    await screen.findByRole("heading", { name: remembered.label });
+    expect(openSession).toHaveBeenCalledTimes(2);
+    expect(openSession.mock.calls.every(([, input]) => input.sessionRef === remembered.sessionRef && input.sessionId === remembered.sessionId && input.label === undefined)).toBe(true);
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+  });
+
+  it("passes the exact existing attachment recovery binding when retrying a remembered session", async () => {
+    const user = userEvent.setup();
+    const remembered = { sessionRef: "bound-retry.jsonl", sessionId: "durable-bound-retry", label: "Bound retry conversation" };
+    const recoveryBinding = `sha256:${"c".repeat(64)}`;
+    writeLastSession(workspace.id, remembered);
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async (_workspaceId, input) => {
+      if (input.recoveryBinding !== recoveryBinding) throw {
+        code: "session_open_recovery_required", routeRecovery: { code: "session_already_active", retryable: true,
+          allowedActions: ["retry_session_attach"], recoveryBinding },
+      };
+      return { id: "http-bound-retry", label: remembered.label, runCount: 1 };
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), openSession,
+      catalog: async () => ({ ...emptyCatalog, entries: [{ ...remembered, title: remembered.label, sourceState: "ready",
+        sourceBytes: 512, sourceModifiedAtUnixMs: 1, userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false }] }),
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Retry conversation" }));
+    await screen.findByRole("heading", { name: remembered.label });
+    expect(openSession).toHaveBeenNthCalledWith(2, workspace.id, {
+      sessionRef: remembered.sessionRef, sessionId: remembered.sessionId, recoveryBinding,
+    });
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+  });
+
+  it("keeps retrying the exact remembered identity when a transient retry fails and the first catalog page omits it", async () => {
+    const user = userEvent.setup();
+    const remembered = { sessionRef: "older-retry.jsonl", sessionId: "durable-older-retry", label: "An older conversation" };
+    const bindings = [`sha256:${"a".repeat(64)}`, `sha256:${"b".repeat(64)}`];
+    writeLastSession(workspace.id, remembered);
+    let attempt = 0;
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async () => {
+      attempt += 1;
+      if (attempt <= 2) throw { code: "session_open_recovery_required", routeRecovery: {
+        code: "session_writer_busy", retryable: true, allowedActions: ["retry_session_attach"], recoveryBinding: bindings[attempt - 1],
+      } };
+      return { id: "http-older-retry", label: remembered.label, runCount: 1 };
+    });
+    const catalog = vi.fn<DesktopBridge["catalog"]>(async () => ({ ...emptyCatalog,
+      entries: [{ sessionRef: "newer.jsonl", sessionId: "durable-newer", title: "Newer conversation", sourceState: "ready",
+        sourceBytes: 512, sourceModifiedAtUnixMs: 2, userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false }],
+      nextCursor: "older-page-not-yet-loaded",
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), openSession, catalog,
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Retry conversation" }));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
+    const retry = await screen.findByRole("button", { name: "Retry conversation" });
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+    expect(screen.queryByText("Conversation history refreshed because the list changed.")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    await user.click(retry);
+    await screen.findByRole("heading", { name: remembered.label });
+    expect(openSession.mock.calls.map(([, input]) => input)).toEqual([
+      { sessionRef: remembered.sessionRef, sessionId: remembered.sessionId },
+      { sessionRef: remembered.sessionRef, sessionId: remembered.sessionId, recoveryBinding: bindings[0] },
+      { sessionRef: remembered.sessionRef, sessionId: remembered.sessionId, recoveryBinding: bindings[1] },
+    ]);
+    expect(catalog.mock.calls.every(([, query]) => query.cursor === undefined)).toBe(true);
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+  });
+
+  it("retains the remembered identity without opening or retrying when authority recovery disallows it", async () => {
+    const remembered = { sessionRef: "authority-last.jsonl", sessionId: "durable-authority-last", label: "Unavailable authority" };
+    writeLastSession(workspace.id, remembered);
+    const openSession = vi.fn<DesktopBridge["openSession"]>().mockRejectedValue({
+      code: "session_open_recovery_required", routeRecovery: { code: "authority_unavailable", retryable: false,
+        allowedActions: ["back_to_session_library"], recoveryBinding: "" },
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), openSession,
+    })} />);
+    await screen.findByRole("heading", { name: "Conversation unavailable" });
+    expect(readLastSession(workspace.id)).toEqual(remembered);
+    expect(screen.queryByRole("button", { name: "Retry conversation" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    expect(openSession).toHaveBeenCalledOnce();
   });
 
   it.each(["loading", "failed", "unconfigured"] as const)(
@@ -2507,13 +2644,14 @@ describe("desktop workspace and history shell", () => {
     expect(unsubscribe).toHaveBeenCalled();
   });
 
-  it("falls back to the conversation list when the remembered session is stale", async () => {
+  it("surfaces a rejected remembered session without silently forgetting its identity", async () => {
     writeLastSession(workspace.id, {
       sessionRef: "missing-session.jsonl",
       sessionId: "durable-missing-session",
       label: "Missing conversation",
     });
-    const openSession = vi.fn(async () => Promise.reject(new Error("missing")));
+    // Native opening currently maps missing/denied server responses to this bounded rejection.
+    const openSession = vi.fn(async () => Promise.reject({ code: "workspace_request_rejected", recoveryActions: ["show_details"] }));
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -2523,9 +2661,11 @@ describe("desktop workspace and history shell", () => {
       openSession,
     })} />);
 
-    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Conversation unavailable" })).toBeTruthy();
     await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
-    expect(readLastSession(workspace.id)).toBeUndefined();
+    expect(readLastSession(workspace.id)?.sessionId).toBe("durable-missing-session");
+    expect(screen.queryByRole("button", { name: "Retry conversation" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
   });
 
   it("retries the exact recent workspace and exposes only bounded safe recovery details", async () => {
@@ -2856,17 +2996,15 @@ describe("desktop workspace and history shell", () => {
     expect(openSession).toHaveBeenNthCalledWith(1, workspace.id, {
       sessionRef: entry.sessionRef,
       sessionId: entry.sessionId,
-      label: entry.title,
     });
     expect(openSession).toHaveBeenNthCalledWith(2, workspace.id, {
       sessionRef: entry.sessionRef,
       sessionId: entry.sessionId,
-      label: entry.title,
     });
     expect(catalog).toHaveBeenCalledTimes(2);
   });
 
-  it("stops retrying when a failed conversation refreshes as an invalid source", async () => {
+  it.each(["invalid", "identity_changed"] as const)("stops retrying when a failed conversation refreshes with explicit source facts (%s)", async (change) => {
     const user = userEvent.setup();
     const readyEntry = {
       sessionRef: "incompatible.jsonl",
@@ -2880,15 +3018,15 @@ describe("desktop workspace and history shell", () => {
       toolResultCount: 0,
       pinned: false,
     };
-    const invalidEntry = {
+    const changedEntry = change === "invalid" ? {
       ...readyEntry,
       sessionId: undefined,
       sourceState: "invalid" as const,
       sourceDiagnostic: "invalid_event_stream" as const,
-    };
+    } : { ...readyEntry, sessionId: "different-durable-scope" };
     const catalog = vi.fn()
       .mockResolvedValueOnce({ ...emptyCatalog, entries: [readyEntry] })
-      .mockResolvedValueOnce({ ...emptyCatalog, generation: 2, entries: [invalidEntry] });
+      .mockResolvedValueOnce({ ...emptyCatalog, generation: 2, entries: [changedEntry] });
     const openSession = vi.fn(async () => Promise.reject(new Error("not ready")));
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),

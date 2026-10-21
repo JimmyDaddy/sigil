@@ -52,6 +52,7 @@ interface AppProps {
 
 type LoadState = "loading" | "ready" | "working" | "error";
 type SessionActionState = "idle" | "working" | "error";
+type SessionOpenTarget = Pick<CatalogEntry, "sessionRef" | "sessionId" | "title">;
 type ConversationNavigationState =
   | { readonly kind: "creating"; readonly targetSessionId?: string }
   | { readonly kind: "opening"; readonly sessionRef: string; readonly title: string; readonly targetSessionId?: string };
@@ -142,10 +143,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
+  const [sessionRestoreFailed, setSessionRestoreFailed] = useState(false);
   const [sessionReopenIssue, setSessionReopenIssue] = useState<CreatedSessionSummary>();
   const [sessionReopenBusy, setSessionReopenBusy] = useState(false);
   const [sessionRecovery, setSessionRecovery] = useState<SessionRouteRecoveryView>();
-  const [failedSessionEntry, setFailedSessionEntry] = useState<CatalogEntry>();
+  const [failedSessionEntry, setFailedSessionEntry] = useState<SessionOpenTarget>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
   const [pendingSessionDelete, setPendingSessionDelete] = useState<CatalogEntry>();
@@ -440,6 +442,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setSessionActionState("idle");
     setConversationNavigation(undefined);
     setSessionMessage(undefined);
+    setSessionRestoreFailed(false);
     setFailedSessionEntry(undefined);
     setWorkspaceRunContext(undefined);
     setDefaultModel(undefined);
@@ -457,10 +460,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     void bridge.openSession(activeWorkspaceId, {
       sessionRef: remembered.sessionRef,
       sessionId: remembered.sessionId,
-      label: remembered.label,
     }).then((session) => {
       if (sessionSelectionEpoch.current !== selectionEpoch) return false;
-      setSelectedSession(session);
+      setSelectedSession({ ...session, label: session.label ?? remembered.label });
       setSelectedDurableSessionId(remembered.sessionId);
       setConversationNavigation((current) =>
         current?.kind === "opening" && current.sessionRef === remembered.sessionRef
@@ -470,10 +472,21 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionActionState("idle");
       setSessionMessage(undefined);
       setFailedSessionEntry(undefined);
-    }).catch(() => {
+    }).catch((error) => {
       if (sessionSelectionEpoch.current !== selectionEpoch) return false;
-      writeLastSession(activeWorkspaceId, undefined);
-      setSessionActionState("idle");
+      const routeRecovery = sessionRouteRecoveryFromError(error);
+      const recoveryActions = recoveryActionsFromError(error, ["retry_current"]);
+      const canRetry = routeRecovery === undefined
+        ? recoveryActions === undefined || recoveryActions.includes("retry_current")
+        : routeRecovery.retryable && routeRecovery.allowedActions.includes("retry_session_attach");
+      setSessionRecovery(routeRecovery);
+      setSessionActionState("error");
+      setSessionRestoreFailed(true);
+      setSessionMessage(routeRecovery?.code === "authority_unavailable"
+        ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
+      setFailedSessionEntry(canRetry ? {
+        sessionRef: remembered.sessionRef, sessionId: remembered.sessionId, title: remembered.label,
+      } : undefined);
       setConversationNavigation(undefined);
     });
   }, [activeWorkspaceId, bridge]);
@@ -702,6 +715,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
+    setSessionRestoreFailed(false);
     const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
@@ -748,7 +762,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
-  const openSession = async (entry: CatalogEntry, recoveryBinding?: string): Promise<boolean> => {
+  const openSession = async (entry: SessionOpenTarget, recoveryBinding?: string): Promise<boolean> => {
     if (activeWorkspaceId === undefined || entry.sessionId === undefined) return false;
     if (
       recoveryBinding === undefined
@@ -773,7 +787,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef: entry.sessionRef,
         sessionId: entry.sessionId,
-        label: entry.title,
         recoveryBinding,
       });
       if (sessionSelectionEpoch.current !== selectionEpoch) return false;
@@ -782,7 +795,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           ? { ...current, targetSessionId: session.id }
           : current,
       );
-      setSelectedSession(session);
+      setSelectedSession({ ...session, label: entry.title ?? session.label });
+      setSessionRestoreFailed(false);
       setSelectedDurableSessionId(entry.sessionId);
       setSessionReopenIssue(undefined);
       setSessionReopenBusy(false);
@@ -808,11 +822,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const refreshed = await loadHistory(activeWorkspaceId);
       if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       const refreshedEntry = refreshed?.entries.find(
-        (candidate) => candidate.sessionRef === entry.sessionRef
-          && candidate.sessionId === entry.sessionId,
+        (candidate) => candidate.sessionRef === entry.sessionRef,
       );
-      if (refreshed !== undefined
-        && (refreshedEntry === undefined || refreshedEntry.sourceState !== "ready")) {
+      // A filtered or paged catalog can omit a valid target. Only returned source facts
+      // can retire this exact retry identity; absence alone cannot prove a change.
+      if (refreshedEntry !== undefined
+        && (refreshedEntry.sessionId !== entry.sessionId || refreshedEntry.sourceState !== "ready")) {
         setSessionActionState("error");
         setSessionMessage(t("historyChangedRefreshed"));
         setFailedSessionEntry(undefined);
@@ -856,13 +871,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const session = await bridge.openSession(activeWorkspaceId, {
         sessionRef,
         sessionId,
-        label: title,
       });
       if (sessionSelectionEpoch.current !== selectionEpoch) return;
       setConversationNavigation((current) => current?.kind === "opening"
         ? { ...current, targetSessionId: session.id }
         : current);
-      setSelectedSession(session);
+      setSelectedSession({ ...session, label: session.label ?? title });
       setSelectedDurableSessionId(sessionId);
       setNavigationOpen(false);
       setSessionActionState("idle");
@@ -1007,7 +1021,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   };
   const legacyIdentity = legacyWorkspace ?? legacyRecent;
   const emptyCreationAllowed = sessionRecovery === undefined || sessionRecovery.allowedActions.includes("start_new_session");
-  const recoveryWithoutSession = selectedSession === undefined && !emptyCreationAllowed;
+  const recoveryWithoutSession = selectedSession === undefined && (
+    !emptyCreationAllowed || sessionRestoreFailed
+  );
   const historyFiltersApplied = searchQuery.trim() !== "" || searchDraft.trim() !== "" || providerFilter.trim() !== "" || sourceFilter !== "all" || pinnedOnly;
   const emptyHistory = historyState === "ready" && catalog.workspaceId === activeWorkspaceId && catalog.entries.length === 0;
   const sessionNavigationBusy = sessionActionState === "working" || conversationNavigation !== undefined;
@@ -1042,7 +1058,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setPinnedOnly(false);
       }}
       onRetry={() => void loadHistory(activeWorkspace.id)}
-      onRetrySession={failedSessionEntry === undefined ? undefined : () => void openSession(failedSessionEntry)}
+      onRetrySession={failedSessionEntry === undefined ? undefined : () => void openSession(failedSessionEntry, sessionRecovery?.recoveryBinding || undefined)}
       onLoadMore={() => {
         if (catalog.nextCursor !== undefined) void loadHistory(activeWorkspace.id, catalog.nextCursor);
       }}
@@ -1334,8 +1350,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               <div className="conversation-empty" role="alert">
                 <h1>{t("conversationUnavailable")}</h1>
                 <p>{sessionMessage}</p>
-                {sessionRecovery?.allowedActions.includes("back_to_session_library") ? <Button type="button" onClick={() => navigate("library")}>{t("openConversationLibrary")}</Button> : null}
-                {failedSessionEntry !== undefined && sessionRecovery?.allowedActions.includes("retry_session_attach") ? <Button type="button" disabled={sessionNavigationBusy} onClick={() => void openSession(failedSessionEntry)}>{t("retryConversation")}</Button> : null}
+                {sessionRecovery === undefined || sessionRecovery.allowedActions.includes("back_to_session_library") ? <Button type="button" onClick={() => navigate("library")}>{t("openConversationLibrary")}</Button> : null}
+                {failedSessionEntry !== undefined && (sessionRecovery === undefined || sessionRecovery.allowedActions.includes("retry_session_attach")) ? <Button type="button" disabled={sessionNavigationBusy} onClick={() => void openSession(failedSessionEntry, sessionRecovery?.recoveryBinding || undefined)}>{t("retryConversation")}</Button> : null}
                 {sessionRecovery?.allowedActions.some((action) => action === "repair_connection" || action === "select_replacement") ? <Button type="button" onClick={() => navigate("settings")}>{t("openSettings")}</Button> : null}
               </div>
             ) : selectedSession === undefined ? (
@@ -1411,9 +1427,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                     const reopened = await bridge.openSession(activeWorkspaceId, {
                       sessionRef: entry.sessionRef,
                       sessionId: entry.sessionId,
-                      label: entry.title,
                     });
-                    setSelectedSession(reopened);
+                    setSelectedSession({ ...reopened, label: reopened.label ?? entry.title });
                     return true;
                   } catch {
                     return false;
