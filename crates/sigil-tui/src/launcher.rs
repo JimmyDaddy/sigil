@@ -1832,14 +1832,7 @@ where
         AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
             #[cfg(not(test))]
             {
-                let route = app
-                    .pending_session_route_selection()
-                    .map(|(_, route)| route.clone())
-                    .or_else(|| app.current_session_route());
-                if let Some(route) = route {
-                    return runtime_transition::start(app, worker, route);
-                }
-                return Ok(());
+                return runtime_transition::start_after_config_save(app, worker);
             }
             #[cfg(test)]
             {
@@ -2687,6 +2680,22 @@ fn queue_run_admission(
 ) -> Result<bool> {
     if !is_run_admission_action(action) {
         return Ok(false);
+    }
+    if worker.is_none()
+        && app
+            .runtime_maintenance
+            .as_ref()
+            .is_some_and(|owner| owner.has_failed())
+    {
+        app.restore_unadmitted_run_input(action);
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!(
+                "session runtime is unavailable; input kept; retry the session or open settings"
+            ),
+        )?;
+        return Ok(true);
     }
     let Some(runtime) = worker.as_mut() else {
         return Ok(false);

@@ -410,6 +410,27 @@ impl RuntimeSessionWorkerHost for WorkerHost {
 }
 
 impl RuntimeTransitionOwner {
+    fn can_retire_for_session(&self, session_id: &str) -> bool {
+        self.completed
+            && self.activation_acknowledged
+            && self.handle.is_none()
+            && self.controller.inputs.session_id != session_id
+            && self.workers.lock().is_ok_and(|workers| workers.is_none())
+            && self
+                .cleanup_failure
+                .lock()
+                .is_ok_and(|failure| failure.is_none())
+    }
+
+    fn retire_after_worker_join(&self, session_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.can_retire_for_session(session_id),
+            "session controller is not a completed activation in a retired scope"
+        );
+        self.application.endpoint.retire_route_operation()?;
+        Ok(())
+    }
+
     /// Retains every owner while making a replacement UI unable to consume this operation's
     /// route/config result. Cleanup joins the old admission on a separate background thread.
     pub(crate) fn invalidate_view(&mut self) {
@@ -512,6 +533,20 @@ impl RuntimeTransitionOwner {
 
 /// Every route action enters here. The UI only freezes values and transfers the worker owner;
 /// store reads, shutdown, CAS, spawn and Ready waiting all run on the controller thread.
+pub(super) fn start_after_config_save(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> Result<()> {
+    let route = app
+        .pending_session_route_selection()
+        .map(|(_, route)| route.clone())
+        .or_else(|| app.current_session_route());
+    match route {
+        Some(route) => start(app, worker, route),
+        None => Ok(()),
+    }
+}
+
 pub(super) fn start(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,

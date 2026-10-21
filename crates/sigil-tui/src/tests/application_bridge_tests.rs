@@ -20,6 +20,111 @@ use sigil_application::{
 
 use super::*;
 
+fn tui_journal_fixture() -> Result<(tempfile::TempDir, TuiApplicationJournals, ApplicationScope)> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let fixture = tempfile::tempdir()?;
+    let state = fixture.path().join("state");
+    let execution = fixture.path().join("execution");
+    std::fs::create_dir_all(state.join("cache"))?;
+    std::fs::create_dir(&execution)?;
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &state,
+        &execution,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x67; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x76; 32]),
+        },
+        Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[
+            Channel::ApplicationControlLog,
+            Channel::ApplicationCommandIndex,
+            Channel::ApplicationControlRecovery,
+        ],
+    )?;
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("tui-journal")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("test-workspace")?),
+        session: Some(sigil_application::SessionScopeId::new("session-a")?),
+    };
+    let journals =
+        TuiApplicationJournals::open(Arc::clone(&composition.storage_writer), scope.clone())?;
+    Ok((fixture, journals, scope))
+}
+
+#[test]
+fn tui_journal_delivery_keeps_last_owner_until_same_scope_rebind() -> Result<()> {
+    let (_fixture, journals, scope) = tui_journal_fixture()?;
+    let first = journals.bind_delivery(&journals.writer, &scope)?;
+    let observed = Arc::downgrade(&first);
+    // The observation owner can release its last reference on a different thread. The cache
+    // remains the final strong owner, so store destruction cannot race the following acquire.
+    std::thread::spawn(move || drop(first))
+        .join()
+        .map_err(|_| anyhow::anyhow!("observation owner panicked"))?;
+    let retained = observed
+        .upgrade()
+        .context("cache must retain the final owner")?;
+    let rebound = journals.bind_delivery(&journals.writer, &scope)?;
+    assert!(Arc::ptr_eq(&retained, &rebound));
+    assert_eq!(
+        Arc::strong_count(&rebound),
+        3,
+        "one cache and two live clients"
+    );
+    Ok(())
+}
+
+#[test]
+fn tui_journal_delivery_prunes_idle_scopes_and_finishes_their_authority_release() -> Result<()> {
+    let (_fixture, journals, scope_a) = tui_journal_fixture()?;
+    let ack_a = journals.bind_delivery(&journals.writer, &scope_a)?;
+    let old_a = Arc::downgrade(&ack_a);
+    drop(ack_a);
+    let mut scope_b = scope_a.clone();
+    scope_b.session = Some(sigil_application::SessionScopeId::new("session-b")?);
+    let ack_b = journals.bind_delivery(&journals.writer, &scope_b)?;
+    assert!(
+        old_a.upgrade().is_none(),
+        "an idle historical scope must be destroyed"
+    );
+    // A separate actual managed open proves that prune completed Drop/finalize, rather than
+    // merely forgetting the cache entry while its authority lease remained live.
+    let released = sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
+        Arc::clone(&journals.writer),
+        "tui-application-delivery-session-a",
+        scope_a.clone(),
+        1,
+    )?;
+    drop(released);
+    for index in 0..16 {
+        let mut scope = scope_a.clone();
+        scope.session = Some(sigil_application::SessionScopeId::new(format!(
+            "session-{index}"
+        ))?);
+        drop(journals.bind_delivery(&journals.writer, &scope)?);
+        assert!(
+            journals.delivery.lock().expect("delivery cache").len() <= 2,
+            "retain only the live client and current target, not historical scopes"
+        );
+    }
+    let still_b = journals.bind_delivery(&journals.writer, &scope_b)?;
+    assert!(
+        Arc::ptr_eq(&ack_b, &still_b),
+        "a live client must never be pruned"
+    );
+    let reopened_a = journals.bind_delivery(&journals.writer, &scope_a)?;
+    assert_eq!(
+        Arc::strong_count(&reopened_a),
+        2,
+        "reopened scope has one cache and one client"
+    );
+    Ok(())
+}
+
 /// A transport-only actor acknowledges real dispatch but never invents domain completion.
 pub(crate) fn acknowledged_test_channel(
     owner: Option<sigil_kernel::SessionApplicationOperationOwner>,

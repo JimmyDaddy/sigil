@@ -145,6 +145,15 @@ impl TuiWorkerEndpoint {
         Ok(())
     }
 
+    pub(crate) fn retire_route_operation(&self) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .route_operation
+            .take();
+        Ok(())
+    }
+
     pub(crate) fn publish(
         &self,
         generation: u64,
@@ -328,12 +337,84 @@ pub(crate) struct TuiApplicationSession {
     application: TuiApplicationAdapter,
     pub(crate) endpoint: Arc<TuiWorkerEndpoint>,
     projection_binding: Arc<sigil_runtime::RuntimeSessionProjectionBinding>,
+    journals: Option<Arc<TuiApplicationJournals>>,
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
     provider_route_bindings: Arc<Mutex<BTreeMap<String, sigil_kernel::ResolvedModelRoute>>>,
     mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
     configuration_bindings: Arc<Mutex<BTreeMap<String, Arc<ConfigurationSaveRequest>>>>,
+}
+
+/// One host owns the managed command journal across its session-scoped application services.
+/// Retained command recovery may keep an earlier service alive after its worker has stopped.
+pub(crate) struct TuiApplicationJournals {
+    writer: Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    scope: ApplicationScope,
+    reservations: Arc<sigil_runtime::ManagedApplicationReservationStore>,
+    delivery:
+        Mutex<BTreeMap<ApplicationScope, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
+}
+
+impl TuiApplicationJournals {
+    fn open(
+        writer: Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        scope: ApplicationScope,
+    ) -> Result<Self> {
+        let reservations = Arc::new(
+            sigil_runtime::ManagedApplicationReservationStore::open(
+                Arc::clone(&writer),
+                "tui-application",
+            )
+            .context("open TUI application command journal")?,
+        );
+        Ok(Self {
+            writer,
+            scope,
+            reservations,
+            delivery: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn bind_delivery(
+        &self,
+        writer: &Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        scope: &ApplicationScope,
+    ) -> Result<Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>> {
+        anyhow::ensure!(
+            Arc::ptr_eq(&self.writer, writer)
+                && self.scope.application_instance == scope.application_instance
+                && self.scope.authenticated_subject == scope.authenticated_subject
+                && self.scope.workspace == scope.workspace,
+            "TUI application journals belong to another authority scope"
+        );
+        let mut delivery = self
+            .delivery
+            .lock()
+            .map_err(|_| anyhow!("TUI delivery journal owner poisoned"))?;
+        // Keep the requested scope owned until its replacement receives a clone. Other idle
+        // scopes finish their last-owner Drop under this lock before they can be reopened.
+        delivery
+            .retain(|cached_scope, store| cached_scope == scope || Arc::strong_count(store) > 1);
+        if let Some(store) = delivery.get(scope) {
+            return Ok(Arc::clone(store));
+        }
+        let session_id = scope
+            .session
+            .as_ref()
+            .context("TUI delivery requires a session")?;
+        let store = Arc::new(
+            sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
+                Arc::clone(writer),
+                &format!("tui-application-delivery-{}", session_id.as_str()),
+                scope.clone(),
+                1,
+            )
+            .context("open TUI session delivery journal")?,
+        );
+        delivery.insert(scope.clone(), Arc::clone(&store));
+        Ok(store)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -400,6 +481,7 @@ impl TuiApplicationSession {
                 connection_instance,
             )?,
             projection_binding,
+            journals: None,
             reasoning_effort,
             session_bindings,
             session_maintenance_bindings,
@@ -414,6 +496,10 @@ impl TuiApplicationSession {
         owner: sigil_runtime::RuntimeSessionProjectionOwner,
     ) -> Result<(), ApplicationError> {
         self.projection_binding.replace_owner(owner)
+    }
+
+    pub(crate) fn journals(&self) -> Option<Arc<TuiApplicationJournals>> {
+        self.journals.clone()
     }
 
     fn bind_session_target(
@@ -1694,6 +1780,7 @@ pub(crate) fn build_for_worker(
         worker_tx,
         reasoning_effort,
         projection_owner,
+        None,
     )
 }
 
@@ -1702,6 +1789,7 @@ pub(crate) fn build_from_inputs(
     worker_tx: WorkerCommandSender,
     reasoning_effort: ReasoningEffort,
     projection_owner: sigil_runtime::RuntimeSessionProjectionOwner,
+    journals: Option<Arc<TuiApplicationJournals>>,
 ) -> Result<TuiApplicationSession> {
     let cutover = &inputs.cutover;
     let composition = &inputs.composition;
@@ -1736,18 +1824,14 @@ pub(crate) fn build_from_inputs(
         )?
         .with_owner(projection_owner),
     );
-    let reservations = sigil_runtime::ManagedApplicationReservationStore::open(
-        Arc::clone(&composition.storage_writer),
-        "tui-application",
-    )
-    .map_err(|error| anyhow!(error))?;
-    let delivery_acks = sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
-        Arc::clone(&composition.storage_writer),
-        &format!("tui-application-delivery-{}", inputs.session_id),
-        scope.clone(),
-        1,
-    )
-    .map_err(|error| anyhow!(error))?;
+    let journals = match journals {
+        Some(journals) => journals,
+        None => Arc::new(TuiApplicationJournals::open(
+            Arc::clone(&composition.storage_writer),
+            scope.clone(),
+        )?),
+    };
+    let delivery_acks = journals.bind_delivery(&composition.storage_writer, &scope)?;
     let application_reasoning_effort = application_reasoning_effort(&reasoning_effort);
     let session_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let session_maintenance_bindings = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1771,8 +1855,8 @@ pub(crate) fn build_from_inputs(
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
         projection_source,
         executor,
-        Arc::new(reservations),
-        Arc::new(delivery_acks),
+        journals.reservations.clone(),
+        delivery_acks,
     ));
     let client_epoch = stable_tui_client_epoch(&scope);
     let connection = HostConnectionInstanceId::new(format!("tui-{}", uuid::Uuid::new_v4()))?;
@@ -1792,6 +1876,7 @@ pub(crate) fn build_from_inputs(
     )
     .map_err(|error| anyhow!(error))?;
     application.endpoint = endpoint;
+    application.journals = Some(journals);
     Ok(application)
 }
 

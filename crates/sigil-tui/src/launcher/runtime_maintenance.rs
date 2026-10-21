@@ -10,10 +10,13 @@ pub(crate) struct RuntimeMaintenanceOwner {
     handle: Option<std::thread::JoinHandle<()>>,
     result: mpsc::Receiver<Result<()>>,
     completed: bool,
+    failed: bool,
     retired: bool,
     retired_cleanup_started: bool,
     shutdown_requested: bool,
     cleanup_failure: Arc<Mutex<Option<String>>>,
+    journals: Option<Arc<application_bridge::TuiApplicationJournals>>,
+    retired_route: Arc<Mutex<Option<RuntimeTransitionOwner>>>,
 }
 
 impl std::fmt::Debug for RuntimeMaintenanceOwner {
@@ -27,6 +30,10 @@ impl std::fmt::Debug for RuntimeMaintenanceOwner {
 }
 
 impl RuntimeMaintenanceOwner {
+    pub(in crate::launcher) fn has_failed(&self) -> bool {
+        self.completed && self.failed
+    }
+
     pub(crate) fn invalidate_view(&mut self) {
         self.retired = true;
         self.request_exit();
@@ -143,6 +150,23 @@ pub(in crate::launcher) fn maintain(
         explicit_selection: app.pending_session_route_selection().cloned(),
     };
     let attachment = app.worker_session_attachment();
+    let journals = worker
+        .as_ref()
+        .and_then(|runtime| runtime.application.as_ref())
+        .and_then(|application| application.journals())
+        .or_else(|| {
+            app.runtime_maintenance
+                .as_ref()
+                .and_then(|owner| owner.journals.clone())
+        });
+    let task_journals = journals.clone();
+    let retired_route = app
+        .runtime_maintenance
+        .as_ref()
+        .map(|owner| Arc::clone(&owner.retired_route))
+        .unwrap_or_default();
+    let task_retired_route = Arc::clone(&retired_route);
+    let session_id = app.session_id.clone();
     let reasoning = app.runtime.reasoning_effort.clone();
     let cleanup_failure = app
         .runtime_maintenance
@@ -167,6 +191,26 @@ pub(in crate::launcher) fn maintain(
                     .lock()
                     .map_err(|_| anyhow::anyhow!("runtime owner poisoned"))?;
                 stop_owned_worker(&mut workers, &task_failure)?;
+                anyhow::ensure!(
+                    workers.is_none(),
+                    "previous session worker remains owned after shutdown"
+                );
+                {
+                    let mut retired = task_retired_route.lock().map_err(|_| {
+                        anyhow::anyhow!("retired session controller owner poisoned")
+                    })?;
+                    if let Some(previous) = retired.as_ref() {
+                        anyhow::ensure!(
+                            task_failure.lock().is_ok_and(|failure| failure.is_none()),
+                            "previous session worker cleanup failure remains unresolved"
+                        );
+                        // stop_owned_worker completed the actual worker's shutdown and joins.
+                        // Only a previously activated, completed controller may now release its
+                        // old session attachment. Unresolved command owners remain retained.
+                        previous.retire_after_worker_join(&session_id)?;
+                        retired.take();
+                    }
+                }
                 if let Some((config, inputs)) = config.zip(inputs) {
                     if exiting.load(Ordering::Acquire) {
                         return Ok(());
@@ -212,6 +256,7 @@ pub(in crate::launcher) fn maintain(
                                 runtime.worker_tx.clone(),
                                 reasoning,
                                 spawned.projection_owner,
+                                task_journals,
                             )?));
                         if exiting.load(Ordering::Acquire) {
                             stop_owned_worker(&mut workers, &task_failure)?;
@@ -227,6 +272,13 @@ pub(in crate::launcher) fn maintain(
             })();
             let _ = sender.send(result);
         })?;
+    if app
+        .runtime_transition
+        .as_ref()
+        .is_some_and(|owner| owner.can_retire_for_session(&app.session_id))
+    {
+        *retired_route.lock().expect("new lifecycle route owner") = app.runtime_transition.take();
+    }
     let retained = app.runtime_maintenance.as_mut().and_then(|previous| {
         previous
             .workers
@@ -244,10 +296,13 @@ pub(in crate::launcher) fn maintain(
         handle: Some(handle),
         result,
         completed: false,
+        failed: false,
         retired: false,
         retired_cleanup_started: false,
         shutdown_requested: false,
         cleanup_failure,
+        journals,
+        retired_route,
     });
     let _ = begin.send(());
     app.mark_worker_not_ready();
@@ -293,8 +348,9 @@ pub(in crate::launcher) fn poll_maintenance(
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some("runtime lifecycle owner panicked".to_owned());
         owner.completed = true;
+        owner.failed = true;
         app.runtime_maintenance = Some(owner);
-        report_worker_unavailable(app, "runtime lifecycle panicked; worker ownership retained")?;
+        report_maintenance_failure(app, "runtime lifecycle panicked; worker ownership retained")?;
         return Ok(true);
     }
     match owner
@@ -311,13 +367,25 @@ pub(in crate::launcher) fn poll_maintenance(
         }
         Ok(()) => {}
         Err(error) => {
-            report_worker_unavailable(app, &format!("runtime lifecycle incomplete: {error:#}"))?;
+            owner.failed = true;
+            report_maintenance_failure(app, &format!("runtime lifecycle incomplete: {error:#}"))?;
         }
     }
     owner.completed = true;
     app.runtime_maintenance = Some(owner);
     Ok(true)
 }
+
+fn report_maintenance_failure(app: &mut AppState, message: &str) -> Result<()> {
+    app.mark_worker_not_ready();
+    app.clear_worker_run_state();
+    // This is host attachment failure, not evidence that a provider connection failed.
+    app.handle_worker_message(WorkerMessage::Notice(message.to_owned()))
+}
+
+#[cfg(test)]
+#[path = "runtime_maintenance_tests.rs"]
+mod tests;
 
 impl Drop for RuntimeMaintenanceOwner {
     fn drop(&mut self) {

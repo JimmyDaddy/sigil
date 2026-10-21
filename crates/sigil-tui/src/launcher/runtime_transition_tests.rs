@@ -2,6 +2,12 @@ use super::*;
 
 fn real_runtime_transition_fixture() -> Result<(tempfile::TempDir, AppState, Option<WorkerRuntime>)>
 {
+    real_runtime_transition_fixture_at("http://127.0.0.1:1")
+}
+
+fn real_runtime_transition_fixture_at(
+    base_url: &str,
+) -> Result<(tempfile::TempDir, AppState, Option<WorkerRuntime>)> {
     let fixture = tempfile::tempdir()?;
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -27,7 +33,7 @@ fn real_runtime_transition_fixture() -> Result<(tempfile::TempDir, AppState, Opt
             "label": "local",
             "provider": "custom",
             "protocol": "chat_completions",
-            "base_url": "http://127.0.0.1:1",
+            "base_url": base_url,
             "credential": { "source": "none" }
         }),
     )]);
@@ -92,6 +98,9 @@ fn real_runtime_transition_fixture() -> Result<(tempfile::TempDir, AppState, Opt
         )?;
     Ok((fixture, app, Some(worker)))
 }
+
+#[path = "configured_session_lifecycle_tests.rs"]
+mod configured_session_lifecycle_tests;
 
 fn wait_for_real_transition(app: &AppState) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
