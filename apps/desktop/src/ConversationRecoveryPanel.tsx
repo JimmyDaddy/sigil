@@ -51,27 +51,6 @@ export function ConversationRecoveryPanel({
 
   return (
     <div className="conversation-recovery-panel sg-bounded-content">
-      <Collapsible label={t("compactContext")} className="conversation-recovery-section compaction-review">
-        <header>
-          <div>
-            <h3>{t("compactContext")}</h3>
-            <p>{t("compactContextDetail")}</p>
-          </div>
-          <Button
-            type="button"
-            busy={busy}
-            onClick={() => void onCompact()}
-          >
-            {t(busy ? "compactingContext" : "compactNow")}
-          </Button>
-        </header>
-        {busy ? (
-          <p className="conversation-recovery-empty-copy" aria-live="polite">
-            {t("compactingContext")}
-          </p>
-        ) : null}
-      </Collapsible>
-
       {recovery === undefined ? (
         <div
           className={`conversation-recovery-empty task-status-${emptyPresentation?.status}`}
@@ -95,6 +74,12 @@ export function ConversationRecoveryPanel({
           {error ? <Button type="button" onClick={onRefresh}>{t("retry")}</Button> : null}
         </div>
       ) : <>
+      {error ? (
+        <div className="conversation-recovery-feedback" role="alert">
+          <p>{t("conversationRecoveryRequestFailed")}</p>
+          <Button type="button" disabled={busy} onClick={onRefresh}>{t("retry")}</Button>
+        </div>
+      ) : null}
 
       <section className="conversation-recovery-section">
         <header>
@@ -175,17 +160,9 @@ export function ConversationRecoveryPanel({
         </section>
       ) : null}
 
-      <Collapsible label={t("conversationForks")} className="conversation-recovery-section">
-        <header>
-          <div>
-            <h3>{t("conversationForks")}</h3>
-            <p>{t("conversationForksDetail")}</p>
-          </div>
-          <span>{recovery.forkPoints.length}</span>
-        </header>
-        {recovery.forkPoints.length === 0 ? (
-          <p className="conversation-recovery-empty-copy">{t("noForkPoints")}</p>
-        ) : (
+      {recovery.forkPoints.length === 0 ? null : (
+        <Collapsible label={t("conversationForks")} className="conversation-recovery-section" summary={recovery.forkPoints.length}>
+          <p>{t("conversationForksDetail")}</p>
           <ol className="conversation-recovery-list fork-list">
             {recovery.forkPoints.slice().reverse().map((point) => (
               <li key={point.sourceTurnDigest}>
@@ -200,9 +177,28 @@ export function ConversationRecoveryPanel({
               </li>
             ))}
           </ol>
-        )}
-      </Collapsible>
+        </Collapsible>
+      )}
       </>}
+      <Collapsible label={t("compactContext")} className="conversation-recovery-section compaction-review">
+        <header>
+          <div>
+            <p>{t("compactContextDetail")}</p>
+          </div>
+          <Button
+            type="button"
+            busy={busy}
+            onClick={() => void onCompact()}
+          >
+            {t(busy ? "compactingContext" : "compactNow")}
+          </Button>
+        </header>
+        {busy ? (
+          <p className="conversation-recovery-empty-copy" aria-live="polite">
+            {t("compactingContext")}
+          </p>
+        ) : null}
+      </Collapsible>
     </div>
   );
 }

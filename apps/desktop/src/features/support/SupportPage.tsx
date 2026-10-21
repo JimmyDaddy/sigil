@@ -78,7 +78,6 @@ export function SupportPage({
       className="support-page"
       eyebrow={t("localSupport")}
       title={t("supportDiagnostics")}
-      detail={t("supportDiagnosticsDetail")}
       navigation={{ label: t("backToSettings"), onBack }}
       aside={<div className="support-header-actions">
           <Button
@@ -122,9 +121,7 @@ export function SupportPage({
                 <Icon name={statusIcon(report.summary.overallStatus)} />
               </span>
               <div>
-                <p className="eyebrow">{t("diagnosticStatus")}</p>
                 <h2 id="support-summary-title">{statusTitle(report.summary.overallStatus, t)}</h2>
-                <p>{t("diagnosticBuild", { version: report.version, target: report.target })}</p>
               </div>
             </div>
             <dl className="support-counts">
@@ -154,6 +151,7 @@ export function SupportPage({
           <Collapsible className="support-checks" label={t("cutoverAuthority")} summary={t("cutoverBlockerCount", { count: report.cutover.blockers.length })}>
             <div className="support-section-heading">
               <div>
+                <p>{t("diagnosticBuild", { version: report.version, target: report.target })}</p>
                 <p>{t("cutoverStatus", { epoch: report.cutover.epoch, authority: report.cutover.authority })}</p>
               </div>
               <span>{t("cutoverBlockerCount", { count: report.cutover.blockers.length })}</span>
@@ -180,9 +178,13 @@ export function SupportPage({
               <Icon name="lock" />
             </div>
             <div className="support-privacy-columns">
-              <div><h3>{t("supportIncludes")}</h3><ul>{report.privacy.included.map((item) => <li key={item}>{item}</li>)}</ul></div>
-              <div><h3>{t("supportExcludes")}</h3><ul>{report.privacy.excluded.map((item) => <li key={item}>{item}</li>)}</ul></div>
+              <div><h3>{t("supportIncludes")}</h3><ul>{report.privacy.included.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
+              <div><h3>{t("supportExcludes")}</h3><ul>{report.privacy.excluded.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
             </div>
+            {[...report.privacy.included, ...report.privacy.excluded].some((item) => privacyCategories.has(item)) ? <Collapsible label={t("supportPrivacyIdentifiers")}>
+              <p><strong>{t("supportIncludes")}: </strong><code>{report.privacy.included.join(", ")}</code></p>
+              <p><strong>{t("supportExcludes")}: </strong><code>{report.privacy.excluded.join(", ")}</code></p>
+            </Collapsible> : null}
             {report.privacy.reviewBeforeSharing ? <p className="support-review-note">{t("reviewSupportBeforeSharing")}</p> : null}
           </section>
         </>
@@ -221,4 +223,26 @@ function SupportChecks({ checks }: { readonly checks: SupportDoctorReport["check
       </li>
     ))}
   </ul>;
+}
+
+const privacyCategories = new Map<string, Parameters<ReturnType<typeof useLocale>["t"]>[0]>([
+  ["build_metadata", "supportCategoryBuild"],
+  ["os_arch", "supportCategoryPlatform"],
+  ["terminal_family", "supportCategoryTerminal"],
+  ["doctor_status_and_redacted_checks", "supportCategoryChecks"],
+  ["provider_and_model_labels", "supportCategoryModels"],
+  ["mcp_aliases", "supportCategoryMcp"],
+  ["capability_and_sandbox_status", "supportCategoryCapabilities"],
+  ["conversation_content", "supportCategoryConversation"],
+  ["tool_input_output", "supportCategoryTools"],
+  ["file_content_and_diff", "supportCategoryFiles"],
+  ["config_file_content", "supportCategoryConfig"],
+  ["credential_and_environment_names_and_values", "supportCategoryCredentials"],
+  ["local_paths_and_private_endpoints", "supportCategoryPaths"],
+  ["session_log_content", "supportCategorySessionLog"],
+]);
+
+function privacyCategory(value: string, t: ReturnType<typeof useLocale>["t"]): string {
+  const key = privacyCategories.get(value);
+  return key === undefined ? value : t(key);
 }

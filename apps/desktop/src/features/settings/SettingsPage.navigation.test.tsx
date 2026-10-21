@@ -48,6 +48,9 @@ describe("settings categories", () => {
       .toBe(screen.getByRole("button", { name: "Appearance & preferences" }).getAttribute("aria-controls"));
     await user.click(screen.getByRole("button", { name: "Support" }));
     expect(await screen.findByRole("heading", { name: "Desktop updates" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Support & diagnostics" })).toBeTruthy();
+    expect(screen.getByText("Review diagnostics or save a private report when you need help.")).toBeTruthy();
+    expect(screen.queryByText(/The setting above chooses the model/)).toBeNull();
     expect(screen.getByRole("button", { name: "Open support and diagnostics" }).hasAttribute("disabled")).toBe(true);
     await user.click(screen.getByRole("button", { name: "Extensions" }));
     expect(screen.getByRole("button", { name: "Choose JSON file" })).toBeTruthy();

@@ -272,6 +272,7 @@ const context: RunContext = {
 };
 
 function renderComposer(overrides: {
+  draftKey?: string;
   conversationHistory?: "empty" | "populated";
   timelineSupplement?: ReactNode;
   persistentDraftKey?: string;
@@ -332,7 +333,7 @@ function renderComposer(overrides: {
     const composer = (
     <LocaleProvider>
       <Composer
-        draftKey="composer-test"
+        draftKey={overrides.draftKey ?? "composer-test"}
         persistentDraftKey={persistentDraftKey}
         active={overrides.active ?? false}
         reviewActive={reviewActive}
@@ -1126,6 +1127,109 @@ it.each([true, false])("settles the current draft key when durable identity arri
 });
 
 describe("Markdown writing", () => {
+  it("restores the preview reading offset after hiding it independently of source scrolling and late draft persistence", async () => {
+    const user = userEvent.setup();
+    const { bindPersistentDraftKey } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "# START\n\n" + Array.from({ length: 60 }, (_, index) =>
+      `- [ ] 第${index + 1}项：**重点**，继续阅读 [参考](https://example.test) 与 \`code\`。\n`
+    ).join("\n") + "\nEND\n";
+    setEditorText(input, source);
+    const view = editorView(input);
+    act(() => view.dispatch({ selection: { anchor: source.length - 10, head: source.length } }));
+    const selection = view.state.selection;
+    view.scrollDOM.scrollTop = 210;
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    let preview = screen.getByRole("region", { name: "Preview" });
+    // JSDOM records offsets; native verification owns actual wrapped line geometry.
+    fireEvent.scroll(preview, { target: { scrollTop: 1320 } });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
+    bindPersistentDraftKey("late-durable-reading-draft");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    preview = screen.getByRole("region", { name: "Preview" });
+    expect(preview.scrollTop).toBe(1320);
+    expect(view.scrollDOM.scrollTop).toBe(210);
+    expect(editorView(input)).toBe(view);
+    expect(view.state.selection.eq(selection)).toBe(true);
+    expect(editorText(input)).toBe(source);
+  });
+
+  it("preserves independent preview reading across expanded editing and an arriving review", async () => {
+    const user = userEvent.setup();
+    const { bindReviewActive } = renderComposer({ active: true });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "## Draft\n\nReading paragraph\n\n".repeat(60));
+    const view = editorView(input);
+    view.scrollDOM.scrollTop = 90;
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const preview = screen.getByRole("region", { name: "Preview" });
+    fireEvent.scroll(preview, { target: { scrollTop: 960 } });
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    expect(preview.scrollTop).toBe(960);
+    fireEvent.scroll(preview, { target: { scrollTop: 1240 } });
+    bindReviewActive(true);
+    expect(preview.scrollTop).toBe(1240);
+    bindReviewActive(false);
+    await user.click(screen.getByRole("button", { name: "Collapse editor" }));
+    expect(preview.scrollTop).toBe(1240);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(1240);
+    expect(view.scrollDOM.scrollTop).toBe(90);
+    expect(editorView(input)).toBe(view);
+  });
+
+  it.each([true, false])("%s accepted submission resets only the cleared draft's preview reading position", async (accepted) => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ onSubmit: vi.fn(async () => accepted) });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "A long draft paragraph\n\n".repeat(60);
+    setEditorText(input, source);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 900 } });
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSubmit).toHaveBeenCalledOnce();
+    await waitFor(() => expect(editorText(input)).toBe(accepted ? "" : source));
+    if (accepted) setEditorText(input, "A different new draft\n\n".repeat(60));
+    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(accepted ? 0 : 900);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(accepted ? 0 : 900);
+  });
+
+  it("does not transfer preview reading to another mounted draft", async () => {
+    const user = userEvent.setup();
+    const first = renderComposer({ draftKey: "workspace:first-session", persistentDraftKey: "first-reading-draft" });
+    setEditorText(screen.getByRole("combobox", { name: "Message Sigil" }), "First draft\n\n".repeat(60));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 1200 } });
+    first.unmount();
+    renderComposer({ draftKey: "workspace:second-session", persistentDraftKey: "second-reading-draft" });
+    setEditorText(screen.getByRole("combobox", { name: "Message Sigil" }), "Second draft\n\n".repeat(60));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(0);
+  });
+
+  it("retains preview reading for later edits when an older submission is accepted", async () => {
+    const user = userEvent.setup();
+    let settle!: (accepted: boolean) => void;
+    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
+    renderComposer({ onSubmit: vi.fn(() => pending) });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "Submitted draft\n\n".repeat(60));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const laterDraft = "Later unsent edits\n\n".repeat(60);
+    setEditorText(input, laterDraft);
+    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 750 } });
+    await act(async () => { settle(true); await pending; });
+    expect(editorText(input)).toBe(laterDraft);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(750);
+  });
+
   it("edits source and renders a live safe preview without remounting the editor or losing history", async () => {
     const user = userEvent.setup();
     renderComposer();
@@ -1525,14 +1629,22 @@ describe("compact composer presentation", () => {
       const user = userEvent.setup();
       renderComposer();
       const input = screen.getByRole("combobox", { name: "Message Sigil" });
-      const source = "# Preview heading\n\nA paragraph.\n\n> A quote.\n\n- [ ] First\n- [x] Second\n\n`inline`\n\n```text\n  exact code  \n```";
+      const source = "# Preview heading\n\nA paragraph.\n\n> A quote.\n\n- [ ] First **重点** [资料](https://example.com/notes) 与 `task-code` 尾部\n  - [x] Nested **完整**\n- [x] Second\n\n`inline`\n\n```text\n  exact code  \n```";
       setEditorText(input, source);
       const editor = editorView(input);
       await user.click(screen.getByRole("button", { name: "Preview" }));
       const preview = screen.getByRole("region", { name: "Preview" });
       expect(getComputedStyle(within(preview).getByRole("heading", { level: 1 })).fontSize).toBe("19px");
       expect(getComputedStyle(preview.querySelector(".contains-task-list")!).listStyle).toBe("none");
-      expect(getComputedStyle(preview.querySelector(".task-list-item")!).display).toBe("flex");
+      expect(getComputedStyle(preview.querySelector(".task-list-item")!).display).toBe("list-item");
+      const task = preview.querySelector(".task-list-item")!;
+      expect(task.querySelector("strong")?.textContent).toBe("重点");
+      expect(task.querySelector("a")?.textContent).toBe("资料");
+      expect(task.querySelector("code")?.textContent).toBe("task-code");
+      expect(task.querySelector(":scope > ul > .task-list-item strong")?.textContent).toBe("完整");
+      const checkbox = task.querySelector("input")! as HTMLInputElement;
+      expect(checkbox.disabled).toBe(true);
+      expect(checkbox.getAttribute("aria-label")).toBe("Incomplete task");
       expect(getComputedStyle(preview.querySelector("blockquote")!).paddingLeft).toBe("10px");
       expect(getComputedStyle(preview.querySelector("blockquote")!).marginLeft).toBe("0px");
       expect(preview.querySelector("pre code")?.textContent).toBe("  exact code  \n");
@@ -1542,5 +1654,49 @@ describe("compact composer presentation", () => {
     } finally {
       style.remove();
     }
+  });
+});
+
+describe("compact Markdown format presentation", () => {
+  it.each([
+    ["MacIntel", "⌘B", "Meta+B"],
+    ["Win32", "Ctrl+B", "Control+B"],
+    ["Linux x86_64", "Ctrl+B", "Control+B"],
+  ])("shows only the %s modifier and keeps every format action without replacing the editor", async (platform, shortcut, accessibleShortcut) => {
+    const platformGetter = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+    try {
+      const user = userEvent.setup();
+      renderComposer();
+      const input = screen.getByRole("combobox", { name: "Message Sigil" });
+      setEditorText(input, "  中文 raw {{unknown}}  ");
+      const editor = editorView(input);
+      act(() => editor.dispatch({ selection: { anchor: 2, head: 4 } }));
+      await user.click(screen.getByRole("button", { name: "Format" }));
+      const menu = screen.getByRole("dialog", { name: "Format" });
+      const actions = within(menu).getAllByRole("button");
+      expect(actions.map((button) => button.textContent?.replace(/⌘[BIK]|Ctrl\+[BIK]/g, ""))).toEqual(["Bold", "Italic", "Inline code", "Code block", "List", "Link"]);
+      const bold = within(menu).getByRole("button", { name: "Bold" });
+      expect(bold.querySelector("kbd")?.textContent).toBe(shortcut);
+      expect(bold.getAttribute("aria-keyshortcuts")).toBe(accessibleShortcut);
+      expect(menu.textContent).not.toContain(platform === "MacIntel" ? "Ctrl" : "⌘");
+      await user.click(bold);
+      expect(editorView(input)).toBe(editor);
+      expect(editorText(input)).toBe("  **中文** raw {{unknown}}  ");
+      expect(document.activeElement).toBe(input);
+    } finally {
+      platformGetter.mockRestore();
+    }
+  });
+
+  it("describes queueing after this response without changing the queued source", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ active: true });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "  exact follow-up  ");
+    const queueButton = screen.getByRole("button", { name: "Queue message" });
+    await user.hover(queueButton);
+    expect(await screen.findByRole("tooltip")).toHaveProperty("textContent", "Queue for after this response (Enter)");
+    await user.click(queueButton);
+    expect(onSubmit).toHaveBeenCalledWith("  exact follow-up  ", undefined, undefined);
   });
 });

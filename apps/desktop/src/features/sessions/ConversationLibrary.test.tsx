@@ -40,7 +40,7 @@ function setup(blocked = false) {
   render(<LocaleProvider><NotificationProvider><ConversationLibrary bridge={bridge} workspaceId="library"
     onBack={() => undefined} onOpen={() => undefined} onCatalogChanged={onCatalogChanged} />
   </NotificationProvider></LocaleProvider>);
-  return { planSessionCatalogBatch, executeSessionCatalogBatch, onCatalogChanged };
+  return { catalog, planSessionCatalogBatch, executeSessionCatalogBatch, onCatalogChanged };
 }
 
 describe("conversation library contextual batch actions", () => {
@@ -92,4 +92,19 @@ describe("conversation library contextual batch actions", () => {
     expect((screen.getByRole("checkbox", { name: "Select conversation: Ready conversation" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByRole("button", { name: "Delete ready (1)" })).toBeTruthy();
   });
+});
+
+it("puts existing filters before records without a duplicate page introduction and keeps all filter actions", async () => {
+  const user = userEvent.setup();
+  const { catalog } = setup();
+  await screen.findByRole("button", { name: "Ready conversation" });
+  expect(screen.getAllByRole("heading", { name: "Conversation Library" })).toHaveLength(1);
+  expect(document.querySelector(".application-page-intro")).toBeNull();
+  expect(document.querySelector(".application-page-content")?.firstElementChild).toHaveProperty("className", "library-command-surface");
+  await user.type(screen.getByRole("textbox", { name: "Provider" }), "exact-provider");
+  await user.selectOptions(screen.getByRole("combobox", { name: "Source state" }), "invalid");
+  await user.click(screen.getByRole("checkbox", { name: "Pinned only" }));
+  await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "needle");
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  await waitFor(() => expect(catalog).toHaveBeenLastCalledWith("library", expect.objectContaining({ query: "needle", provider: "exact-provider", state: "invalid", pinned: true })));
 });

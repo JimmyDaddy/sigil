@@ -13,7 +13,7 @@
 .application-page-content {
   min-width: 0;
   min-height: 0;
-  padding: var(--sg-sys-space-6);
+  padding: var(--sg-sys-space-4);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -38,7 +38,7 @@
 }
 
 .application-page-header p:not(.eyebrow),
-.application-page-intro > p:not(.eyebrow) {
+.application-page-intro {
   max-width: 700px;
   margin: 8px 0 0;
   color: var(--sg-sys-color-on-surface-variant);
@@ -89,7 +89,7 @@
   justify-content: flex-end;
 }
 
-.application-page-intro { margin-bottom: var(--sg-sys-space-5); }
+.application-page-intro { margin: 0 0 var(--sg-sys-space-3); }
 
 .application-page-meta {
   flex: 0 0 auto;

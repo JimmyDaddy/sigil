@@ -19,7 +19,7 @@ export function ApplicationPage({
 }: {
   readonly eyebrow: string;
   readonly title: string;
-  readonly detail: string;
+  readonly detail?: string;
   readonly navigation?: ApplicationPageNavigation;
   readonly aside?: ReactNode;
   readonly className?: string;
@@ -56,15 +56,12 @@ export function ApplicationPage({
             <div className="application-page-heading">
               <p className="eyebrow">{eyebrow}</p>
               <h1 id={titleId}>{title}</h1>
-              <p>{detail}</p>
+              {detail === undefined ? null : <p>{detail}</p>}
             </div>
             {aside}
           </header>
-        ) : (
-          <div className="application-page-intro">
-            <p className="eyebrow">{eyebrow}</p>
-            <p>{detail}</p>
-          </div>
+        ) : detail === undefined ? null : (
+          <p className="application-page-intro">{detail}</p>
         )}
         {children}
       </div>

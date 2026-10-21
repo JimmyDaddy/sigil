@@ -572,8 +572,8 @@ export function SettingsPage({
             <div className="settings-section-heading">
               <Icon name="shield" />
               <div>
-                <h2 id="settings-runtime">{t("runtimeControls")}</h2>
-                <p>{t("runtimeControlsDetail")}</p>
+                <h2 id="settings-runtime">{t("supportDiagnostics")}</h2>
+                <p>{t("settingsSupportDetail")}</p>
               </div>
             </div>
             <div className="settings-choice-group">

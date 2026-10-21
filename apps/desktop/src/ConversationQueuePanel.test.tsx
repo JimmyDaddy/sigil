@@ -6,7 +6,7 @@ import { ConversationQueuePanel } from "./ConversationQueuePanel";
 import { LocaleProvider } from "./i18n";
 import type { ConversationQueueCommandAction, ConversationQueueView, ForegroundRunOwner } from "./types";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); window.localStorage.clear(); });
 
 const queue: ConversationQueueView = {
   schemaVersion: 1,
@@ -63,7 +63,7 @@ function renderQueue(
 }
 
 describe("conversation queue panel", () => {
-  it("describes safe handoff instead of promising to wait for the run terminal", () => {
+  it("describes separate turns after the current response while retaining the foreground block", () => {
     renderQueue(undefined, {
       ...queue,
       items: [{
@@ -74,8 +74,8 @@ describe("conversation queue panel", () => {
       totalItems: 1,
     });
 
-    expect(screen.getByText("Runs at a safe handoff in the current run or after it finishes")).toBeTruthy();
-    expect(screen.getByText("Waiting for a safe handoff from the current run")).toBeTruthy();
+    expect(screen.getByText("Each message runs as a separate turn after the current response finishes")).toBeTruthy();
+    expect(screen.getByText("Waiting for the current response to finish")).toBeTruthy();
   });
 
   it("requires a blank exact re-entry instead of prefilling a redacted preview", async () => {
@@ -247,4 +247,17 @@ describe("queued Markdown source", () => {
     fireEvent.submit(input.closest("form")!);
     expect(onCommand).not.toHaveBeenCalled();
   });
+});
+
+it.each(["en", "zh-CN"] as const)("explains the ordinary main queue in %s without implying injection into the active response", (locale) => {
+  window.localStorage.setItem("sigil.desktop.locale.v1", locale);
+  const onCommand = renderQueue(undefined, { ...queue, items: [], totalItems: 0 });
+  expect(screen.getByText(locale === "en"
+    ? "Each message runs as a separate turn after the current response finishes"
+    : "当前回复结束后，按顺序单独处理每条消息")).toBeTruthy();
+  expect(screen.getByText(locale === "en"
+    ? "While Sigil is responding, Enter queues your next message without interrupting it."
+    : "回复进行时，按 Enter 将下一条消息加入队列，不会打断当前回复。")).toBeTruthy();
+  expect(screen.getByRole("button", { name: locale === "en" ? "Pause queue" : "暂停队列" })).toBeTruthy();
+  expect(onCommand).not.toHaveBeenCalled();
 });

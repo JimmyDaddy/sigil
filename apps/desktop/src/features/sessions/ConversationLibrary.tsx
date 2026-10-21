@@ -171,7 +171,6 @@ export function ConversationLibrary({
       className="conversation-library-page"
       eyebrow={t("conversations")}
       title={t("conversationLibrary")}
-      detail={t("conversationLibraryDetail")}
       navigation={{ label: t("backToConversation"), onBack }}
       aside={<span className="application-page-meta">{t("loadedConversationCount", { count: page.entries.length })}</span>}
     >

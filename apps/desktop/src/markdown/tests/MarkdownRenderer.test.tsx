@@ -1,4 +1,6 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -173,4 +175,47 @@ describe("complete Markdown preview work", () => {
     expect(view.container.querySelectorAll("pre")).toHaveLength(1);
     expect(screen.getByText("After.")).toBeTruthy();
   });
+});
+
+it.each(["message-content", "composer-preview"])("keeps mixed task text in normal flow with disabled, named checkboxes in %s", async (scope) => {
+  const parsed = document.createElement("style");
+  parsed.textContent = readFileSync(resolve(process.cwd(), "src/features/conversation/conversation.css"), "utf8");
+  document.head.append(parsed);
+  const features = Array.from(parsed.sheet!.cssRules).find((rule) => "name" in rule && rule.name === "features") as CSSGroupingRule;
+  const style = document.createElement("style");
+  style.textContent = Array.from(features.cssRules, (rule) => rule.cssText).join("\n");
+  parsed.replaceWith(style);
+  try {
+    const source = [
+      "- [ ] 确认场地；**重点**是读完 [资料](https://example.com/notes) 与 `code` 的尾部。",
+      "  - [x] 子项 **完整** 与 `nested`。",
+      "- [ ] 多段任务 **第一段**。",
+      "",
+      "  继续同一任务的第二段。",
+      "",
+      "  ```text",
+      "  exact block  ",
+      "  ```",
+    ].join("\n");
+    const { container } = render(<div className={scope}><SafeMarkdown text={source} /></div>);
+    const tasks = container.querySelectorAll(".task-list-item");
+    expect(tasks).toHaveLength(3);
+    for (const task of tasks) expect(getComputedStyle(task).display).toBe("list-item");
+    const firstParagraph = tasks[0].querySelector(":scope > p")!;
+    expect(firstParagraph.textContent).toBe(" 确认场地；重点是读完 资料 与 code 的尾部。");
+    expect(firstParagraph.querySelector("strong")?.textContent).toBe("重点");
+    expect(firstParagraph.querySelector("a")?.getAttribute("href")).toBe("https://example.com/notes");
+    expect(firstParagraph.querySelector("code")?.textContent).toBe("code");
+    expect(tasks[0].querySelector("ul .task-list-item")).toBe(tasks[1]);
+    const checkboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    expect(checkboxes.map((checkbox) => [checkbox.disabled, checkbox.checked, checkbox.getAttribute("aria-label")])).toEqual([
+      [true, false, "Incomplete task"], [true, true, "Completed task"], [true, false, "Incomplete task"],
+    ]);
+    await userEvent.click(checkboxes[0]);
+    expect(checkboxes[0].checked).toBe(false);
+    expect(within(tasks[2] as HTMLElement).getByText("继续同一任务的第二段。")).toBeTruthy();
+    expect(tasks[2].querySelector("pre code")?.textContent).toBe("exact block  \n");
+  } finally {
+    style.remove();
+  }
 });

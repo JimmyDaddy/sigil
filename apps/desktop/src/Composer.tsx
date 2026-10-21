@@ -131,11 +131,22 @@ export function Composer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [editorExpanded, setEditorExpanded] = useState(false);
+  const previewRef = useRef<HTMLElement>(null);
+  const previewPosition = useRef({ draftKey, top: 0 });
+  const draftEmpty = prompt === "";
+  useLayoutEffect(() => {
+    // A late persistence key still describes this draft; only its identity or clear resets reading.
+    if (previewPosition.current.draftKey !== draftKey || draftEmpty) {
+      previewPosition.current = { draftKey, top: 0 };
+    }
+    if (previewRef.current !== null) previewRef.current.scrollTop = previewPosition.current.top;
+  }, [draftKey, draftEmpty, previewVisible, editorExpanded, reviewActive]);
   const collapseEditor = () => {
     setEditorExpanded(false);
     editorRef.current?.focus();
   };
   const [formatOpen, setFormatOpen] = useState(false);
+  const appleShortcuts = typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
   const previewText = useDeferredValue(prompt);
   const previousStorageKey = useRef(storageKey);
   useLayoutEffect(() => {
@@ -568,13 +579,19 @@ export function Composer({
           /> : null}
           <Popover label={t("markdownFormat")} accessibleLabel={t("markdownFormat")} className="composer-format" open={formatOpen} onOpenChange={setFormatOpen} align="start">
             <div className="composer-format-actions">
-              {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => (
-                <Button type="button" variant="quiet" key={format} onClick={() => {
-                  setFormatOpen(false);
-                  editorRef.current?.format(format);
-                  setPreviewVisible(true);
-                }}>{t(formatLabels[format])}</Button>
-              ))}
+              {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => {
+                const shortcut = formatShortcuts[format];
+                return <Button type="button" variant="quiet" key={format}
+                  aria-keyshortcuts={shortcut === undefined ? undefined : `${appleShortcuts ? "Meta" : "Control"}+${shortcut}`}
+                  onClick={() => {
+                    setFormatOpen(false);
+                    editorRef.current?.format(format);
+                    setPreviewVisible(true);
+                  }}>
+                  <span>{t(formatLabels[format])}</span>
+                  {shortcut === undefined ? null : <kbd aria-hidden="true">{appleShortcuts ? `⌘${shortcut}` : `Ctrl+${shortcut}`}</kbd>}
+                </Button>;
+              })}
             </div>
           </Popover>
           <Button type="button" variant="quiet" aria-pressed={previewVisible} aria-controls={previewVisible ? previewId : undefined} onClick={() => setPreviewVisible((visible) => !visible)}>{t("markdownPreview")}</Button>
@@ -642,7 +659,10 @@ export function Composer({
               void submit();
             }}
           />
-          {previewVisible ? <section id={previewId} className="composer-preview" aria-label={t("markdownPreview")} tabIndex={0}>
+          {previewVisible ? <section ref={previewRef} id={previewId} className="composer-preview" aria-label={t("markdownPreview")} tabIndex={0}
+            onScroll={(event) => {
+              previewPosition.current = { draftKey, top: draftEmpty ? 0 : event.currentTarget.scrollTop };
+            }}>
             {previewText === "" ? <p className="composer-preview-empty">{t("markdownPreviewEmpty")}</p>
               : <SafeMarkdown text={previewText} contentId={`composer-preview:${draftKey}`} codeBlockVariant="embedded" />}
           </section> : null}
@@ -983,6 +1003,8 @@ const formatLabels = {
   bold: "markdownBold", italic: "markdownItalic", code: "markdownCode",
   code_block: "markdownCodeBlock", list: "markdownList", link: "markdownLink",
 } as const satisfies Record<MarkdownFormat, Parameters<ReturnType<typeof useLocale>["t"]>[0]>;
+
+const formatShortcuts: Partial<Record<keyof typeof formatLabels, string>> = { bold: "B", italic: "I", link: "K" };
 
 function permissionModeLabel(mode: PermissionMode, t: ReturnType<typeof useLocale>["t"]): string {
   switch (mode) {
