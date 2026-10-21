@@ -1421,6 +1421,7 @@ describe("desktop workspace and history shell", () => {
     typeEditorText(composer, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     expect(await screen.findByText(/Use environment variable · api\.deepseek\.com/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     await user.click(screen.getByRole("button", { name: "Solarized Light" }));
 
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("solarized_light"));
@@ -1465,6 +1466,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByRole("heading", { name: "Open a workspace" });
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     await user.click(screen.getByRole("button", { name: "Solarized Light" }));
     expect((await screen.findByRole("alert")).textContent).toContain("previous appearance is still active");
     expect(document.documentElement.dataset.theme).toBe("sigil_dark");
@@ -1487,6 +1489,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByRole("heading", { name: "Open a workspace" });
     await userEvent.setup().click(screen.getByRole("button", { name: "Open settings" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Appearance & preferences" }));
     const systemTheme = screen.getByRole("button", { name: "System theme" });
     expect(systemTheme.getAttribute("aria-pressed")).toBe("true");
     act(() => listener?.({ preference: "system", resolvedTheme: "sigil_light" }));
@@ -1563,6 +1566,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Support" }));
     await user.click(screen.getByRole("button", { name: "Open support and diagnostics" }));
 
     expect(await screen.findByRole("heading", { name: "Support & diagnostics" })).toBeTruthy();
@@ -2809,7 +2813,9 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     const model = await screen.findByRole("heading", { name: "Default model for new conversations" });
+    await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     const appearance = screen.getByRole("heading", { name: "Appearance" });
+    await user.click(screen.getByRole("button", { name: "Extensions" }));
     const extensions = screen.getByRole("heading", { name: "Import MCP servers" });
     expect(model.compareDocumentPosition(extensions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(appearance.compareDocumentPosition(extensions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
@@ -3199,6 +3205,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     await user.click(screen.getByRole("checkbox", { name: "Reopen the most recent workspace" }));
     expect(window.localStorage.getItem("sigil.desktop.reopen-last-workspace.v1")).toBe("false");
 
@@ -6954,6 +6961,7 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByRole("heading", { name: "Open a workspace" });
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     await user.click(screen.getByRole("button", { name: "简体中文" }));
 
     expect(screen.getByRole("heading", { name: "设置" })).toBeTruthy();

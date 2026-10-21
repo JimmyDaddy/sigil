@@ -150,7 +150,15 @@
 .batch-receipt h2 { margin: 0; font-size: 15px; }
 .batch-receipt p { margin: 6px 0 0; color: var(--sg-sys-color-on-surface-variant); }
 
-.settings-sections { display: grid; gap: 0; }
+.settings-page .application-page-content { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
+.settings-page .application-page-intro { display: none; }
+.settings-workbench { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.settings-navigation { display: grid; flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sg-sys-space-1); padding-bottom: var(--sg-sys-space-3); }
+.settings-navigation .sg-button { min-width: 0; white-space: normal; }
+.settings-navigation [aria-current="page"] { border-color: var(--sg-sys-color-primary); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-primary-container); }
+.settings-sections { display: grid; min-height: 0; flex: 1 1 auto; align-content: start; overflow: auto; gap: 0; }
+.settings-category { min-width: 0; }
+.settings-category[hidden] { display: none; }
 .settings-section {
   display: grid;
   grid-template-columns: minmax(180px, .6fr) minmax(0, 1.4fr);
@@ -439,6 +447,10 @@
   .theme-option-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-choice-grid { grid-template-columns: minmax(0, 1fr); }
   .provider-setup { width: calc(100% - 2 * var(--sg-sys-space-3)); padding: var(--sg-sys-space-4); }
+}
+
+@media (max-width: 640px) {
+  .settings-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import type { ThemePreference } from "../../appearance/contract";
@@ -28,6 +28,9 @@ import {
   providerConnectionDetail,
   providerConnectionLabel,
 } from "./providerPresentation";
+
+const settingsCategories = ["connections", "preferences", "extensions", "support"] as const;
+type SettingsCategory = typeof settingsCategories[number];
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -74,6 +77,26 @@ export function SettingsPage({
   const { notify } = useNotifications();
   const [reopenLastWorkspace, setReopenLastWorkspace] = useState(readReopenLastWorkspace);
   const [providerSetupOpen, setProviderSetupOpen] = useState(false);
+  const [category, setCategory] = useState<SettingsCategory>("connections");
+  const categoryId = useId();
+  const sectionsRef = useRef<HTMLDivElement>(null);
+  const providerSetupTrigger = useRef<HTMLButtonElement | null>(null);
+  const categoryPanel = (value: SettingsCategory) => ({
+    id: `${categoryId}-${value}-panel`,
+    role: "region",
+    "aria-labelledby": `${categoryId}-${value}`,
+    hidden: category !== value,
+  });
+  const closeProviderSetup = () => {
+    setProviderSetupOpen(false);
+    window.requestAnimationFrame(() => {
+      const target = providerSetupTrigger.current;
+      if (target?.isConnected && target.closest("[hidden], [inert]") === null) {
+        target.focus({ preventScroll: true });
+        target.scrollIntoView?.({ block: "nearest" });
+      }
+    });
+  };
   const [providerReloading, setProviderReloading] = useState(false);
   const [defaultModelSaving, setDefaultModelSaving] = useState(false);
   const effectiveDefaultModel = defaultModel ?? providerInventory?.defaultModel;
@@ -228,313 +251,345 @@ export function SettingsPage({
       navigation={{ label: t("backToConversation"), onBack }}
     >
 
-      <div className="settings-sections">
-        <section className="settings-section settings-provider" aria-labelledby="settings-provider">
-          <div className="settings-section-heading">
-            <Icon name="model" />
-            <div>
-              <h2 id="settings-provider">{t("providerConnections")}</h2>
-              <p>{t("providerConnectionsDetail")}</p>
+      <div className="settings-workbench">
+        <nav className="settings-navigation" aria-label={t("settingsCategories")}>
+          {settingsCategories.map((value) => (
+            <Button key={value} id={`${categoryId}-${value}`} type="button"
+              variant={category === value ? "secondary" : "quiet"}
+              aria-current={category === value ? "page" : undefined}
+              aria-controls={`${categoryId}-${value}-panel`}
+              onClick={() => {
+                setCategory(value);
+                if (sectionsRef.current !== null) sectionsRef.current.scrollTop = 0;
+              }}>
+              {t(`settingsCategory_${value}`)}
+            </Button>
+          ))}
+        </nav>
+        <div className="settings-sections" ref={sectionsRef}>
+        <div className="settings-category" {...categoryPanel("connections")}>
+          <section className="settings-section settings-provider" aria-labelledby="settings-provider">
+            <div className="settings-section-heading">
+              <Icon name="model" />
+              <div>
+                <h2 id="settings-provider">{t("providerConnections")}</h2>
+                <p>{t("providerConnectionsDetail")}</p>
+              </div>
             </div>
-          </div>
-          <div className="provider-connection-settings">
-            {workspaceId === undefined ? (
-              <p className="settings-control-unavailable">{t("providerWorkspaceRequired")}</p>
-            ) : providerInventory === undefined ? (
-              <p className="settings-control-unavailable">{t("loadingProviderConnections")}</p>
-            ) : (
-              <>
-                {providerInventory.connections.length === 0 ? (
-                  <p className="settings-control-unavailable">{t("noProviderConnections")}</p>
-                ) : (
-                  <ul className="provider-connection-list">
-                    {providerInventory.connections.map((connection) => {
-                      const isDefaultConnection = effectiveDefaultModel?.connectionId === connection.id;
-                      const connectionDetail = providerConnectionDetail(connection);
-                      return (
-                        <li key={connection.id}>
-                          <div>
-                            <strong>{connection.label}</strong>
-                            {connectionDetail === "" ? null : <span>{connectionDetail}</span>}
-                            <span>
-                              {providerCredentialSourceLabel(connection.credentialSource, t)}
-                              {" · "}
-                              {connection.endpointDisplay}
-                            </span>
-                            <span className="provider-connection-model">
-                              {isDefaultConnection && effectiveDefaultModel !== undefined
-                                ? t("providerConnectionDefaultModel", {
-                                  model: modelRefLabel(effectiveDefaultModel),
-                                })
-                                : t("providerConnectionNotDefault")}
-                            </span>
-                          </div>
-                          <small data-readiness={connection.readiness}>
-                            {providerReadinessLabel(connection.readiness, t)}
-                          </small>
-                        </li>
-                      );
+            <div className="provider-connection-settings">
+              {workspaceId === undefined ? (
+                <p className="settings-control-unavailable">{t("providerWorkspaceRequired")}</p>
+              ) : providerInventory === undefined ? (
+                <p className="settings-control-unavailable">{t("loadingProviderConnections")}</p>
+              ) : (
+                <>
+                  {providerInventory.connections.length === 0 ? (
+                    <p className="settings-control-unavailable">{t("noProviderConnections")}</p>
+                  ) : (
+                    <ul className="provider-connection-list">
+                      {providerInventory.connections.map((connection) => {
+                        const isDefaultConnection = effectiveDefaultModel?.connectionId === connection.id;
+                        const connectionDetail = providerConnectionDetail(connection);
+                        return (
+                          <li key={connection.id}>
+                            <div>
+                              <strong>{connection.label}</strong>
+                              {connectionDetail === "" ? null : <span>{connectionDetail}</span>}
+                              <span>
+                                {providerCredentialSourceLabel(connection.credentialSource, t)}
+                                {" · "}
+                                {connection.endpointDisplay}
+                              </span>
+                              <span className="provider-connection-model">
+                                {isDefaultConnection && effectiveDefaultModel !== undefined
+                                  ? t("providerConnectionDefaultModel", {
+                                    model: modelRefLabel(effectiveDefaultModel),
+                                  })
+                                  : t("providerConnectionNotDefault")}
+                              </span>
+                            </div>
+                            <small data-readiness={connection.readiness}>
+                              {providerReadinessLabel(connection.readiness, t)}
+                            </small>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {providerInventory.configMode === "v2" ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={(event) => {
+                        providerSetupTrigger.current = event.currentTarget;
+                        setProviderSetupOpen(true);
+                      }}
+                    >
+                      {t("addProviderConnection")}
+                    </Button>
+                  ) : (
+                    <div className="provider-setup-error" role="alert">
+                      <p>{t("providerConfigInvalidDetail")}</p>
+                      <div className="provider-setup-actions">
+                        <Button
+                          type="button"
+                          variant="primary"
+                          onClick={(event) => {
+                            providerSetupTrigger.current = event.currentTarget;
+                            setProviderSetupOpen(true);
+                          }}
+                        >
+                          {t("replaceProviderConfig")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={providerReloading}
+                          onClick={() => void reloadProviderConfiguration()}
+                        >
+                          {providerReloading ? t("loading") : t("recheckProviderConfig")}
+                        </Button>
+                        <Button type="button" variant="quiet" onClick={onOpenSupport}>
+                          {t("openSupport")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {providerSetupOpen
+              && workspaceId !== undefined
+              && providerInventory !== undefined ? (
+                <div className="settings-provider-setup">
+                  <ProviderSetup
+                    bridge={bridge}
+                    workspaceId={workspaceId}
+                    inventory={providerInventory}
+                    mode={providerInventory.configMode === "invalid" ? "repair" : "settings"}
+                    active={category === "connections"}
+                    onCancel={closeProviderSetup}
+                    onSaved={(inventory) => {
+                      if (!onProviderInventoryChange(inventory)) return;
+                      void onProviderConfigurationReloaded(workspaceId).then(() => {
+                        setProviderSetupOpen(false);
+                        notify({ tone: "success", message: t("providerSetupSaved") });
+                      }).catch(() => {
+                        notify({ tone: "error", message: t("providerSetupRestartFailed") });
+                      });
+                    }}
+                  />
+                </div>
+              ) : null}
+          </section>
+
+          <section className="settings-section" aria-labelledby="settings-model">
+            <div className="settings-section-heading">
+              <Icon name="model" />
+              <div>
+                <h2 id="settings-model">{t("defaultModel")}</h2>
+                <p>{t("defaultModelDetail")}</p>
+              </div>
+            </div>
+            <div className="settings-model-controls">
+              {modelContext === undefined && providerInventory?.configMode === "v2"
+                && providerInventory.connections.length > 0 ? (
+                <DefaultModelRouteForm
+                  key={workspaceId}
+                  inventory={providerInventory}
+                  defaultModel={effectiveDefaultModel}
+                  saving={defaultModelSaving}
+                  onSave={saveDefaultModel}
+                />
+              ) : modelContext === undefined ? (
+                <p className="settings-control-unavailable">
+                  {effectiveDefaultModel === undefined
+                    ? t("defaultModelUnavailable")
+                    : t("defaultModelPickerUnavailable")}
+                </p>
+              ) : (
+                <Select
+                  label={t("defaultModel")}
+                  description={connectionMatchesProvider(defaultConnectionIdentity)
+                    ? t("defaultModelConnection", { connection: defaultConnectionIdentity.label.trim() })
+                    : t("defaultModelProvider", {
+                      connection: defaultConnectionIdentity.label,
+                      provider: defaultConnectionIdentity.providerLabel,
                     })}
-                  </ul>
-                )}
-                {providerInventory.configMode === "v2" ? (
+                  value={
+                    effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
+                  }
+                  disabled={defaultModelSaving}
+                  onChange={(event) => void updateDefaultModel(event.currentTarget.value)}
+                >
+                  {modelContext.modelOptions.map((option) => (
+                    <option
+                      key={modelRefKey(option.modelRef)}
+                      value={modelRefKey(option.modelRef)}
+                      disabled={
+                        !modelOptionIsSelectable(option)
+                        || !providerInventory?.connections.some(
+                          (connection) => connection.id === option.modelRef.connectionId,
+                        )
+                      }
+                    >
+                      {modelOptionLabel(option)}
+                    </option>
+                  ))}
+                </Select>
+              )}
+              {effectiveDefaultModel === undefined ? null : (
+                <div className="settings-context-window-control">
+                  <TextField
+                    type="number"
+                    min={1}
+                    inputMode="numeric"
+                    label={t("contextWindow")}
+                    description={t("contextWindowSettingsDetail", {
+                      connection: defaultModelConnection?.label
+                        ?? effectiveDefaultModel.connectionId,
+                      model: effectiveDefaultModel.modelId,
+                    })}
+                    value={contextWindowTokens}
+                    placeholder={t("automatic")}
+                    error={contextWindowValid ? undefined : t("contextWindowInvalid")}
+                    disabled={defaultModelSaving}
+                    onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
+                  />
                   <Button
                     type="button"
                     variant="secondary"
-                    onClick={() => setProviderSetupOpen(true)}
+                    disabled={defaultModelSaving || !contextWindowValid}
+                    onClick={() => void saveContextWindow()}
                   >
-                    {t("addProviderConnection")}
+                    {defaultModelSaving ? t("savingProvider") : t("save")}
                   </Button>
-                ) : (
-                  <div className="provider-setup-error" role="alert">
-                    <p>{t("providerConfigInvalidDetail")}</p>
-                    <div className="provider-setup-actions">
-                      <Button
-                        type="button"
-                        variant="primary"
-                        onClick={() => setProviderSetupOpen(true)}
-                      >
-                        {t("replaceProviderConfig")}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        disabled={providerReloading}
-                        onClick={() => void reloadProviderConfiguration()}
-                      >
-                        {providerReloading ? t("loading") : t("recheckProviderConfig")}
-                      </Button>
-                      <Button type="button" variant="quiet" onClick={onOpenSupport}>
-                        {t("openSupport")}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          {providerSetupOpen
-            && workspaceId !== undefined
-            && providerInventory !== undefined ? (
-              <div className="settings-provider-setup">
-                <ProviderSetup
-                  bridge={bridge}
-                  workspaceId={workspaceId}
-                  inventory={providerInventory}
-                  mode={providerInventory.configMode === "invalid" ? "repair" : "settings"}
-                  onCancel={() => setProviderSetupOpen(false)}
-                  onSaved={(inventory) => {
-                    if (!onProviderInventoryChange(inventory)) return;
-                    void onProviderConfigurationReloaded(workspaceId).then(() => {
-                      setProviderSetupOpen(false);
-                      notify({ tone: "success", message: t("providerSetupSaved") });
-                    }).catch(() => {
-                      notify({ tone: "error", message: t("providerSetupRestartFailed") });
-                    });
-                  }}
-                />
+                </div>
+              )}
               </div>
-            ) : null}
-        </section>
+          </section>
 
-        <section className="settings-section" aria-labelledby="settings-model">
-          <div className="settings-section-heading">
-            <Icon name="model" />
-            <div>
-              <h2 id="settings-model">{t("defaultModel")}</h2>
-              <p>{t("defaultModelDetail")}</p>
+        </div>
+        <div className="settings-category" {...categoryPanel("preferences")}>
+          <section className="settings-section" aria-labelledby="settings-appearance">
+            <div className="settings-section-heading">
+              <Icon name="sun" />
+              <div>
+                <h2 id="settings-appearance">{t("appearance")}</h2>
+                <p>{t("appearanceDetail")}</p>
+              </div>
             </div>
-          </div>
-          <div className="settings-model-controls">
-            {modelContext === undefined && providerInventory?.configMode === "v2"
-              && providerInventory.connections.length > 0 ? (
-              <DefaultModelRouteForm
-                key={workspaceId}
-                inventory={providerInventory}
-                defaultModel={effectiveDefaultModel}
-                saving={defaultModelSaving}
-                onSave={saveDefaultModel}
-              />
-            ) : modelContext === undefined ? (
-              <p className="settings-control-unavailable">
-                {effectiveDefaultModel === undefined
-                  ? t("defaultModelUnavailable")
-                  : t("defaultModelPickerUnavailable")}
-              </p>
-            ) : (
-              <Select
-                label={t("defaultModel")}
-                description={connectionMatchesProvider(defaultConnectionIdentity)
-                  ? t("defaultModelConnection", { connection: defaultConnectionIdentity.label.trim() })
-                  : t("defaultModelProvider", {
-                    connection: defaultConnectionIdentity.label,
-                    provider: defaultConnectionIdentity.providerLabel,
-                  })}
-                value={
-                  effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
-                }
-                disabled={defaultModelSaving}
-                onChange={(event) => void updateDefaultModel(event.currentTarget.value)}
-              >
-                {modelContext.modelOptions.map((option) => (
-                  <option
-                    key={modelRefKey(option.modelRef)}
-                    value={modelRefKey(option.modelRef)}
-                    disabled={
-                      !modelOptionIsSelectable(option)
-                      || !providerInventory?.connections.some(
-                        (connection) => connection.id === option.modelRef.connectionId,
-                      )
-                    }
-                  >
-                    {modelOptionLabel(option)}
-                  </option>
-                ))}
-              </Select>
-            )}
-            {effectiveDefaultModel === undefined ? null : (
-              <div className="settings-context-window-control">
-                <TextField
-                  type="number"
-                  min={1}
-                  inputMode="numeric"
-                  label={t("contextWindow")}
-                  description={t("contextWindowSettingsDetail", {
-                    connection: defaultModelConnection?.label
-                      ?? effectiveDefaultModel.connectionId,
-                    model: effectiveDefaultModel.modelId,
-                  })}
-                  value={contextWindowTokens}
-                  placeholder={t("automatic")}
-                  error={contextWindowValid ? undefined : t("contextWindowInvalid")}
-                  disabled={defaultModelSaving}
-                  onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
-                />
+            <div className="theme-option-grid" role="group" aria-label={t("appearance")}>
+              {themeOptions.map((option) => (
                 <Button
+                  key={option}
                   type="button"
                   variant="secondary"
-                  disabled={defaultModelSaving || !contextWindowValid}
-                  onClick={() => void saveContextWindow()}
+                  className="theme-option"
+                  data-theme-option={option}
+                  aria-label={themeName(option, t)}
+                  aria-pressed={appearance.preference === option}
+                  disabled={appearance.status === "saving"}
+                  onClick={() => void appearance.setPreference(option)}
                 >
-                  {defaultModelSaving ? t("savingProvider") : t("save")}
+                  <span className="theme-option-content">
+                    <span className="theme-option-preview" data-theme-preview={option} aria-hidden="true">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                    <span className="theme-option-copy">
+                      <strong>{themeName(option, t)}</strong>
+                      <small>{themeDescription(option, t)}</small>
+                    </span>
+                  </span>
                 </Button>
+              ))}
+            </div>
+            {appearance.error === undefined ? null : (
+              <div className="settings-inline-error">
+                <span>{appearance.error}</span>
+                <Button type="button" onClick={() => void appearance.retry()}>{t("retry")}</Button>
               </div>
             )}
-            </div>
-        </section>
+          </section>
 
-        <section className="settings-section" aria-labelledby="settings-appearance">
-          <div className="settings-section-heading">
-            <Icon name="sun" />
-            <div>
-              <h2 id="settings-appearance">{t("appearance")}</h2>
-              <p>{t("appearanceDetail")}</p>
+          <section className="settings-section" aria-labelledby="settings-language">
+            <div className="settings-section-heading">
+              <Icon name="language" />
+              <div>
+                <h2 id="settings-language">{t("languageSetting")}</h2>
+                <p>{t("languageSettingDetail")}</p>
+              </div>
             </div>
-          </div>
-          <div className="theme-option-grid" role="group" aria-label={t("appearance")}>
-            {themeOptions.map((option) => (
+            <div className="settings-choice-group" role="group" aria-label={t("languageSetting")}>
+              {(["en", "zh-CN"] as Locale[]).map((value) => (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={locale === value ? "primary" : "secondary"}
+                  aria-pressed={locale === value}
+                  onClick={() => setLocale(value)}
+                >
+                  {value === "en" ? "English" : "简体中文"}
+                </Button>
+              ))}
+            </div>
+          </section>
+
+          <section className="settings-section" aria-labelledby="settings-startup">
+            <div className="settings-section-heading">
+              <Icon name="history" />
+              <div>
+                <h2 id="settings-startup">{t("startup")}</h2>
+                <p>{t("startupDetail")}</p>
+              </div>
+            </div>
+            <Checkbox
+              label={t("reopenLastWorkspace")}
+              description={t("reopenLastWorkspaceDetail")}
+              checked={reopenLastWorkspace}
+              onChange={(event) => updateStartup(event.currentTarget.checked)}
+            />
+          </section>
+
+        </div>
+        <div className="settings-category" {...categoryPanel("extensions")}>
+          {workspaceId === undefined ? <p className="settings-control-unavailable">{t("settingsExtensionsWorkspaceRequired")}</p> : null}
+          {workspaceId !== undefined && sessionId !== undefined && <PluginReviewCard key={`${workspaceId}:${sessionId}`} bridge={bridge} workspaceId={workspaceId} sessionId={sessionId} />}
+
+          {workspaceId !== undefined && <McpImportCard key={workspaceId}
+            bridge={bridge} workspaceId={workspaceId}
+            onImported={async () => {
+              if (isWorkspaceActive()) await onProviderConfigurationReloaded(workspaceId);
+            }} />}
+
+        </div>
+        <div className="settings-category" {...categoryPanel("support")}>
+          <DesktopUpdateCard bridge={bridge} />
+
+          <section className="settings-section settings-boundary" aria-labelledby="settings-runtime">
+            <div className="settings-section-heading">
+              <Icon name="shield" />
+              <div>
+                <h2 id="settings-runtime">{t("runtimeControls")}</h2>
+                <p>{t("runtimeControlsDetail")}</p>
+              </div>
+            </div>
+            <div className="settings-choice-group">
               <Button
-                key={option}
                 type="button"
                 variant="secondary"
-                className="theme-option"
-                data-theme-option={option}
-                aria-label={themeName(option, t)}
-                aria-pressed={appearance.preference === option}
-                disabled={appearance.status === "saving"}
-                onClick={() => void appearance.setPreference(option)}
+                leadingIcon={<Icon name="shield" />}
+                disabled={!supportAvailable}
+                onClick={onOpenSupport}
               >
-                <span className="theme-option-content">
-                  <span className="theme-option-preview" data-theme-preview={option} aria-hidden="true">
-                    <i />
-                    <i />
-                    <i />
-                  </span>
-                  <span className="theme-option-copy">
-                    <strong>{themeName(option, t)}</strong>
-                    <small>{themeDescription(option, t)}</small>
-                  </span>
-                </span>
+                {t("openSupport")}
               </Button>
-            ))}
-          </div>
-          {appearance.error === undefined ? null : (
-            <div className="settings-inline-error">
-              <span>{appearance.error}</span>
-              <Button type="button" onClick={() => void appearance.retry()}>{t("retry")}</Button>
             </div>
-          )}
-        </section>
-
-        <section className="settings-section" aria-labelledby="settings-language">
-          <div className="settings-section-heading">
-            <Icon name="language" />
-            <div>
-              <h2 id="settings-language">{t("languageSetting")}</h2>
-              <p>{t("languageSettingDetail")}</p>
-            </div>
-          </div>
-          <div className="settings-choice-group" role="group" aria-label={t("languageSetting")}>
-            {(["en", "zh-CN"] as Locale[]).map((value) => (
-              <Button
-                key={value}
-                type="button"
-                variant={locale === value ? "primary" : "secondary"}
-                aria-pressed={locale === value}
-                onClick={() => setLocale(value)}
-              >
-                {value === "en" ? "English" : "简体中文"}
-              </Button>
-            ))}
-          </div>
-        </section>
-
-        <section className="settings-section" aria-labelledby="settings-startup">
-          <div className="settings-section-heading">
-            <Icon name="history" />
-            <div>
-              <h2 id="settings-startup">{t("startup")}</h2>
-              <p>{t("startupDetail")}</p>
-            </div>
-          </div>
-          <Checkbox
-            label={t("reopenLastWorkspace")}
-            description={t("reopenLastWorkspaceDetail")}
-            checked={reopenLastWorkspace}
-            onChange={(event) => updateStartup(event.currentTarget.checked)}
-          />
-        </section>
-
-        {workspaceId !== undefined && sessionId !== undefined && <PluginReviewCard key={`${workspaceId}:${sessionId}`} bridge={bridge} workspaceId={workspaceId} sessionId={sessionId} />}
-
-        {workspaceId !== undefined && <McpImportCard key={workspaceId}
-          bridge={bridge} workspaceId={workspaceId}
-          onImported={async () => {
-            if (isWorkspaceActive()) await onProviderConfigurationReloaded(workspaceId);
-          }} />}
-
-        <DesktopUpdateCard bridge={bridge} />
-
-        <section className="settings-section settings-boundary" aria-labelledby="settings-runtime">
-          <div className="settings-section-heading">
-            <Icon name="shield" />
-            <div>
-              <h2 id="settings-runtime">{t("runtimeControls")}</h2>
-              <p>{t("runtimeControlsDetail")}</p>
-            </div>
-          </div>
-          <div className="settings-choice-group">
-            <Button
-              type="button"
-              variant="secondary"
-              leadingIcon={<Icon name="shield" />}
-              disabled={!supportAvailable}
-              onClick={onOpenSupport}
-            >
-              {t("openSupport")}
-            </Button>
-          </div>
-        </section>
+          </section>
+        </div>
+        </div>
       </div>
     </ApplicationPage>
   );

@@ -211,13 +211,7 @@ export function ConversationLibrary({
           <Button type="submit" leadingIcon={<Icon name="search" />}>{t("search")}</Button>
         </form>
 
-        <div className="library-selection-bar" aria-live="polite">
-          <Checkbox
-            label={t("selectLoadedConversations")}
-            checked={allLoadedSelected}
-            disabled={page.entries.length === 0}
-            onChange={(event) => toggleAllLoaded(event.currentTarget.checked)}
-          />
+        {selectedEntries.length === 0 ? null : <div className="library-selection-bar" aria-live="polite">
           <span>{t("selectedConversationCount", { count: selectedEntries.length })}</span>
           <div className="library-batch-actions">
             <Button
@@ -238,7 +232,7 @@ export function ConversationLibrary({
               onClick={() => void prepare("delete_invalid_sources", selectedUnavailable)}
             >{t("deleteSelectedInvalid", { count: selectedUnavailable.length })}</Button>
           </div>
-        </div>
+        </div>}
       </div>
 
       {receipt === undefined ? null : <BatchReceipt receipt={receipt} />}
@@ -252,7 +246,9 @@ export function ConversationLibrary({
           <table className="library-table">
             <thead>
               <tr>
-                <th scope="col"><span className="sr-only">{t("selectLoadedConversations")}</span></th>
+                <th scope="col"><Checkbox className="library-row-check"
+                  label={t("selectLoadedConversations")} checked={allLoadedSelected}
+                  onChange={(event) => toggleAllLoaded(event.currentTarget.checked)} /></th>
                 <th scope="col">{t("conversationTitle")}</th>
                 <th scope="col">{t("conversationState")}</th>
                 <th scope="col">{t("provider")}</th>

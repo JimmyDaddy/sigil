@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -41,6 +41,48 @@ function setup(
 }
 
 describe("provider setup when catalog discovery fails", () => {
+  it("focuses and scrolls the first control on user-driven step changes", async () => {
+    const user = userEvent.setup();
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    try {
+      setup(vi.fn());
+      const provider = screen.getByRole("button", { name: /DeepSeek/ });
+      expect(document.activeElement).toBe(provider);
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(provider);
+      await user.click(provider);
+      expect(document.activeElement).toBe(screen.getByLabelText("Authentication"));
+      expect(scrollIntoView.mock.contexts.at(-1)).toBe(screen.getByLabelText("Authentication"));
+      await user.click(screen.getByRole("button", { name: "Back" }));
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: /DeepSeek/ }));
+    } finally {
+      if (original === undefined) Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+      else Object.defineProperty(HTMLElement.prototype, "scrollIntoView", original);
+    }
+  });
+
+  it("keeps focus and manual input intact when a same-step catalog retry resolves", async () => {
+    const user = userEvent.setup();
+    let resolveCatalog!: (value: ProviderSetupCatalog) => void;
+    setup(vi.fn().mockRejectedValueOnce(new Error("offline"))
+      .mockImplementationOnce(() => new Promise<ProviderSetupCatalog>((resolve) => { resolveCatalog = resolve; })));
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "focus-refresh-key");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    const model = await screen.findByLabelText("Model ID") as HTMLInputElement;
+    await user.click(screen.getByRole("button", { name: "Retry refresh" }));
+    await user.type(model, "exact-model-draft");
+    const caret = model.selectionStart;
+    await act(async () => resolveCatalog({ connectionId: "retry", providerLabel: "DeepSeek", state: "remote",
+      models: [{ modelId: "listed", displayName: "Listed after retry", availability: "available", recommended: true, provenance: "remote" }],
+      manualEntryAllowed: true }));
+    expect(await screen.findByRole("radio", { name: /Listed after retry/ })).toBeTruthy();
+    expect(document.activeElement).toBe(model);
+    expect(model.value).toBe("exact-model-draft");
+    expect(model.selectionStart).toBe(caret);
+  });
+
   it("accepts an exact model ID after a catalog RPC error and keeps the required API key", async () => {
     const user = userEvent.setup();
     const providerSetupCatalog = vi.fn().mockRejectedValue(new Error("discovery unavailable"));

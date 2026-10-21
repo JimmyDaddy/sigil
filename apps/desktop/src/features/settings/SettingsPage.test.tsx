@@ -122,6 +122,7 @@ describe("settings provider identity labels", () => {
       expect(screen.getByText(connectionId === "deepseek-default"
         ? /^Connection DeepSeek\. Existing conversations/
         : /^Connection Team gateway · Provider DeepSeek\./)).toBeTruthy();
+      await userEvent.setup().click(screen.getByRole("button", { name: "Support" }));
       await screen.findByText("Current version test");
     },
   );

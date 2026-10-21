@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
@@ -34,6 +34,7 @@ export function ProviderSetup({
   mode,
   onSaved,
   onCancel,
+  active = true,
 }: {
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
@@ -41,6 +42,7 @@ export function ProviderSetup({
   readonly mode: "onboarding" | "settings" | "repair";
   readonly onSaved: (inventory: ProviderConnectionInventory) => void;
   readonly onCancel?: () => void;
+  readonly active?: boolean;
 }) {
   const { t } = useLocale();
   const [step, setStep] = useState<SetupStep>("provider");
@@ -57,6 +59,16 @@ export function ProviderSetup({
   const [contextWindowTokens, setContextWindowTokens] = useState("");
   const [error, setError] = useState<string>();
   const catalogRequestRevision = useRef(0);
+  const stepRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const content = stepRef.current;
+    if (!active || content === null || content.closest("[hidden], [inert]") !== null) return;
+    const target = (step === "model" ? content.querySelector<HTMLElement>("input:checked") : null)
+      ?? content.querySelector<HTMLElement>("input:not([disabled]), select:not([disabled])")
+      ?? content.querySelector<HTMLElement>("button:not([disabled])");
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [active, step]);
 
   const isCustom = template === "open_ai_compatible";
   const effectiveModelId = modelId === "__manual__" ? manualModelId.trim() : modelId;
@@ -219,7 +231,7 @@ export function ProviderSetup({
       </header>
 
       {step === "provider" ? (
-        <div className="provider-choice-grid" role="list" aria-label={t("chooseProvider")}>
+        <div ref={stepRef} className="provider-choice-grid" role="list" aria-label={t("chooseProvider")}>
           {PROVIDERS.map((provider) => (
             <Button
               key={provider}
@@ -238,7 +250,7 @@ export function ProviderSetup({
       ) : null}
 
       {step === "authentication" && template !== undefined ? (
-        <div className="provider-setup-form">
+        <div ref={stepRef} className="provider-setup-form">
           <div className="provider-setup-selection">
             <strong>{providerName(template, t)}</strong>
             <Button type="button" variant="quiet" onClick={() => setStep("provider")}>
@@ -322,7 +334,7 @@ export function ProviderSetup({
       ) : null}
 
       {step === "model" && template !== undefined ? (
-        <div className="provider-setup-form">
+        <div ref={stepRef} className="provider-setup-form">
           <div className="provider-catalog-summary">
             <div>
               <strong>{catalog?.providerLabel ?? providerName(template, t)}</strong>
