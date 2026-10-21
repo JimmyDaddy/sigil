@@ -59,8 +59,8 @@ export function ConversationQueuePanel({
       : "");
   };
   const finishEdit = async (entryId: string) => {
-    const prompt = replacementPrompt.trim();
-    if (prompt === "") return;
+    const prompt = replacementPrompt;
+    if (prompt.trim() === "") return;
     if (await onCommand({
       action: "edit",
       entryId,

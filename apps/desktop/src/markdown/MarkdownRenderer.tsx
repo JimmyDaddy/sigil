@@ -15,6 +15,7 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
+import { normalizeCompletedMarkdown } from "./normalize";
 import { writeClipboard } from "../clipboard";
 import { useLocale } from "../i18n";
 import { ReadonlyCheckbox } from "../ui/primitives";
@@ -70,28 +71,30 @@ export interface MarkdownRendererProps {
 export function MarkdownRenderer(props: MarkdownRendererProps) {
   const cursor = useRef<MarkdownProjectionCursor | undefined>(undefined);
   const update = useMemo(
-    () => projectMarkdownWithCursor({
-      source: props.text,
-      phase: props.phase,
-      contentId: props.contentId,
-    }, cursor.current),
+    () => props.phase === "complete"
+      ? { phase: "complete" as const, source: normalizeCompletedMarkdown(props.text).source }
+      : { phase: "streaming" as const, ...projectMarkdownWithCursor({
+        source: props.text,
+        phase: props.phase,
+        contentId: props.contentId,
+      }, cursor.current) },
     [props.contentId, props.phase, props.text],
   );
   useLayoutEffect(() => {
-    cursor.current = update.cursor;
-  }, [update.cursor]);
-  const projection = update.projection;
+    cursor.current = update.phase === "streaming" ? update.cursor : undefined;
+  }, [update]);
 
-  if (props.phase === "complete") {
+  if (update.phase === "complete") {
     return (
       <MarkdownDocument
         {...props}
-        source={projection.source}
+        source={update.source}
         allowMermaid
       />
     );
   }
 
+  const projection = update.projection;
   let diagramCount = 0;
   return (
     <>

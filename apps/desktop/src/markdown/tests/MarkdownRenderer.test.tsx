@@ -133,3 +133,44 @@ describe("safe conversation Markdown renderer", () => {
     expect(screen.getByRole("button", { name: "Close viewer" })).toBeTruthy();
   });
 });
+
+describe("complete Markdown preview work", () => {
+  it("renders every paragraph without repeatedly encoding the entire completed source", () => {
+    const source = Array.from({ length: 128 }, (_, index) => `Paragraph ${index}`).join("\n\n");
+    const encode = vi.spyOn(TextEncoder.prototype, "encode");
+    try {
+      const { container } = renderMarkdown(source);
+      expect(container.querySelectorAll("p")).toHaveLength(128);
+      expect(container.textContent).toContain("Paragraph 127");
+      const wholeSourceEncodings = encode.mock.calls.filter(([value]) => value === source).length;
+      expect(wholeSourceEncodings).toBeLessThanOrEqual(2);
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
+  it("retains completed CRLF and exact code text after a streaming phase", () => {
+    const source = "Before **中文**\r\n\r\n```text\r\n  exact code  \r\nend\r\n```\r\n\r\nAfter.";
+    const view = renderMarkdown(source, "streaming");
+    view.rerender(
+      <LocaleProvider>
+        <div className="message-content">
+          <SafeMarkdown text={source} phase="complete" contentId="renderer-test" />
+        </div>
+      </LocaleProvider>,
+    );
+    expect(view.container.querySelector("strong")?.textContent).toBe("中文");
+    const code = view.container.querySelector("pre code");
+    expect(code?.textContent).toBe("  exact code  \r\nend\n");
+    expect(view.container.querySelectorAll("pre")).toHaveLength(1);
+    expect(screen.getByText("After.")).toBeTruthy();
+  });
+
+  it("keeps completed attached fence repair without changing code indentation", () => {
+    const source = "Before.\n\n```text\n  exact code  \nend```\n\nAfter.";
+    const view = renderMarkdown(source);
+    expect(view.container.querySelector("pre code")?.textContent).toBe("  exact code  \nend\n");
+    expect(view.container.querySelectorAll("pre")).toHaveLength(1);
+    expect(screen.getByText("After.")).toBeTruthy();
+  });
+});

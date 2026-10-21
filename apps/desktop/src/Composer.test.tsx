@@ -916,7 +916,6 @@ describe("structured composer", () => {
   });
 });
 
-
 const draftImage: DraftImage = {
   attachmentId: "admitted-image-1", mimeType: "image/png", width: 2, height: 3,
   byteLen: 72, previewDataUrl: "data:image/png;base64,aW1hZ2U=",
@@ -1163,4 +1162,22 @@ describe("Markdown writing", () => {
     expect(screen.getByText(/These edits are only in this window/)).toBeTruthy();
     setItem.mockRestore();
   });
+});
+
+
+it("uses Shift+Tab for backward focus without accepting a suggestion, while Tab still accepts it", async () => {
+  const user = userEvent.setup();
+  const { onOpenSettings, onSubmit } = renderComposer();
+  const input = screen.getByRole("combobox", { name: "Message Sigil" });
+  typeEditorText(input, "/config");
+  expect(screen.getByRole("listbox", { name: "Composer suggestions" })).toBeTruthy();
+  await user.tab({ shift: true });
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Expand editor" }));
+  expect(editorText(input)).toBe("/config");
+  expect(onOpenSettings).not.toHaveBeenCalled();
+  expect(onSubmit).not.toHaveBeenCalled();
+  input.focus();
+  await user.tab();
+  await waitFor(() => expect(onOpenSettings).toHaveBeenCalledOnce());
+  expect(onSubmit).not.toHaveBeenCalled();
 });

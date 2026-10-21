@@ -590,7 +590,7 @@ export function Composer({
                   setActiveSuggestion((current) => (current + delta + suggestions.length) % suggestions.length);
                   return;
                 }
-                if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+                if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey) {
                   event.preventDefault();
                   selectSuggestion(suggestions[Math.min(activeSuggestion, suggestions.length - 1)]);
                   return;

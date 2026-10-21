@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -200,5 +200,51 @@ describe("conversation queue panel", () => {
     }, { runId: "foreground-run", ownerRevision: "owner-revision" });
 
     expect(screen.queryByRole("button", { name: "Interrupt and run next" })).toBeNull();
+  });
+});
+
+describe("queued Markdown source", () => {
+  it("preserves a complete prefilled source on replace without trimming code indentation or ending whitespace", async () => {
+    const user = userEvent.setup();
+    const source = "    code block\r\n\r\nlast line  \r\n";
+    const onCommand = renderQueue(undefined, {
+      ...queue,
+      items: [{ ...queue.items[1]!, promptPreview: source }],
+      totalItems: 1,
+    });
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledWith({
+      action: "edit",
+      entryId: "queue-entry-ready",
+      prompt: source,
+      reasoningEffort: "high",
+    }));
+  });
+
+  it("submits newly edited source exactly as entered", async () => {
+    const user = userEvent.setup();
+    const onCommand = renderQueue();
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    const source = "\n    中文代码\n\nlast line  \n";
+    fireEvent.change(screen.getByRole("textbox", { name: "Replacement prompt" }), { target: { value: source } });
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledWith({
+      action: "edit",
+      entryId: "queue-entry-ready",
+      prompt: source,
+      reasoningEffort: "high",
+    }));
+  });
+
+  it("still rejects an all-whitespace replacement through both button and form submission", async () => {
+    const user = userEvent.setup();
+    const onCommand = renderQueue();
+    await user.click(screen.getByRole("button", { name: "Replace queued message" }));
+    const input = screen.getByRole("textbox", { name: "Replacement prompt" });
+    fireEvent.change(input, { target: { value: "  \n\t" } });
+    expect((screen.getByRole("button", { name: "Replace" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(input.closest("form")!);
+    expect(onCommand).not.toHaveBeenCalled();
   });
 });
