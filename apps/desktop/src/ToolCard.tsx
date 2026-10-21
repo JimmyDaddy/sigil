@@ -16,6 +16,7 @@ const MAX_VISIBLE_OUTPUT_LINES = 240;
 const OUTPUT_PREVIEW_LINES = 3;
 const OUTPUT_PREVIEW_CHARACTERS = 480;
 const MAX_SUMMARY_CHARACTERS = 280;
+const SHORT_OUTPUT_BYTES = 4_096;
 
 export interface ToolView {
   key: string;
@@ -104,6 +105,8 @@ export function ToolCard({
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
+  // Search and paging replace artifactPage; retain only the bounded original for inline reading.
+  const [inlineArtifactPage, setInlineArtifactPage] = useState<ToolArtifactPage>();
   const [artifactBusy, setArtifactBusy] = useState(false);
   const [artifactError, setArtifactError] = useState(false);
   const [artifactQuery, setArtifactQuery] = useState("");
@@ -119,6 +122,7 @@ export function ToolCard({
     artifactReadGeneration.current += 1;
     artifactReadBusy.current = false;
     setArtifactPage(undefined);
+    setInlineArtifactPage(undefined);
     setArtifactBusy(false);
     setArtifactError(false);
     setArtifactQuery("");
@@ -137,7 +141,12 @@ export function ToolCard({
     void (async () => {
       try {
         const page = await read(selector);
-        if (generation === artifactReadGeneration.current) setArtifactPage(page);
+        if (generation === artifactReadGeneration.current) {
+          setArtifactPage(page);
+          if (selector.kind === "byte_slice" && selector.offset === 0 && page.returnedBytes <= SHORT_OUTPUT_BYTES) {
+            setInlineArtifactPage(page);
+          }
+        }
       } catch {
         if (generation === artifactReadGeneration.current) setArtifactError(true);
       } finally {
@@ -156,11 +165,37 @@ export function ToolCard({
   }, [canReadArtifact]);
   const shortOutput = canReadArtifact
     && tool.artifactPersistedBytes !== undefined
-    && tool.artifactPersistedBytes <= 4_096;
+    && tool.artifactPersistedBytes <= SHORT_OUTPUT_BYTES;
   useEffect(() => {
     if (!shortOutput) return;
-    return readArtifact({ kind: "byte_slice", offset: 0, limit: 4_096 });
+    return readArtifact({ kind: "byte_slice", offset: 0, limit: SHORT_OUTPUT_BYTES });
   }, [shortOutput, tool.key, tool.artifactRef, readArtifact]);
+  const completeInlineOutput = shortOutput && isCompleteInlineOutput(inlineArtifactPage, tool)
+    ? inlineArtifactPage : undefined;
+  const visibleShortPage = completeInlineOutput ?? artifactPage;
+  const compactSearch = completeInlineOutput !== undefined
+    && presentation.tone === "success" && tool.artifactHasMore !== true;
+  const artifactSearch = (
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      const query = artifactQuery.trim();
+      if (query !== "") void readArtifact({ kind: "search_literal", query, startOffset: 0, maxMatches: 20, contextLines: 2 });
+    }}>
+      <TextField label={t("searchSavedOutput")} labelHidden containerClassName="tool-artifact-search-field"
+        maxLength={512} value={artifactQuery} onChange={(event) => setArtifactQuery(event.target.value)} />
+      <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>{t("search")}</Button>
+    </form>
+  );
+  const artifactResults = <>
+    {artifactPage === undefined || (shortOutput && artifactPage === visibleShortPage) ? null : artifactPage.bodyEncoding === "utf8" ? (
+      <HighlightedCode text={artifactPage.body} ariaLabel={`${tool.toolName} saved output ${artifactPage.selector.kind === "search_literal" ? "search results" : "page"}`} />
+    ) : <small>{t("savedOutputBinary")}</small>}
+    {artifactPage?.nextSelector === undefined ? null : (
+      <Button type="button" variant="quiet" busy={artifactBusy}
+        onClick={() => void readArtifact(artifactPage.nextSelector!)}>{t("nextOutputPage")}</Button>
+    )}
+    {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
+  </>;
   const artifactPresentation = tool.artifactAvailability === undefined
     ? undefined
     : presentArtifactStatus(tool.artifactAvailability, t);
@@ -198,9 +233,9 @@ export function ToolCard({
         </div>
       )}
       {shortOutput ? (
-        artifactPage?.bodyEncoding === "utf8" ? (
-          artifactPage.body === "" ? <p>{t("noToolOutput")}</p>
-            : <HighlightedCode text={artifactPage.body} ariaLabel={`${tool.toolName} saved output page`} />
+        visibleShortPage?.bodyEncoding === "utf8" ? (
+          visibleShortPage.body === "" ? <p>{t("noToolOutput")}</p>
+            : <HighlightedCode text={visibleShortPage.body} ariaLabel={`${tool.toolName} saved output page`} />
         ) : artifactError ? (
           <p role="alert">{t("artifactReadFailed")}</p>
         ) : artifactBusy ? (
@@ -242,7 +277,15 @@ export function ToolCard({
           </div>
         </details>
       )}
-      {canReadArtifact ? (
+      {canReadArtifact && compactSearch ? (
+        <details className="tool-details">
+          <summary>{t("searchSavedOutput")}</summary>
+          <div className="tool-card-body">
+            <div className="tool-artifact-actions">{artifactSearch}</div>
+            {artifactResults}
+          </div>
+        </details>
+      ) : canReadArtifact ? (
         <Collapsible className="tool-artifact-retrieval" label={t("savedOutputDetails")}>
           <div className="tool-artifact-actions">
             <Button
@@ -253,52 +296,9 @@ export function ToolCard({
             >
               {artifactPage === undefined ? t("viewSavedOutput") : t("restartSavedOutput")}
             </Button>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                const query = artifactQuery.trim();
-                if (query === "") return;
-                void readArtifact({
-                  kind: "search_literal",
-                  query,
-                  startOffset: 0,
-                  maxMatches: 20,
-                  contextLines: 2,
-                });
-              }}
-            >
-              <TextField
-                label={t("searchSavedOutput")}
-                labelHidden
-                containerClassName="tool-artifact-search-field"
-                maxLength={512}
-                value={artifactQuery}
-                onChange={(event) => setArtifactQuery(event.target.value)}
-              />
-              <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>
-                {t("search")}
-              </Button>
-            </form>
+            {artifactSearch}
           </div>
-          {artifactPage === undefined || shortOutput ? null : artifactPage.bodyEncoding === "utf8" ? (
-            <HighlightedCode
-              text={artifactPage.body}
-              ariaLabel={`${tool.toolName} saved output page`}
-            />
-          ) : (
-            <small>{t("savedOutputBinary")}</small>
-          )}
-          {artifactPage?.nextSelector === undefined ? null : (
-            <Button
-              type="button"
-              variant="quiet"
-              busy={artifactBusy}
-              onClick={() => void readArtifact(artifactPage.nextSelector!)}
-            >
-              {t("nextOutputPage")}
-            </Button>
-          )}
-          {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
+          {artifactResults}
         </Collapsible>
       ) : artifactPresentation !== undefined ? (
         <section
@@ -316,6 +316,13 @@ export function ToolCard({
       ) : null}
     </article>
   );
+}
+
+function isCompleteInlineOutput(page: ToolArtifactPage | undefined, tool: ToolView): page is ToolArtifactPage {
+  return page !== undefined && page.artifactRef === tool.artifactRef && page.bodyEncoding === "utf8"
+    && page.selector.kind === "byte_slice" && page.selector.offset === 0 && page.eof
+    && page.nextSelector === undefined && page.returnedBytes === tool.artifactPersistedBytes
+    && page.returnedBytes <= SHORT_OUTPUT_BYTES;
 }
 
 function ToolInput({ toolName, input, language }: {
