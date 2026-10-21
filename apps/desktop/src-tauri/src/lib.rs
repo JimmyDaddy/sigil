@@ -61,7 +61,9 @@ use crate::{
         DesktopUpdaterState, desktop_check_for_update, desktop_download_and_install_update,
         desktop_restart_after_update, desktop_update_state,
     },
-    window_state::{DisplayBounds, WindowGeometry, WindowStateOwner},
+    window_state::{
+        DisplayBounds, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WindowGeometry, WindowStateOwner,
+    },
 };
 
 const EXIT_IDLE: u8 = 0;
@@ -152,7 +154,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Sigil")
                 .inner_size(1440.0, 900.0)
-                .min_inner_size(1100.0, 720.0)
+                .min_inner_size(f64::from(MIN_WINDOW_WIDTH), f64::from(MIN_WINDOW_HEIGHT))
                 .theme(theme_preference.native_theme())
                 .initialization_script(initialization_script(theme_preference));
             #[cfg(feature = "desktop-e2e")]

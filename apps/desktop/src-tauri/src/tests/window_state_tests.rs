@@ -67,6 +67,33 @@ fn window_state_rejects_small_invalid_or_oversized_files() {
 }
 
 #[test]
+fn window_state_restores_compact_window_without_resetting_its_size() {
+    let temp = tempfile::tempdir().expect("temporary directory should create");
+    let path = temp.path().join("compact.json");
+    let mut store = WindowStateStore::load(path.clone());
+    store
+        .set(WindowGeometry {
+            x: 60,
+            y: 80,
+            width: 840,
+            height: 560,
+            maximized: false,
+        })
+        .expect("compact geometry should persist");
+    let restored = WindowStateStore::load(path)
+        .initial_geometry(&[DisplayBounds {
+            x: 0,
+            y: 0,
+            width: 1_440,
+            height: 900,
+            scale_factor: 1.0,
+        }])
+        .expect("compact geometry should restore");
+    assert_eq!((restored.x, restored.y), (60.0, 80.0));
+    assert_eq!((restored.width, restored.height), (840.0, 560.0));
+}
+
+#[test]
 fn window_state_selects_the_display_with_the_largest_overlap() {
     let temp = tempfile::tempdir().expect("temporary directory should create");
     let path = temp.path().join("window.json");
