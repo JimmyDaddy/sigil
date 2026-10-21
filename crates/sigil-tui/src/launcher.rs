@@ -22,7 +22,7 @@ use crossterm::{
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
         EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
@@ -88,7 +88,6 @@ const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
 const WORKER_MESSAGE_BATCH_LIMIT: usize = 64;
 const WORKER_MESSAGE_BATCH_BUDGET: Duration = Duration::from_millis(4);
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
@@ -1036,10 +1035,19 @@ async fn run_app(
                     if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
                         break;
                     }
-                    next_event = event::poll(Duration::ZERO)?
-                        .then(event::read)
-                        .transpose()?
-                        .map(InputEvent::from);
+                    next_event = match poll_ready_input(terminal_event.as_mut()).await {
+                        Some(event) => {
+                            let event = event.ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "terminal event stream closed",
+                                )
+                            })?;
+                            terminal_event = Box::pin(terminal_events.next());
+                            Some(InputEvent::from(event?))
+                        }
+                        None => None,
+                    };
                 }
                 needs_render |= !batch_damage.is_empty();
             }
@@ -1183,6 +1191,20 @@ async fn run_app(
         task.handle.abort();
     }
     Ok(())
+}
+
+async fn poll_ready_input<F: std::future::Future + ?Sized>(
+    mut pending: std::pin::Pin<&mut F>,
+) -> Option<F::Output> {
+    // Poll the same stream future once with the owner task's real waker. A no-op-waker probe
+    // can strand Crossterm's background reader; a separate read/poll would violate its ownership.
+    std::future::poll_fn(|context| {
+        std::task::Poll::Ready(match pending.as_mut().poll(context) {
+            std::task::Poll::Ready(event) => Some(event),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
 }
 
 #[cfg(not(test))]
@@ -1451,7 +1473,7 @@ where
             app
         }
         Err(error) => {
-            let startup_error = config_path.exists().then(|| error.to_string());
+            let startup_error = config_path.exists().then(|| format!("{error:#}"));
             // Setup captures the exact source once and classifies it independently from this boot
             // error. Authority/bootstrap failures must not be mistaken for malformed TOML.
             AppState::from_setup_with_recovery(
@@ -4985,3 +5007,7 @@ mod user_input_recovery_tests;
 #[cfg(test)]
 #[path = "tests/launcher_real_admission_support.rs"]
 pub(crate) mod real_admission_support;
+
+#[cfg(test)]
+#[path = "tests/launcher_input_stream_tests.rs"]
+mod input_stream_tests;

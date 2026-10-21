@@ -1208,6 +1208,34 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 }
 
 #[test]
+fn startup_failure_displays_inner_error_with_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config_for_workspace(temp.path()).save(&config_path)?;
+    let error = anyhow::Error::new(
+        sigil_runtime::application_host::BootAuthorityErrorV1::Config(
+            "synthetic nested boot failure".to_owned(),
+        ),
+    )
+    .context("load workspace");
+
+    let (app, worker) = build_initial_app_with_session(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(error),
+        InitialSessionTarget::Fresh,
+        |_root_config, _app| Err(anyhow!("failed startup cannot spawn a worker")),
+    )?;
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    let recovery = app.setup_lines().join("\n");
+    assert!(recovery.contains("load workspace"));
+    assert!(recovery.contains("synthetic nested boot failure"));
+    Ok(())
+}
+
+#[test]
 fn initial_non_authority_boot_failure_stays_in_setup() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
