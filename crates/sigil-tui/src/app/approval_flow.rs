@@ -13,6 +13,20 @@ use super::{
 };
 
 impl AppState {
+    pub(super) fn update_approval_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
+        let Some(view) = self.approval_modal_view() else {
+            return;
+        };
+        let current_theme = crate::ui::theme::resolve_for_app(self);
+        let max_scroll = crate::ui::approval_max_scroll(
+            ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height),
+            &view,
+            &current_theme,
+        );
+        let current = self.approval.scroll_back.min(max_scroll);
+        self.approval.scroll_back = update(current).min(max_scroll);
+    }
+
     pub fn approval_preview_lines(&self) -> Vec<String> {
         let Some(pending) = self
             .approval

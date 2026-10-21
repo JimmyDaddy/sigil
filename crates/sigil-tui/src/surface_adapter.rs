@@ -63,7 +63,7 @@ pub(crate) fn build_surface_model(
         pending_user_input: app.pending_user_input().cloned(),
         pending_plan_approval: app.pending_plan_approval().cloned(),
         approval: app.approval_modal_view(),
-        approval_scroll_back: app.approval.scroll_back.min(u16::MAX as usize) as u16,
+        approval_scroll_back: app.approval.scroll_back,
         checkpoint_restore: app.checkpoint_restore_modal_view(),
         intent_stack: app.intent_stack_modal_view(),
         modal: modal_surface(app),

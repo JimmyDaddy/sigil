@@ -924,9 +924,9 @@ impl AppState {
         let delta = self.terminal_scroll_sensitivity();
         if self.approval.has_actionable_pending() {
             if upward {
-                self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
+                self.update_approval_scroll(|current| current.saturating_sub(delta));
             } else {
-                self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
+                self.update_approval_scroll(|current| current.saturating_add(delta));
             }
             return;
         }
@@ -943,7 +943,7 @@ impl AppState {
             PaneFocus::Composer => self.scroll_timeline(delta),
             PaneFocus::Activity => {
                 if self.approval.has_actionable_pending() {
-                    self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
+                    self.update_approval_scroll(|current| current.saturating_sub(delta));
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_add(delta);
                 }
@@ -956,7 +956,7 @@ impl AppState {
             PaneFocus::Composer => self.unscroll_timeline(delta),
             PaneFocus::Activity => {
                 if self.approval.has_actionable_pending() {
-                    self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
+                    self.update_approval_scroll(|current| current.saturating_add(delta));
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_sub(delta);
                 }

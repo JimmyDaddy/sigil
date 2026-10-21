@@ -119,7 +119,7 @@ pub(crate) struct SurfaceModel {
     pub pending_user_input: Option<PendingUserInputForm>,
     pub pending_plan_approval: Option<PendingPlanApproval>,
     pub approval: Option<ApprovalModalView>,
-    pub approval_scroll_back: u16,
+    pub approval_scroll_back: usize,
     pub checkpoint_restore: Option<CheckpointRestoreModalView>,
     pub intent_stack: Option<IntentStackModalView>,
     pub modal: ModalSurface,

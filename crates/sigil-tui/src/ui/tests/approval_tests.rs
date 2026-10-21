@@ -1097,6 +1097,114 @@ fn single_file_approval_uses_full_review_width_and_keeps_decision_geometry() {
     );
 }
 
+#[test]
+fn approval_scroll_clamps_wrapped_diff_to_visible_tail_and_preserves_added_style()
+-> anyhow::Result<()> {
+    let mut view = modal_view("file write");
+    view.metadata_collapsed = true;
+    view.preview_summary.clear();
+    view.diff_lines = vec![ApprovalDiffLine {
+        text: "@@ -0,0 +1,224 @@".to_owned(),
+        kind: ApprovalDiffLineKind::Hunk,
+        active_hunk: false,
+    }];
+    view.diff_lines
+        .extend((0..223).map(|index| ApprovalDiffLine {
+            text: format!(
+                "+line {index} {}",
+                "保留中文 🌿 与完整命令内容。 ".repeat(6)
+            ),
+            kind: ApprovalDiffLineKind::Added,
+            active_hunk: false,
+        }));
+    view.diff_lines.push(ApprovalDiffLine {
+        text: "+DIFFTAIL".to_owned(),
+        kind: ApprovalDiffLineKind::Added,
+        active_hunk: false,
+    });
+    let current_theme = theme::Theme::default();
+    for (width, height) in [(80, 24), (166, 48), (100, 32)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| {
+            render_approval_modal_surface(frame, Some(&view), usize::MAX / 2, &current_theme)
+        })?;
+        let rendered = rendered_content(&terminal);
+        assert!(
+            rendered.contains("DIFFTAIL"),
+            "tail missing at {width}x{height}"
+        );
+        assert!(rendered.contains("Allow"));
+        assert!(rendered.contains("Deny"));
+        let rows = rendered_rows(&terminal);
+        let tail_row = rows
+            .iter()
+            .find(|row| row.contains("DIFFTAIL"))
+            .expect("tail row");
+        assert!(
+            tail_row.contains("224"),
+            "original diff line number must remain on its first visual row"
+        );
+        assert_eq!(
+            cell_colors_at_text(&terminal, "DIFFTAIL", "DIFFTAIL").0,
+            current_theme.palette.diff_added_fg
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn approval_scroll_clamps_wrapped_command_to_visible_tail() -> anyhow::Result<()> {
+    let mut view = modal_view("execute");
+    view.has_diff_preview = false;
+    view.tool_name = "bash".to_owned();
+    view.metadata_collapsed = true;
+    view.preview_title = "Command".to_owned();
+    view.preview_summary = format!(
+        "{}\nCOMMANDTAIL",
+        "printf '多行与空白 emoji 🌿 保留'; ".repeat(80)
+    );
+    let current_theme = theme::Theme::default();
+    for (width, height) in [(80, 24), (166, 48)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| {
+            render_approval_modal_surface(frame, Some(&view), usize::MAX, &current_theme)
+        })?;
+        let rendered = rendered_content(&terminal);
+        assert!(rendered.contains("COMMANDTAIL"));
+        assert!(rendered.contains("Allow"));
+        assert!(rendered.contains("Deny"));
+    }
+    Ok(())
+}
+
+#[test]
+fn approval_scroll_reaches_tail_beyond_u16_without_narrowing() -> anyhow::Result<()> {
+    let mut view = modal_view("file write");
+    view.metadata_collapsed = true;
+    view.preview_summary.clear();
+    view.diff_lines = (0..65_570)
+        .map(|_| ApprovalDiffLine {
+            text: "+x".to_owned(),
+            kind: ApprovalDiffLineKind::Added,
+            active_hunk: false,
+        })
+        .collect();
+    view.diff_lines.push(ApprovalDiffLine {
+        text: "+TAILOVERU16".to_owned(),
+        kind: ApprovalDiffLineKind::Added,
+        active_hunk: false,
+    });
+    let current_theme = theme::Theme::default();
+    let area = Rect::new(0, 0, 80, 24);
+    assert!(approval_max_scroll(area, &view, &current_theme) > usize::from(u16::MAX));
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))?;
+    terminal.draw(|frame| {
+        render_approval_modal_surface(frame, Some(&view), usize::MAX / 2, &current_theme)
+    })?;
+    assert!(rendered_content(&terminal).contains("TAILOVERU16"));
+    Ok(())
+}
+
 fn multi_file_preview() -> ToolPreview {
     ToolPreview {
         title: "Update src/lib.rs".to_owned(),

@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
@@ -29,6 +29,7 @@ use super::{
         approval_metadata_control_label, approval_modal_area, approval_modal_sections,
     },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
+    text::wrap_terminal_lines,
     theme::{self, ThemePalette},
 };
 
@@ -38,18 +39,13 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         return;
     };
     let current_theme = theme::resolve_for_app(app);
-    render_approval_modal_view(
-        frame,
-        &view,
-        app.approval.scroll_back as u16,
-        &current_theme,
-    );
+    render_approval_modal_view(frame, &view, app.approval.scroll_back, &current_theme);
 }
 
 pub(super) fn render_approval_modal_surface(
     frame: &mut Frame,
     view: Option<&ApprovalModalView>,
-    scroll_back: u16,
+    scroll_back: usize,
     theme: &theme::Theme,
 ) {
     let Some(view) = view else {
@@ -61,7 +57,7 @@ pub(super) fn render_approval_modal_surface(
 fn render_approval_modal_view(
     frame: &mut Frame,
     view: &ApprovalModalView,
-    scroll_back: u16,
+    scroll_back: usize,
     current_theme: &theme::Theme,
 ) {
     let palette = &current_theme.palette;
@@ -100,16 +96,10 @@ fn render_approval_modal_view(
         sections.header,
     );
 
+    let content = approval_content_layout(sections.body, view, current_theme);
     if !view.has_diff_preview {
-        render_approval_review_content(
-            frame,
-            view,
-            sections.body,
-            scroll_back,
-            area.width.saturating_sub(6) as usize,
-            current_theme.syntax_theme,
-            palette,
-        );
+        frame.render_widget(content.block.clone(), content.outer);
+        render_approval_scrolled_content(frame, view, &content, scroll_back, current_theme);
         if let Some(metadata_area) = sections.metadata {
             render_approval_metadata(frame, view, metadata_area, palette);
         }
@@ -117,20 +107,7 @@ fn render_approval_modal_view(
         return;
     }
 
-    let file_width = approval_file_list_width(sections.body, view);
-    let body_chunks = if file_width > 0 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(file_width), Constraint::Min(12)])
-            .split(sections.body)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1)])
-            .split(sections.body)
-    };
-
-    if file_width > 0 {
+    if let Some(file_area) = content.files {
         let file_lines = view
             .file_rows
             .iter()
@@ -156,27 +133,72 @@ fn render_approval_modal_view(
                         .border_style(Style::default().fg(palette.border_subtle)),
                 )
                 .wrap(Wrap { trim: false }),
-            body_chunks[0],
+            file_area,
         );
     }
 
-    let diff_area = *body_chunks.last().unwrap_or(&sections.body);
-    let diff_title = if view.preview_title.trim().is_empty() {
-        " Diff to apply ".to_owned()
-    } else {
-        format!(" {} ", view.preview_title.trim())
-    };
-    let diff_block = Block::default()
-        .title(diff_title)
-        .borders(Borders::TOP)
-        .padding(Padding::new(1, 1, 0, 1))
-        .border_style(Style::default().fg(palette.border_subtle));
-    let diff_inner = diff_block.inner(diff_area);
-    frame.render_widget(diff_block, diff_area);
-    if diff_inner.width > 0 && diff_inner.height > 0 {
+    frame.render_widget(content.block.clone(), content.outer);
+    if let Some(status) = content.status {
+        frame.render_widget(
+            Paragraph::new(approval_diff_status_line_with_palette(view, palette)),
+            status,
+        );
+    }
+    if let Some(summary) = content.summary {
+        frame.render_widget(
+            Paragraph::new(Text::from(content.summary_lines.clone())).wrap(Wrap { trim: false }),
+            summary,
+        );
+    }
+    render_approval_scrolled_content(frame, view, &content, scroll_back, current_theme);
+
+    if let Some(metadata_area) = sections.metadata {
+        render_approval_metadata(frame, view, metadata_area, palette);
+    }
+    render_approval_footer(frame, sections.footer, footer_lines, palette);
+}
+
+struct ApprovalContentLayout {
+    outer: Rect,
+    block: Block<'static>,
+    files: Option<Rect>,
+    status: Option<Rect>,
+    summary: Option<Rect>,
+    summary_lines: Vec<Line<'static>>,
+    viewport: Rect,
+}
+
+fn approval_content_layout(
+    body: Rect,
+    view: &ApprovalModalView,
+    current_theme: &theme::Theme,
+) -> ApprovalContentLayout {
+    let palette = &current_theme.palette;
+    if view.has_diff_preview {
+        let file_width = approval_file_list_width(body, view);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(if file_width > 0 {
+                vec![Constraint::Length(file_width), Constraint::Min(12)]
+            } else {
+                vec![Constraint::Min(1)]
+            })
+            .split(body);
+        let outer = *chunks.last().unwrap_or(&body);
+        let title = if view.preview_title.trim().is_empty() {
+            " Diff to apply ".to_owned()
+        } else {
+            format!(" {} ", view.preview_title.trim())
+        };
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::TOP)
+            .padding(Padding::new(1, 1, 0, 1))
+            .border_style(Style::default().fg(palette.border_subtle));
+        let inner = block.inner(outer);
         let summary_lines = approval_preview_summary_lines_with_palette(
             view,
-            diff_inner.width as usize,
+            inner.width as usize,
             current_theme.syntax_theme,
             palette,
         );
@@ -185,25 +207,56 @@ fn render_approval_modal_view(
             constraints.push(Constraint::Length(summary_lines.len() as u16));
         }
         constraints.push(Constraint::Min(1));
-        let diff_sections = Layout::default()
+        let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
-            .split(diff_inner);
-        frame.render_widget(
-            Paragraph::new(approval_diff_status_line_with_palette(view, palette)),
-            diff_sections[0],
-        );
-        if !summary_lines.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Text::from(summary_lines)).wrap(Wrap { trim: false }),
-                diff_sections[1],
-            );
-        }
+            .split(inner);
+        return ApprovalContentLayout {
+            outer,
+            block,
+            files: (file_width > 0).then_some(chunks[0]),
+            status: Some(sections[0]),
+            summary: (!summary_lines.is_empty()).then_some(sections[1]),
+            summary_lines,
+            viewport: *sections.last().unwrap_or(&inner),
+        };
+    }
+    let risk_color = permission_risk_color(view.risk, palette);
+    let title = if view.tool_name == "bash" {
+        " Command to run "
+    } else {
+        " Content to approve "
+    };
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(risk_color).add_modifier(Modifier::BOLD))
+        .padding(Padding::horizontal(1))
+        .borders(Borders::TOP)
+        .padding(Padding::new(2, 2, 0, 1))
+        .border_style(Style::default().fg(palette.border_subtle))
+        .style(Style::default().bg(palette.surface_code));
+    ApprovalContentLayout {
+        outer: body,
+        viewport: block.inner(body),
+        block,
+        files: None,
+        status: None,
+        summary: None,
+        summary_lines: Vec::new(),
+    }
+}
+
+fn approval_content_lines(
+    view: &ApprovalModalView,
+    width: u16,
+    current_theme: &theme::Theme,
+) -> Vec<Line<'static>> {
+    let palette = &current_theme.palette;
+    let lines = if view.has_diff_preview {
         let numbered =
             number_unified_diff_lines(view.diff_lines.iter().map(|line| line.text.as_str()));
         let line_number_width = diff_line_number_width(&numbered);
-        let diff_lines = view
-            .diff_lines
+        view.diff_lines
             .iter()
             .cloned()
             .zip(numbered)
@@ -216,55 +269,54 @@ fn render_approval_modal_view(
                     palette,
                 )
             })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(Text::from(diff_lines))
-                .scroll((scroll_back, 0))
-                .wrap(Wrap { trim: false }),
-            *diff_sections.last().unwrap_or(&diff_inner),
-        );
-    }
-
-    if let Some(metadata_area) = sections.metadata {
-        render_approval_metadata(frame, view, metadata_area, palette);
-    }
-    render_approval_footer(frame, sections.footer, footer_lines, palette);
+            .collect()
+    } else {
+        approval_review_lines_with_palette(
+            view,
+            width as usize,
+            current_theme.syntax_theme,
+            palette,
+        )
+    };
+    wrap_terminal_lines(lines, width as usize)
 }
 
-fn render_approval_review_content(
+pub(crate) fn approval_max_scroll(
+    screen: Rect,
+    view: &ApprovalModalView,
+    current_theme: &theme::Theme,
+) -> usize {
+    let area = approval_modal_area(screen, view);
+    let sections =
+        approval_modal_sections(Block::default().borders(Borders::ALL).inner(area), view);
+    let content = approval_content_layout(sections.body, view, current_theme);
+    if content.viewport.width == 0 || content.viewport.height == 0 {
+        return 0;
+    }
+    approval_content_lines(view, content.viewport.width, current_theme)
+        .len()
+        .saturating_sub(content.viewport.height as usize)
+}
+
+fn render_approval_scrolled_content(
     frame: &mut Frame,
     view: &ApprovalModalView,
-    area: ratatui::layout::Rect,
-    scroll: u16,
-    max_content_width: usize,
-    syntax_theme: SyntaxThemeId,
-    palette: &ThemePalette,
+    content: &ApprovalContentLayout,
+    scroll: usize,
+    current_theme: &theme::Theme,
 ) {
-    let content_lines =
-        approval_review_lines_with_palette(view, max_content_width, syntax_theme, palette);
-    let risk_color = permission_risk_color(view.risk, palette);
-    let title = if view.tool_name == "bash" {
-        " Command to run "
-    } else {
-        " Content to approve "
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(content_lines))
-            .block(
-                Block::default()
-                    .title(title)
-                    .title_style(Style::default().fg(risk_color).add_modifier(Modifier::BOLD))
-                    .padding(Padding::horizontal(1))
-                    .borders(Borders::TOP)
-                    .padding(Padding::new(2, 2, 0, 1))
-                    .border_style(Style::default().fg(palette.border_subtle))
-                    .style(Style::default().bg(palette.surface_code)),
-            )
-            .style(Style::default().bg(palette.surface_code))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    let viewport = content.viewport;
+    if viewport.width == 0 || viewport.height == 0 {
+        return;
+    }
+    let lines = approval_content_lines(view, viewport.width, current_theme);
+    let max_scroll = lines.len().saturating_sub(viewport.height as usize);
+    let visible = lines
+        .into_iter()
+        .skip(scroll.min(max_scroll))
+        .take(viewport.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(visible)), viewport);
 }
 
 fn render_approval_metadata(

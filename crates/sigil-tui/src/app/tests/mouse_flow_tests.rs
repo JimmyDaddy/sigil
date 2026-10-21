@@ -1908,7 +1908,7 @@ fn mouse_scroll_info_rail_focuses_activity_and_moves_sidebar() -> Result<()> {
 fn mouse_scroll_approval_modal_moves_approval_scroll() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    inject_write_file_approval(&mut app, with_long_approval_diff(sample_approval_preview()))?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let approval = layout.approval_modal.expect("expected approval area");
     let (column, row) = point_in(approval);
@@ -2227,7 +2227,7 @@ fn mouse_scroll_uses_terminal_scroll_sensitivity() -> Result<()> {
 fn mouse_scroll_approval_with_pending_approval_scrolls_upward() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    inject_write_file_approval(&mut app, with_long_approval_diff(sample_approval_preview()))?;
     app.approval.scroll_back = 5;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let approval = layout.approval_modal.expect("expected approval area");
@@ -2297,7 +2297,10 @@ fn mouse_click_selected_or_missing_approval_file_is_noop() -> Result<()> {
 fn mouse_scroll_approval_file_row_scrolls_modal() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 24);
-    inject_write_file_approval(&mut app, multi_file_approval_preview())?;
+    inject_write_file_approval(
+        &mut app,
+        with_long_approval_diff(multi_file_approval_preview()),
+    )?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
     let first_file = layout
         .approval_modal_hit_areas

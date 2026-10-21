@@ -358,6 +358,9 @@ impl AppState {
         if self.timeline_at_live_tail() {
             self.timeline_scroll_back = 0;
         }
+        if width_changed || height_changed {
+            self.update_approval_scroll(|current| current);
+        }
         width_changed || height_changed
     }
 

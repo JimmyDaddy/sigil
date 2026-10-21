@@ -2112,7 +2112,8 @@ fn timeline_scroll_and_live_summary_edges_cover_pending_and_busy_states() -> Res
     app.handle_mouse_scroll(false);
     assert_eq!(app.timeline_scroll_back, 0);
 
-    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.set_terminal_size(80, 24);
+    inject_write_file_approval(&mut app, with_long_approval_diff(sample_approval_preview()))?;
     app.handle_mouse_scroll(false);
     assert_eq!(app.approval.scroll_back, 3);
     app.handle_mouse_scroll(true);

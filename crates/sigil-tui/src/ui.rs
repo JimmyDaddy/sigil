@@ -24,6 +24,7 @@ mod timeline;
 mod tool_card;
 mod user_input_form;
 
+pub(crate) use approval::approval_max_scroll;
 #[cfg(test)]
 pub use shell::render;
 pub(crate) use shell::render_surface;

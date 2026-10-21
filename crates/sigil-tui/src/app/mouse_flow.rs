@@ -832,9 +832,9 @@ impl AppState {
     fn scroll_approval_with_mouse(&mut self, upward: bool) {
         let delta = self.terminal_scroll_sensitivity();
         if upward {
-            self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
+            self.update_approval_scroll(|current| current.saturating_sub(delta));
         } else {
-            self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
+            self.update_approval_scroll(|current| current.saturating_add(delta));
         }
     }
 

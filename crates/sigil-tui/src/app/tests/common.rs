@@ -725,6 +725,23 @@ pub(crate) fn sample_delete_approval_preview() -> ToolPreview {
     }
 }
 
+pub(crate) fn with_long_approval_diff(mut preview: ToolPreview) -> ToolPreview {
+    let path = preview
+        .file_diffs
+        .first()
+        .expect("structured preview")
+        .path
+        .clone();
+    let rows = (0..80)
+        .map(|index| format!("+scroll row {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diff = format!("--- current/{path}\n+++ proposed/{path}\n@@ -1 +1,80 @@\n-old\n{rows}");
+    preview.file_diffs[0].diff = diff.clone();
+    preview.body = diff;
+    preview
+}
+
 pub(crate) fn multi_file_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Update multiple files".to_owned(),

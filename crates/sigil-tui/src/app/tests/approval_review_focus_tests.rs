@@ -76,6 +76,90 @@ fn assert_pending(app: &AppState, call_id: &str) {
 }
 
 #[test]
+fn approval_scroll_end_pageup_pagedown_mouse_and_resize_render_tail_without_losing_guard()
+-> Result<()> {
+    let (_root, mut app) = fixture(80, 24)?;
+    let diff = format!(
+        "--- current/note.txt\n+++ proposed/note.txt\n@@ -1 +1,224 @@\n-old\n{}\n+REVIEWTAIL",
+        (0..223)
+            .map(|index| format!("+{index} {}", "完整中文代码 🌿 保留空白。 ".repeat(5)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let preview = app
+        .approval
+        .pending
+        .as_mut()
+        .and_then(|pending| pending.preview.as_mut())
+        .expect("preview");
+    preview.body = diff.clone();
+    preview.file_diffs[0].diff = diff;
+    let frozen_preview =
+        serde_json::to_value(&app.approval.pending.as_ref().expect("pending").preview)?;
+    let content = |committed: &CommittedPresentation| {
+        committed
+            .frame()
+            .surface()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    for (width, height) in [(80, 24), (166, 48), (80, 24)] {
+        app.set_terminal_size(width, height);
+        let view = app.approval_modal_view().expect("review open");
+        let current_theme = crate::ui::theme::resolve_for_app(&app);
+        let max_scroll =
+            crate::ui::approval_max_scroll(Rect::new(0, 0, width, height), &view, &current_theme);
+        assert!(app.approval.scroll_back <= max_scroll);
+        assert!(press(&mut app, KeyCode::End)?.is_none());
+        let end = app.approval.scroll_back;
+        assert!(end > 8);
+        let (surface, committed) = present(&app, width, height)?;
+        assert_eq!(surface.approval_scroll_back, end);
+        assert!(content(&committed).contains("REVIEWTAIL"));
+        assert!(press(&mut app, KeyCode::PageUp)?.is_none());
+        assert_eq!(app.approval.scroll_back, end - 8);
+        let (_, previous) = present(&app, width, height)?;
+        assert_ne!(content(&previous), content(&committed));
+        for _ in 0..end.div_ceil(8).saturating_add(2) {
+            assert!(press(&mut app, KeyCode::PageDown)?.is_none());
+        }
+        assert_eq!(app.approval.scroll_back, end);
+        let (_, committed) = present(&app, width, height)?;
+        let body = committed
+            .layout()
+            .approval_modal_hit_areas
+            .as_ref()
+            .expect("approval geometry")
+            .diff_area;
+        for _ in 0..5 {
+            assert!(matches!(
+                app.handle_committed_mouse_event(
+                    mouse(MouseInputKind::ScrollDown, body),
+                    &committed
+                )?,
+                AppMouseOutcome::Redraw
+            ));
+            assert_eq!(app.approval.scroll_back, end);
+        }
+        let (_, committed) = present(&app, width, height)?;
+        assert!(content(&committed).contains("REVIEWTAIL"));
+        assert!(press(&mut app, KeyCode::Home)?.is_none());
+        assert_eq!(app.approval.scroll_back, 0);
+        let (_, committed) = present(&app, width, height)?;
+        assert!(content(&committed).contains("current/note.txt"));
+        assert_pending(&app, "call-1");
+        assert!(press(&mut app, KeyCode::End)?.is_none());
+    }
+    assert_eq!(
+        serde_json::to_value(&app.approval.pending.as_ref().expect("pending").preview)?,
+        frozen_preview
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_review_escape_preserves_draft_identity_and_diff_state() -> Result<()> {
     let (_root, mut app) = fixture(124, 40)?;
     app.composer.input = "保留  draft".to_owned();
