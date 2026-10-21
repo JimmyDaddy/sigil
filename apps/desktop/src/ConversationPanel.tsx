@@ -273,6 +273,9 @@ export function ConversationPanel({
   };
   const [userInputBusy, setUserInputBusy] = useState(false);
   const [userInputFailure, setUserInputFailure] = useState(false);
+  const [userInputContinuationRunIds, setUserInputContinuationRunIds] = useState<ReadonlySet<string>>(() => new Set());
+  const userInputEpoch = useRef(0);
+  useEffect(() => () => { userInputEpoch.current += 1; }, [session.id, workspaceId]);
   const exactPlanDetail = planDetail !== undefined
     && durablePlanReview?.planId === planDetail.planId
     && durablePlanReview.planHash === planDetail.planHash
@@ -544,6 +547,7 @@ export function ConversationPanel({
     setSelectedUserInputKey(undefined);
     setUserInputBusy(false);
     setUserInputFailure(false);
+    setUserInputContinuationRunIds(new Set());
     setTaskIntegrationReview(undefined);
     setTaskIntegrationAcceptance(undefined);
     setTaskIntegrationLoading(false);
@@ -1449,7 +1453,11 @@ export function ConversationPanel({
   );
   const rows = useMemo(() => {
     const next = projectConversationRows(
-      selectConversationTimeline(continuityState),
+      selectConversationTimeline(continuityState).filter((entry) => !(
+        entry.source === "live"
+        && entry.item.kind === "user_message"
+        && userInputContinuationRunIds.has(entry.item.runId)
+      )),
       selectDeltaBuffers(liveEventState),
       t,
       selectSemanticLiveItems(liveEventState),
@@ -1464,7 +1472,7 @@ export function ConversationPanel({
       skill: pendingPrompt.skill,
       status: pendingPrompt.queueAccepted ? "queued" : "sending",
     }];
-  }, [continuityState, liveEventState, approvalPresentation, pendingPrompt, t]);
+  }, [continuityState, liveEventState, approvalPresentation, pendingPrompt, t, userInputContinuationRunIds]);
   const pendingApproval = approvalPresentation?.phase === "pending"
     ? approvalPresentation.event
     : undefined;
@@ -2082,10 +2090,11 @@ export function ConversationPanel({
   ) => {
     const request = selectedRequest;
     if (request === undefined || request.status !== "requested" || userInputBusy) return;
+    const commandEpoch = userInputEpoch.current;
     setUserInputBusy(true);
     setUserInputFailure(false);
     try {
-      await bridge.userInputDecision(
+      const summary = await bridge.userInputDecision(
         workspaceId,
         session.id,
         request.identity.requestId,
@@ -2094,17 +2103,33 @@ export function ConversationPanel({
         decision,
         permissionMode,
       );
+      if (commandEpoch !== userInputEpoch.current) return;
+      if (summary.sessionId !== session.id
+        || userInputKey(summary.request) !== userInputKey(request)
+        || summary.request.identity.sourceBindingHash !== request.identity.sourceBindingHash) {
+        throw new Error("User input receipt belongs to another request.");
+      }
+      if (decision.kind === "submitted"
+        && summary.request.answerReceipt?.decision === "submitted"
+        && summary.request.status !== "requested"
+        && summary.continuationRunId !== undefined) {
+        // RunStarted carries a host continuation hint, without a new user message to reconcile it.
+        // The exact typed receipt retires only that run's synthetic live user slot, in either order.
+        const runId = summary.continuationRunId;
+        setUserInputContinuationRunIds((current) => new Set([...current, runId]));
+      }
       setDurableUserInputs((current) => current.filter(
         (candidate) => userInputKey(candidate) !== userInputKey(request),
       ));
       setDisplayReload((value) => value + 1);
       setContinuityReload((value) => value + 1);
     } catch {
+      if (commandEpoch !== userInputEpoch.current) return;
       setUserInputFailure(true);
       setDisplayReload((value) => value + 1);
       setContinuityReload((value) => value + 1);
     } finally {
-      setUserInputBusy(false);
+      if (commandEpoch === userInputEpoch.current) setUserInputBusy(false);
     }
   };
 
