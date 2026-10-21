@@ -272,6 +272,8 @@ const context: RunContext = {
 };
 
 function renderComposer(overrides: {
+  conversationHistory?: "empty" | "populated";
+  timelineSupplement?: ReactNode;
   persistentDraftKey?: string;
   active?: boolean;
   reviewActive?: boolean;
@@ -284,6 +286,7 @@ function renderComposer(overrides: {
   onPickImage?: () => Promise<DraftImage | null>;
   onIngestImage?: (bytes: number[]) => Promise<DraftImage>;
   onReleaseImages?: (handles: string[]) => Promise<void>;
+  onCancel?: () => void;
   onOpenQueue?: () => void;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
@@ -325,13 +328,14 @@ function renderComposer(overrides: {
     credentialSource: "environment",
     readiness: "ready",
   }];
-  const content = (persistentDraftKey = overrides.persistentDraftKey) => (
+  const content = (persistentDraftKey = overrides.persistentDraftKey, reviewActive = overrides.reviewActive) => {
+    const composer = (
     <LocaleProvider>
       <Composer
         draftKey="composer-test"
         persistentDraftKey={persistentDraftKey}
         active={overrides.active ?? false}
-        reviewActive={overrides.reviewActive}
+        reviewActive={reviewActive}
         submissionBlocked={overrides.submissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
@@ -364,14 +368,25 @@ function renderComposer(overrides: {
         onPickImage={overrides.onPickImage}
         onIngestImage={overrides.onIngestImage}
         onReleaseImages={overrides.onReleaseImages}
-        onCancel={() => undefined}
+        onCancel={overrides.onCancel ?? (() => undefined)}
       />
     </LocaleProvider>
-  );
+    );
+    return overrides.conversationHistory === undefined ? composer : (
+      <div className="conversation-layout"><section className="conversation-panel">
+        <header className="conversation-header">Conversation</header>
+        <div className="timeline">{overrides.timelineSupplement}{overrides.conversationHistory === "empty"
+          ? <div className="timeline-empty">Start a conversation</div>
+          : <article className="timeline-row">Previous response</article>}</div>
+        {composer}
+      </section></div>
+    );
+  };
   const rendered = render(content());
   return {
     ...rendered,
     bindPersistentDraftKey: (key: string) => rendered.rerender(content(key)),
+    bindReviewActive: (active: boolean) => rendered.rerender(content(overrides.persistentDraftKey, active)),
     onSubmit,
     onOpenQueue,
     onReasoningEffortChange,
@@ -1249,6 +1264,221 @@ it("uses Shift+Tab for backward focus without accepting a suggestion, while Tab 
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
+
+function loadConversationStyles(): HTMLStyleElement {
+  const parsed = document.createElement("style");
+  parsed.textContent = readFileSync(resolve(process.cwd(), "src/features/conversation/conversation.css"), "utf8");
+  document.head.append(parsed);
+  const features = Array.from(parsed.sheet!.cssRules).find((rule) =>
+    "name" in rule && rule.name === "features"
+  ) as CSSGroupingRule;
+  const style = document.createElement("style");
+  style.textContent = Array.from(features.cssRules, (rule) => rule.cssText).join("\n");
+  parsed.replaceWith(style);
+  return style;
+}
+
+describe("expanded composer", () => {
+  it("keeps history recovery, gap notices and terminal controls reachable beside an empty placeholder", async () => {
+    const style = loadConversationStyles();
+    try {
+      const user = userEvent.setup();
+      const retry = vi.fn();
+      const stop = vi.fn();
+      const { container } = renderComposer({ conversationHistory: "empty", timelineSupplement: <>
+        <div role="status">Live history has a gap</div>
+        <button type="button" onClick={retry}>Retry saved messages</button>
+        <article aria-label="Running terminal"><button type="button" onClick={stop}>Stop terminal</button></article>
+      </> });
+      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      expect(getComputedStyle(container.querySelector(".timeline")!).display).not.toBe("none");
+      await user.click(screen.getByRole("button", { name: "Retry saved messages" }));
+      await user.click(screen.getByRole("button", { name: "Stop terminal" }));
+      expect(retry).toHaveBeenCalledOnce();
+      expect(stop).toHaveBeenCalledOnce();
+      expect(screen.getByRole("status").textContent).toBe("Live history has a gap");
+    } finally { style.remove(); }
+  });
+
+  it("anchors expanded suggestions inside the writing budget and selects the real command without submitting", async () => {
+    const style = loadConversationStyles();
+    try {
+      const user = userEvent.setup();
+      const { onSubmit, onOpenSettings } = renderComposer({ conversationHistory: "empty" });
+      const input = screen.getByRole("combobox", { name: "Message Sigil" });
+      const view = editorView(input);
+      const documentArea = input.closest(".composer-document")!;
+      setEditorText(input, "/config");
+      expect(documentArea.contains(screen.getByRole("listbox", { name: "Composer suggestions" }))).toBe(false);
+      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      const list = screen.getByRole("listbox", { name: "Composer suggestions" });
+      expect(documentArea.contains(list)).toBe(true);
+      expect(screen.getAllByRole("listbox", { name: "Composer suggestions" })).toHaveLength(1);
+      expect(getComputedStyle(documentArea).position).toBe("relative");
+      expect(getComputedStyle(list).bottom).toBe("auto");
+      await user.click(within(list).getByRole("option", { name: /\/config/ }));
+      expect(onOpenSettings).toHaveBeenCalledOnce();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(editorView(input)).toBe(view);
+      expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+    } finally { style.remove(); }
+  });
+
+  it.each(["empty", "populated"] as const)("allocates remaining conversation space to writing with %s history and restores the normal layout", async (history) => {
+    const style = loadConversationStyles();
+    try {
+      const user = userEvent.setup();
+      const { onSubmit, container } = renderComposer({ conversationHistory: history });
+      const input = screen.getByRole("combobox", { name: "Message Sigil" });
+      const source = "# Long draft\n\n    exact source  \n".repeat(50);
+      setEditorText(input, source);
+      const view = editorView(input);
+      const form = input.closest("form")!;
+      const timeline = container.querySelector<HTMLElement>(".timeline")!;
+      expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
+      await user.click(screen.getByRole("button", { name: "Preview" }));
+      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      const documentArea = input.closest(".composer-document")!;
+      const preview = screen.getByRole("region", { name: "Preview" });
+      // jsdom has no layout engine: qualify the mounted flex/scroll contract here,
+      // then measure the resulting short-window geometry in the native WebView.
+      expect(Number(getComputedStyle(form).flexGrow)).toBeGreaterThan(Number(getComputedStyle(timeline).flexGrow));
+      expect(Number(getComputedStyle(documentArea).flexGrow)).toBeGreaterThan(0);
+      expect(view.scrollDOM.style.maxHeight).toBe("100%");
+      expect(getComputedStyle(preview).overflow).toBe("auto");
+      expect(getComputedStyle(preview).maxHeight).toBe("100%");
+      if (history === "empty") expect(getComputedStyle(timeline).display).toBe("none");
+      else expect(parseFloat(getComputedStyle(timeline).flexBasis)).toBeGreaterThan(0);
+      expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Collapse editor" }));
+      expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
+      expect(Number(getComputedStyle(timeline).flexGrow)).toBeGreaterThan(0);
+      expect(getComputedStyle(timeline).display).not.toBe("none");
+      expect(editorView(input)).toBe(view);
+      expect(editorText(input)).toBe(source);
+      expect(onSubmit).not.toHaveBeenCalled();
+    } finally { style.remove(); }
+  });
+
+  it.each(["source", "preview", "editing tools", "send tools"] as const)("collapses from %s focus across a viewport resize without changing the editor, selection, history or running work", async (target) => {
+    const user = userEvent.setup();
+    const onCancel = vi.fn();
+    const { onSubmit } = renderComposer({ active: true, onCancel });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "  # Exact draft\r\n\n```text\n  keep whitespace  \n```\n";
+    setEditorText(input, source);
+    const view = editorView(input);
+    act(() => view.dispatch({ selection: { anchor: 4, head: 12 } }));
+    const selection = view.state.selection;
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    const focusTarget = target === "source" ? input : target === "preview"
+      ? screen.getByRole("region", { name: "Preview" }) : target === "editing tools"
+        ? screen.getByRole("button", { name: "Preview" }) : screen.getByRole("button", { name: "Queue message" });
+    focusTarget.focus();
+    const previousHeight = window.innerHeight;
+    try {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 560 });
+      fireEvent.resize(window);
+      fireEvent.keyDown(focusTarget, { key: "Escape", code: "Escape" });
+      expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+      expect(document.activeElement).toBe(input);
+      expect(editorView(input)).toBe(view);
+      expect(view.state.selection.eq(selection)).toBe(true);
+      expect(editorText(input)).toBe(source);
+      fireEvent.keyDown(input, { key: "z", code: "KeyZ", ctrlKey: true });
+      expect(editorText(input)).toBe("");
+      fireEvent.keyDown(input, { key: "y", code: "KeyY", ctrlKey: true });
+      expect(editorText(input)).toBe(source);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onCancel).not.toHaveBeenCalled();
+    } finally { Object.defineProperty(window, "innerHeight", { configurable: true, value: previousHeight }); }
+  });
+
+  it("returns space to an arriving approval and restores expanded writing when review ends without remounting", async () => {
+    const style = loadConversationStyles();
+    try {
+      const user = userEvent.setup();
+      const { bindReviewActive, container } = renderComposer({ active: true, conversationHistory: "empty" });
+      const input = screen.getByRole("combobox", { name: "Message Sigil" });
+      setEditorText(input, "Approval follow-up\n".repeat(30));
+      const view = editorView(input);
+      const form = input.closest("form")!;
+      const timeline = container.querySelector<HTMLElement>(".timeline")!;
+      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      await user.click(screen.getByRole("button", { name: "Preview" }));
+      bindReviewActive(true);
+      expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
+      expect(getComputedStyle(timeline).display).not.toBe("none");
+      expect(view.scrollDOM.style.maxHeight).toBe("88px");
+      expect(getComputedStyle(screen.getByRole("region", { name: "Preview" })).maxHeight).toBe("88px");
+      expect(screen.getByRole("button", { name: "Cancel work" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Queue message" })).toBeTruthy();
+      bindReviewActive(false);
+      expect(Number(getComputedStyle(form).flexGrow)).toBeGreaterThan(0);
+      expect(getComputedStyle(timeline).display).toBe("none");
+      expect(view.scrollDOM.style.maxHeight).toBe("100%");
+      expect(editorView(input)).toBe(view);
+      expect(editorText(input)).toBe("Approval follow-up\n".repeat(30));
+    } finally { style.remove(); }
+  });
+
+  it("dismisses suggestions before collapsing from source or toolbar focus", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    for (const fromToolbar of [false, true]) {
+      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      setEditorText(input, fromToolbar ? "/doctor" : "/config");
+      const target = fromToolbar ? screen.getByRole("button", { name: "Preview" }) : input;
+      target.focus();
+      fireEvent.keyDown(target, { key: "Escape", code: "Escape" });
+      expect(screen.queryByRole("listbox", { name: "Composer suggestions" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+      fireEvent.keyDown(target, { key: "Escape", code: "Escape" });
+      expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    }
+  });
+
+  it("lets the format popover close first and then collapses from its restored trigger focus", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "draft");
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    const format = screen.getByRole("button", { name: "Format" });
+    const bold = screen.getByRole("button", { name: /^Bold/ });
+    bold.focus();
+    fireEvent.keyDown(bold, { key: "Escape", code: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Format" })).toBeNull();
+    expect(document.activeElement).toBe(format);
+    expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+    fireEvent.keyDown(format, { key: "Escape", code: "Escape" });
+    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("leaves IME composition and an already collapsed composer alone", async () => {
+    const user = userEvent.setup();
+    const onCancel = vi.fn();
+    const { onSubmit } = renderComposer({ active: true, onCancel });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "中文草稿");
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape", isComposing: true, keyCode: 229 });
+    expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    expect(editorText(input)).toBe("中文草稿");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+});
 
 describe("compact composer presentation", () => {
   it("keeps the image picker in the editing toolbar with accessible busy feedback and the exact draft", async () => {

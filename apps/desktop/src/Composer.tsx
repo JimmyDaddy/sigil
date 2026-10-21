@@ -131,6 +131,10 @@ export function Composer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [editorExpanded, setEditorExpanded] = useState(false);
+  const collapseEditor = () => {
+    setEditorExpanded(false);
+    editorRef.current?.focus();
+  };
   const [formatOpen, setFormatOpen] = useState(false);
   const previewText = useDeferredValue(prompt);
   const previousStorageKey = useRef(storageKey);
@@ -454,6 +458,19 @@ export function Composer({
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
   const activity = statusPresentation
     ?? (activityState === undefined ? undefined : presentComposerActivity(activityState, t));
+  const expandedWriting = editorExpanded && !reviewActive;
+  const suggestionList = suggestionsOpen ? (
+    <ComposerSuggestions
+      id={suggestionListId}
+      label={t("composerSuggestions")}
+      unavailableLabel={t("unavailable")}
+      suggestions={suggestions}
+      activeIndex={Math.min(activeSuggestion, suggestions.length - 1)}
+      query={suggestionQuery?.query ?? ""}
+      onSelect={selectSuggestion}
+      onActiveIndexChange={setActiveSuggestion}
+    />
+  ) : null;
 
   return (
     <>
@@ -462,24 +479,26 @@ export function Composer({
         ? ""
         : ` has-activity${activityState === undefined ? "" : ` activity-${activityState}`}`}`}
       data-composer-product-status={activity?.status}
+      data-expanded={editorExpanded}
+      data-review-active={reviewActive}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented || event.nativeEvent.defaultPrevented
+          || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (suggestionsOpen) {
+          event.preventDefault();
+          setSuggestionsDismissedFor(suggestionQuery?.token);
+        } else if (editorExpanded) {
+          event.preventDefault();
+          collapseEditor();
+        }
+      }}
       onSubmit={(event) => {
         if (event.target !== event.currentTarget) return;
         event.preventDefault();
         void submit();
       }}
     >
-      {suggestionsOpen ? (
-        <ComposerSuggestions
-          id={suggestionListId}
-          label={t("composerSuggestions")}
-          unavailableLabel={t("unavailable")}
-          suggestions={suggestions}
-          activeIndex={Math.min(activeSuggestion, suggestions.length - 1)}
-          query={suggestionQuery?.query ?? ""}
-          onSelect={selectSuggestion}
-          onActiveIndexChange={setActiveSuggestion}
-        />
-      ) : null}
+      {!expandedWriting ? suggestionList : null}
       {activity !== undefined && showActivity ? (
         <div
           className="composer-activity"
@@ -566,6 +585,7 @@ export function Composer({
           <small className="composer-editing-hint">{t("markdownSendHint")}</small>
         </div>
         <div className="composer-document" data-preview={previewVisible} data-expanded={editorExpanded} data-review-active={reviewActive}>
+          {expandedWriting ? suggestionList : null}
           <MarkdownEditor
             ref={editorRef}
             value={prompt}
@@ -611,6 +631,11 @@ export function Composer({
                   setSuggestionsDismissedFor(suggestionQuery?.token);
                   return;
                 }
+              }
+              if (event.key === "Escape" && editorExpanded) {
+                event.preventDefault();
+                collapseEditor();
+                return;
               }
               if (event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();

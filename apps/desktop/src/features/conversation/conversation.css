@@ -3,6 +3,8 @@
 .conversation-panel { --conversation-content-max-width: 820px; --conversation-content-gutter: clamp(4px, 2vw, 24px); display: grid; gap: 14px; min-width: 0; margin-top: var(--sg-sys-space-3); padding: 12px var(--sg-sys-space-4) var(--sg-sys-space-3); background: var(--sg-sys-color-canvas); }
 .conversation-layout > .conversation-panel { display: flex; min-height: 0; flex-direction: column; margin: 0; }
 .conversation-layout .timeline { min-height: 0; max-height: none; flex: 1; }
+.conversation-layout > .conversation-panel:has(> .composer[data-expanded="true"][data-review-active="false"]) > .timeline { flex: 0 1 72px; }
+.conversation-layout > .conversation-panel:has(> .composer[data-expanded="true"][data-review-active="false"]) > .timeline:has(> .timeline-empty:only-child) { display: none; }
 .inspector-empty { display: grid; gap: 6px; margin-top: 18px; padding: 14px; border: 1px dashed var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface-variant); }
 .inspector-empty p { margin: 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; line-height: 1.5; }
 .conversation-header, .conversation-header > div, .timeline-row header { display: flex; align-items: center; }
@@ -554,7 +556,6 @@
 .composer-document { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); }
 .composer-document[data-preview="true"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .composer-preview { min-width: 0; max-height: 176px; overflow: auto; padding: 10px 14px; border-left: 1px solid var(--sg-sys-color-outline-variant); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
-.composer-document[data-expanded="true"] .composer-preview { max-height: min(300px, 34vh); }
 .composer-document[data-review-active="true"] .composer-preview { max-height: 88px; }
 .composer-preview > :first-child { margin-top: 0; }
 .composer-preview > :last-child { margin-bottom: 0; }
@@ -564,6 +565,18 @@
   .composer-document[data-preview="true"] { grid-template-columns: minmax(0, 1fr); }
   .composer-preview { max-height: 100px; border-top: 1px solid var(--sg-sys-color-outline-variant); border-left: 0; }
   .composer-document[data-review-active="true"] .composer-preview { max-height: 60px; }
+}
+/* The expanded document receives the remaining column once, including in short
+   windows. Its two reading panes share that budget instead of stacking vh caps. */
+.composer[data-expanded="true"][data-review-active="false"] { display: flex; min-height: 0; flex: 1 1 0px; flex-direction: column; }
+.composer[data-expanded="true"][data-review-active="false"] > .composer-surface { display: flex; min-height: 0; flex: 1 1 0px; flex-direction: column; overflow-y: auto; }
+.composer[data-expanded="true"][data-review-active="false"] > .composer-surface > :not(.composer-document) { flex-shrink: 0; }
+.composer[data-expanded="true"][data-review-active="false"] .composer-document { position: relative; min-height: 0; flex: 1 1 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.composer[data-expanded="true"][data-review-active="false"] .composer-document > .composer-suggestions { z-index: 1; top: 0; bottom: auto; max-height: min(360px, 100%); }
+.composer[data-expanded="true"][data-review-active="false"] .sg-markdown-editor { min-height: 0; height: 100%; }
+.composer[data-expanded="true"][data-review-active="false"] .composer-preview { min-height: 0; max-height: 100%; }
+@container (max-width: 440px) {
+  .composer[data-expanded="true"][data-review-active="false"] .composer-document[data-preview="true"] { grid-template-rows: repeat(2, minmax(0, 1fr)); }
 }
 .composer-toolbar { display: flex; min-width: 0; align-items: flex-end; justify-content: space-between; gap: var(--sg-sys-space-2); padding: var(--sg-sys-space-2); }
 .composer-options { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: var(--sg-sys-space-2); }

@@ -119,7 +119,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: props.value },
         annotations: [controlledReplacement.of(true), Transaction.userEvent.of("input.replace"), isolateHistory.of("full")] });
     }
-    view.scrollDOM.style.maxHeight = props.reviewActive ? "88px" : props.expanded ? "min(300px, 32dvh)" : "176px";
+    view.scrollDOM.style.maxHeight = props.reviewActive ? "88px" : props.expanded ? "100%" : "176px";
   }, [props.value, props.label, props.placeholder, props.expanded, props.reviewActive,
     props.suggestionsOpen, props.suggestionListId, props.activeSuggestionId]);
   return <div ref={host} className="sg-markdown-editor" data-expanded={props.expanded}
