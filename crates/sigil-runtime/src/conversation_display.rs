@@ -452,6 +452,7 @@ enum ToolProjectionKey {
 struct ToolProjectionState {
     items: HashMap<ToolProjectionKey, ToolProjection>,
     terminals: HashMap<String, command::CommandTerminalState>,
+    // Display origins outlive a private Resolved-before-V3 bundle, not the pending form.
     waiting_inputs: BTreeMap<sigil_kernel::UserInputIdentityV1, WaitingInputToolProjection>,
 }
 
@@ -484,50 +485,39 @@ impl ToolProjectionState {
         scope: &str,
         active_run: &Option<ActiveRunProjection>,
     ) -> Result<()> {
-        match control {
-            ControlEntry::UserInputRequested(requested) => {
-                requested.validate()?;
-                let Some(binding) = requested.request.continuation.as_ref() else {
-                    return Ok(());
-                };
-                let Some(tool) = self
-                    .items
-                    .get(&ToolProjectionKey::Call(binding.tool_call_id.clone()))
-                    .filter(|tool| {
-                        requested.request.identity.session_scope_id.as_str() == scope
-                            && tool.name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME
-                            && tool.requested_message_id == binding.assistant_message_id
-                            && tool.requested_run_id.is_some()
-                            && tool.requested_run_id == active_run_id(active_run)
-                    })
-                else {
-                    return Ok(());
-                };
-                if let Some(previous) = self.waiting_inputs.get(&requested.request.identity)
-                    && (previous.request_hash != requested.request_hash
-                        || previous.tool.requested_display_id != tool.requested_display_id)
-                {
-                    bail!("user input display continuation changed its exact source");
-                }
-                self.waiting_inputs.insert(
-                    requested.request.identity.clone(),
-                    WaitingInputToolProjection {
-                        request_hash: requested.request_hash.clone(),
-                        tool: tool.clone(),
-                    },
-                );
-            }
-            ControlEntry::UserInputResolved(resolved) => {
-                if self
-                    .waiting_inputs
-                    .get(&resolved.identity)
-                    .is_some_and(|origin| origin.request_hash == resolved.request_hash)
-                {
-                    self.waiting_inputs.remove(&resolved.identity);
-                }
-            }
-            _ => {}
+        let ControlEntry::UserInputRequested(requested) = control else {
+            return Ok(());
+        };
+        requested.validate()?;
+        let Some(binding) = requested.request.continuation.as_ref() else {
+            return Ok(());
+        };
+        let Some(tool) = self
+            .items
+            .get(&ToolProjectionKey::Call(binding.tool_call_id.clone()))
+            .filter(|tool| {
+                requested.request.identity.session_scope_id.as_str() == scope
+                    && tool.name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME
+                    && tool.requested_message_id == binding.assistant_message_id
+                    && tool.requested_run_id.is_some()
+                    && tool.requested_run_id == active_run_id(active_run)
+            })
+        else {
+            return Ok(());
+        };
+        if let Some(previous) = self.waiting_inputs.get(&requested.request.identity)
+            && (previous.request_hash != requested.request_hash
+                || previous.tool.requested_display_id != tool.requested_display_id)
+        {
+            bail!("user input display continuation changed its exact source");
         }
+        self.waiting_inputs.insert(
+            requested.request.identity.clone(),
+            WaitingInputToolProjection {
+                request_hash: requested.request_hash.clone(),
+                tool: tool.clone(),
+            },
+        );
         Ok(())
     }
 

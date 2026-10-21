@@ -430,6 +430,157 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
     Ok(())
 }
 
+#[test]
+fn conversation_display_input_private_resolution_before_v3_keeps_exact_origin() -> Result<()> {
+    use sigil_kernel::{
+        AgentThreadId, LogicalRunId, SessionScopeId, UserInputActionV1, UserInputCommandId,
+        UserInputContinuationBindingV1, UserInputDecisionCommandV1, UserInputDecisionV1,
+        UserInputIdentityV1, UserInputLifecycleEntryV1, UserInputPurposeV1, UserInputQuestionV1,
+        UserInputRequestId, UserInputRequestV1, UserInputRequestedV1, UserInputSourceV1,
+    };
+    for decision in [
+        UserInputDecisionV1::Declined,
+        UserInputDecisionV1::RunCancelled,
+    ] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let run_id = "private-input-run";
+        session
+            .conversation_run_lifecycle_recorder()?
+            .append_started(&ConversationRunStartedEntryV1::new(run_id, 1)?)?;
+        let call = ToolCall {
+            id: "private-input-call".to_owned(),
+            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        };
+        let assistant = ModelMessage::assistant(None, vec![call.clone()]);
+        let assistant_id = assistant.id.clone();
+        session.append_assistant_message(assistant)?;
+        let request = UserInputRequestedV1::new(UserInputRequestV1 {
+            schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+            identity: UserInputIdentityV1 {
+                session_scope_id: SessionScopeId::new(&scope)?,
+                root_logical_run_id: LogicalRunId::new(run_id)?,
+                source_thread_id: AgentThreadId::new("private-input-source")?,
+                request_id: UserInputRequestId::new("private-input-request")?,
+                generation: 1,
+                source_binding_hash: format!(
+                    "sha256:{}",
+                    sigil_kernel::sha256_hex(&serde_json::to_vec(&call)?)
+                ),
+            },
+            source: UserInputSourceV1::Agent,
+            purpose: UserInputPurposeV1::Clarification,
+            prompt: "Choose the scope".to_owned(),
+            questions: vec![UserInputQuestionV1 {
+                id: "scope".to_owned(),
+                question: "Which scope?".to_owned(),
+                description: None,
+                required: true,
+                options: Vec::new(),
+                multiple: false,
+            }],
+            allowed_actions: vec![
+                UserInputActionV1::Submit,
+                UserInputActionV1::Decline,
+                UserInputActionV1::CancelRun,
+            ],
+            requested_at_unix_ms: 10,
+            continuation: Some(UserInputContinuationBindingV1 {
+                assistant_message_id: assistant_id,
+                tool_call_id: call.id.clone(),
+                provider_name: "provider".to_owned(),
+                model_name: "model".to_owned(),
+            }),
+        })?;
+        // This supported private-only prefix has not finalized or published Awaiting.
+        session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(
+            Box::new(request.clone()),
+        )])?;
+        let requested = all_display_items(&store.read_event_records_writer()?, &scope)?
+            .into_iter()
+            .find(|item| item.kind == ConversationDisplayItemKindV1::Tool)
+            .context("private requested input tool")?;
+        sigil_kernel::accept_user_input_decision(
+            &mut session,
+            UserInputDecisionCommandV1 {
+                identity: request.request.identity,
+                request_hash: request.request_hash,
+                command_id: UserInputCommandId::new("private-input-decision")?,
+                decision,
+            },
+            20,
+        )?;
+        let settled_records = store.read_event_records_writer()?;
+        let resolved_sequence = settled_records
+            .iter()
+            .find_map(|record| {
+                matches!(
+                    record.session_log_entry(),
+                    Ok(Some(SessionLogEntry::Control(
+                        ControlEntry::UserInputResolved(_)
+                    )))
+                )
+                .then_some(record.stream_sequence())
+            })
+            .context("real private resolution")?;
+        let result_sequence = settled_records
+            .iter()
+            .find_map(|record| {
+                matches!(
+                    record.session_log_entry(),
+                    Ok(Some(SessionLogEntry::ToolResultV3(_)))
+                )
+                .then_some(record.stream_sequence())
+            })
+            .context("real private V3 settlement")?;
+        assert!(
+            resolved_sequence < result_sequence,
+            "exercise the real fallback write order"
+        );
+        assert!(settled_records.iter().all(
+            |record| record.stored_event().event_kind() != Some(DurableEventType::RunFinalized)
+        ));
+        assert!(
+            sigil_kernel::PublicEventOutboxProjectionV1::from_records(&settled_records)?
+                .events_in_order()
+                .is_empty()
+        );
+        // Force the production index to hydrate this historical result from its exact context.
+        for index in 0..120 {
+            session
+                .append_user_message(ModelMessage::user(format!("after private input {index}")))?;
+        }
+        let records = store.read_event_records_writer()?;
+        let page = conversation_display_page_from_records(&records, &scope, None, 50, None)?;
+        assert!(
+            page.user_inputs.is_empty(),
+            "retaining a display origin cannot revive the form"
+        );
+        let items = all_display_items(&records, &scope)?;
+        let result = items
+            .iter()
+            .find(|item| {
+                item.kind == ConversationDisplayItemKindV1::Tool
+                    && item.status == ConversationDisplayStatusV1::Completed
+            })
+            .context("private settled input tool")?;
+        assert_eq!(result.run_id.as_deref(), Some(run_id));
+        assert_eq!(
+            result.reconciles,
+            Some(vec![
+                requested.display_id,
+                conversation_live_provisional_id(
+                    &scope,
+                    run_id,
+                    &ConversationLiveProvisionalSlotV1::Tool { call_id: call.id }
+                )?,
+            ])
+        );
+    }
+    Ok(())
+}
+
 fn append_display_input_result(
     session: &mut Session,
     call_id: &str,
