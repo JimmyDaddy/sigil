@@ -1,3 +1,5 @@
+import { useId, useLayoutEffect, useRef } from "react";
+
 import { useLocale } from "./i18n";
 import { SafeMarkdown } from "./SafeMarkdown";
 import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail } from "./types";
@@ -37,195 +39,207 @@ export function PlanCard({
   const primaryAction: PlanDecisionAction | undefined = review.allowedActions.includes("run")
     ? "run"
     : review.allowedActions[0];
+  const contentRef = useRef<HTMLDivElement>(null);
+  const contentId = useId();
+  const hasFooter = review.planHash !== undefined || review.allowedActions.length > 0 || detailFailure || failure;
+
+  useLayoutEffect(() => {
+    if (detailOpen && detail !== undefined) contentRef.current?.focus({ preventScroll: true });
+  }, [detailOpen, detail?.planId, detail?.planHash]);
 
   return (
     <section className={`plan-card sg-bounded-content${detailOpen ? " plan-card-open" : ""}`} aria-labelledby="plan-card-title">
-      <header>
-        <div>
-          <span className="plan-card-eyebrow">{t("planReview")}</span>
-          <h3 id="plan-card-title">
-            {review.summary ?? t(`planReviewStatus_${review.status}`)}
-          </h3>
-        </div>
-        <span className={`plan-status plan-status-${review.status.replace(/_/g, "-")}`}>
-          {t(`planReviewStatus_${review.status}`)}
-        </span>
-      </header>
-
-      {review.planHash === undefined ? null : (
-        <div className="plan-card-overview">
-          <div className="plan-card-metrics" aria-label={t("planReviewOverview")}>
-            {hasLegacyMarkdown || review.stepCount === undefined || review.stepCount === 0 ? null : (
-              <span>{t("planReviewSteps", { count: review.stepCount })}</span>
-            )}
-            {hasLegacyMarkdown || review.targetPathCount === undefined || review.targetPathCount === 0 ? null : (
-              <span>{t("planReviewTargetPaths", { count: review.targetPathCount })}</span>
-            )}
-            {hasLegacyMarkdown || review.suggestedCheckCount === undefined || review.suggestedCheckCount === 0 ? null : (
-              <span>{t("planReviewSuggestedChecks", { count: review.suggestedCheckCount })}</span>
-            )}
-            <span>{t(`planReviewSource_${review.source}`)}</span>
+      <div id={contentId} className="plan-card-content" role="region" aria-label={t("planReview")} tabIndex={0} ref={contentRef}>
+        <header>
+          <div>
+            <span className="plan-card-eyebrow">{t("planReview")}</span>
+            <h3 id="plan-card-title">
+              {review.summary ?? t(`planReviewStatus_${review.status}`)}
+            </h3>
           </div>
-          <details className="plan-card-identity">
-            <summary>{t("planReviewIdentity")}</summary>
-            <div>
-              <code>{review.planId}</code>
-              <code>{review.planHash.slice(0, 12)}…</code>
+          <span className={`plan-status plan-status-${review.status.replace(/_/g, "-")}`}>
+            {t(`planReviewStatus_${review.status}`)}
+          </span>
+        </header>
+
+        {review.planHash === undefined ? null : (
+          <div className="plan-card-overview">
+            <div className="plan-card-metrics" aria-label={t("planReviewOverview")}>
+              {hasLegacyMarkdown || review.stepCount === undefined || review.stepCount === 0 ? null : (
+                <span>{t("planReviewSteps", { count: review.stepCount })}</span>
+              )}
+              {hasLegacyMarkdown || review.targetPathCount === undefined || review.targetPathCount === 0 ? null : (
+                <span>{t("planReviewTargetPaths", { count: review.targetPathCount })}</span>
+              )}
+              {hasLegacyMarkdown || review.suggestedCheckCount === undefined || review.suggestedCheckCount === 0 ? null : (
+                <span>{t("planReviewSuggestedChecks", { count: review.suggestedCheckCount })}</span>
+              )}
+              <span>{t(`planReviewSource_${review.source}`)}</span>
             </div>
-          </details>
-        </div>
-      )}
-
-      {review.risk === undefined ? null : (
-        <div className="plan-card-risk">
-          <strong>{t("planRisk")}</strong>
-          <span>{review.risk}</span>
-        </div>
-      )}
-
-      {review.candidate === undefined ? null : (
-        <section className="plan-card-candidate" aria-label={t("planReviewCandidate")}>
-          <div className="plan-card-candidate-heading">
-            <strong>{t("planReviewCandidate")}</strong>
-            <span>{t(`planReviewCandidateCompleteness_${review.candidate.completeness}`)}</span>
+            <details className="plan-card-identity">
+              <summary>{t("planReviewIdentity")}</summary>
+              <div>
+                <code>{review.planId}</code>
+                <code>{review.planHash.slice(0, 12)}…</code>
+              </div>
+            </details>
           </div>
-          <code>{review.candidate.contentHash}</code>
-          <pre>{review.candidate.content}</pre>
-        </section>
-      )}
+        )}
 
-      {review.stale ? (
-        <div className="plan-card-notice" role="status">
-          {t("planReviewStale")}
-        </div>
-      ) : null}
+        {review.risk === undefined ? null : (
+          <div className="plan-card-risk">
+            <strong>{t("planRisk")}</strong>
+            <span>{review.risk}</span>
+          </div>
+        )}
 
-      {review.revision === undefined ? null : (
-        <div className="plan-card-notice" role="status">
-          {t(`planRevisionStatus_${review.revision.status}`)}
-          {review.revision.attemptOrdinal === undefined
-            ? null
-            : ` · #${review.revision.attemptOrdinal}`}
-        </div>
-      )}
-
-      {review.planHash === undefined && review.allowedActions.length === 0 ? null : (
-        <div className="plan-card-toolbar">
-          {review.planHash === undefined ? null : (
-            <div className="plan-card-review-toggle">
-              <Button
-                type="button"
-                variant="quiet"
-                data-plan-detail-toggle
-                disabled={detailBusy}
-                aria-expanded={detailOpen}
-                onClick={detailOpen ? onCloseDetail : onOpenDetail}
-              >
-                {detailBusy
-                  ? t("planDetailLoading")
-                  : detailOpen
-                    ? t("planDetailClose")
-                    : t("planDetailOpen")}
-              </Button>
+        {review.candidate === undefined ? null : (
+          <section className="plan-card-candidate" aria-label={t("planReviewCandidate")}>
+            <div className="plan-card-candidate-heading">
+              <strong>{t("planReviewCandidate")}</strong>
+              <span>{t(`planReviewCandidateCompleteness_${review.candidate.completeness}`)}</span>
             </div>
-          )}
-          {review.allowedActions.length === 0 ? null : (
-            <div className="plan-card-actions" aria-label={t("planReviewActions")}>
-              {review.allowedActions.map((action) => (
+            <code>{review.candidate.contentHash}</code>
+            <pre>{review.candidate.content}</pre>
+          </section>
+        )}
+
+        {review.stale ? (
+          <div className="plan-card-notice" role="status">
+            {t("planReviewStale")}
+          </div>
+        ) : null}
+
+        {review.revision === undefined ? null : (
+          <div className="plan-card-notice" role="status">
+            {t(`planRevisionStatus_${review.revision.status}`)}
+            {review.revision.attemptOrdinal === undefined
+              ? null
+              : ` · #${review.revision.attemptOrdinal}`}
+          </div>
+        )}
+
+        {detailOpen && detail !== undefined ? (
+          <div className="plan-workbench" data-testid="plan-workbench">
+            {detail.legacyMarkdown !== undefined ? (
+              <div className="message-content">
+                <SafeMarkdown text={detail.legacyMarkdown}
+                  contentId={`plan:${detail.planId}:${detail.planHash}`} codeBlockVariant="embedded" />
+              </div>
+            ) : <>
+            <section>
+              <h4>{t("planDetailSummary")}</h4>
+              <p>{detail.summary}</p>
+            </section>
+            <section>
+              <h4>{t("planDetailSteps")}</h4>
+              <ol className="plan-workbench-steps">
+                {detail.steps.map((step) => (
+                  <li key={step.stepId}>
+                    <strong>{step.title}</strong>
+                    {step.detail === undefined ? null : <p>{step.detail}</p>}
+                    <div className="plan-workbench-contract">
+                      {step.role === undefined ? null : <code>{step.role}</code>}
+                      {step.mode === undefined ? null : <code>{step.mode}</code>}
+                      {step.isolation === undefined ? null : <code>{step.isolation}</code>}
+                    </div>
+                    {step.dependsOn.length === 0 ? null : (
+                      <p><b>{t("planDetailDependsOn")}</b> {step.dependsOn.join(", ")}</p>
+                    )}
+                    {step.targetPaths.length === 0 ? null : (
+                      <p><b>{t("planDetailPaths")}</b> {step.targetPaths.join(", ")}</p>
+                    )}
+                    {step.suggestedChecks.length === 0 ? null : (
+                      <ul>
+                        {step.suggestedChecks.map((check) => (
+                          <li key={check.checkSpecId}><PlanCheck check={check} /></li>
+                        ))}
+                      </ul>
+                    )}
+                    {step.risk === undefined ? null : <p><b>{t("planRisk")}</b> {step.risk}</p>}
+                    {step.notes.map((note) => <p key={note}>{note}</p>)}
+                  </li>
+                ))}
+              </ol>
+            </section>
+            {detail.targetPaths.length === 0 ? null : (
+              <section>
+                <h4>{t("planDetailScope")}</h4>
+                <ul>{detail.targetPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+              </section>
+            )}
+            {detail.suggestedChecks.length === 0 ? null : (
+              <section>
+                <h4>{t("planDetailVerification")}</h4>
+                <ul>{detail.suggestedChecks.map((check) => (
+                  <li key={check.checkSpecId}><PlanCheck check={check} /></li>
+                ))}</ul>
+              </section>
+            )}
+            {detail.notes.length === 0 ? null : (
+              <section><h4>{t("planDetailNotes")}</h4><ul>{detail.notes.map((note) => <li key={note}>{note}</li>)}</ul></section>
+            )}
+            </>}
+          </div>
+        ) : null}
+
+      </div>
+
+      {hasFooter ? <footer className="plan-card-footer">
+        {review.planHash === undefined && review.allowedActions.length === 0 ? null : (
+          <div className="plan-card-toolbar">
+            {review.planHash === undefined ? null : (
+              <div className="plan-card-review-toggle">
                 <Button
-                  key={action}
                   type="button"
-                  variant={action === "run" ? "primary" : action === "reject" ? "danger" : "secondary"}
-                  data-plan-action={action}
-                  disabled={disabled || busy}
-                  onClick={() => onDecision(action)}
+                  variant="quiet"
+                  data-plan-detail-toggle
+                  disabled={detailBusy}
+                  aria-expanded={detailOpen}
+                  aria-controls={contentId}
+                  onClick={detailOpen ? onCloseDetail : onOpenDetail}
                 >
-                  {busy && action === primaryAction
-                    ? t("planDecisionInProgress")
-                    : t(`planDecision_${action}`)}
+                  {detailBusy
+                    ? t("planDetailLoading")
+                    : detailOpen
+                      ? t("planDetailClose")
+                      : t("planDetailOpen")}
                 </Button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+              </div>
+            )}
+            {review.allowedActions.length === 0 ? null : (
+              <div className="plan-card-actions" aria-label={t("planReviewActions")}>
+                {review.allowedActions.map((action) => (
+                  <Button
+                    key={action}
+                    type="button"
+                    variant={action === "run" ? "primary" : action === "reject" ? "danger" : "secondary"}
+                    data-plan-action={action}
+                    disabled={disabled || busy}
+                    onClick={() => onDecision(action)}
+                  >
+                    {busy && action === primaryAction
+                      ? t("planDecisionInProgress")
+                      : t(`planDecision_${action}`)}
+                  </Button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
-      {detailFailure ? (
-        <div className="plan-card-notice plan-card-notice-error" role="alert">
-          {t("planDetailFailed")}
-        </div>
-      ) : null}
+        {detailFailure ? (
+          <div className="plan-card-notice plan-card-notice-error" role="alert">
+            {t("planDetailFailed")}
+          </div>
+        ) : null}
 
-      {detailOpen && detail !== undefined ? (
-        <div className="plan-workbench" data-testid="plan-workbench">
-          {detail.legacyMarkdown !== undefined ? (
-            <div className="message-content">
-              <SafeMarkdown text={detail.legacyMarkdown}
-                contentId={`plan:${detail.planId}:${detail.planHash}`} codeBlockVariant="embedded" />
-            </div>
-          ) : <>
-          <section>
-            <h4>{t("planDetailSummary")}</h4>
-            <p>{detail.summary}</p>
-          </section>
-          <section>
-            <h4>{t("planDetailSteps")}</h4>
-            <ol className="plan-workbench-steps">
-              {detail.steps.map((step) => (
-                <li key={step.stepId}>
-                  <strong>{step.title}</strong>
-                  {step.detail === undefined ? null : <p>{step.detail}</p>}
-                  <div className="plan-workbench-contract">
-                    {step.role === undefined ? null : <code>{step.role}</code>}
-                    {step.mode === undefined ? null : <code>{step.mode}</code>}
-                    {step.isolation === undefined ? null : <code>{step.isolation}</code>}
-                  </div>
-                  {step.dependsOn.length === 0 ? null : (
-                    <p><b>{t("planDetailDependsOn")}</b> {step.dependsOn.join(", ")}</p>
-                  )}
-                  {step.targetPaths.length === 0 ? null : (
-                    <p><b>{t("planDetailPaths")}</b> {step.targetPaths.join(", ")}</p>
-                  )}
-                  {step.suggestedChecks.length === 0 ? null : (
-                    <ul>
-                      {step.suggestedChecks.map((check) => (
-                        <li key={check.checkSpecId}><PlanCheck check={check} /></li>
-                      ))}
-                    </ul>
-                  )}
-                  {step.risk === undefined ? null : <p><b>{t("planRisk")}</b> {step.risk}</p>}
-                  {step.notes.map((note) => <p key={note}>{note}</p>)}
-                </li>
-              ))}
-            </ol>
-          </section>
-          {detail.targetPaths.length === 0 ? null : (
-            <section>
-              <h4>{t("planDetailScope")}</h4>
-              <ul>{detail.targetPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
-            </section>
-          )}
-          {detail.suggestedChecks.length === 0 ? null : (
-            <section>
-              <h4>{t("planDetailVerification")}</h4>
-              <ul>{detail.suggestedChecks.map((check) => (
-                <li key={check.checkSpecId}><PlanCheck check={check} /></li>
-              ))}</ul>
-            </section>
-          )}
-          {detail.notes.length === 0 ? null : (
-            <section><h4>{t("planDetailNotes")}</h4><ul>{detail.notes.map((note) => <li key={note}>{note}</li>)}</ul></section>
-          )}
-          </>}
-        </div>
-      ) : null}
-
-      {failure ? (
-        <div className="plan-card-notice plan-card-notice-error" role="alert">
-          {t("planDecisionFailed")}
-        </div>
-      ) : null}
-
+        {failure ? (
+          <div className="plan-card-notice plan-card-notice-error" role="alert">
+            {t("planDecisionFailed")}
+          </div>
+        ) : null}
+      </footer> : null}
     </section>
   );
 }
