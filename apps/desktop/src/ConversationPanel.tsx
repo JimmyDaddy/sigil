@@ -357,6 +357,7 @@ export function ConversationPanel({
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
   const pendingPromptCounter = useRef(0);
   const conversationQueueEpoch = useRef(0);
+  useEffect(() => () => { conversationQueueEpoch.current += 1; }, []);
   const conversationQueueRef = useRef<ConversationQueueView | undefined>(undefined);
   const queuedSuccessorExpected = useRef(false);
   const startedRunProjectionExpected = useRef<string | undefined>(undefined);
@@ -1646,6 +1647,8 @@ export function ConversationPanel({
         });
       }
       if (conversationQueueEpoch.current !== commandEpoch) return false;
+      if (receipt.sessionId !== session.id || receipt.queue.sessionId !== session.id
+        || receipt.action !== action.action) throw new Error("queue receipt does not match this conversation command");
       conversationQueueRef.current = receipt.queue;
       setConversationQueue(receipt.queue);
       const enqueued = action.action === "enqueue";
@@ -1662,7 +1665,9 @@ export function ConversationPanel({
           setPendingPrompt(editedPrompt);
         }
       }
-      queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue);
+      const canDispatchSuccessor = enqueued || action.action === "resume" || action.action === "interrupt_and_run_next";
+      queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue)
+        || (canDispatchSuccessor && queueHasPendingDelivery(queue));
       if (enqueued) {
         if (pendingPromptRef.current?.queued === true) {
           const enqueuedEntryId = receipt.enqueuedEntryId;
@@ -1679,8 +1684,10 @@ export function ConversationPanel({
           setPendingPrompt(acceptedPrompt);
           if (settledBeforeReceipt) setDisplayReload((value) => value + 1);
         }
-        // The predecessor may already have finished while its background terminal
-        // stream remains live. Queue admission must discover the successor itself.
+      }
+      if (canDispatchSuccessor) {
+        // Resume may dispatch after the predecessor's stream has ended, or even finish
+        // before its receipt arrives. Discover the exact owner or refresh durable display.
         pendingPredecessorRunId.current = activeRunIdRef.current;
         pendingContinuityOwner.current = undefined;
         setContinuityReload((value) => value + 1);
