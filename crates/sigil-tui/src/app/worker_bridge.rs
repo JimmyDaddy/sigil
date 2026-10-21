@@ -29,8 +29,8 @@ use super::{
 };
 use crate::runner::{WorkerApprovalRouteState, WorkerCommand, WorkerMessage};
 use message_labels::{
-    queued_prompt_summary_noun, summarize_queued_prompt, task_run_finish_notice,
-    task_run_terminal_timeline_notice,
+    TASK_PAUSED_NOTICE, queued_prompt_summary_noun, summarize_queued_prompt,
+    task_run_finish_notice, task_run_terminal_timeline_notice,
 };
 use run_event_helpers::notice_is_timeline_worthy;
 #[cfg(test)]
@@ -38,6 +38,15 @@ use sigil_kernel::ToolResult;
 use sigil_kernel::{ControlEntry, EventHandler};
 
 impl AppState {
+    fn active_task_message_matches(&self, task_id: &str) -> bool {
+        self.runtime.is_busy
+            && self
+                .runtime
+                .active_task
+                .as_ref()
+                .is_some_and(|task| task.task_id == task_id)
+    }
+
     fn render_command_call_state(&mut self, call: &sigil_kernel::ToolCall, status: &str) {
         if !super::formatting::command_tool_name(&call.name) {
             return;
@@ -856,6 +865,11 @@ impl AppState {
                 status,
                 entries,
             } => {
+                if status == sigil_kernel::TaskRunStatus::Paused
+                    && !self.active_task_message_matches(&task_id)
+                {
+                    return Ok(());
+                }
                 let notice = task_run_finish_notice(&task_id, status, &entries);
                 let terminal_timeline_notice =
                     task_run_terminal_timeline_notice(&task_id, status, &entries);
@@ -879,9 +893,11 @@ impl AppState {
                 self.push_event("run:cancel", "cancellation requested".to_owned());
             }
             WorkerMessage::TaskPauseRequested { task_id } => {
-                self.last_notice = Some(format!(
-                    "pausing task {task_id} — waiting for active work to stop"
-                ));
+                if !self.active_task_message_matches(&task_id) {
+                    return Ok(());
+                }
+                self.last_notice =
+                    Some("Pausing Task — waiting for active work to stop".to_owned());
                 self.push_event("task:pause", format!("task {task_id} pause requested"));
             }
             WorkerMessage::TaskRunPaused {
@@ -892,6 +908,9 @@ impl AppState {
                 model_name,
                 entries,
             } => {
+                if session_id != self.session_id || !self.active_task_message_matches(&task_id) {
+                    return Ok(());
+                }
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(
@@ -900,11 +919,10 @@ impl AppState {
                     provider_name,
                     model_name,
                     entries,
-                    "task paused; restored",
+                    "",
                 );
-                self.last_notice = Some(format!(
-                    "task {task_id} paused; use /task continue to resume"
-                ));
+                self.last_notice = Some(TASK_PAUSED_NOTICE.to_owned());
+                self.push_timeline(TimelineRole::Notice, TASK_PAUSED_NOTICE);
                 self.schedule_balance_refresh();
             }
             WorkerMessage::RunCancelled {

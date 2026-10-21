@@ -116,7 +116,11 @@ fn f5_pauses_only_the_exact_running_direct_task() -> Result<()> {
         request.execution,
         sigil_kernel::TaskExecutionBindingV1::Direct { admission_id }
     );
-    assert_eq!(app.last_notice(), Some("pausing task task_1"));
+    assert_eq!(app.last_notice(), Some("Pausing Task"));
+    assert_eq!(
+        app.timeline.last().map(|entry| entry.text.as_str()),
+        Some("Task pause requested.")
+    );
 
     app.runtime.is_busy = false;
     assert!(

@@ -950,6 +950,12 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
     let restored_path = session_dir.join("session-task-paused.jsonl");
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut entries = restored_entries("pause-provider", "pause-model");
+    for index in 0..48 {
+        entries.push(SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("earlier Task activity {index}")),
+            Vec::new(),
+        )));
+    }
     entries.push(SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {
             task_id: task_id.clone(),
@@ -963,17 +969,18 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
     write_session_log(&restored_path, &entries)?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.composer.input = "start a durable task".to_owned();
-    assert!(matches!(
-        app.submit_input()?,
-        Some(AppAction::SubmitPrompt(_))
-    ));
+    app.session_id = crate::app::tests::common::fixture_session_id(&restored_path);
+    app.session_log_path = restored_path.clone();
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: task_id.as_str().to_owned(),
+        objective: "pause safely".to_owned(),
+    })?;
     app.handle_worker_message(WorkerMessage::TaskPauseRequested {
         task_id: task_id.as_str().to_owned(),
     })?;
     assert_eq!(
         app.last_notice(),
-        Some("pausing task task_1 — waiting for active work to stop")
+        Some("Pausing Task — waiting for active work to stop")
     );
     assert!(app.events.iter().any(|event| {
         event.label == "task:pause" && event.detail == "task task_1 pause requested"
@@ -999,7 +1006,156 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
     assert_eq!(app.session_log_path, restored_path);
     assert_eq!(
         app.last_notice(),
-        Some("task task_1 paused; use /task continue to resume")
+        Some("Task paused · /task continue to resume")
+    );
+    assert_eq!(
+        app.timeline.last().map(|entry| entry.text.as_str()),
+        Some("Task paused · /task continue to resume"),
+        "the settled feedback must follow restored history, not be buried before it"
+    );
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.text == "Task paused · /task continue to resume")
+            .count(),
+        1
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("restored tool output"))
+    );
+    assert!(!app.timeline.iter().any(|entry| entry.text.is_empty()));
+    app.set_terminal_size(80, 24);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+    terminal.draw(|frame| crate::ui::render(frame, &app))?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        rendered.contains("Task paused · /task continue to resume"),
+        "actual 80x24 frame: {rendered}"
+    );
+    Ok(())
+}
+
+#[test]
+fn task_pause_feedback_rejects_foreign_and_replayed_pause_messages() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    let session_id = app.session_id.clone();
+    let session_path = app.session_log_path.clone();
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "active-task".to_owned(),
+        objective: "keep the active Task".to_owned(),
+    })?;
+    let before_notice = app.last_notice().map(str::to_owned);
+    let before_timeline = app.timeline.len();
+    let paused = |session: &str, task: &str| WorkerMessage::TaskRunPaused {
+        session_id: session.to_owned(),
+        task_id: task.to_owned(),
+        session_log_path: session_path.clone(),
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+        entries: Vec::new(),
+    };
+    app.handle_worker_message(WorkerMessage::TaskPauseRequested {
+        task_id: "other-task".to_owned(),
+    })?;
+    app.handle_worker_message(paused("foreign-session", "active-task"))?;
+    app.handle_worker_message(paused(&session_id, "other-task"))?;
+    app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: "other-task".to_owned(),
+        status: sigil_kernel::TaskRunStatus::Paused,
+        entries: Vec::new(),
+    })?;
+    assert!(app.runtime.is_busy);
+    assert_eq!(
+        app.runtime
+            .active_task
+            .as_ref()
+            .map(|task| task.task_id.as_str()),
+        Some("active-task")
+    );
+    assert_eq!(app.session_id, session_id);
+    assert_eq!(app.last_notice(), before_notice.as_deref());
+    assert_eq!(app.timeline.len(), before_timeline);
+
+    app.handle_worker_message(paused(&session_id, "active-task"))?;
+    assert!(!app.runtime.is_busy);
+    let settled_timeline = app.timeline.len();
+    app.handle_worker_message(paused(&session_id, "active-task"))?;
+    app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: "active-task".to_owned(),
+        status: sigil_kernel::TaskRunStatus::Paused,
+        entries: Vec::new(),
+    })?;
+    assert_eq!(app.timeline.len(), settled_timeline);
+    assert_eq!(
+        app.last_notice(),
+        Some("Task paused · /task continue to resume")
+    );
+    app.runtime.is_busy = true;
+    app.handle_worker_message(paused(&session_id, "active-task"))?;
+    assert!(
+        app.runtime.is_busy,
+        "an ordinary active run must not be cleared by an old Task pause"
+    );
+    assert_eq!(app.timeline.len(), settled_timeline);
+    Ok(())
+}
+
+#[test]
+fn task_pause_feedback_keeps_typed_recovery_reason_on_paused_completion() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "recoverable-task".to_owned(),
+        objective: "complete the original objective".to_owned(),
+    })?;
+    app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: "recoverable-task".to_owned(),
+        status: sigil_kernel::TaskRunStatus::Paused,
+        entries: vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: sigil_kernel::TaskId::new("recoverable-task")?,
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "complete the original objective".to_owned(),
+                title: None,
+                status: sigil_kernel::TaskRunStatus::Paused,
+                reason: Some("provider recovery requires review".to_owned()),
+            },
+        ))],
+    })?;
+    assert!(!app.runtime.is_busy);
+    assert_eq!(
+        app.last_notice(),
+        Some("Task paused · /task continue to resume")
+    );
+    assert_eq!(
+        app.timeline
+            .last()
+            .map(|entry| (entry.role, entry.text.as_str())),
+        Some((
+            TimelineRole::Notice,
+            "Task paused · /task continue to resume\nprovider recovery requires review"
+        ))
+    );
+    let projection =
+        sigil_kernel::TaskStateProjection::from_entries(&app.session_browser.current_entries);
+    assert_eq!(
+        projection
+            .current_task()
+            .and_then(|task| task.reason.as_deref()),
+        Some("provider recovery requires review")
     );
     Ok(())
 }
@@ -1517,7 +1673,10 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
         (sigil_kernel::TaskRunStatus::Cancelled, "cancelled"),
         (sigil_kernel::TaskRunStatus::Interrupted, "interrupted"),
     ] {
-        app.runtime.is_busy = true;
+        app.handle_worker_message(WorkerMessage::TaskRunStarted {
+            task_id: "task_1".to_owned(),
+            objective: "ship task".to_owned(),
+        })?;
         app.handle_worker_message(WorkerMessage::TaskRunFinished {
             task_id: "task_1".to_owned(),
             status,
@@ -1526,7 +1685,11 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
 
         assert!(!app.runtime.is_busy);
         assert_eq!(app.run_phase(), RunPhase::Idle);
-        let expected_notice = format!("task task_1 {label}");
+        let expected_notice = if status == sigil_kernel::TaskRunStatus::Paused {
+            "Task paused · /task continue to resume".to_owned()
+        } else {
+            format!("task task_1 {label}")
+        };
         assert_eq!(app.last_notice(), Some(expected_notice.as_str()));
         assert!(app.events.iter().any(|event| {
             event.label == "task:finish" && event.detail == format!("task_1 status={label}")

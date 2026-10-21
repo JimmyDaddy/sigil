@@ -53,12 +53,8 @@ impl AppState {
                 return None;
             }
         };
-        let task_id = request.task_id.as_str();
-        self.last_notice = Some(format!("pausing task {task_id}"));
-        self.push_timeline(
-            super::TimelineRole::Notice,
-            format!("Pause requested for task {task_id}."),
-        );
+        self.last_notice = Some("Pausing Task".to_owned());
+        self.push_timeline(super::TimelineRole::Notice, "Task pause requested.");
         Some(AppAction::PauseTask { request })
     }
 

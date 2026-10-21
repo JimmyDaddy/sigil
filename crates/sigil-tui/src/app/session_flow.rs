@@ -774,7 +774,9 @@ impl AppState {
         self.events.clear();
         self.reset_scroll();
 
-        self.push_timeline(TimelineRole::Notice, notice.to_owned());
+        if !notice.is_empty() {
+            self.push_timeline(TimelineRole::Notice, notice.to_owned());
+        }
         self.push_event("session", format!("active {}", self.session_id));
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event(

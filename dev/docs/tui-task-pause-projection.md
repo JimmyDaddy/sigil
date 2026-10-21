@@ -17,3 +17,5 @@ python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib task
 python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib f5_ -- --nocapture
 python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib live_preview -- --test-threads=4
 ```
+
+暂停请求显示简短的进行中提示；收到当前会话、当前 Task 的暂停结果后，在重放历史之后显示 `Task paused · /task continue to resume`，避免被工具中断卡埋住。重复或其他会话、其他 Task 的暂停消息不追加提示，也不改当前视图。Task 的 Paused 与根运行的 Cancelled 仍保留各自持久事实；工具中断、清理失败和 typed recovery 原因不改写。通用 Paused 完成消息的具体原因仍在时间线反馈中保留。

@@ -4,11 +4,16 @@ use sigil_kernel::{
 
 use super::super::formatting::summarize_terminal_reason;
 
+pub(super) const TASK_PAUSED_NOTICE: &str = "Task paused · /task continue to resume";
+
 pub(super) fn task_run_finish_notice(
     task_id: &str,
     status: sigil_kernel::TaskRunStatus,
     entries: &[sigil_kernel::SessionLogEntry],
 ) -> String {
+    if status == TaskRunStatus::Paused {
+        return TASK_PAUSED_NOTICE.to_owned();
+    }
     let label = status.as_str();
     let reason = entries.iter().rev().find_map(|entry| {
         let sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskRun(run)) = entry else {
@@ -37,6 +42,22 @@ pub(super) fn task_run_terminal_timeline_notice(
     status: TaskRunStatus,
     entries: &[sigil_kernel::SessionLogEntry],
 ) -> Option<String> {
+    if status == TaskRunStatus::Paused {
+        let reason = entries.iter().rev().find_map(|entry| match entry {
+            sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.task_id.as_str() == task_id && run.status == TaskRunStatus::Paused =>
+            {
+                run.reason
+                    .as_deref()
+                    .filter(|reason| !reason.trim().is_empty())
+            }
+            _ => None,
+        });
+        return Some(match reason {
+            Some(reason) => format!("{TASK_PAUSED_NOTICE}\n{reason}"),
+            None => TASK_PAUSED_NOTICE.to_owned(),
+        });
+    }
     let status_label = match status {
         TaskRunStatus::Failed => "Task failed",
         TaskRunStatus::Interrupted => "Task interrupted",
