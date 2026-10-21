@@ -20,7 +20,10 @@ use super::{
     AppState, PaneFocus, TimelineRole,
     formatting::{ProviderModelIdentity, build_model_picker_options, non_empty_or},
 };
-use crate::commands::{keyboard_help_lines, metadata_slash_commands, metadata_slash_help_lines};
+use crate::commands::{
+    KeyboardHelpPage, common_keyboard_help_lines, keyboard_help_lines, metadata_slash_commands,
+    metadata_slash_help_lines,
+};
 use crate::config_panel::{
     ConfigField, ConnectionPickerChoice, ConnectionPickerChoiceKind, config_field_accepts_char,
 };
@@ -287,6 +290,12 @@ pub(super) struct TextInputState {
     pub(super) buffer: String,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct KeyboardHelpState {
+    pub(super) page: KeyboardHelpPage,
+    pub(super) scroll_rows: usize,
+}
+
 #[derive(Debug)]
 pub(super) enum ModalState {
     ConnectionPicker(ConnectionPickerState),
@@ -304,7 +313,7 @@ pub(super) enum ModalState {
     SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
     SessionRetention(Box<super::session_lifecycle_flow::SessionRetentionModalState>),
     Feedback(Box<super::feedback_flow::FeedbackModalState>),
-    KeyboardHelp,
+    KeyboardHelp(KeyboardHelpState),
 }
 
 #[derive(Debug, Clone)]
@@ -363,7 +372,7 @@ impl AppState {
             ModalState::SessionActions(_) => Some("Session Actions"),
             ModalState::SessionRetention(_) => Some("Storage Maintenance"),
             ModalState::Feedback(_) => Some("Feedback Report"),
-            ModalState::KeyboardHelp => Some("Keyboard Help"),
+            ModalState::KeyboardHelp(_) => Some("Keyboard Help"),
         }
     }
 
@@ -485,7 +494,10 @@ impl AppState {
             Some(ModalState::SessionActions(state)) => state.lines(),
             Some(ModalState::SessionRetention(state)) => state.lines(),
             Some(ModalState::Feedback(state)) => state.lines(self.terminal_height),
-            Some(ModalState::KeyboardHelp) => {
+            Some(ModalState::KeyboardHelp(state)) => {
+                if state.page == KeyboardHelpPage::Common {
+                    return common_keyboard_help_lines();
+                }
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
                 lines.push("Slash commands".to_owned());
@@ -507,7 +519,6 @@ impl AppState {
                 }));
                 lines.push(String::new());
                 lines.push("Use / or 、 to open the command palette.".to_owned());
-                lines.push("Enter or Esc closes this help.".to_owned());
                 lines
             }
             None => Vec::new(),
@@ -550,7 +561,7 @@ impl AppState {
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::Feedback(_) => None,
-            ModalState::KeyboardHelp => None,
+            ModalState::KeyboardHelp(_) => None,
         }
     }
 
@@ -1253,8 +1264,60 @@ impl AppState {
     }
 
     pub(super) fn open_keyboard_help(&mut self) {
-        self.modal_state = Some(ModalState::KeyboardHelp);
+        self.modal_state = Some(ModalState::KeyboardHelp(KeyboardHelpState::default()));
         self.last_notice = Some("keyboard help".to_owned());
+    }
+
+    pub(crate) fn keyboard_help_view(&self) -> Option<crate::surface::KeyboardHelpSurface> {
+        let ModalState::KeyboardHelp(state) = self.modal_state.as_ref()? else {
+            return None;
+        };
+        let (max_scroll, _) = crate::ui::keyboard_help_scroll_bounds(
+            self.terminal_width,
+            self.terminal_height,
+            &self.modal_lines(),
+        );
+        Some(crate::surface::KeyboardHelpSurface {
+            page: state.page,
+            scroll_rows: state.scroll_rows.min(max_scroll),
+        })
+    }
+
+    fn handle_keyboard_help_key(&mut self, key: KeyEvent) -> ModalOutcome {
+        let lines = self.modal_lines();
+        let (max_scroll, page_rows) = crate::ui::keyboard_help_scroll_bounds(
+            self.terminal_width,
+            self.terminal_height,
+            &lines,
+        );
+        let Some(ModalState::KeyboardHelp(state)) = self.modal_state.as_mut() else {
+            return ModalOutcome::None;
+        };
+        let current = state.scroll_rows.min(max_scroll);
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.modal_state = None;
+                return ModalOutcome::Dismissed("closed keyboard help".to_owned());
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                state.page = match state.page {
+                    KeyboardHelpPage::Common => KeyboardHelpPage::All,
+                    KeyboardHelpPage::All => KeyboardHelpPage::Common,
+                };
+                state.scroll_rows = 0;
+                return ModalOutcome::None;
+            }
+            KeyCode::Up => state.scroll_rows = current.saturating_sub(1),
+            KeyCode::Down => state.scroll_rows = current.saturating_add(1).min(max_scroll),
+            KeyCode::PageUp => state.scroll_rows = current.saturating_sub(page_rows.max(1)),
+            KeyCode::PageDown => {
+                state.scroll_rows = current.saturating_add(page_rows.max(1)).min(max_scroll)
+            }
+            KeyCode::Home => state.scroll_rows = 0,
+            KeyCode::End => state.scroll_rows = max_scroll,
+            _ => state.scroll_rows = current,
+        }
+        ModalOutcome::None
     }
 
     pub(super) fn open_mcp_elicitation(
@@ -1486,13 +1549,7 @@ impl AppState {
             },
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
             ModalState::Feedback(_) => ModalOutcome::None,
-            ModalState::KeyboardHelp => match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.modal_state = None;
-                    ModalOutcome::Dismissed("closed keyboard help".to_owned())
-                }
-                _ => ModalOutcome::None,
-            },
+            ModalState::KeyboardHelp(_) => self.handle_keyboard_help_key(key),
         }
     }
 
@@ -1557,7 +1614,7 @@ impl AppState {
             | ModalState::SessionActions(_)
             | ModalState::SessionRetention(_)
             | ModalState::Feedback(_)
-            | ModalState::KeyboardHelp => ModalOutcome::None,
+            | ModalState::KeyboardHelp(_) => ModalOutcome::None,
         }
     }
 
@@ -1629,7 +1686,7 @@ impl AppState {
             }
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
             ModalState::Feedback(_) => ModalOutcome::None,
-            ModalState::KeyboardHelp => {
+            ModalState::KeyboardHelp(_) => {
                 self.modal_state = None;
                 ModalOutcome::Dismissed("closed keyboard help".to_owned())
             }
@@ -2002,3 +2059,7 @@ fn mcp_user_input_form(
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/modal_flow_detail_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/keyboard_help_tests.rs"]
+mod keyboard_help_tests;

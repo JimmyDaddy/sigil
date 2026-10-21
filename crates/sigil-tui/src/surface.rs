@@ -60,6 +60,12 @@ pub(crate) struct SlashSelectorSurface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyboardHelpSurface {
+    pub page: crate::commands::KeyboardHelpPage,
+    pub scroll_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModalSurface {
     pub visible: bool,
     pub checkpoint_restore_visible: bool,
@@ -68,6 +74,7 @@ pub(crate) struct ModalSurface {
     pub input_cursor: Option<(String, usize, usize)>,
     pub config_mode: bool,
     pub session_modal_actions: Vec<(SessionModalAction, String)>,
+    pub keyboard_help: Option<KeyboardHelpSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

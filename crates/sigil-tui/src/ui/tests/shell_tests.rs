@@ -233,7 +233,6 @@ required = true
 fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
-    // Tall enough to fit the full keyboard help including the new approval family hints.
     let backend = TestBackend::new(112, 46);
     let mut terminal = Terminal::new(backend)?;
 
@@ -246,11 +245,11 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Session"));
-    assert!(rendered.contains("Review"));
-    assert!(rendered.contains("F2"));
-    assert!(rendered.contains("Shift-F2"));
-    assert!(rendered.contains("Navigation"));
+    assert!(rendered.contains("[Common]"));
+    assert!(rendered.contains("All shortcuts"));
+    assert!(rendered.contains("Input"));
+    assert!(rendered.contains("Ctrl-J"));
+    assert!(rendered.contains("Esc/Enter close"));
     Ok(())
 }
 

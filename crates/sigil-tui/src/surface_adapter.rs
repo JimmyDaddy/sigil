@@ -154,6 +154,7 @@ fn modal_surface(app: &AppState) -> ModalSurface {
         input_cursor: app.modal_input_cursor(),
         config_mode: app.is_config_mode(),
         session_modal_actions: app.session_modal_action_rows(),
+        keyboard_help: app.keyboard_help_view(),
     }
 }
 

@@ -37,6 +37,13 @@ pub(crate) enum UiCommand {
     CancelFocusedTerminalTask,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum KeyboardHelpPage {
+    #[default]
+    Common,
+    All,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandSurface {
     Global,
@@ -441,6 +448,48 @@ pub(crate) fn tool_card_commands() -> impl Iterator<Item = UiCommand> {
         .iter()
         .filter(|spec| spec.surface == CommandSurface::ToolCard)
         .map(|spec| spec.command)
+}
+
+pub(crate) fn common_keyboard_help_lines() -> Vec<String> {
+    vec![
+        "Input".to_owned(),
+        concise_help_line(
+            UiCommand::SubmitPrompt,
+            "Send; while busy, queue a follow-up.",
+        ),
+        "Ctrl-J: New line.".to_owned(),
+        "/ or 、: Commands and session actions.".to_owned(),
+        "Up/Down: Prompt history.".to_owned(),
+        String::new(),
+        "Read".to_owned(),
+        concise_help_line(UiCommand::CopyTranscript, "Copy selection or latest reply."),
+        "PageUp/PageDown: Scroll conversation.".to_owned(),
+        concise_help_line(
+            UiCommand::ToggleThinking,
+            "Show or hide activity and thinking details.",
+        ),
+        String::new(),
+        "Control".to_owned(),
+        concise_help_line(UiCommand::ToggleWriteMode, "Change permission mode."),
+        concise_help_line(
+            UiCommand::CancelOrQuit,
+            "Cancel work / quit when idle; a selection is copied first.",
+        ),
+    ]
+}
+
+fn concise_help_line(command: UiCommand, summary: &str) -> String {
+    let spec = COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.command == command)
+        .expect("common help has command metadata");
+    let trigger = spec
+        .keys
+        .first()
+        .map(|key| key.label)
+        .or(spec.slash)
+        .expect("common help has a trigger");
+    format!("{trigger}: {summary}")
 }
 
 pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {

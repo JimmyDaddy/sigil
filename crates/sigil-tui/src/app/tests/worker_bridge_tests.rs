@@ -1727,7 +1727,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         preview: None,
         presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
-    app.modal_state = Some(ModalState::KeyboardHelp);
+    app.modal_state = Some(ModalState::KeyboardHelp(Default::default()));
     app.timeline_state.streaming_reasoning_index = Some(0);
 
     app.handle_worker_message(WorkerMessage::RunFinished {
@@ -1802,7 +1802,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     assert_eq!(app.last_notice(), Some("restored from disk"));
 
     app.runtime.is_busy = true;
-    app.modal_state = Some(ModalState::KeyboardHelp);
+    app.modal_state = Some(ModalState::KeyboardHelp(Default::default()));
     app.handle_worker_message(WorkerMessage::RunFailed(
         "request failed\n\nCaused by:\n  0: timeout".to_owned(),
     ))?;

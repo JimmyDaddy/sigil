@@ -107,6 +107,7 @@ fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
 
     assert_eq!(app.composer.input, "draft");
     assert_eq!(app.modal_title(), Some("Keyboard Help"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let lines = app.modal_lines();
     assert!(lines.iter().any(|line| line.contains("F1:")));
     assert!(lines.iter().any(|line| line.contains("Ctrl-G:")));

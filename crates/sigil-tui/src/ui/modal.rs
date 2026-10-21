@@ -1,3 +1,7 @@
+mod keyboard_help;
+
+pub(crate) use keyboard_help::keyboard_help_scroll_bounds;
+
 use std::borrow::Cow;
 
 use ratatui::{
@@ -24,6 +28,10 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let visual = modal_visual(app);
+    if let Some(help) = app.keyboard_help_view() {
+        keyboard_help::render_keyboard_help(frame, &app.modal_lines(), &help, &visual);
+        return;
+    }
     let geometry = modal_geometry(frame.area(), app);
     let raw_lines = app.modal_lines();
     let title = app.modal_title().unwrap_or("Modal");
@@ -116,6 +124,10 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         return;
     }
     let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
+    if let Some(help) = modal.keyboard_help.as_ref() {
+        keyboard_help::render_keyboard_help(frame, &modal.lines, help, &visual);
+        return;
+    }
     let geometry = modal_geometry_from_lines(frame.area(), &modal.lines, modal.title.as_deref());
     let raw_lines = &modal.lines;
     let title = modal.title.as_deref().unwrap_or("Modal");
