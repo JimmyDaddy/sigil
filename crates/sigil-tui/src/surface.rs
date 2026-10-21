@@ -30,6 +30,15 @@ pub(crate) struct SetupSurface {
     pub trust_gate: bool,
     pub lines: Vec<String>,
     pub field_line_indices: Vec<usize>,
+    pub recovery: Option<SetupRecoverySurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupRecoverySurface {
+    pub diagnostics: bool,
+    pub connection_changes_unsaved: bool,
+    pub scroll_rows: usize,
+    pub actions: Vec<crate::setup::SetupRecoveryAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

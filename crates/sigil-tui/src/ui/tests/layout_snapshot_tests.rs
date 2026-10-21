@@ -1457,3 +1457,113 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     assert_eq!(sections.footer.height, 4);
     assert!(approval_modal_hit_areas(Rect::new(0, 0, 4, 4), &view).is_some());
 }
+
+#[test]
+fn setup_startup_recovery_production_surface_keeps_actions_and_diagnostics_reachable_at_80x24()
+-> anyhow::Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let error = format!(
+        "FIRST source\n\n{}\nLAST exact failure",
+        "原因 e\u{301} /own-fixture/full-path/\n".repeat(45)
+    );
+    let mut app = AppState::from_setup_with_recovery(
+        path,
+        temp.path().to_path_buf(),
+        Some(error.clone()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    app.setup_state_mut()
+        .expect("setup")
+        .set_startup_blocker(Some(crate::setup::StartupBlocker::OwnerActive));
+    app.set_terminal_size(80, 24);
+    let render =
+        |app: &AppState| -> anyhow::Result<(String, crate::surface::SurfaceModel, Vec<String>)> {
+            let surface = crate::surface_adapter::build_surface_model(
+                Rect::new(0, 0, 80, 24),
+                app,
+                crate::surface::SurfaceState {
+                    frame_generation: 1,
+                    terminal_epoch: 1,
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+            terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+            let rows = (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            Ok((rows.join("\n"), surface, rows))
+        };
+    let (main, surface, rows) = render(&app)?;
+    assert!(main.contains("Configuration saved"));
+    assert!(main.contains("Another Sigil instance"));
+    assert!(main.contains("Close the other Sigil instance first"));
+    assert!(main.contains("[Enter] Retry Start"));
+    assert!(main.contains("[F1] Diagnostics"));
+    assert!(main.contains("[F2] Edit connection"));
+    assert!(main.contains("[Ctrl-C] Quit"));
+    assert!(!main.contains("FIRST source"));
+    assert!(!main.contains("authentication"));
+    let hits = surface
+        .layout
+        .setup_hit_areas
+        .as_ref()
+        .expect("setup hit areas");
+    assert!(hits.fields.is_empty());
+    for (action, area) in &hits.recovery.as_ref().expect("recovery").actions {
+        assert!(area.bottom() <= 24);
+        assert_eq!(
+            surface.layout.hit_target(area.x, area.y),
+            HitTarget::SetupRecoveryAction { action: *action }
+        );
+        assert!(rows[area.y as usize].contains(action.label()));
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    let (first, _, _) = render(&app)?;
+    assert!(first.contains("FIRST source"));
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    let (last, _, _) = render(&app)?;
+    assert!(last.contains("LAST exact failure"));
+    assert!(last.contains("[Esc] Back to startup"));
+    assert!(!last.contains("[Enter] Retry Start"));
+    app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    let (previous, _, _) = render(&app)?;
+    assert_ne!(previous, last);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    assert_eq!(render(&app)?.0, first);
+    assert!(app.setup_lines().join("\n").contains(&error));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let (dirty, dirty_surface, _) = render(&app)?;
+    assert!(dirty.contains("Connection changes not saved"));
+    assert!(dirty.contains("[Enter] Save changes and retry"));
+    assert!(!dirty.contains("Configuration saved"));
+    assert!(
+        dirty_surface
+            .setup
+            .as_ref()
+            .and_then(|setup| setup.recovery.as_ref())
+            .expect("recovery")
+            .connection_changes_unsaved
+    );
+    assert!(
+        dirty_surface
+            .layout
+            .setup_hit_areas
+            .as_ref()
+            .and_then(|areas| areas.recovery.as_ref())
+            .expect("recovery")
+            .actions
+            .iter()
+            .any(|(action, _)| *action == crate::setup::SetupRecoveryAction::SaveChangesAndRetry)
+    );
+    Ok(())
+}

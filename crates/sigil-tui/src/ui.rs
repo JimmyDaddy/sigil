@@ -36,6 +36,7 @@ pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 pub(crate) use modal::info_details_scroll_bounds;
 pub(crate) use modal::keyboard_help_scroll_bounds;
 pub(crate) use modal::session_actions_scroll_bounds;
+pub(crate) use setup_config::setup_recovery_scroll_bounds;
 
 pub(crate) use markdown::MarkdownRenderCursor;
 pub(crate) use markdown::contains_mermaid_diagram as markdown_contains_mermaid_diagram;

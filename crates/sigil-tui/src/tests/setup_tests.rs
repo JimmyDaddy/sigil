@@ -173,6 +173,29 @@ fn setup_auth_summary_reports_detected_env_reference_without_value() {
 }
 
 #[test]
+fn setup_provider_choices_show_the_next_action_without_environment_aliases() {
+    let _guard = crate::test_env::lock();
+    let _canonical = EnvScope::unset("SIGIL_API_KEY");
+    let _alias = EnvScope::unset("DEEPSEEK_API_KEY");
+    assert_eq!(
+        SetupState::provider_choice_auth_summary("deepseek"),
+        "Add an API key next"
+    );
+    let _detected = EnvScope::set("DEEPSEEK_API_KEY", "private-test-key");
+    assert_eq!(
+        SetupState::provider_choice_auth_summary("deepseek"),
+        "API key detected"
+    );
+    for provider in crate::setup::SETUP_PROVIDER_ORDER {
+        let summary = SetupState::provider_choice_auth_summary(provider);
+        assert!(summary.len() <= 25);
+        assert!(!summary.contains("private-test-key"));
+        assert!(!summary.contains("_API_KEY"));
+        assert!(!summary.contains("aliases"));
+    }
+}
+
+#[test]
 fn custom_protocol_switch_detects_the_protocol_specific_environment() {
     let _guard = crate::test_env::lock();
     let _responses = EnvScope::set("SIGIL_OPENAI_RESPONSES_API_KEY", "responses-secret");

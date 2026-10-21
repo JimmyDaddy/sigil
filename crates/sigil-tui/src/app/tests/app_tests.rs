@@ -185,7 +185,7 @@ fn terminal_capability_helpers_use_safe_defaults_and_follow_config() {
         setup_app.terminal_keyboard_enhancement_policy(),
         sigil_kernel::TerminalKeyboardEnhancement::Off
     );
-    assert!(!setup_app.terminal_mouse_capture_enabled());
+    assert!(setup_app.terminal_mouse_capture_enabled());
     assert!(setup_app.terminal_osc52_clipboard_enabled());
 
     let mut config = test_config();
@@ -203,6 +203,40 @@ fn terminal_capability_helpers_use_safe_defaults_and_follow_config() {
     assert!(app.terminal_keyboard_enhancement_enabled());
     assert!(app.terminal_mouse_capture_enabled());
     assert!(!app.terminal_osc52_clipboard_enabled());
+}
+
+#[test]
+fn setup_mouse_capture_follows_valid_saved_snapshot_and_main_keeps_existing_policy() -> Result<()> {
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    for enabled in [false, true] {
+        let mut config = test_config();
+        config.terminal.mouse_capture = enabled;
+        config.save(&path)?;
+        let setup = AppState::from_setup_with_recovery(
+            path.clone(),
+            temp.path().to_path_buf(),
+            Some("later startup phase failed".to_owned()),
+            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+        );
+        assert!(setup.config_snapshot.is_none());
+        assert_eq!(setup.terminal_mouse_capture_enabled(), enabled);
+        let mut main = AppState::from_root_config(&path, &config);
+        assert_eq!(main.terminal_mouse_capture_enabled(), enabled);
+        main.config_snapshot = None;
+        assert!(!main.terminal_mouse_capture_enabled());
+    }
+    std::fs::write(&path, "invalid = [")?;
+    let repair = AppState::from_setup(
+        path,
+        temp.path().to_path_buf(),
+        Some("config error".to_owned()),
+    );
+    assert_eq!(
+        repair.terminal_mouse_capture_enabled(),
+        sigil_kernel::config::TerminalConfig::default().mouse_capture
+    );
+    Ok(())
 }
 
 #[test]

@@ -19,15 +19,112 @@ use super::{
     formatting::persisted_root_config,
     modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
 };
-use crate::setup::{SETUP_PROVIDER_ORDER, SetupCredentialSource};
+use crate::setup::{
+    SETUP_PROVIDER_ORDER, SetupCredentialSource, SetupRecoveryAction, SetupRecoveryFrameIdentity,
+    StartupBlocker,
+};
 use crate::token_units::{
     MAX_OUTPUT_TOKEN_PRESETS, cycle_context_window_preset, cycle_token_preset,
     is_token_count_character, parse_optional_token_count, token_count_display,
 };
 
 impl AppState {
+    pub(crate) fn setup_recovery_view(&self) -> Option<crate::surface::SetupRecoverySurface> {
+        let state = self.setup_state.as_ref()?;
+        state
+            .startup_recovery_visible()
+            .then(|| crate::surface::SetupRecoverySurface {
+                diagnostics: state.startup_diagnostics_open,
+                connection_changes_unsaved: state.startup_connection_changes_unsaved(),
+                scroll_rows: state.startup_diagnostics_scroll,
+                actions: if state.startup_diagnostics_open {
+                    vec![SetupRecoveryAction::Back, SetupRecoveryAction::Quit]
+                } else {
+                    vec![
+                        if state.startup_connection_changes_unsaved() {
+                            SetupRecoveryAction::SaveChangesAndRetry
+                        } else {
+                            SetupRecoveryAction::Retry
+                        },
+                        SetupRecoveryAction::Diagnostics,
+                        SetupRecoveryAction::EditConnection,
+                        SetupRecoveryAction::Quit,
+                    ]
+                },
+            })
+    }
+
+    pub(crate) fn setup_recovery_frame_identity(&self) -> Option<SetupRecoveryFrameIdentity> {
+        let state = self.setup_state.as_ref()?;
+        state
+            .startup_recovery_visible()
+            .then_some(SetupRecoveryFrameIdentity {
+                diagnostics: state.startup_diagnostics_open,
+                draft_revision: state.draft_revision,
+                blocker: state.startup_blocker,
+                connection_changes_unsaved: state.startup_connection_changes_unsaved(),
+            })
+    }
+
+    pub(super) fn handle_setup_recovery_action(
+        &mut self,
+        action: SetupRecoveryAction,
+    ) -> Result<Option<AppAction>> {
+        if self
+            .setup_recovery_view()
+            .is_none_or(|view| !view.actions.contains(&action))
+        {
+            return Ok(None);
+        }
+        if matches!(
+            action,
+            SetupRecoveryAction::Retry | SetupRecoveryAction::SaveChangesAndRetry
+        ) {
+            return self.complete_setup();
+        }
+        let state = self
+            .setup_state
+            .as_mut()
+            .expect("visible setup recovery has state");
+        match action {
+            SetupRecoveryAction::Diagnostics => state.startup_diagnostics_open = true,
+            SetupRecoveryAction::Back => state.startup_diagnostics_open = false,
+            SetupRecoveryAction::EditConnection => {
+                state.startup_editing_connection = true;
+                state.selected_field = SetupField::Provider;
+            }
+            SetupRecoveryAction::Quit => self.should_quit = true,
+            SetupRecoveryAction::Retry | SetupRecoveryAction::SaveChangesAndRetry => {
+                unreachable!("retry was handled above")
+            }
+        }
+        state.startup_diagnostics_scroll = 0;
+        Ok(None)
+    }
+
+    pub(super) fn scroll_setup_diagnostics(&mut self, upward: bool, amount: usize) {
+        let Some(view) = self.setup_recovery_view().filter(|view| view.diagnostics) else {
+            return;
+        };
+        let (max, _) = crate::ui::setup_recovery_scroll_bounds(
+            self.terminal_width,
+            self.terminal_height,
+            &self.setup_lines(),
+            &view,
+        );
+        let current = view.scroll_rows.min(max);
+        if let Some(state) = self.setup_state.as_mut() {
+            state.startup_diagnostics_scroll = if upward {
+                current.saturating_sub(amount)
+            } else {
+                current.saturating_add(amount).min(max)
+            };
+        }
+    }
+
     pub(crate) fn setup_field_line_indices(&self) -> Vec<usize> {
         match self.setup_state.as_ref() {
+            Some(state) if state.startup_recovery_visible() => Vec::new(),
             Some(state) if state.selected_field == SetupField::Provider => {
                 (3..3 + SETUP_PROVIDER_ORDER.len()).collect()
             }
@@ -42,12 +139,24 @@ impl AppState {
             return Vec::new();
         };
 
+        if state.startup_recovery_visible() {
+            return setup_startup_recovery_lines(state);
+        }
+
         if state.selected_field == SetupField::Provider {
-            let mut lines = vec![
-                "Set up a model connection".to_owned(),
-                "Step 1 of 4 · Choose the provider or endpoint you want to connect.".to_owned(),
-                String::new(),
-            ];
+            let mut lines = if state.startup_editing_connection {
+                vec![
+                    "Edit connection".to_owned(),
+                    "Choose a provider · Esc returns to Startup".to_owned(),
+                    String::new(),
+                ]
+            } else {
+                vec![
+                    "Set up a model connection".to_owned(),
+                    "Step 1 of 4 · Choose the provider or endpoint you want to connect.".to_owned(),
+                    String::new(),
+                ]
+            };
             for (index, provider_name) in SETUP_PROVIDER_ORDER.iter().enumerate() {
                 let marker = if index == state.provider_index() {
                     ">"
@@ -64,15 +173,17 @@ impl AppState {
                 String::new(),
                 "Up/Down choose · Enter continue · Ctrl-C quit".to_owned(),
             ]);
-            append_setup_startup_recovery_lines(&mut lines, state);
+            if !state.startup_editing_connection {
+                append_setup_startup_recovery_lines(&mut lines, state);
+            }
             append_setup_save_error_lines(&mut lines, state);
             return lines;
         }
 
-        let (title, description) = if state.authority_boot_retry_required() {
+        let (title, description) = if state.startup_editing_connection {
             (
-                "Startup needs attention",
-                "Review the reported startup failure, then retry Start.",
+                "Edit connection",
+                "Esc returns to Startup. Saving still checks the original configuration snapshot.",
             )
         } else {
             (
@@ -112,6 +223,10 @@ impl AppState {
             "retry save and start"
         } else if state.existing_config_repair_required() {
             "review, replace invalid config and start"
+        } else if state.valid_config_boot_retry_required()
+            && state.startup_connection_changes_unsaved()
+        {
+            "save changes and retry"
         } else if state.authority_boot_retry_required() {
             "Retry Start"
         } else if state.valid_config_boot_retry_required() {
@@ -124,7 +239,7 @@ impl AppState {
                 SetupField::ApiKey,
                 state.selected_field,
                 "authentication",
-                state.credential_source.label(),
+                &state.auth_summary(),
                 Some("Left/Right choose · Enter continue"),
             ),
             render_setup_value_row(
@@ -151,21 +266,12 @@ impl AppState {
             render_setup_action_row(SetupField::Save, state.selected_field, save_label),
         ]);
         append_setup_save_error_lines(&mut lines, state);
-        lines.extend([
-            String::new(),
-            "[review]".to_owned(),
-            format!("provider: {}", state.provider_label()),
-            format!("model: {}", state.model),
-            format!("authentication: {}", state.auth_summary()),
-        ]);
-        if state.is_custom() {
-            lines.push(format!("protocol: {}", state.protocol.label()));
-        }
-
         if state.credential_source == SetupCredentialSource::SecureStore {
             lines.push(format!("staged credential: {}", state.masked_api_key()));
         }
-        append_setup_startup_recovery_lines(&mut lines, state);
+        if !state.startup_editing_connection {
+            append_setup_startup_recovery_lines(&mut lines, state);
+        }
 
         lines.push(String::new());
         lines.push(
@@ -195,6 +301,61 @@ impl AppState {
             }
             let outcome = self.handle_modal_key_event(key);
             self.apply_modal_outcome(outcome);
+            return Ok(None);
+        }
+
+        if let Some(view) = self.setup_recovery_view() {
+            let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+            if view.diagnostics {
+                let (_, page) = crate::ui::setup_recovery_scroll_bounds(
+                    self.terminal_width,
+                    self.terminal_height,
+                    &self.setup_lines(),
+                    &view,
+                );
+                match key.code {
+                    KeyCode::Esc => {
+                        return self.handle_setup_recovery_action(SetupRecoveryAction::Back);
+                    }
+                    KeyCode::Up => self.scroll_setup_diagnostics(true, 1),
+                    KeyCode::Down => self.scroll_setup_diagnostics(false, 1),
+                    KeyCode::PageUp => self.scroll_setup_diagnostics(true, page),
+                    KeyCode::PageDown => self.scroll_setup_diagnostics(false, page),
+                    KeyCode::Home => self.scroll_setup_diagnostics(true, usize::MAX),
+                    KeyCode::End => self.scroll_setup_diagnostics(false, usize::MAX),
+                    _ => {}
+                }
+                return Ok(None);
+            }
+            let retry = if view.connection_changes_unsaved {
+                SetupRecoveryAction::SaveChangesAndRetry
+            } else {
+                SetupRecoveryAction::Retry
+            };
+            let action = match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => Some(retry),
+                KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => Some(retry),
+                KeyCode::Char('i' | 'I') if plain => Some(SetupRecoveryAction::Diagnostics),
+                KeyCode::Char('e' | 'E') if plain => Some(SetupRecoveryAction::EditConnection),
+                KeyCode::F(1) if key.modifiers.is_empty() => Some(SetupRecoveryAction::Diagnostics),
+                KeyCode::F(2) if key.modifiers.is_empty() => {
+                    Some(SetupRecoveryAction::EditConnection)
+                }
+                _ => None,
+            };
+            return match action {
+                Some(action) => self.handle_setup_recovery_action(action),
+                None => Ok(None),
+            };
+        }
+        if key.code == KeyCode::Esc
+            && let Some(state) = self
+                .setup_state
+                .as_mut()
+                .filter(|state| state.startup_editing_connection)
+        {
+            state.startup_editing_connection = false;
+            state.selected_field = SetupField::Save;
             return Ok(None);
         }
 
@@ -436,6 +597,9 @@ impl AppState {
         let Some(state) = self.setup_state.as_mut() else {
             return;
         };
+        if state.startup_recovery_visible() {
+            return;
+        }
         let value = text
             .chars()
             .filter(|character| !character.is_control())
@@ -575,6 +739,7 @@ impl AppState {
         // pre-edit snapshot that was loaded when Setup opened.
         state.startup_config = Some(persisted_snapshot);
         state.clear_staged_secrets();
+        state.mark_startup_configuration_saved();
         let saved_notice = format!(
             "saved config to {}; orchestration={} / {}",
             state.config_path.display(),
@@ -602,26 +767,69 @@ impl AppState {
     }
 }
 
+fn setup_startup_recovery_lines(state: &SetupState) -> Vec<String> {
+    let unsaved = state.startup_connection_changes_unsaved();
+    let retry = if unsaved {
+        "save changes and retry"
+    } else {
+        "retry Start"
+    };
+    if state.startup_diagnostics_open {
+        let mut lines = vec![
+            "Startup diagnostics".to_owned(),
+            if unsaved {
+                "Connection changes are not saved. Sigil has not started."
+            } else {
+                "Configuration is saved. Sigil has not started."
+            }
+            .to_owned(),
+        ];
+        if let Some(error) = &state.save_error {
+            lines.extend([String::new(), "Last retry:".to_owned(), error.clone()]);
+        }
+        if let Some(error) = &state.startup_error {
+            lines.extend([String::new(), "Startup failure:".to_owned(), error.clone()]);
+        }
+        lines.extend([
+            String::new(),
+            format!("Configuration: {}", state.config_path.display()),
+        ]);
+        return lines;
+    }
+    let mut lines = vec![
+        if unsaved {
+            "Connection changes not saved · Not started"
+        } else {
+            "Configuration saved · Not started"
+        }
+        .to_owned(),
+        String::new(),
+    ];
+    if state.save_error.is_some() {
+        lines.extend([
+            "The last retry could not complete.".to_owned(),
+            format!("Open Diagnostics for the complete error. Resolve that issue, then {retry}."),
+        ]);
+    } else if state.startup_blocker == Some(StartupBlocker::OwnerActive) {
+        lines.extend([
+            "Another Sigil instance is still using this workspace.".to_owned(),
+            format!("Close the other Sigil instance first. Then {retry}."),
+        ]);
+    } else {
+        lines.extend([
+            "Startup could not complete.".to_owned(),
+            format!("Open Diagnostics for the reported cause. Resolve that issue, then {retry}."),
+        ]);
+    }
+    lines
+}
+
 fn append_setup_startup_recovery_lines(lines: &mut Vec<String>, state: &SetupState) {
     let Some(error) = &state.startup_error else {
         return;
     };
     lines.push(String::new());
-    if state.valid_config_boot_retry_required() {
-        lines.push("current configuration is valid; a later startup phase failed:".to_owned());
-        lines.push(error.clone());
-        if state.authority_boot_retry_required() {
-            lines.push("Resolve the reported startup failure, then choose Retry Start.".to_owned());
-        } else {
-            lines.push(
-                "Review the current connection and retry start. Saving preserves the remaining current-schema config, uses the exact source snapshot, and refuses any concurrent file change."
-                    .to_owned(),
-            );
-            lines.push(
-                "Run `sigil doctor` for the boot failure, then review and retry Start.".to_owned(),
-            );
-        }
-    } else if state.existing_config_repair_required() {
+    if state.existing_config_repair_required() {
         lines.push(format!("configuration is invalid: {error}"));
         lines.push(
             "The invalid file remains unchanged until you explicitly save this reviewed current-schema replacement."

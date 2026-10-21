@@ -106,6 +106,42 @@ pub(crate) enum SetupCredentialSource {
     NoAuthentication,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupBlocker {
+    OwnerActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupRecoveryAction {
+    Retry,
+    SaveChangesAndRetry,
+    Diagnostics,
+    EditConnection,
+    Back,
+    Quit,
+}
+
+impl SetupRecoveryAction {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Retry => "[Enter] Retry Start",
+            Self::SaveChangesAndRetry => "[Enter] Save changes and retry",
+            Self::Diagnostics => "[F1] Diagnostics",
+            Self::EditConnection => "[F2] Edit connection",
+            Self::Back => "[Esc] Back to startup",
+            Self::Quit => "[Ctrl-C] Quit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupRecoveryFrameIdentity {
+    pub(crate) diagnostics: bool,
+    pub(crate) draft_revision: u64,
+    pub(crate) blocker: Option<StartupBlocker>,
+    pub(crate) connection_changes_unsaved: bool,
+}
+
 impl SetupCredentialSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -139,8 +175,13 @@ pub(crate) struct SetupState {
     pub(crate) credential_source: SetupCredentialSource,
     pub(crate) api_key: SecretString,
     pub(crate) draft_revision: u64,
+    startup_saved_draft_revision: u64,
     pub(crate) startup_error: Option<String>,
     pub(crate) startup_recovery_code: Option<PublicRouteRecoveryCode>,
+    pub(crate) startup_blocker: Option<StartupBlocker>,
+    pub(crate) startup_diagnostics_open: bool,
+    pub(crate) startup_diagnostics_scroll: usize,
+    pub(crate) startup_editing_connection: bool,
     pub(crate) save_error: Option<String>,
     /// The exact source observed before setup opened. Its parsed state distinguishes malformed
     /// config from a valid-config boot failure, and its redacted bytes form the save-time CAS.
@@ -166,6 +207,7 @@ impl fmt::Debug for SetupState {
             .field("draft_revision", &self.draft_revision)
             .field("startup_error", &self.startup_error)
             .field("startup_recovery_code", &self.startup_recovery_code)
+            .field("startup_blocker", &self.startup_blocker)
             .field("save_error_present", &self.save_error.is_some())
             .field("startup_config_present", &self.startup_config.is_some())
             .field("orchestration_rollout", &self.orchestration_rollout)
@@ -224,12 +266,17 @@ impl SetupState {
             max_output_tokens,
             api_key: SecretString::default(),
             draft_revision: 0,
+            startup_saved_draft_revision: 0,
             provider_name,
             protocol,
             base_url,
             credential_source,
             startup_error,
             startup_recovery_code,
+            startup_blocker: None,
+            startup_diagnostics_open: false,
+            startup_diagnostics_scroll: 0,
+            startup_editing_connection: false,
             save_error: None,
             startup_config,
             orchestration_rollout,
@@ -318,26 +365,14 @@ impl SetupState {
 
     #[must_use]
     pub(crate) fn provider_choice_auth_summary(provider_name: &str) -> String {
-        if provider_name == "openai_compat" {
-            return match provider_api_key_env_names(provider_name) {
-                Some(names) if detected_environment_name(names).is_some() => format!(
-                    "{} detected · loopback no-auth available",
-                    detected_environment_name(names).expect("detected environment name")
-                ),
-                Some(names) => format!(
-                    "API key ({}) or loopback no-auth",
-                    format_environment_names(names)
-                ),
-                None => "API key or loopback no-auth".to_owned(),
-            };
-        }
-        match provider_api_key_env_names(provider_name) {
-            Some(names) if detected_environment_name(names).is_some() => format!(
-                "{} detected",
-                detected_environment_name(names).expect("detected environment name")
-            ),
-            Some(names) => format!("API key · {}", missing_environment_names(names)),
-            None => "authentication required".to_owned(),
+        if provider_api_key_env_names(provider_name)
+            .is_some_and(|names| detected_environment_name(names).is_some())
+        {
+            "API key detected".to_owned()
+        } else if provider_name == "openai_compat" {
+            "API key or local endpoint".to_owned()
+        } else {
+            "Add an API key next".to_owned()
         }
     }
 
@@ -545,6 +580,28 @@ impl SetupState {
     pub(crate) fn authority_boot_retry_required(&self) -> bool {
         self.valid_config_boot_retry_required()
             && self.startup_recovery_code == Some(PublicRouteRecoveryCode::AuthorityUnavailable)
+    }
+
+    pub(crate) fn set_startup_blocker(&mut self, blocker: Option<StartupBlocker>) {
+        self.startup_blocker = blocker;
+        self.startup_diagnostics_open = false;
+        self.startup_diagnostics_scroll = 0;
+        self.startup_editing_connection = false;
+        if self.valid_config_boot_retry_required() {
+            self.selected_field = SetupField::Save;
+        }
+    }
+
+    pub(crate) fn startup_recovery_visible(&self) -> bool {
+        self.valid_config_boot_retry_required() && !self.startup_editing_connection
+    }
+
+    pub(crate) fn startup_connection_changes_unsaved(&self) -> bool {
+        self.draft_revision != self.startup_saved_draft_revision
+    }
+
+    pub(crate) fn mark_startup_configuration_saved(&mut self) {
+        self.startup_saved_draft_revision = self.draft_revision;
     }
 
     pub(crate) fn startup_config_snapshot_missing(&self) -> bool {

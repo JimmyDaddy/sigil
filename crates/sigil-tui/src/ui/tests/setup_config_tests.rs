@@ -1015,3 +1015,36 @@ fn selected_row_and_line_classifier_helpers_cover_known_variants() {
     assert!(config_line_looks_like_field(" selected row"));
     assert!(!config_line_looks_like_field("Model"));
 }
+
+#[test]
+fn startup_recovery_visual_rows_preserve_multiline_errors_and_fixed_controls() {
+    let lines = vec![
+        "Startup diagnostics".to_owned(),
+        "FIRST\n\n完整错误 e\u{301}\nLAST\n".to_owned(),
+    ];
+    let view = crate::surface::SetupRecoverySurface {
+        diagnostics: true,
+        connection_changes_unsaved: false,
+        scroll_rows: usize::MAX,
+        actions: vec![
+            crate::setup::SetupRecoveryAction::Back,
+            crate::setup::SetupRecoveryAction::Quit,
+        ],
+    };
+    let layout = setup_content_layout(
+        Rect::new(0, 0, 80, 24),
+        &lines,
+        Some(&view),
+        &theme::default_palette(),
+    );
+    let actual = layout.rows[layout.logical_ranges[1].clone()]
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, vec!["FIRST", "", "完整错误 e\u{301}", "LAST", ""]);
+    assert_eq!(layout.scroll, layout.max_scroll);
+    for (_, area) in layout.actions {
+        assert!(area.y >= layout.body.bottom());
+        assert!(area.bottom() < layout.area.bottom());
+    }
+}

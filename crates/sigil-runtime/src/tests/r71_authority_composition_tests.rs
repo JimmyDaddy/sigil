@@ -703,7 +703,6 @@ fn r71_process_inventory_boot_error_mapping_preserves_corruption_classes() {
     for error in [
         InventoryError::LegacySchema,
         InventoryError::AuthenticatorMissing,
-        InventoryError::PriorOwnerStillLive,
         InventoryError::PreparedProcessRecoveryRequired,
     ] {
         assert!(matches!(
@@ -739,6 +738,177 @@ fn r71_process_inventory_boot_error_mapping_preserves_corruption_classes() {
             sigil_resource_authority::bootstrap::BootstrapErrorV1::IdentityDrift,
         )
     );
+}
+
+#[test]
+fn r71_process_inventory_live_owner_is_actionable_without_claiming_corruption() {
+    let error = map_process_inventory_boot_error(
+        sigil_resource_authority::AuthorityProcessInventoryErrorV1::PriorOwnerStillLive,
+    );
+
+    assert_eq!(error, BootAuthorityErrorV1::OwnerActive);
+    assert_eq!(
+        error.to_string(),
+        "another Sigil instance is using this workspace; close that instance and retry"
+    );
+}
+
+#[test]
+fn r71_process_inventory_live_owner_blocks_foreign_boot_until_owned_exit() {
+    use std::{
+        io::{Read, Write},
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    const OWNER_FIXTURE: &str = "SIGIL_R71_LIVE_OWNER_FIXTURE";
+    if let Some(root) = std::env::var_os(OWNER_FIXTURE) {
+        let root = PathBuf::from(root);
+        let boot = boot_current_schema(&root.join("sigil.toml"), &root)
+            .expect("owned child boots the production authority");
+        std::fs::write(root.join("owner.ready"), b"ready").expect("owner handshake");
+        let mut close = [0_u8];
+        std::io::stdin()
+            .read_exact(&mut close)
+            .expect("parent requests normal owner shutdown");
+        assert_eq!(close[0], b'q');
+        drop(boot);
+        return;
+    }
+
+    let _environment_guard = crate::test_env::lock();
+    // Both real boot callers share only the unified runner's private identity. Their config,
+    // workspace, state and cache are still unique to this fixture; no global HOME is changed.
+    let isolation = PathBuf::from(
+        std::env::var_os("SIGIL_ISOLATED_TESTS_ROOT")
+            .expect("run this process fixture through scripts/run-isolated-tests.py"),
+    );
+    let isolation = std::fs::canonicalize(isolation).expect("runner-owned isolation root");
+    let home = sigil_kernel::default_user_config_dir()
+        .expect("isolated user directory")
+        .parent()
+        .expect("isolated home")
+        .to_path_buf();
+    let home = std::fs::canonicalize(home).expect("isolated home exists");
+    assert!(
+        home.starts_with(&isolation),
+        "the boot fixture must not use a real user identity"
+    );
+    let dir = tempfile::tempdir().expect("owned boot workspace");
+    let config = dir.path().join("sigil.toml");
+    write_r71_boot_config(&config);
+    let config_before = std::fs::read(&config).expect("fixture config bytes");
+    let output_path = dir.path().join("owner-output.log");
+    let output = std::fs::File::create(&output_path).expect("owned child output");
+    let current_test = std::thread::current()
+        .name()
+        .expect("libtest names its test thread")
+        .to_owned();
+    let mut command = Command::new(std::env::current_exe().expect("runtime test binary"));
+    command
+        .args(["--exact", &current_test, "--nocapture"])
+        .env_clear()
+        .current_dir(dir.path())
+        .env(OWNER_FIXTURE, dir.path())
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("APPDATA", home.join("AppData").join("Roaming"))
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"))
+        .stdin(Stdio::piped())
+        .stdout(output.try_clone().expect("clone child output"))
+        .stderr(output);
+    // Keep only OS execution/loader inputs, never credentials, proxies, config selectors or
+    // SIGIL storage overrides. The config above explicitly owns state/cache for both callers.
+    for name in [
+        "PATH",
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            // Failure cleanup is restricted to the exact child spawned by this fixture.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut owner = OwnedChild(
+        command
+            .spawn()
+            .expect("spawn isolated real authority owner"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !dir.path().join("owner.ready").exists() {
+        assert!(
+            owner.0.try_wait().expect("observe owned child").is_none() && Instant::now() < deadline,
+            "owner did not become ready: {}",
+            std::fs::read_to_string(&output_path).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let bootstrap =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(&config)
+            .expect("shared fixture realm");
+    assert!(bootstrap.root().starts_with(&home));
+    let inventory_path = bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+    );
+    let inventory_before = std::fs::read(&inventory_path).expect("real owner inventory");
+    assert!(matches!(
+        boot_current_schema(&config, dir.path()),
+        Err(BootAuthorityErrorV1::OwnerActive)
+    ));
+    assert_eq!(
+        std::fs::read(&inventory_path).expect("inventory after denied foreign boot"),
+        inventory_before,
+        "refusing a live foreign owner must not rewrite authenticated inventory"
+    );
+    owner
+        .0
+        .stdin
+        .take()
+        .expect("owned child shutdown input")
+        .write_all(b"q")
+        .expect("request normal owner exit");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = owner.0.try_wait().expect("reap owned authority owner") {
+            assert!(
+                status.success(),
+                "owner shutdown failed: {}",
+                std::fs::read_to_string(&output_path).unwrap_or_default()
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owned authority owner did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let retry = boot_current_schema(&config, dir.path())
+        .expect("same configuration boots after the owned prior process exits normally");
+    assert_ne!(
+        std::fs::read(&inventory_path).expect("new owner inventory"),
+        inventory_before,
+        "only the successful retry may publish its newly authenticated owner"
+    );
+    assert_eq!(std::fs::read(&config).expect("same config"), config_before);
+    drop(retry);
+    std::fs::remove_dir_all(bootstrap.root()).expect("cleanup fixture bootstrap");
 }
 
 #[test]

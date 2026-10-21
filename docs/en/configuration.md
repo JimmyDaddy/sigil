@@ -63,9 +63,15 @@ publishing fails, the panel stays open with the draft intact, shows a persistent
 status, and focuses the related field when Sigil can identify one. Editing again clears the stale
 error so the next save attempt is unambiguous.
 
-If the current configuration is valid but authority startup fails afterward, setup keeps the
-specific startup error visible and selects **Retry Start**. After resolving that startup error,
-retry directly without saving the connection again or re-entering credentials.
+If configuration is already saved but startup is blocked, setup shows the reason and the next
+step before **Retry Start**. When another Sigil instance is using the same workspace, exit that
+instance normally, then press Enter to retry. Repeated retries cannot release another instance's
+running state. You do not need to re-enter credentials. Press **F1** (or **I**) for the full, scrollable
+diagnostic; press **Esc** to return to the recovery actions.
+Press **F2** (or **E**) to edit the connection. Returning with unsaved changes keeps the draft and labels the
+next action **Save changes and retry**; opening and leaving the editor alone does not mark changes.
+The function keys also work while a non-Latin input method is active. Mouse actions follow your
+saved `terminal.mouse_capture` preference; a new setup uses the default mouse support.
 
 Model turns are unlimited by default. To set an optional limit for each agent run, add a positive
 `max_turns` value to the existing `[agent]` block in your config file, then restart Sigil:

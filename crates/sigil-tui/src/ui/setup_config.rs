@@ -1,3 +1,8 @@
+mod startup;
+
+pub(super) use startup::setup_content_layout;
+pub(crate) use startup::setup_recovery_scroll_bounds;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -189,50 +194,26 @@ pub(super) fn config_step_hit_spans(source: &str, width: usize) -> Vec<(usize, u
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
-    let panel_bg = palette.setup_bg;
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(12)])
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(frame.area());
     render_status(frame, outer[0], app);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(10),
-            Constraint::Min(68),
-            Constraint::Percentage(10),
-        ])
-        .split(outer[1]);
-
     let (title, lines) = if app.is_workspace_trust_gate_mode() {
         ("Workspace Trust", app.workspace_trust_gate_lines())
+    } else if app.setup_recovery_view().is_some() {
+        ("Startup", app.setup_lines())
     } else {
         ("Setup", app.setup_lines())
     };
-    let detail = lines
-        .into_iter()
-        .map(|line| render_setup_line_with_palette(&line, palette))
-        .collect::<Vec<_>>();
-
-    let detail_widget = Paragraph::new(Text::from(detail))
-        .block(
-            Block::default()
-                .title(title)
-                .title_style(
-                    Style::default()
-                        .fg(palette.text_primary)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border_subtle))
-                .style(Style::default().bg(panel_bg)),
-        )
-        .style(Style::default().bg(panel_bg))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(detail_widget, body[1]);
+    startup::render_setup_content(
+        frame,
+        title,
+        &lines,
+        app.setup_recovery_view().as_ref(),
+        palette,
+    );
     render_modal(frame, app);
 }
 
@@ -326,7 +307,7 @@ pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
     let palette = &surface.theme.palette;
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(12)])
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(frame.area());
     super::shell::render_status_surface(
         frame,
@@ -335,41 +316,14 @@ pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
         &surface.theme,
         Some(setup),
     );
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(10),
-            Constraint::Min(68),
-            Constraint::Percentage(10),
-        ])
-        .split(outer[1]);
     let title = if setup.trust_gate {
         "Workspace Trust"
+    } else if setup.recovery.is_some() {
+        "Startup"
     } else {
         "Setup"
     };
-    let detail = setup
-        .lines
-        .iter()
-        .map(|line| render_setup_line_with_palette(line, palette))
-        .collect::<Vec<_>>();
-    let detail_widget = Paragraph::new(Text::from(detail))
-        .block(
-            Block::default()
-                .title(title)
-                .title_style(
-                    Style::default()
-                        .fg(palette.text_primary)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border_subtle))
-                .style(Style::default().bg(palette.setup_bg)),
-        )
-        .style(Style::default().bg(palette.setup_bg))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(detail_widget, body[1]);
+    startup::render_setup_content(frame, title, &setup.lines, setup.recovery.as_ref(), palette);
     super::modal::render_modal_surface(frame, &surface.modal, &surface.theme);
 }
 

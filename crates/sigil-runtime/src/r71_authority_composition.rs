@@ -1044,6 +1044,8 @@ pub enum BootAuthorityErrorV1 {
     Composition(RuntimeAuthorityCompositionErrorV1),
     #[error("authority bootstrap failed: {0}")]
     Bootstrap(sigil_resource_authority::bootstrap::BootstrapErrorV1),
+    #[error("another Sigil instance is using this workspace; close that instance and retry")]
+    OwnerActive,
 }
 
 fn open_workspace_bootstrap(
@@ -1090,6 +1092,7 @@ fn map_process_inventory_boot_error(
 
     match error {
         InventoryError::Bootstrap(error) => BootAuthorityErrorV1::Bootstrap(error),
+        InventoryError::PriorOwnerStillLive => BootAuthorityErrorV1::OwnerActive,
         error @ (InventoryError::InvalidBootstrapBinding
         | InventoryError::AuthenticatorUnavailable) => {
             BootAuthorityErrorV1::Config(error.to_string())
@@ -1104,7 +1107,6 @@ fn map_process_inventory_boot_error(
         | InventoryError::CapacityExhausted
         | InventoryError::SequenceExhausted
         | InventoryError::InvalidClaim
-        | InventoryError::PriorOwnerStillLive
         | InventoryError::PriorManagedProcessStillLive(_)
         | InventoryError::PreparedProcessRecoveryRequired
         | InventoryError::Observation(_)

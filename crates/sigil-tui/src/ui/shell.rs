@@ -383,6 +383,19 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
                 " review workspace ",
                 "press Enter to trust, Ctrl-C to quit",
             )
+        } else if app.setup_recovery_view().is_some() {
+            (
+                " Startup ",
+                " not started ",
+                if app
+                    .setup_recovery_view()
+                    .is_some_and(|view| view.connection_changes_unsaved)
+                {
+                    "connection changes not saved"
+                } else {
+                    "configuration saved"
+                },
+            )
         } else {
             (
                 " Sigil setup ",
@@ -405,8 +418,13 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
             short_path_label(&app.workspace_root),
             short_path_label(&app.config_path)
         ))]);
+        let notice = if app.setup_recovery_view().is_some() {
+            default_notice
+        } else {
+            app.last_notice().unwrap_or(default_notice)
+        };
         let tertiary = Line::from(vec![Span::styled(
-            app.last_notice().unwrap_or(default_notice),
+            notice,
             Style::default().fg(palette.config_warning),
         )]);
         let paragraph = Paragraph::new(Text::from(vec![title, secondary, tertiary]))
@@ -473,6 +491,20 @@ pub(super) fn render_status_surface(
                 " review workspace ",
                 "press Enter to trust, Ctrl-C to quit",
             )
+        } else if setup.recovery.is_some() {
+            (
+                " Startup ",
+                " not started ",
+                if setup
+                    .recovery
+                    .as_ref()
+                    .is_some_and(|view| view.connection_changes_unsaved)
+                {
+                    "connection changes not saved"
+                } else {
+                    "configuration saved"
+                },
+            )
         } else {
             (
                 " Sigil setup ",
@@ -494,8 +526,13 @@ pub(super) fn render_status_surface(
             "ws={}  cfg={}",
             status.workspace_label, status.config_label
         ))]);
+        let notice = if setup.recovery.is_some() {
+            default_notice
+        } else {
+            status.last_notice.as_deref().unwrap_or(default_notice)
+        };
         let tertiary = Line::from(vec![Span::styled(
-            status.last_notice.as_deref().unwrap_or(default_notice),
+            notice,
             Style::default().fg(palette.config_warning),
         )]);
         frame.render_widget(

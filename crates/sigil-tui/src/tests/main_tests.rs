@@ -1220,7 +1220,7 @@ fn startup_failure_displays_inner_error_with_context() -> Result<()> {
     )
     .context("load workspace");
 
-    let (app, worker) = build_initial_app_with_session(
+    let (mut app, worker) = build_initial_app_with_session(
         temp.path().to_path_buf(),
         config_path,
         Err(error),
@@ -1230,9 +1230,69 @@ fn startup_failure_displays_inner_error_with_context() -> Result<()> {
 
     assert!(app.is_setup_mode());
     assert!(worker.is_none());
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('i'),
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
     let recovery = app.setup_lines().join("\n");
     assert!(recovery.contains("load workspace"));
     assert!(recovery.contains("synthetic nested boot failure"));
+    Ok(())
+}
+
+#[test]
+fn initial_live_owner_failure_preserves_typed_reason_without_spawning() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config_for_workspace(temp.path()).save(&config_path)?;
+    let error =
+        anyhow::Error::new(sigil_runtime::application_host::BootAuthorityErrorV1::OwnerActive)
+            .context("start saved workspace");
+    let (app, worker) = build_initial_app_with_session(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(error),
+        InitialSessionTarget::Fresh,
+        |_root_config, _app| panic!("a blocked startup must not spawn a worker"),
+    )?;
+
+    let setup = app.setup_state().expect("startup recovery");
+    assert_eq!(
+        setup.startup_blocker,
+        Some(crate::setup::StartupBlocker::OwnerActive)
+    );
+    assert!(setup.authority_boot_retry_required());
+    assert_eq!(setup.selected_field, crate::app::SetupField::Save);
+    assert!(worker.is_none());
+    assert!(!app.has_pending_worker_commands());
+    assert!(app.setup_lines().join("\n").contains("Another Sigil"));
+    Ok(())
+}
+
+#[test]
+fn startup_owner_reason_requires_typed_error_and_is_cleared_on_a_different_failure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config_for_workspace(temp.path()).save(&config_path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        config_path,
+        temp.path().to_path_buf(),
+        Some("startup failed".to_owned()),
+        Some(PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    super::apply_setup_startup_blocker(
+        &mut app,
+        &anyhow::Error::new(sigil_runtime::application_host::BootAuthorityErrorV1::OwnerActive),
+    );
+    assert_eq!(
+        app.setup_state().expect("recovery").startup_blocker,
+        Some(crate::setup::StartupBlocker::OwnerActive)
+    );
+    super::apply_setup_startup_blocker(
+        &mut app,
+        &anyhow!("another Sigil instance is using this workspace; close that instance and retry"),
+    );
+    assert_eq!(app.setup_state().expect("recovery").startup_blocker, None);
     Ok(())
 }
 
@@ -1647,6 +1707,10 @@ fn authority_boot_failure_returns_to_repairable_setup_without_worker() -> Result
         app.last_notice(),
         Some("configuration saved; authority boot is unavailable: durable journal is corrupt")
     );
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('i'),
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
     assert!(
         app.setup_lines()
             .iter()

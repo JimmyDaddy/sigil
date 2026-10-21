@@ -33,36 +33,71 @@ pub enum AppMouseOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
     SessionModal,
-    SessionModalAction { action: SessionModalAction },
+    SessionModalAction {
+        action: SessionModalAction,
+    },
     IntentStackModal,
-    IntentStackRow { index: usize },
+    IntentStackRow {
+        index: usize,
+    },
     IntentStackPrimaryAction,
     ApprovalModal,
     ApprovalDiffArea,
-    ApprovalFileRow { index: usize },
-    ApprovalAction { action: ApprovalAction },
+    ApprovalFileRow {
+        index: usize,
+    },
+    ApprovalAction {
+        action: ApprovalAction,
+    },
     ApprovalHunkPrevious,
     ApprovalHunkNext,
     ApprovalDiffViewToggle,
     ApprovalMetadataToggle,
-    SetupField { index: usize },
+    SetupField {
+        index: usize,
+    },
+    SetupRecoveryAction {
+        action: crate::setup::SetupRecoveryAction,
+    },
     ConfigAdvancedToggle,
-    ConfigSection { index: usize },
-    ConfigField { index: usize },
-    ConfigFooterAction { index: usize },
+    ConfigSection {
+        index: usize,
+    },
+    ConfigField {
+        index: usize,
+    },
+    ConfigFooterAction {
+        index: usize,
+    },
     SlashOverlay,
-    SlashCandidate { index: usize },
-    ToolCardHeader { entry_index: usize },
-    ToolCardHiddenPreview { entry_index: usize },
-    ToolCard { entry_index: usize },
-    ThinkingBlock { entry_index: usize },
+    SlashCandidate {
+        index: usize,
+    },
+    ToolCardHeader {
+        entry_index: usize,
+    },
+    ToolCardHiddenPreview {
+        entry_index: usize,
+    },
+    ToolCard {
+        entry_index: usize,
+    },
+    ThinkingBlock {
+        entry_index: usize,
+    },
     TaskStripToggle,
     VerificationCard,
-    ComposerQueueItem { index: usize },
-    ComposerQueueAction { action: ComposerQueueAction },
+    ComposerQueueItem {
+        index: usize,
+    },
+    ComposerQueueAction {
+        action: ComposerQueueAction,
+    },
     Composer,
     LivePanel,
-    InfoRailAgentRow { index: usize },
+    InfoRailAgentRow {
+        index: usize,
+    },
     InfoRailDetails,
     InfoRail,
     Background,

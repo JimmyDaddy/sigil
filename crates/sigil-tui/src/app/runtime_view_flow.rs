@@ -1,5 +1,6 @@
 use sigil_kernel::{
     ControlEntry, OptionalCapability, RootConfig, SessionLogEntry, TerminalKeyboardEnhancement,
+    config::TerminalConfig,
 };
 use sigil_runtime::support::SupportBuildInfo;
 
@@ -73,9 +74,19 @@ impl AppState {
     }
 
     pub fn terminal_mouse_capture_enabled(&self) -> bool {
-        self.config_snapshot
-            .as_ref()
-            .is_some_and(|config| config.terminal.mouse_capture)
+        if let Some(config) = &self.config_snapshot {
+            return config.terminal.mouse_capture;
+        }
+        self.setup_state.as_ref().is_some_and(|state| {
+            state
+                .startup_config
+                .as_ref()
+                .and_then(|snapshot| snapshot.parsed())
+                .map_or_else(
+                    || TerminalConfig::default().mouse_capture,
+                    |config| config.terminal.mouse_capture,
+                )
+        })
     }
 
     pub fn terminal_keyboard_enhancement_enabled(&self) -> bool {

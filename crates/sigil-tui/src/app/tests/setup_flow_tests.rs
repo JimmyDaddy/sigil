@@ -9,6 +9,7 @@ use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 fn setup_lines_include_invalid_config_error_and_missing_auth_summary() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let _alias = crate::test_env::EnvScope::unset("DEEPSEEK_API_KEY");
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(&config_path, "this = [is malformed")?;
@@ -23,7 +24,11 @@ fn setup_lines_include_invalid_config_error_and_missing_auth_summary() -> Result
     assert!(lines.contains("configuration is invalid: config load failed"));
     assert!(lines.contains("explicitly save this reviewed current-schema replacement"));
     assert!(lines.contains("> DeepSeek"));
-    assert!(lines.contains("SIGIL_API_KEY not set"));
+    assert!(
+        lines.lines().any(|line| {
+            line.starts_with("> DeepSeek") && line.ends_with("Add an API key next")
+        })
+    );
     assert_eq!(app.last_notice(), Some("config load failed"));
     Ok(())
 }
@@ -73,9 +78,10 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
         .selected_field = SetupField::Save;
     let lines = app.setup_lines().join("\n");
     assert!(lines.contains("> [review, trust folder, save and start]"));
-    assert!(lines.contains("provider: DeepSeek"));
-    assert!(lines.contains("model: deepseek-v4-flash"));
-    assert!(lines.contains("authentication:"));
+    assert_eq!(lines.matches("DeepSeek").count(), 1);
+    assert_eq!(lines.matches("deepseek-v4-flash").count(), 1);
+    assert!(lines.contains("authentication"));
+    assert!(!lines.contains("[review]"));
     assert!(!lines.contains("orchestration:"));
     assert!(!lines.contains("manifest_unavailable"));
     assert!(!lines.contains("saved default: this route"));
@@ -208,9 +214,14 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
     assert_eq!(state.max_output_tokens, "8000");
     assert_eq!(state.selected_field, SetupField::Save);
     let setup_lines = app.setup_lines().join("\n");
-    assert!(setup_lines.contains("current configuration is valid"));
-    assert!(setup_lines.contains("authority state requires reconciliation"));
-    assert!(setup_lines.contains("> [Retry Start]"));
+    assert!(setup_lines.contains("Configuration saved · Not started"));
+    assert!(!setup_lines.contains("authority state requires reconciliation"));
+    assert!(
+        app.setup_recovery_view()
+            .expect("recovery")
+            .actions
+            .contains(&crate::setup::SetupRecoveryAction::Retry)
+    );
     assert!(!setup_lines.contains("Review the current connection"));
     assert!(!setup_lines.contains("inspect the current configuration and storage permissions"));
 
@@ -261,7 +272,7 @@ fn setup_authority_boot_failure_shows_its_cause_without_changing_the_connection(
     test_config().save(&config_path)?;
     let original = std::fs::read(&config_path)?;
     let error = "authority bootstrap metadata corrupted: cutover pointer validation failed: missing field composition";
-    let app = AppState::from_setup_with_recovery(
+    let mut app = AppState::from_setup_with_recovery(
         config_path.clone(),
         temp.path().to_path_buf(),
         Some(error.to_owned()),
@@ -275,10 +286,17 @@ fn setup_authority_boot_failure_shows_its_cause_without_changing_the_connection(
     assert_eq!(state.model, "deepseek-v4-flash");
     assert!(state.api_key.is_empty());
     let lines = app.setup_lines();
-    assert_eq!(lines[0], "Startup needs attention");
+    assert_eq!(lines[0], "Configuration saved · Not started");
     let rendered = lines.join("\n");
-    assert!(rendered.contains(error));
-    assert!(rendered.contains("> [Retry Start]"));
+    assert!(!rendered.contains(error));
+    assert!(rendered.contains("Open Diagnostics"));
+    assert!(!rendered.contains("Close the other Sigil"));
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    assert!(app.setup_lines().join("\n").contains(error));
+    let model = app.setup_state.as_ref().expect("setup").model.clone();
+    app.setup_state.as_mut().expect("setup").selected_field = SetupField::Model;
+    app.handle_setup_paste_text("must-not-edit-behind-diagnostics");
+    assert_eq!(app.setup_state.as_ref().expect("setup").model, model);
     assert!(!rendered.contains("Set up a model connection"));
     assert!(!rendered.contains("Review the current connection"));
     assert!(!rendered.contains("storage permissions"));
@@ -312,8 +330,13 @@ fn setup_authority_retry_requires_a_typed_failure_and_a_valid_saved_config() -> 
         assert!(!state.authority_boot_retry_required());
         assert_eq!(state.selected_field, SetupField::Provider);
         let lines = app.setup_lines();
-        assert_eq!(lines[0], "Set up a model connection");
-        assert!(!lines.join("\n").contains("> [Retry Start]"));
+        if state.valid_config_boot_retry_required() {
+            assert_eq!(lines[0], "Configuration saved · Not started");
+            assert!(app.setup_recovery_view().is_some());
+        } else {
+            assert_eq!(lines[0], "Set up a model connection");
+            assert!(app.setup_recovery_view().is_none());
+        }
     }
     Ok(())
 }
@@ -344,10 +367,15 @@ fn setup_exact_cas_failure_stays_visible_and_retryable() -> Result<()> {
 
     assert!(action.is_none());
     assert!(app.is_setup_mode());
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("The last retry could not complete")
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
     let lines = app.setup_lines().join("\n");
-    assert!(lines.contains("Setup did not complete:"));
+    assert!(lines.contains("Last retry:"));
     assert!(lines.contains("config changed since Provider settings were loaded"));
-    assert!(lines.contains("press Enter on review or Ctrl-S to retry"));
     assert_eq!(std::fs::read_to_string(config_path)?, concurrently_changed);
     Ok(())
 }
@@ -874,6 +902,7 @@ fn setup_builder_rejects_output_budget_above_the_known_provider_limit() {
 fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let _alias = crate::test_env::EnvScope::unset("DEEPSEEK_API_KEY");
     let temp = tempdir()?;
     let config_path = temp.path().join("config").join("sigil.toml");
     let workspace_root = temp.path().join("workspace");
@@ -886,7 +915,11 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
     let setup_lines = app.setup_lines().join("\n");
     assert!(setup_lines.contains("Set up a model connection"));
     assert!(setup_lines.contains("> DeepSeek"));
-    assert!(setup_lines.contains("SIGIL_API_KEY not set"));
+    assert!(
+        setup_lines.lines().any(|line| {
+            line.starts_with("> DeepSeek") && line.ends_with("Add an API key next")
+        })
+    );
     assert!(setup_lines.contains("startup recovery could not capture the config source"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -925,5 +958,308 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
             .map(|state| state.api_key.expose_secret()),
         Some("s")
     );
+    Ok(())
+}
+
+#[test]
+fn setup_owner_active_recovery_has_specific_next_step_and_reversible_diagnostics() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let before = std::fs::read(&path)?;
+    let error = "authority owner remains live\n\n完整原因 e\u{301} with exact details";
+    let mut app = AppState::from_setup_with_recovery(
+        path.clone(),
+        temp.path().to_path_buf(),
+        Some(error.to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup")
+        .set_startup_blocker(Some(crate::setup::StartupBlocker::OwnerActive));
+    let main = app.setup_lines().join("\n");
+    assert!(main.contains("Configuration saved · Not started"));
+    assert!(main.contains("Another Sigil instance is still using this workspace"));
+    assert!(main.contains("Close the other Sigil instance first"));
+    assert!(!main.contains("authentication"));
+    assert!(!main.contains(error));
+    assert_eq!(app.setup_field_line_indices(), Vec::<usize>::new());
+    app.setup_state
+        .as_mut()
+        .expect("setup")
+        .set_startup_blocker(None);
+    assert!(
+        !app.setup_lines()
+            .join("\n")
+            .contains("Close the other Sigil")
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup")
+        .set_startup_blocker(Some(crate::setup::StartupBlocker::OwnerActive));
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    assert!(app.setup_lines().join("\n").contains(error));
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Char('e'),
+        KeyCode::Char('f'),
+        KeyCode::Char('d'),
+    ] {
+        assert!(
+            app.handle_setup_key_event(KeyEvent::new(code, KeyModifiers::NONE))?
+                .is_none()
+        );
+    }
+    assert!(
+        app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(app.setup_recovery_view().expect("diagnostics").diagnostics);
+    assert_eq!(std::fs::read(&path)?, before);
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    assert!(app.setup_recovery_view().is_none());
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").selected_field,
+        SetupField::Provider
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").selected_field,
+        SetupField::Model
+    );
+    app.handle_setup_paste_text("draft-model");
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.setup_recovery_view().expect("recovery").diagnostics);
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").model,
+        "draft-model"
+    );
+    let view = app.setup_recovery_view().expect("recovery");
+    assert!(view.connection_changes_unsaved);
+    assert!(
+        view.actions
+            .contains(&crate::setup::SetupRecoveryAction::SaveChangesAndRetry)
+    );
+    assert!(
+        !view
+            .actions
+            .contains(&crate::setup::SetupRecoveryAction::Retry)
+    );
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("Connection changes not saved")
+    );
+    assert_eq!(std::fs::read(path)?, before);
+    Ok(())
+}
+
+#[test]
+fn setup_diagnostics_end_then_page_up_uses_real_wrapped_bounds() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let mut app = AppState::from_setup(
+        path,
+        temp.path().to_path_buf(),
+        Some(
+            (0..70)
+                .map(|index| format!("line {index}: 完整原因 e\u{301} {}", "long-path/".repeat(8)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    );
+    app.set_terminal_size(80, 24);
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    let view = app.setup_recovery_view().expect("diagnostics");
+    let (max, page) = crate::ui::setup_recovery_scroll_bounds(80, 24, &app.setup_lines(), &view);
+    assert!(max > page);
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_recovery_view().expect("diagnostics").scroll_rows,
+        max
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_recovery_view().expect("diagnostics").scroll_rows,
+        max - page
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_recovery_view().expect("diagnostics").scroll_rows,
+        0
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+    assert!(app.should_quit);
+    Ok(())
+}
+
+#[test]
+fn setup_edited_recovery_advertises_save_and_only_marks_saved_after_successful_publish()
+-> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let before = std::fs::read(&path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        path.clone(),
+        temp.path().to_path_buf(),
+        Some("later startup phase failed".to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    for code in [KeyCode::Char('e'), KeyCode::Esc] {
+        app.handle_setup_key_event(KeyEvent::new(code, KeyModifiers::NONE))?;
+    }
+    assert!(
+        !app.setup_recovery_view()
+            .expect("recovery")
+            .connection_changes_unsaved
+    );
+    assert!(
+        app.setup_recovery_view()
+            .expect("recovery")
+            .actions
+            .contains(&crate::setup::SetupRecoveryAction::Retry)
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_setup_paste_text("draft-model");
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.setup_lines()[0].contains("Connection changes not saved"));
+    assert!(
+        app.handle_setup_recovery_action(crate::setup::SetupRecoveryAction::Retry)?
+            .is_none()
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("Connection changes are not saved")
+    );
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let action = app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    assert_eq!(
+        RootConfig::load_persisted(&path)?.agent.model,
+        "draft-model"
+    );
+    assert!(
+        !app.setup_state
+            .as_ref()
+            .expect("setup")
+            .startup_connection_changes_unsaved()
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup")
+        .set_startup_blocker(Some(crate::setup::StartupBlocker::OwnerActive));
+    assert!(app.setup_lines()[0].contains("Configuration saved"));
+    assert!(
+        app.setup_recovery_view()
+            .expect("recovery")
+            .actions
+            .contains(&crate::setup::SetupRecoveryAction::Retry)
+    );
+    // A later exact-CAS rejection must retain the unsaved revision and the external bytes.
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_setup_paste_text("second-draft-model");
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(
+        app.setup_recovery_view()
+            .expect("recovery")
+            .connection_changes_unsaved
+    );
+    let concurrent = format!("{}\n# external change\n", std::fs::read_to_string(&path)?);
+    std::fs::write(&path, &concurrent)?;
+    assert!(
+        app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(
+        app.setup_recovery_view()
+            .expect("recovery")
+            .connection_changes_unsaved
+    );
+    assert_eq!(std::fs::read_to_string(&path)?, concurrent);
+    assert!(
+        app.setup_state
+            .as_ref()
+            .expect("setup")
+            .save_error
+            .as_deref()
+            .is_some_and(|error| error.contains("config changed since"))
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_recovery_function_keys_match_letter_aliases_without_changing_main_help() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        path.clone(),
+        temp.path().to_path_buf(),
+        Some("startup needs attention".to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    for (code, modifiers) in [
+        (KeyCode::F(1), KeyModifiers::NONE),
+        (KeyCode::Char('i'), KeyModifiers::NONE),
+        (KeyCode::Char('I'), KeyModifiers::SHIFT),
+    ] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(code, modifiers))?
+                .is_none()
+        );
+        assert!(app.setup_recovery_view().expect("diagnostics").diagnostics);
+        assert!(!app.has_modal());
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    }
+    for (code, modifiers) in [
+        (KeyCode::F(2), KeyModifiers::NONE),
+        (KeyCode::Char('e'), KeyModifiers::NONE),
+        (KeyCode::Char('E'), KeyModifiers::SHIFT),
+    ] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(code, modifiers))?
+                .is_none()
+        );
+        assert!(app.setup_recovery_view().is_none());
+        assert_eq!(
+            app.setup_state.as_ref().expect("setup").selected_field,
+            SetupField::Provider
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert!(
+            !app.setup_recovery_view()
+                .expect("recovery")
+                .connection_changes_unsaved
+        );
+    }
+    for code in [
+        KeyCode::F(1),
+        KeyCode::F(2),
+        KeyCode::Char('i'),
+        KeyCode::Char('e'),
+    ] {
+        app.handle_key_event(KeyEvent::new(code, KeyModifiers::CONTROL))?;
+        assert!(!app.setup_recovery_view().expect("recovery").diagnostics);
+    }
+    let mut main = AppState::from_root_config(&path, &test_config());
+    main.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    assert_eq!(main.modal_title(), Some("Keyboard Help"));
     Ok(())
 }

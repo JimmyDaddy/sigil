@@ -182,6 +182,13 @@ pub(crate) struct IntentStackRowHitArea {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupHitAreas {
     pub fields: Vec<SetupFieldHitArea>,
+    pub(crate) recovery: Option<SetupRecoveryHitAreas>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupRecoveryHitAreas {
+    pub(crate) identity: crate::setup::SetupRecoveryFrameIdentity,
+    pub(crate) actions: Vec<(crate::setup::SetupRecoveryAction, Rect)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +432,13 @@ impl LayoutSnapshot {
         }
 
         if let Some(areas) = &self.setup_hit_areas {
+            if let Some(recovery) = &areas.recovery {
+                for (action, area) in &recovery.actions {
+                    if contains(*area, column, row) {
+                        return HitTarget::SetupRecoveryAction { action: *action };
+                    }
+                }
+            }
             for field in &areas.fields {
                 if contains(field.area, column, row) {
                     return HitTarget::SetupField { index: field.index };
@@ -755,42 +769,58 @@ fn intent_stack_modal_hit_areas(screen: Rect, app: &AppState) -> Option<IntentSt
 }
 
 fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(12)])
-        .split(screen);
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(10),
-            Constraint::Min(68),
-            Constraint::Percentage(10),
-        ])
-        .split(outer[1]);
-    let content = inset_rect(body[1], 1, 1);
-    if content.width == 0 || content.height == 0 {
+    let lines = if app.is_workspace_trust_gate_mode() {
+        app.workspace_trust_gate_lines()
+    } else {
+        app.setup_lines()
+    };
+    let recovery = app.setup_recovery_view();
+    let layout = super::setup_config::setup_content_layout(
+        screen,
+        &lines,
+        recovery.as_ref(),
+        &super::theme::resolve_for_app(app).palette,
+    );
+    if layout.body.width == 0 || layout.body.height == 0 {
         return None;
     }
-
+    if let Some(identity) = app.setup_recovery_frame_identity() {
+        return Some(SetupHitAreas {
+            fields: Vec::new(),
+            recovery: Some(SetupRecoveryHitAreas {
+                identity,
+                actions: layout.actions,
+            }),
+        });
+    }
     let fields = app
         .setup_field_line_indices()
         .into_iter()
         .enumerate()
-        .filter_map(|(index, line_index)| {
-            (line_index < app.setup_lines().len() && (line_index as u16) < content.height)
-                .then_some(SetupFieldHitArea {
-                    index,
-                    area: Rect::new(
-                        content.x,
-                        content.y.saturating_add(line_index as u16),
-                        content.width,
-                        1,
-                    ),
-                })
+        .filter_map(|(index, logical)| {
+            let range = layout.logical_ranges.get(logical)?;
+            let start = range.start.max(layout.scroll);
+            let end = range
+                .end
+                .min(layout.scroll.saturating_add(layout.body.height as usize));
+            (start < end).then_some(SetupFieldHitArea {
+                index,
+                area: Rect::new(
+                    layout.body.x,
+                    layout
+                        .body
+                        .y
+                        .saturating_add(start.saturating_sub(layout.scroll) as u16),
+                    layout.body.width,
+                    (end - start) as u16,
+                ),
+            })
         })
         .collect::<Vec<_>>();
-
-    (!fields.is_empty()).then_some(SetupHitAreas { fields })
+    (!fields.is_empty()).then_some(SetupHitAreas {
+        fields,
+        recovery: None,
+    })
 }
 
 fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {

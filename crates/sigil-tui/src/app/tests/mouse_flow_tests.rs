@@ -2588,3 +2588,89 @@ fn mouse_click_run_next_targets_the_selected_follow_up() -> Result<()> {
     assert_eq!(app.composer.pending_queue_operations.len(), 1);
     Ok(())
 }
+
+#[test]
+fn mouse_setup_recovery_rejects_old_form_and_diagnostic_frames_and_retries_via_current_action()
+-> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    test_config().save(&path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        path,
+        temp.path().to_path_buf(),
+        Some("exact startup cause\n".repeat(50)),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+    app.set_terminal_size(80, 24);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    app.setup_state.as_mut().expect("setup").selected_field = SetupField::Save;
+    let form = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    let (x, y) = setup_field_point(&form, 5);
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(matches!(
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, x, y), &form)?,
+        AppMouseOutcome::Noop
+    ));
+    let main = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    let retry = main
+        .setup_hit_areas
+        .as_ref()
+        .and_then(|areas| areas.recovery.as_ref())
+        .expect("recovery")
+        .actions
+        .iter()
+        .find(|(action, _)| *action == crate::setup::SetupRecoveryAction::Retry)
+        .expect("retry")
+        .1;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, retry.x, retry.y), &main)?,
+        AppMouseOutcome::Noop
+    ));
+    let diagnostics = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, 10, 10), &diagnostics)?;
+    assert_eq!(
+        app.setup_recovery_view().expect("diagnostics").scroll_rows,
+        3
+    );
+    app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, 10, 10), &diagnostics)?;
+    assert_eq!(
+        app.setup_recovery_view().expect("diagnostics").scroll_rows,
+        0
+    );
+    let back = diagnostics
+        .setup_hit_areas
+        .as_ref()
+        .and_then(|areas| areas.recovery.as_ref())
+        .expect("diagnostics")
+        .actions
+        .iter()
+        .find(|(action, _)| *action == crate::setup::SetupRecoveryAction::Back)
+        .expect("back")
+        .1;
+    assert!(matches!(
+        app.handle_mouse_event(
+            mouse(MouseInputKind::LeftDown, back.x, back.y),
+            &diagnostics
+        )?,
+        AppMouseOutcome::Redraw
+    ));
+    let main = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    let retry = main
+        .setup_hit_areas
+        .as_ref()
+        .and_then(|areas| areas.recovery.as_ref())
+        .expect("recovery")
+        .actions
+        .iter()
+        .find(|(action, _)| *action == crate::setup::SetupRecoveryAction::Retry)
+        .expect("retry")
+        .1;
+    assert!(matches!(
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, retry.x, retry.y), &main)?,
+        AppMouseOutcome::Action(AppAction::SetupCompleted { .. })
+    ));
+    Ok(())
+}

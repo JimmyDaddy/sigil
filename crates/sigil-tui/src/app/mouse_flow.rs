@@ -29,6 +29,35 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        let recovery_frame = layout
+            .setup_hit_areas
+            .as_ref()
+            .and_then(|areas| areas.recovery.as_ref());
+        if self.setup_recovery_view().is_some() || recovery_frame.is_some() {
+            if recovery_frame.map(|frame| &frame.identity)
+                != self.setup_recovery_frame_identity().as_ref()
+            {
+                return Ok(crate::mouse::AppMouseOutcome::Noop);
+            }
+            return match (input.kind, layout.hit_target(input.column, input.row)) {
+                (crate::mouse::MouseInputKind::ScrollUp, _) => {
+                    self.scroll_setup_diagnostics(true, 3);
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                }
+                (crate::mouse::MouseInputKind::ScrollDown, _) => {
+                    self.scroll_setup_diagnostics(false, 3);
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                }
+                (
+                    crate::mouse::MouseInputKind::LeftDown,
+                    crate::mouse::HitTarget::SetupRecoveryAction { action },
+                ) => Ok(self.handle_setup_recovery_action(action)?.map_or(
+                    crate::mouse::AppMouseOutcome::Redraw,
+                    crate::mouse::AppMouseOutcome::Action,
+                )),
+                _ => Ok(crate::mouse::AppMouseOutcome::Noop),
+            };
+        }
         if layout.approval_modal.is_some() || layout.approval_modal_hit_areas.is_some() {
             let same_request = layout
                 .approval_request_identity
@@ -664,6 +693,7 @@ impl AppState {
             | crate::mouse::HitTarget::ApprovalDiffViewToggle
             | crate::mouse::HitTarget::ApprovalMetadataToggle
             | crate::mouse::HitTarget::SetupField { .. }
+            | crate::mouse::HitTarget::SetupRecoveryAction { .. }
             | crate::mouse::HitTarget::ConfigAdvancedToggle
             | crate::mouse::HitTarget::ConfigSection { .. }
             | crate::mouse::HitTarget::ConfigField { .. }

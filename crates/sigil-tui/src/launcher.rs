@@ -1476,12 +1476,14 @@ where
             let startup_error = config_path.exists().then(|| format!("{error:#}"));
             // Setup captures the exact source once and classifies it independently from this boot
             // error. Authority/bootstrap failures must not be mistaken for malformed TOML.
-            AppState::from_setup_with_recovery(
+            let mut setup_app = AppState::from_setup_with_recovery(
                 config_path,
                 cwd,
                 startup_error,
                 startup_recovery_code_from_error(&error),
-            )
+            );
+            apply_setup_startup_blocker(&mut setup_app, &error);
+            setup_app
         }
     };
     Ok((app, worker))
@@ -1737,6 +1739,7 @@ where
                             startup_recovery_code_from_error(&error),
                         )?;
                     }
+                    apply_setup_startup_blocker(app, &error);
                     return Ok(());
                 }
             };
@@ -1861,6 +1864,7 @@ where
                             startup_error,
                             recovery_code,
                         )?;
+                        apply_setup_startup_blocker(app, &error);
                         return Ok(());
                     }
                 };
@@ -3856,10 +3860,26 @@ fn startup_recovery_code_from_error(
     match boot_error {
         sigil_runtime::application_host::BootAuthorityErrorV1::Composition(_)
         | sigil_runtime::application_host::BootAuthorityErrorV1::Cutover(_)
-        | sigil_runtime::application_host::BootAuthorityErrorV1::Bootstrap(_) => {
+        | sigil_runtime::application_host::BootAuthorityErrorV1::Bootstrap(_)
+        | sigil_runtime::application_host::BootAuthorityErrorV1::OwnerActive => {
             Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable)
         }
         sigil_runtime::application_host::BootAuthorityErrorV1::Config(_) => None,
+    }
+}
+
+fn apply_setup_startup_blocker(app: &mut AppState, error: &anyhow::Error) {
+    let blocker =
+        error.chain().find_map(|cause| match cause
+            .downcast_ref::<sigil_runtime::application_host::BootAuthorityErrorV1>(
+        ) {
+            Some(sigil_runtime::application_host::BootAuthorityErrorV1::OwnerActive) => {
+                Some(crate::setup::StartupBlocker::OwnerActive)
+            }
+            _ => None,
+        });
+    if let Some(setup) = app.setup_state_mut() {
+        setup.set_startup_blocker(blocker);
     }
 }
 

@@ -2532,8 +2532,9 @@ fn render_main_screen_shows_pending_approval_overlay() -> anyhow::Result<()> {
 
 #[test]
 fn render_setup_screen_shows_workspace_notice_and_panel() -> anyhow::Result<()> {
+    let fixture = tempdir()?;
     let app = AppState::from_setup(
-        Path::new("sigil.toml").to_path_buf(),
+        fixture.path().join("sigil.toml"),
         Path::new("/tmp/example-workspace").to_path_buf(),
         Some("set auth then save".to_owned()),
     );

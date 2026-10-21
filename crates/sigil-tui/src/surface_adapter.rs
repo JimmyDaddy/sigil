@@ -90,6 +90,7 @@ fn setup_surface(app: &AppState) -> Option<SetupSurface> {
             app.setup_lines()
         },
         field_line_indices: app.setup_field_line_indices(),
+        recovery: app.setup_recovery_view(),
     })
 }
 
