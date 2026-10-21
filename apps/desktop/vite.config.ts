@@ -13,6 +13,9 @@ export default defineConfig({
   build: {
     target: ["es2022", "chrome105", "safari13"],
     sourcemap: true,
+    // Keep fonts same-origin for the desktop font-src 'self' policy.
+    assetsInlineLimit: (filePath) =>
+      /\.(?:woff2?|ttf|otf|eot)$/i.test(filePath) ? false : undefined,
   },
   test: {
     environment: "jsdom",
