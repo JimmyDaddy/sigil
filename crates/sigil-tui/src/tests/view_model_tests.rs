@@ -177,7 +177,7 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert_eq!(view_model.info_rail.session_lines, ["state: ready"]);
     assert!(view_model.info_rail.permission_lines.is_empty());
     assert!(view_model.info_rail.code_lines.is_empty());
-    assert_eq!(view_model.info_rail.controls, ["Alt-I details"]);
+    assert!(view_model.footer.hints.contains("F4 details"));
 }
 
 #[test]
@@ -201,9 +201,10 @@ fn compact_footer_omits_empty_statistics_and_keeps_capacity_warnings() -> anyhow
     app.toggle_info_rail_detail();
     let detail = app.modal_lines();
     assert!(detail.iter().any(|line| {
-        line.starts_with("ctx:") && line.contains("cache=0%") && line.contains("prompt")
+        line.starts_with("context:") && line.contains("92%") && line.contains("near limit")
     }));
-    assert!(detail.iter().any(|line| {
+    assert!(!detail.iter().any(|line| line.starts_with("policy:")));
+    assert!(app.usage_sidebar_lines().iter().any(|line| {
         line.starts_with("policy:") && line.contains("soft") && line.contains("hard")
     }));
     config.agent.runtime_provider = "custom".to_owned();
@@ -248,9 +249,9 @@ fn footer_hints_explain_copy_selection_and_latest_response() -> anyhow::Result<(
     let selected = UiViewModel::from_app(&app);
     assert!(selected.footer.hints.contains("Ctrl-C copy selection"));
     assert!(
-        info_rail_detail_lines(&app)
+        !info_rail_detail_lines(&app)
             .iter()
-            .any(|line| line == "Ctrl-C: copy selection")
+            .any(|line| line == "Global shortcuts")
     );
     Ok(())
 }
@@ -268,13 +269,7 @@ fn info_details_opens_full_projection_without_expanding_default_rail() -> anyhow
             .iter()
             .any(|line| line == "provider: deepseek")
     );
-    assert!(
-        compact
-            .info_rail
-            .controls
-            .iter()
-            .any(|line| line == "Alt-I details")
-    );
+    assert!(compact.footer.hints.contains("F4 details"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
     let detail = app.modal_lines();
@@ -284,7 +279,8 @@ fn info_details_opens_full_projection_without_expanding_default_rail() -> anyhow
         assert!(detail.iter().any(|line| line == expected));
     }
     assert!(detail.iter().any(|line| line.starts_with("session: ")));
-    assert!(detail.iter().any(|line| line.starts_with("Ctrl-C: quit")));
+    assert!(!detail.iter().any(|line| line == "Global shortcuts"));
+    assert!(detail.contains(&format!("session: {}", app.session_id)));
     assert!(detail.iter().any(|line| line == "provider: deepseek"));
     assert!(detail.iter().any(|line| line == "scope: saved default"));
     assert!(detail.iter().any(|line| line == "Usage"));
@@ -565,7 +561,7 @@ fn context_provenance_summary_recommends_budget_adjustment_for_budget_only_exclu
 }
 
 #[test]
-fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
+fn detail_info_rail_keeps_context_warning_and_recovery_without_source_inventory() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
     let entries = vec![SessionLogEntry::Control(
@@ -617,11 +613,19 @@ fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
     app.toggle_info_rail_detail();
 
     let usage = app.modal_lines().join("\n");
-    assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
-    assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
-    assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));
-    assert!(usage.contains("excluded: secret · 1 item(s)"));
+    assert!(!usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
+    assert!(!usage.contains("source: memory context"));
+    assert!(!usage.contains("source: session archive"));
+    assert!(usage.contains("warning: "));
     assert!(usage.contains("action: review egress"));
+    let summary = latest_context_provenance_summary(&app.session_browser.current_entries, 3)
+        .expect("durable provenance remains available");
+    assert_eq!(
+        summary.budget_line,
+        "context: 11 / 64 tokens · 2 included · 1 excluded"
+    );
+    assert_eq!(summary.top_sources.len(), 2);
+    assert_eq!(summary.excluded_summary, ["secret · 1 item(s)"]);
     Ok(())
 }
 
@@ -1221,8 +1225,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
 }
 
 #[test]
-fn activity_controls_stay_in_details_without_filling_default_rail_or_footer() -> anyhow::Result<()>
-{
+fn activity_controls_stay_in_help_without_filling_default_rail_details_or_footer()
+-> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolResult(ToolResult::ok(
         "call-1",
@@ -1237,21 +1241,25 @@ fn activity_controls_stay_in_details_without_filling_default_rail_or_footer() ->
     assert!(!view_model.footer.hints.contains("Alt-J/K switch"));
     assert!(!view_model.footer.hints.contains("Esc back"));
     assert!(view_model.footer.hints.contains("Enter send"));
-    assert_eq!(view_model.info_rail.controls, ["Alt-I details"]);
-    assert!(
-        view_model
-            .info_rail
-            .controls
-            .iter()
-            .all(|hint| hint != "Alt-J: next activity")
-    );
+    assert!(view_model.footer.hints.contains("F4 details"));
+    assert!(!view_model.footer.hints.contains("Alt-J: next activity"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
     let detail_view_model = app.modal_lines();
     assert!(
-        detail_view_model
+        !detail_view_model
+            .iter()
+            .any(|hint| hint == "Global shortcuts")
+    );
+    assert!(
+        !detail_view_model
             .iter()
             .any(|hint| hint == "Alt-J: next activity")
+    );
+    assert!(
+        crate::commands::keyboard_help_lines(true)
+            .iter()
+            .any(|hint| hint == "Alt-J: Focus the next activity.")
     );
     assert!(
         !detail_view_model
@@ -1323,18 +1331,12 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
 
     assert!(view_model.footer.hints.contains("Y allow once"));
     assert!(!view_model.footer.hints.contains("Ctrl-C stop"));
-    assert!(
-        !view_model
-            .info_rail
-            .controls
-            .iter()
-            .any(|hint| hint == "Esc: interrupt")
-    );
+    assert!(!view_model.footer.hints.contains("Esc: interrupt"));
     Ok(())
 }
 
 #[test]
-fn compact_info_rail_folds_inactive_modules_and_statistics_into_details() -> anyhow::Result<()> {
+fn info_details_omit_inactive_modules_and_keep_usage() -> anyhow::Result<()> {
     let mut config = test_config();
     config.memory.enabled = false;
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
@@ -1352,20 +1354,16 @@ fn compact_info_rail_folds_inactive_modules_and_statistics_into_details() -> any
     assert!(view_model.info_rail.code_lines.is_empty());
     assert!(view_model.info_rail.mcp_lines.is_empty());
     assert!(view_model.info_rail.usage_lines.is_empty());
-    assert!(
-        view_model
-            .info_rail
-            .controls
-            .iter()
-            .any(|line| line == "Alt-I details")
-    );
+    assert!(view_model.footer.hints.contains("F4 details"));
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
     let view_model = app.modal_lines();
-    assert!(view_model.iter().any(|line| line == "memory: off"));
+    assert!(!view_model.iter().any(|line| line == "memory: off"));
+    assert!(!view_model.iter().any(|line| line == "Agents"));
+    assert!(!view_model.iter().any(|line| line == "LSP"));
     assert!(
-        view_model
+        !view_model
             .iter()
-            .any(|line| line == "◉ main: ○ current session")
+            .any(|line| line == "task memory: no active V2 checkpoint")
     );
     assert!(
         view_model
@@ -1407,7 +1405,7 @@ fn compact_info_rail_uses_workspace_basename_and_preserves_complete_details() ->
     let compact = UiViewModel::from_app(&app);
     assert_eq!(compact.info_rail.workspace_label, "event workspace");
     assert!(compact.info_rail.permission_lines.is_empty());
-    assert_eq!(compact.info_rail.controls, ["Alt-I details"]);
+    assert!(compact.footer.hints.contains("F4 details"));
     assert_eq!(
         compact.composer.permission_label,
         app.runtime.permission_mode
@@ -1416,9 +1414,21 @@ fn compact_info_rail_uses_workspace_basename_and_preserves_complete_details() ->
     let details = info_rail_detail_lines(&app);
     assert!(details.contains(&workspace.display().to_string()));
     assert!(details.contains(&format!("mode: {}", app.runtime.permission_mode)));
-    for line in app.usage_sidebar_lines() {
-        assert!(details.contains(line), "missing usage fact: {line}");
+    for line in app.usage_detail_lines() {
+        assert!(details.contains(&line), "missing user usage fact: {line}");
     }
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line.starts_with("cache io:"))
+    );
+    assert!(!details.iter().any(|line| line.starts_with("cache io:")));
+    assert!(
+        !details
+            .iter()
+            .any(|line| line.starts_with("cache miss source:"))
+    );
+    assert!(!details.iter().any(|line| line == "Global shortcuts"));
     Ok(())
 }
 
@@ -1438,7 +1448,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "Ctrl-C stop · Enter add follow-up · F1 help"
+        "Ctrl-C stop · Enter add follow-up · F4 details · F1 help"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Preparing);
     assert_eq!(

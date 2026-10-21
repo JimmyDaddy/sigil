@@ -22,8 +22,17 @@ use crate::{
 };
 
 fn app_fixture() -> Result<(tempfile::TempDir, AppState)> {
+    app_fixture_with_long_path(false)
+}
+
+fn app_fixture_with_long_path(long_path: bool) -> Result<(tempfile::TempDir, AppState)> {
     let root = tempfile::tempdir()?;
-    let workspace = root.path().join("项目  alpha").join("workspace-details");
+    let mut workspace = root.path().join("项目  alpha").join("workspace-details");
+    if long_path {
+        for index in 0..24 {
+            workspace.push(format!("workspace-long-segment-{index:02}"));
+        }
+    }
     std::fs::create_dir_all(&workspace)?;
     let mut config = test_config();
     config.workspace.root = workspace.display().to_string();
@@ -36,7 +45,7 @@ fn press(app: &mut AppState, code: KeyCode) -> Result<Option<AppAction>> {
 }
 
 fn details_key() -> KeyEvent {
-    KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT)
+    KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)
 }
 
 #[test]
@@ -51,6 +60,7 @@ fn info_details_aliases_open_and_close_the_same_modal_without_a_sidebar() -> Res
     );
     for key in [
         details_key(),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
         KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT),
     ] {
         assert!(app.handle_key_event(key)?.is_none());
@@ -159,7 +169,7 @@ fn info_details_help_entry_uses_the_same_action_and_keeps_other_modal_inputs() -
     assert!(
         app.modal_lines()
             .iter()
-            .any(|line| line == "Alt-I: Workspace and session details.")
+            .any(|line| line == "F4: Workspace and session details.")
     );
     app.handle_key_event(details_key())?;
     assert_eq!(app.modal_title(), Some("Details"));
@@ -176,7 +186,13 @@ fn info_details_control_c_retains_existing_active_cancel_and_idle_quit() -> Resu
     busy.runtime.is_busy = true;
     busy.handle_key_event(details_key())?;
     let lines = busy.modal_lines();
-    assert!(lines.iter().any(|line| line == "Ctrl-C: cancel work"));
+    assert!(!lines.iter().any(|line| line == "Global shortcuts"));
+    assert!(
+        crate::view_model::UiViewModel::from_app(&busy)
+            .footer
+            .hints
+            .contains("Ctrl-C stop")
+    );
     assert!(lines.iter().all(|line| line != "Esc: interrupt"));
     assert!(matches!(
         busy.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?,
@@ -193,7 +209,7 @@ fn info_details_control_c_retains_existing_active_cancel_and_idle_quit() -> Resu
 
 #[test]
 fn info_details_mouse_entry_and_wheel_keep_background_input_untouched() -> Result<()> {
-    let (_root, mut app) = app_fixture()?;
+    let (_root, mut app) = app_fixture_with_long_path(true)?;
     app.set_terminal_size(124, 32);
     app.composer.input = "preserve  draft".to_owned();
     app.composer.input_cursor = 4;
@@ -214,6 +230,11 @@ fn info_details_mouse_entry_and_wheel_keep_background_input_untouched() -> Resul
         AppMouseOutcome::Redraw
     ));
     assert_eq!(app.modal_title(), Some("Details"));
+    let (max_scroll, _) = crate::ui::info_details_scroll_bounds(124, 32, &app.modal_lines());
+    assert!(
+        max_scroll >= 3,
+        "the real long workspace must provide a full wheel step"
+    );
     let before_scroll = app.timeline_scroll_back;
     app.handle_mouse_event(
         MouseInput {
@@ -238,9 +259,10 @@ fn info_details_mouse_entry_and_wheel_keep_background_input_untouched() -> Resul
     Ok(())
 }
 
-fn read_only_keys() -> [KeyEvent; 3] {
+fn read_only_keys() -> [KeyEvent; 4] {
     [
         details_key(),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
         KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT),
         KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
     ]
@@ -526,5 +548,67 @@ fn info_details_attention_keeps_stateful_secret_modal_when_typed_requests_arrive
         assert_eq!(app.modal_lines(), lines);
         assert_eq!(app.modal_input_cursor(), cursor);
     }
+    Ok(())
+}
+
+#[test]
+fn approval_attention_history_keeps_typed_notice_without_transient_decision_keys() -> Result<()> {
+    use sigil_kernel::{EventHandler, RunEvent};
+    let (_root, mut app) = app_fixture()?;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let notice = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Attention)
+        .expect("typed approval attention entry");
+    assert!(notice.text.starts_with("Approval needed · "));
+    assert!(!notice.text.contains("Y allow"));
+    assert!(!notice.text.contains("N deny"));
+    let text = notice.text.clone();
+    press(&mut app, KeyCode::Esc)?;
+    assert!(!app.approval_review_open());
+    assert_approval_identity(&app);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Attention && entry.text == text)
+    );
+    assert!(press(&mut app, KeyCode::Char('n'))?.is_none());
+    assert_eq!(app.composer.input, "n");
+    assert_approval_identity(&app);
+    app.handle(RunEvent::Notice(
+        "error: provider request failed; outcome unknown".to_owned(),
+    ))?;
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice
+                && entry.text == "error: provider request failed; outcome unknown")
+    );
+    Ok(())
+}
+
+#[test]
+fn info_details_show_enabled_memory_and_actual_lsp_failure_even_when_disabled() -> Result<()> {
+    let (_root, mut app) = app_fixture()?;
+    app.runtime.memory_enabled = true;
+    app.runtime.memory_document_count = 0;
+    app.runtime.memory_last_status = "loading failed: permission denied".to_owned();
+    app.runtime.code_intelligence_server_lines.insert(
+        "rust".to_owned(),
+        "rust: launch failed: executable missing".to_owned(),
+    );
+    app.handle_key_event(details_key())?;
+    let lines = app.modal_lines();
+    assert!(lines.contains(&"memory: 0 docs · loading failed: permission denied".to_owned()));
+    assert!(lines.contains(&"LSP".to_owned()));
+    assert!(lines.contains(&"rust: launch failed: executable missing".to_owned()));
+    assert!(lines.contains(&format!("session: {}", app.session_id)));
+    assert!(!lines.contains(&"Global shortcuts".to_owned()));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("cache io:") || line.starts_with("cache miss source:"))
+    );
     Ok(())
 }

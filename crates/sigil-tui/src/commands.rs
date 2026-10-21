@@ -61,7 +61,6 @@ pub(crate) struct UiCommandSpec {
     pub(crate) command: UiCommand,
     pub(crate) keys: &'static [KeyBinding],
     pub(crate) slash: Option<&'static str>,
-    pub(crate) label: &'static str,
     pub(crate) help: &'static str,
     pub(crate) surface: CommandSurface,
 }
@@ -71,7 +70,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenKeyboardHelp,
         keys: &[KeyBinding { label: "F1" }],
         slash: None,
-        label: "Keyboard help",
         help: "Show available TUI shortcuts.",
         surface: CommandSurface::Global,
     },
@@ -79,7 +77,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::SubmitPrompt,
         keys: &[KeyBinding { label: "Enter" }],
         slash: None,
-        label: "Submit prompt",
         help: "Submit composer input or execute the selected slash command.",
         surface: CommandSurface::Global,
     },
@@ -87,7 +84,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CopyTranscript,
         keys: &[KeyBinding { label: "Ctrl-L" }],
         slash: None,
-        label: "Copy selection or latest response",
         help: "Copy selected transcript text, or the latest assistant response when nothing is selected.",
         surface: CommandSurface::Global,
     },
@@ -95,7 +91,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CancelOrQuit,
         keys: &[KeyBinding { label: "Ctrl-C" }],
         slash: Some("/quit"),
-        label: "Cancel or quit",
         help: "Cancel an active run, or quit when idle.",
         surface: CommandSurface::Global,
     },
@@ -103,7 +98,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ToggleWriteMode,
         keys: &[KeyBinding { label: "Shift-Tab" }],
         slash: None,
-        label: "Permission mode",
         help: "Cycle and persist the default permission mode.",
         surface: CommandSurface::Global,
     },
@@ -111,7 +105,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ToggleThinking,
         keys: &[KeyBinding { label: "Ctrl-T" }],
         slash: None,
-        label: "Details view",
         help: "Expand or collapse the current task list, focused activity, or thinking details.",
         surface: CommandSurface::Global,
     },
@@ -119,18 +112,17 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ToggleInfoRailVisibility,
         keys: &[KeyBinding { label: "F2" }],
         slash: None,
-        label: "Info rail",
         help: "Show or hide the right info rail for the current run.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
         command: UiCommand::ToggleInfoRailDetail,
         keys: &[
+            KeyBinding { label: "F4" },
             KeyBinding { label: "Alt-I" },
             KeyBinding { label: "Shift-F2" },
         ],
         slash: None,
-        label: "Details",
         help: "Open or close scrollable workspace and session details.",
         surface: CommandSurface::Global,
     },
@@ -138,7 +130,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenChangeReview,
         keys: &[KeyBinding { label: "Alt-R" }],
         slash: None,
-        label: "Review changes",
         help: "Select recorded diff lines and send a batch of review comments through the conversation.",
         surface: CommandSurface::Global,
     },
@@ -146,7 +137,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenConversationFork,
         keys: &[KeyBinding { label: "Alt-B" }],
         slash: None,
-        label: "Branch conversation",
         help: "Choose a completed turn, open a branch, and edit a draft without sending it. Alt-B keeps word navigation while editing.",
         surface: CommandSurface::Global,
     },
@@ -154,7 +144,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenCheckpointRestore,
         keys: &[KeyBinding { label: "Ctrl-R" }],
         slash: None,
-        label: "Restore checkpoint",
         help: "Open the latest controlled checkpoint in an exact restore preview dialog.",
         surface: CommandSurface::Global,
     },
@@ -162,15 +151,13 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenIntentStack,
         keys: &[KeyBinding { label: "Alt-S" }],
         slash: Some("/intents"),
-        label: "Intent Stack",
         help: "Review durable intent ownership, verification, retention, conflicts, and exact Drop previews.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
         command: UiCommand::OpenConfig,
-        keys: &[],
+        keys: &[KeyBinding { label: "F3" }],
         slash: Some("/config"),
-        label: "Config",
         help: "Open TUI config panel.",
         surface: CommandSurface::Slash,
     },
@@ -178,7 +165,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CompactContext,
         keys: &[],
         slash: Some("/compact"),
-        label: "Compact context",
         help: "Generate, validate, and activate one recoverable semantic checkpoint.",
         surface: CommandSurface::Slash,
     },
@@ -186,7 +172,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenDoctor,
         keys: &[],
         slash: Some("/doctor"),
-        label: "Doctor",
         help: "Run local setup diagnostics.",
         surface: CommandSurface::Slash,
     },
@@ -194,7 +179,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenFeedback,
         keys: &[],
         slash: Some("/feedback"),
-        label: "Feedback",
         help: "Review and privately export a redacted support report.",
         surface: CommandSurface::Slash,
     },
@@ -202,7 +186,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CheckForUpdate,
         keys: &[],
         slash: Some("/update"),
-        label: "Update",
         help: "Check for a new Sigil release or install an admitted standalone update.",
         surface: CommandSurface::Slash,
     },
@@ -210,7 +193,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::StartNewSession,
         keys: &[],
         slash: Some("/new"),
-        label: "New session",
         help: "Start a fresh session.",
         surface: CommandSurface::Slash,
     },
@@ -218,7 +200,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::EnterPlanMode,
         keys: &[],
         slash: Some("/plan"),
-        label: "Plan",
         help: "Run a read-only planning prompt; accept the plan to create and run a durable task.",
         surface: CommandSurface::Slash,
     },
@@ -226,15 +207,13 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::SubmitTask,
         keys: &[],
         slash: Some("/task"),
-        label: "Task",
         help: "Start or continue a durable multi-step task.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
         command: UiCommand::PauseActiveTask,
-        keys: &[KeyBinding { label: "Alt-P" }],
+        keys: &[KeyBinding { label: "F5" }, KeyBinding { label: "Alt-P" }],
         slash: None,
-        label: "Pause task",
         help: "Stop the active task at a safe cancellation boundary and keep it resumable.",
         surface: CommandSurface::Global,
     },
@@ -242,7 +221,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CycleAgentView,
         keys: &[KeyBinding { label: "Alt-A" }],
         slash: Some("/agent"),
-        label: "Agent",
         help: "Switch the visible main chat between parent and child agents; /agent can rename child agents.",
         surface: CommandSurface::Global,
     },
@@ -252,7 +230,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
             label: "Shift-Alt-A",
         }],
         slash: None,
-        label: "Previous agent",
         help: "Switch the visible main chat to the previous parent or child agent.",
         surface: CommandSurface::Global,
     },
@@ -260,7 +237,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CheckChangedFilesDiagnostics,
         keys: &[KeyBinding { label: "Alt-D" }],
         slash: None,
-        label: "Check changes",
         help: "Run code diagnostics for changed source files.",
         surface: CommandSurface::Global,
     },
@@ -268,7 +244,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::FocusVerificationCard,
         keys: &[KeyBinding { label: "Alt-V" }],
         slash: None,
-        label: "Verification",
         help: "Focus the current task verification card; Enter runs its action and I inspects evidence.",
         surface: CommandSurface::Global,
     },
@@ -276,7 +251,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::FocusLatestToolCard,
         keys: &[KeyBinding { label: "Ctrl-G" }],
         slash: None,
-        label: "Latest activity",
         help: "Focus the latest activity.",
         surface: CommandSurface::ToolCard,
     },
@@ -284,7 +258,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::SelectNextToolCard,
         keys: &[KeyBinding { label: "Alt-J" }],
         slash: None,
-        label: "Next activity",
         help: "Focus the next activity.",
         surface: CommandSurface::ToolCard,
     },
@@ -292,7 +265,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::SelectPreviousToolCard,
         keys: &[KeyBinding { label: "Alt-K" }],
         slash: None,
-        label: "Previous activity",
         help: "Focus the previous activity.",
         surface: CommandSurface::ToolCard,
     },
@@ -303,7 +275,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
             KeyBinding { label: "Ctrl-O" },
         ],
         slash: None,
-        label: "Toggle activity",
         help: "Expand or collapse the focused activity.",
         surface: CommandSurface::ToolCard,
     },
@@ -311,7 +282,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ReadNextToolArtifactPage,
         keys: &[KeyBinding { label: "Alt-N" }],
         slash: None,
-        label: "Next output page",
         help: "Read the next bounded page from the focused tool output artifact.",
         surface: CommandSurface::ToolCard,
     },
@@ -319,7 +289,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::SearchToolArtifact,
         keys: &[KeyBinding { label: "Alt-F" }],
         slash: None,
-        label: "Search full output",
         help: "Search a bounded literal in the focused tool output artifact.",
         surface: CommandSurface::ToolCard,
     },
@@ -327,7 +296,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ClearToolCardFocus,
         keys: &[KeyBinding { label: "Esc" }],
         slash: None,
-        label: "Clear activity focus",
         help: "Clear activity focus when the composer is empty.",
         surface: CommandSurface::ToolCard,
     },
@@ -335,7 +303,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CancelFocusedTerminalTask,
         keys: &[KeyBinding { label: "Alt-X" }],
         slash: None,
-        label: "Cancel terminal task",
         help: "Cancel the focused running terminal task after confirmation.",
         surface: CommandSurface::ToolCard,
     },
@@ -348,6 +315,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
             Some(UiCommand::ToggleInfoRailDetail)
         }
         KeyCode::F(2) => Some(UiCommand::ToggleInfoRailVisibility),
+        KeyCode::F(3) => Some(UiCommand::OpenConfig),
+        KeyCode::F(4) => Some(UiCommand::ToggleInfoRailDetail),
+        KeyCode::F(5) => Some(UiCommand::PauseActiveTask),
         KeyCode::Char('l') | KeyCode::Char('L') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::CopyTranscript)
         }
@@ -408,46 +378,6 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
     }
 }
 
-pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
-    let mut hints = vec![
-        control_hint(UiCommand::OpenKeyboardHelp).expect("keyboard help metadata exists"),
-        "/ or 、: command palette".to_owned(),
-        control_hint(UiCommand::ToggleWriteMode).expect("write mode metadata exists"),
-        control_hint(UiCommand::ToggleInfoRailVisibility)
-            .expect("info rail visibility metadata exists"),
-        control_hint(UiCommand::ToggleInfoRailDetail).expect("info rail metadata exists"),
-        if is_busy {
-            "Ctrl-C: cancel work".to_owned()
-        } else {
-            "Ctrl-C: quit · Ctrl-L: copy reply".to_owned()
-        },
-        control_hint(UiCommand::ToggleThinking).expect("thinking metadata exists"),
-        control_hint(UiCommand::CycleAgentView).expect("agent metadata exists"),
-        control_hint(UiCommand::CycleAgentViewPrevious).expect("previous agent metadata exists"),
-        control_hint(UiCommand::CheckChangedFilesDiagnostics)
-            .expect("check changes metadata exists"),
-        control_hint(UiCommand::FocusVerificationCard).expect("verification metadata exists"),
-        if is_busy {
-            control_hint(UiCommand::PauseActiveTask).expect("pause task metadata exists")
-        } else {
-            String::new()
-        },
-        control_hint(UiCommand::OpenCheckpointRestore).expect("checkpoint metadata exists"),
-        control_hint(UiCommand::OpenConversationFork).expect("conversation fork metadata exists"),
-        control_hint(UiCommand::OpenChangeReview).expect("change review metadata exists"),
-        control_hint(UiCommand::OpenIntentStack).expect("Intent Stack metadata exists"),
-    ];
-    hints.retain(|hint| !hint.is_empty());
-    hints
-}
-
-pub(crate) fn tool_card_control_hints() -> impl Iterator<Item = String> {
-    COMMAND_SPECS
-        .iter()
-        .filter(|spec| spec.surface == CommandSurface::ToolCard)
-        .filter_map(command_spec_control_hint)
-}
-
 #[cfg(test)]
 pub(crate) fn tool_card_commands() -> impl Iterator<Item = UiCommand> {
     COMMAND_SPECS
@@ -464,7 +394,10 @@ pub(crate) fn common_keyboard_help_lines() -> Vec<String> {
             "Send; while busy, queue a follow-up.",
         ),
         "Ctrl-J: New line.".to_owned(),
-        "/ or 、: Commands and session actions.".to_owned(),
+        format!(
+            "{} · / or 、 commands",
+            concise_help_line(UiCommand::OpenConfig, "Settings; keep the draft.")
+        ),
         "Up/Down: Prompt history.".to_owned(),
         String::new(),
         "Read".to_owned(),
@@ -481,6 +414,10 @@ pub(crate) fn common_keyboard_help_lines() -> Vec<String> {
         String::new(),
         "Control".to_owned(),
         concise_help_line(UiCommand::ToggleWriteMode, "Change permission mode."),
+        concise_help_line(
+            UiCommand::PauseActiveTask,
+            "Pause the running task; /task continue resumes.",
+        ),
         concise_help_line(
             UiCommand::CancelOrQuit,
             "Cancel work / quit when idle; a selection is copied first.",
@@ -507,9 +444,10 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     lines.extend(command_help_lines([
         UiCommand::OpenKeyboardHelp,
         UiCommand::SubmitPrompt,
+        UiCommand::PauseActiveTask,
     ]));
     lines.push(
-        "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. Alt-P: Pause. Ctrl-L: Latest reply."
+        "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. F5: Pause task. Ctrl-L: Latest reply."
             .to_owned(),
     );
     lines.extend(command_help_lines([
@@ -600,24 +538,12 @@ pub(crate) fn metadata_slash_help_lines() -> Vec<String> {
     COMMAND_SPECS
         .iter()
         .filter(|spec| spec.surface == CommandSurface::Slash)
-        .filter_map(command_spec_help_line)
+        .filter_map(|spec| spec.slash.map(|slash| format!("{slash}: {}", spec.help)))
         .collect()
 }
 
 pub(crate) fn metadata_slash_commands() -> impl Iterator<Item = &'static str> {
     COMMAND_SPECS.iter().filter_map(|spec| spec.slash)
-}
-
-fn control_hint(command: UiCommand) -> Option<String> {
-    COMMAND_SPECS
-        .iter()
-        .find(|spec| spec.command == command)
-        .and_then(command_spec_control_hint)
-}
-
-fn command_spec_control_hint(spec: &UiCommandSpec) -> Option<String> {
-    let key = spec.keys.first()?.label;
-    Some(format!("{key}: {}", spec.label.to_ascii_lowercase()))
 }
 
 fn command_spec_help_line(spec: &UiCommandSpec) -> Option<String> {

@@ -13,7 +13,8 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Open help / slash selector | `F1` / `/` |
 | Submit | `Enter` |
 | Show or hide info rail | `F2` |
-| Open or close scrollable workspace/session details | `Alt-I` / `Shift-F2`; click **Alt-I details** in the rail |
+| Open settings while keeping the composer draft | `F3` (inside settings: Save and close); `/config` also works |
+| Open or close scrollable workspace/session details | `F4` (`Alt-I` / `Shift-F2` also work); click **F4 details** in the rail |
 | Scroll details / close without submitting | `Up/Down`, `PageUp/PageDown`, `Home/End`, mouse wheel / `Esc` or `Enter` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
@@ -31,7 +32,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Read the next bounded page from focused saved tool output | `Alt-N` |
 | Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
-| Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
+| Pause the exact running task at a safe boundary | `F5` (`Alt-P` also works); resume later with `/task continue` |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
 | Branch from a completed conversation turn | `Alt-B`; `Up/Down` selects, `Enter` branches, `Esc` closes. While editing, `Alt-B` keeps word navigation. |
 | Comment on recorded changes | `Alt-R`; select a checkpoint, file and line range, `Enter` adds a comment, `Ctrl-S` sends or queues the batch |

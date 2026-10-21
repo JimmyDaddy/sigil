@@ -16,7 +16,7 @@ syntax_theme = "auto"
 usage_cost_currency = "auto"
 ```
 
-`info_rail` 控制宽度允许时右侧信息栏是否默认显示。`F2` 改变当前运行的显隐；`Shift-F2` 在紧凑和详细内容间切换。进入 `/config` → **Appearance**，用 `Enter` 预览主题，再用 `Ctrl-S` 保存。
+`info_rail` 控制宽度允许时右侧信息栏是否默认显示。`F2` 改变当前运行的显隐；`F4` 打开可滚动的工作区与会话详情，信息栏隐藏时也可使用（兼容 `Alt-I` / `Shift-F2`）。按 `F3` 保留输入草稿并打开设置，或使用 `/config`，然后进入 **Appearance**，用 `Enter` 预览主题，再用 `Ctrl-S` 保存。
 
 `syntax_theme = "auto"` 跟随 TUI 主题。`usage_cost_currency` 只影响显示。所有可用值见[配置字段参考](configuration-reference.md#外观)。
 

@@ -46,11 +46,8 @@ pub(crate) fn render_info_rail_with_theme(
     }
     if let Some(details) = info_rail_details_area(area) {
         frame.render_widget(
-            Paragraph::new(truncate_display_width(
-                "Alt-I details",
-                details.width as usize,
-            ))
-            .style(Style::default().fg(palette.text_secondary)),
+            Paragraph::new(truncate_display_width("F4 details", details.width as usize))
+                .style(Style::default().fg(palette.text_secondary)),
             details,
         );
     }

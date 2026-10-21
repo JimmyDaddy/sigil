@@ -76,8 +76,11 @@ fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
 }
 
 #[test]
-fn alt_p_pauses_only_the_exact_running_direct_task() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+fn f5_pauses_only_the_exact_running_direct_task() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
         task_id.clone(),
@@ -98,9 +101,11 @@ fn alt_p_pauses_only_the_exact_running_direct_task() -> Result<()> {
     ]);
     app.runtime.is_busy = true;
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))?;
+    let footer = crate::view_model::UiViewModel::from_app(&app).footer;
+    assert!(footer.hints.contains("F5 pause"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE))?;
     let Some(AppAction::PauseTask { request }) = action else {
-        panic!("Alt-P should create an exact pause action");
+        panic!("F5 should create an exact pause action");
     };
     assert!(request.has_exact_identity());
     assert_eq!(request.task_id.as_str(), "task_1");
@@ -112,10 +117,16 @@ fn alt_p_pauses_only_the_exact_running_direct_task() -> Result<()> {
 
     app.runtime.is_busy = false;
     assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT))?
+        app.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE))?
             .is_none()
     );
     assert_eq!(app.last_notice(), Some("no active task to pause"));
+    assert!(
+        !crate::view_model::UiViewModel::from_app(&app)
+            .footer
+            .hints
+            .contains("F5 pause")
+    );
     Ok(())
 }
 
@@ -223,4 +234,35 @@ fn dispatch_terminal_entry(
         cleanup: None,
         updated_at_ms: 20,
     })
+}
+
+#[test]
+fn f5_and_alt_p_do_not_pause_an_ordinary_running_conversation() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.runtime.is_busy = true;
+    app.composer.input = "keep  this draft".to_owned();
+    let timeline_len = app.timeline.len();
+    for key in [
+        KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
+    ] {
+        assert!(app.handle_key_event(key)?.is_none());
+        assert_eq!(
+            app.last_notice(),
+            Some("the active run is not a durable task")
+        );
+        assert!(app.runtime.is_busy);
+        assert_eq!(app.composer.input, "keep  this draft");
+        assert_eq!(app.timeline.len(), timeline_len);
+    }
+    assert!(
+        !crate::view_model::UiViewModel::from_app(&app)
+            .footer
+            .hints
+            .contains("F5 pause")
+    );
+    Ok(())
 }

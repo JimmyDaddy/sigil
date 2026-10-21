@@ -4726,35 +4726,106 @@ fn repeated_call_id_without_progress_keeps_distinct_final_cards() -> Result<()> 
 
 #[test]
 fn new_session_started_restores_empty_session_view() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.push_timeline(TimelineRole::Assistant, "old context");
-    let new_session_log_path = std::path::PathBuf::from(".sigil/sessions/session-new.jsonl");
+    let new_session_log_path = temp.path().join("session-new.jsonl");
+    let entries = vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        resolved_model_route: None,
+    })];
+    write_session_log(&new_session_log_path, &entries)?;
+    let session_id = crate::app::tests::common::fixture_session_id(&new_session_log_path);
+    let persisted_before = std::fs::read(&new_session_log_path)?;
 
     app.handle_worker_message(WorkerMessage::NewSessionStarted {
-        session_id: crate::app::tests::common::fixture_session_id(&new_session_log_path),
+        session_id: session_id.clone(),
         session_log_path: new_session_log_path.clone(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        entries: vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            provider_name: "deepseek".to_owned(),
-            model_name: "deepseek-v4-pro".to_owned(),
-            resolved_model_route: None,
-        })],
+        entries,
     })?;
 
     assert_eq!(app.session_log_path, new_session_log_path);
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_eq!(app.last_notice(), Some("started new session"));
-    assert!(
-        app.timeline
-            .iter()
-            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "started new session")
-    );
+    assert_eq!(app.session_id, session_id);
+    assert_eq!(app.timeline.len(), 1);
+    assert_eq!(app.timeline[0].role, TimelineRole::Notice);
+    assert_eq!(app.timeline[0].text, "started new session");
+    assert!(!app.timeline[0].text.contains(&session_id));
+    assert!(app.events.iter().any(|entry| entry.label == "session"
+        && entry.detail == format!("active {session_id}")));
+    assert_eq!(std::fs::read(&new_session_log_path)?, persisted_before);
     assert!(
         !app.timeline
             .iter()
             .any(|entry| entry.role == TimelineRole::Assistant && entry.text == "old context")
     );
+    Ok(())
+}
+
+#[test]
+fn session_switched_restores_history_with_one_quiet_notice_and_preserves_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.push_timeline(TimelineRole::Assistant, "previous session context");
+    let session_log_path = temp.path().join("session-existing.jsonl");
+    let entries = restored_entries("restored-provider", "restored-model");
+    write_session_log(&session_log_path, &entries)?;
+    let session_id = crate::app::tests::common::fixture_session_id(&session_log_path);
+    let persisted_before = std::fs::read(&session_log_path)?;
+    let source_entries = serde_json::to_value(&entries)?;
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: session_id.clone(),
+        session_log_path: session_log_path.clone(),
+        provider_name: "restored-provider".to_owned(),
+        model_name: "restored-model".to_owned(),
+        entries,
+    })?;
+
+    let feedback = app
+        .timeline
+        .iter()
+        .filter(|entry| matches!(entry.role, TimelineRole::System | TimelineRole::Notice))
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(feedback, ["restored from disk"]);
+    assert_eq!(app.last_notice(), Some("restored from disk"));
+    assert_eq!(app.session_id, session_id);
+    assert_eq!(app.session_log_path, session_log_path);
+    assert_eq!(app.runtime.provider_name, "restored-provider");
+    assert_eq!(app.runtime.model_name, "restored-model");
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::User && entry.text == "restored user prompt")
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Assistant
+                && entry.text == "restored assistant answer")
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .all(|entry| !entry.text.contains(&session_id)
+                && entry.text != "previous session context")
+    );
+    assert!(app.events.iter().any(|entry| entry.label == "session"
+        && entry.detail == format!("active {session_id}")));
+    assert_eq!(
+        serde_json::to_value(&app.session_browser.current_entries)?,
+        source_entries
+    );
+    assert_eq!(std::fs::read(&session_log_path)?, persisted_before);
     Ok(())
 }
 

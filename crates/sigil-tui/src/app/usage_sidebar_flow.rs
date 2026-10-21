@@ -151,6 +151,72 @@ impl AppState {
         self.usage_sidebar_cache = lines;
     }
 
+    pub(crate) fn usage_detail_lines(&self) -> Vec<String> {
+        let currency = self.usage_cost_currency();
+        let stats = &self.runtime.stats;
+        let opening = &self.runtime.session_delta_stats;
+        let saved = estimated_cost_label(currency, stats, stats.cache_savings);
+        let total = estimated_cost_label(currency, stats, stats.input_cost + stats.output_cost);
+        let since_opening =
+            estimated_cost_label(currency, opening, opening.input_cost + opening.output_cost);
+        let context = match self.resolved_context_window().tokens.filter(|cap| *cap > 0) {
+            Some(cap) => {
+                let capacity_warning = if stats.last_prompt_tokens
+                    >= threshold_token_count(cap, COMPACTION_EMERGENCY_RATIO)
+                {
+                    " · near limit"
+                } else if stats.last_prompt_tokens
+                    >= threshold_token_count(cap, COMPACTION_PREPARATION_RATIO)
+                {
+                    " · filling up"
+                } else {
+                    ""
+                };
+                let warning = match self
+                    .resolved_compaction_config()
+                    .threshold_status(stats.last_prompt_tokens)
+                {
+                    CompactionThresholdStatus::Soft | CompactionThresholdStatus::Hard => {
+                        format!(" · {}", self.context_usage_hint(cap))
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "context: {} / {} tokens · {}%{capacity_warning}{warning}",
+                    format_token_compact(stats.last_prompt_tokens),
+                    format_token_compact(cap as u64),
+                    self.context_usage_percent(cap)
+                )
+            }
+            None => format!(
+                "context: capacity unknown · prompt {} · set fallback_context_window_tokens",
+                format_token_compact(stats.last_prompt_tokens)
+            ),
+        };
+        vec![
+            context,
+            self.session_token_line(),
+            format!(
+                "cache: {:.0}% · save {saved}",
+                self.cache_hit_ratio() * 100.0
+            ),
+            format!(
+                "cache tokens: read {} · write {} · miss {}",
+                stats.cache_hit_tokens,
+                if stats.cache_write_observed {
+                    stats.cache_write_tokens.to_string()
+                } else {
+                    "not reported".to_owned()
+                },
+                stats.cache_miss_tokens,
+            ),
+            format!("total spent: {total}"),
+            format!("spent since opening: {since_opening}"),
+            self.balance_sidebar_line(),
+        ]
+    }
+
+    #[cfg(test)]
     pub(crate) fn usage_sidebar_lines(&self) -> &[String] {
         &self.usage_sidebar_cache
     }

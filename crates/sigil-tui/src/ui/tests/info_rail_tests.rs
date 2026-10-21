@@ -29,7 +29,6 @@ fn sample_view_model() -> InfoRailViewModel {
         mcp_lines: vec!["filesystem: deferred".to_owned()],
         code_lines: vec!["server: rust-analyzer".to_owned()],
         usage_lines: vec!["tokens: 10/100".to_owned()],
-        controls: vec!["Enter send".to_owned()],
     }
 }
 
@@ -57,7 +56,7 @@ fn render_info_rail_skips_empty_optional_sections() -> anyhow::Result<()> {
     assert!(text.contains("project"));
     assert!(text.contains("mode: ready"));
     assert!(text.contains("attention"));
-    assert!(text.contains("Alt-I details"));
+    assert!(text.contains("F4 details"));
     assert!(!text.contains("permissions"));
     assert!(!text.contains("controls"));
     for hidden in ["agents", "task", "MCP", "LSP", "usage"] {
@@ -96,7 +95,7 @@ fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
     assert!(rendered.contains("LSP"));
     assert!(!rendered.contains("tokens: 10/100"));
     assert!(!rendered.contains("controls"));
-    assert!(rendered.contains("Alt-I details"));
+    assert!(rendered.contains("F4 details"));
     assert!(rendered.contains("mode"));
     assert!(rendered.contains("approval"));
     Ok(())
@@ -195,7 +194,7 @@ fn info_rail_detail_entry_stays_visible_when_attention_fills_the_body() -> anyho
         let row = (details.x..details.right())
             .map(|x| terminal.backend().buffer()[(x, details.y)].symbol())
             .collect::<String>();
-        assert!(row.contains("Alt-I details"), "{row:?}");
+        assert!(row.contains("F4 details"), "{row:?}");
         assert!(details.y >= info_rail_body_area(area).bottom());
         assert!(rendered_text(&terminal).contains("save failed:"));
     }

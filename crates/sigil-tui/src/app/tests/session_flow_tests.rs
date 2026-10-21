@@ -30,6 +30,7 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
         &restored_path,
         &restored_entries("restored-provider", "restored-model"),
     )?;
+    let persisted_before = std::fs::read(&restored_path)?;
 
     let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
     assert!(app.restore_latest_session_from_disk(&config));
@@ -42,6 +43,19 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
             .any(|entry| entry.text == "restored assistant answer")
     );
     assert_eq!(app.last_notice(), Some("restored latest session"));
+    let feedback = app
+        .timeline
+        .iter()
+        .filter(|entry| matches!(entry.role, TimelineRole::System | TimelineRole::Notice))
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(feedback, ["restored latest session"]);
+    assert!(
+        app.timeline
+            .iter()
+            .all(|entry| !entry.text.contains(&app.session_id))
+    );
+    assert_eq!(std::fs::read(&restored_path)?, persisted_before);
     Ok(())
 }
 

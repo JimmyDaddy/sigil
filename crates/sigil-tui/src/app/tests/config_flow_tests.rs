@@ -2404,11 +2404,23 @@ fn config_info_rail_shortcuts_do_not_save_dirty_draft() -> Result<()> {
     assert!(app.config_is_dirty());
     assert!(!config_path.exists());
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
-    assert!(action.is_none());
-    assert!(app.info_rail_detail_enabled());
-    assert!(app.config_is_dirty());
-    assert!(!config_path.exists());
+    for key in [
+        KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT),
+    ] {
+        let action = app.handle_key_event(key)?;
+        assert!(action.is_none());
+        assert!(app.info_rail_detail_enabled());
+        assert!(app.config_is_dirty());
+        assert!(!config_path.exists());
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
+                .is_none()
+        );
+        assert!(!app.info_rail_detail_enabled());
+        assert!(app.config_is_dirty());
+        assert!(!config_path.exists());
+    }
     Ok(())
 }
 
@@ -5509,5 +5521,123 @@ fn reviewed_plugin_skills_share_tui_settings_and_slash_discovery() -> Result<()>
             .is_empty()
     );
     assert!(app.exact_skill_descriptor("workflow/check").is_none());
+    Ok(())
+}
+
+fn f3_config_draft_fixture() -> Result<(tempfile::TempDir, AppState)> {
+    let root = tempdir()?;
+    let config_path = root.path().join("sigil.toml");
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    config.save(&config_path)?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.set_terminal_size(100, 32);
+    app.handle_paste_text("保留第一行  alpha\nsecond line with  spaces\n第三行 🙂");
+    app.composer.input_cursor = 7;
+    app.push_timeline(TimelineRole::Assistant, "Select this historical response");
+    assert!(!app.begin_timeline_text_selection_at(0, 0));
+    assert!(app.update_timeline_text_selection_at(0, 4));
+    assert!(app.selected_timeline_text().is_some());
+    Ok((root, app))
+}
+
+#[test]
+fn f3_config_cancel_preserves_multiline_draft_cursor_selection_and_history() -> Result<()> {
+    let (_root, mut app) = f3_config_draft_fixture()?;
+    let draft = app.composer.input.clone();
+    let cursor = app.composer.input_cursor;
+    let paste_spans = app.composer.input_paste_spans.clone();
+    let selection = app.selected_timeline_text();
+    let history = app.composer.input_history.clone();
+    let config_before = std::fs::read(&app.config_path)?;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(app.is_config_mode());
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(!app.is_config_mode());
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_paste_spans, paste_spans);
+    assert_eq!(app.selected_timeline_text(), selection);
+    assert_eq!(app.composer.input_history, history);
+    assert_eq!(std::fs::read(&app.config_path)?, config_before);
+    Ok(())
+}
+
+#[test]
+fn f3_config_save_uses_typed_config_saved_and_preserves_multiline_draft() -> Result<()> {
+    let (_root, mut app) = f3_config_draft_fixture()?;
+    let draft = app.composer.input.clone();
+    let cursor = app.composer.input_cursor;
+    let paste_spans = app.composer.input_paste_spans.clone();
+    let selection = app.selected_timeline_text();
+    let history = app.composer.input_history.clone();
+    app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+    {
+        let state = app.config_state.as_mut().expect("F3 opens settings");
+        state.draft.model_request_timeout_secs = "240".to_owned();
+        state.mark_edited();
+    }
+    // In config, the same physical key keeps its existing Save and close action.
+    let Some(AppAction::ConfigSaved { root_config }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?
+    else {
+        anyhow::bail!("F3 in config must publish the edited configuration");
+    };
+    assert!(!app.is_config_mode());
+    assert_eq!(app.last_notice(), Some("saved config and closed"));
+    assert_eq!(root_config.model_request.request_timeout_secs, 240);
+    let persisted = RootConfig::load(&app.config_path)?;
+    assert_eq!(persisted.model_request.request_timeout_secs, 240);
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_paste_spans, paste_spans);
+    assert_eq!(app.selected_timeline_text(), selection);
+    assert_eq!(app.composer.input_history, history);
+    Ok(())
+}
+
+#[test]
+fn f3_config_dirty_cancel_preserves_multiline_draft_and_slash_config_stays_compatible() -> Result<()>
+{
+    let (_root, mut app) = f3_config_draft_fixture()?;
+    let draft = app.composer.input.clone();
+    let cursor = app.composer.input_cursor;
+    let config_before = std::fs::read(&app.config_path)?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+    {
+        let state = app.config_state.as_mut().expect("open settings");
+        state.draft.model_request_timeout_secs = "240".to_owned();
+        state.mark_edited();
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.is_config_mode());
+    assert!(app.config_close_guard_armed());
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.is_config_mode());
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(std::fs::read(&app.config_path)?, config_before);
+
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut slash_app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    slash_app.handle_paste_text("/config");
+    assert!(
+        slash_app
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(slash_app.is_config_mode());
+    assert!(slash_app.composer.input.is_empty());
+    assert_eq!(slash_app.last_notice(), Some("opened config"));
     Ok(())
 }

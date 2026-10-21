@@ -2449,3 +2449,51 @@ fn test_terminal_entry(
         updated_at_ms: 20,
     })
 }
+
+#[test]
+fn info_details_mcp_omit_deferred_servers_but_keep_ready_and_failed_facts() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    for name in ["deferred", "ready", "failed"] {
+        config.mcp_servers.push(mcp_server_config! {
+            name: name.to_owned(),
+            startup: McpServerStartup::Lazy,
+            required: false,
+            ..Default::default()
+        });
+    }
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("ready".to_owned()),
+        status: McpActivationStatus::Ready {
+            added_tools: 0,
+            process_coverage: None,
+        },
+    })?;
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("failed".to_owned()),
+        status: McpActivationStatus::Failed {
+            error: "MCP server failed tools/list failed: bad response".to_owned(),
+        },
+    })?;
+    let details = app.mcp_details_sidebar_lines();
+    assert_eq!(details.len(), 2);
+    assert!(
+        details
+            .iter()
+            .any(|line| line.starts_with("ready:") && line.contains('0'))
+    );
+    assert!(
+        details
+            .iter()
+            .any(|line| line == "failed: failed: tools/list failed: bad response")
+    );
+    assert!(!details.iter().any(|line| line.starts_with("deferred:")));
+    assert!(
+        app.mcp_sidebar_lines()
+            .iter()
+            .any(|line| line == "deferred: deferred")
+    );
+    Ok(())
+}

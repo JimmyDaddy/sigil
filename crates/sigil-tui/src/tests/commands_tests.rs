@@ -47,6 +47,10 @@ fn maps_tool_card_key_events_to_commands() {
         Some(UiCommand::ToggleInfoRailVisibility)
     );
     assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)),
+        Some(UiCommand::ToggleInfoRailDetail)
+    );
+    assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT)),
         Some(UiCommand::ToggleInfoRailDetail)
     );
@@ -77,65 +81,28 @@ fn maps_tool_card_key_events_to_commands() {
         command_for_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL,)),
         Some(UiCommand::CopyTranscript)
     );
+    for key in [
+        KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
+    ] {
+        assert_eq!(command_for_key_event(key), Some(UiCommand::PauseActiveTask));
+    }
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
+        Some(UiCommand::OpenConfig)
+    );
     assert!(tool_card_commands().any(|command| command == UiCommand::ClearToolCardFocus));
 }
 
 #[test]
 fn command_metadata_generates_help_and_control_hints() {
-    let global = global_control_hints(false);
-    assert!(global.iter().any(|hint| hint == "F1: keyboard help"));
-    assert!(global.iter().any(|hint| hint.starts_with("Ctrl-C: quit")));
-    assert!(global.iter().any(|hint| hint == "F2: info rail"));
-    assert!(global.iter().any(|hint| hint == "Alt-I: details"));
-    assert!(
-        global
-            .iter()
-            .any(|hint| hint.contains("Ctrl-L: copy reply"))
-    );
-    assert!(global.iter().any(|hint| hint == "Alt-A: agent"));
-    assert!(
-        global
-            .iter()
-            .any(|hint| hint == "Shift-Alt-A: previous agent")
-    );
-    assert!(global.iter().any(|hint| hint == "Alt-D: check changes"));
-    assert!(
-        global
-            .iter()
-            .any(|hint| hint == "Ctrl-R: restore checkpoint")
-    );
-    assert!(
-        global_control_hints(true)
-            .iter()
-            .any(|hint| hint == "Ctrl-C: cancel work")
-    );
-    assert!(
-        global_control_hints(true)
-            .iter()
-            .all(|hint| hint != "Esc: interrupt")
-    );
-    let activity_controls = tool_card_control_hints().collect::<Vec<_>>();
-    assert!(
-        activity_controls
-            .iter()
-            .any(|hint| hint == "Ctrl-T: toggle activity")
-    );
-    assert!(
-        activity_controls
-            .iter()
-            .any(|hint| hint == "Alt-J: next activity")
-    );
-    assert!(
-        activity_controls
-            .iter()
-            .any(|hint| hint == "Alt-N: next output page")
-    );
-    assert!(
-        activity_controls
-            .iter()
-            .any(|hint| hint == "Alt-F: search full output")
-    );
-
+    let common = common_keyboard_help_lines();
+    for prefix in ["F3:", "F4:", "F5:", "Shift-Tab:", "Ctrl-C:"] {
+        assert!(
+            common.iter().any(|line| line.starts_with(prefix)),
+            "missing common control: {prefix}"
+        );
+    }
     let help = keyboard_help_lines(true);
     for section in [
         "Session",
@@ -195,7 +162,7 @@ fn command_metadata_generates_help_and_control_hints() {
             .any(|line| line == "Ctrl-Z: Restore the last draft cleared with Esc.")
     );
     assert!(help.iter().any(|line| {
-        line == "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. Alt-P: Pause. Ctrl-L: Latest reply."
+        line == "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. F5: Pause task. Ctrl-L: Latest reply."
     }));
     assert!(
         help.iter()
@@ -214,7 +181,7 @@ fn command_metadata_generates_help_and_control_hints() {
             .any(|line| line == "F2: Show or hide the right info rail for the current run.")
     );
     assert!(help.iter().any(|line| {
-        line == "Alt-I / Shift-F2: Open or close scrollable workspace and session details."
+        line == "F4 / Alt-I / Shift-F2: Open or close scrollable workspace and session details."
     }));
     assert!(help.iter().any(|line| {
         line == "Alt-A: Switch the visible main chat between parent and child agents; /agent can rename child agents."
@@ -236,6 +203,12 @@ fn command_metadata_generates_help_and_control_hints() {
 
     let slash = metadata_slash_help_lines();
     assert!(slash.iter().any(|line| line.starts_with("/config:")));
+    assert!(help.iter().any(|line| line == "F3: Open TUI config panel."));
+    assert!(
+        common_keyboard_help_lines()
+            .iter()
+            .any(|line| line.starts_with("F3: Settings; keep the draft."))
+    );
     assert!(slash.iter().any(|line| line.starts_with("/new:")));
     assert!(slash.iter().any(|line| line.starts_with("/plan:")));
     assert!(slash.iter().any(|line| line.starts_with("/task:")));

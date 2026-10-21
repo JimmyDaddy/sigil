@@ -11,11 +11,20 @@ use crate::{
 };
 
 fn app_fixture() -> Result<(tempfile::TempDir, AppState)> {
+    app_fixture_with_long_path(false)
+}
+
+fn app_fixture_with_long_path(long_path: bool) -> Result<(tempfile::TempDir, AppState)> {
     let root = tempfile::tempdir()?;
-    let workspace = root
+    let mut workspace = root
         .path()
         .join("项目  alpha")
         .join("complete-workspace-path");
+    if long_path {
+        for index in 0..24 {
+            workspace.push(format!("workspace-long-segment-{index:02}"));
+        }
+    }
     std::fs::create_dir_all(&workspace)?;
     let mut config = test_config();
     config.workspace.root = workspace.display().to_string();
@@ -63,9 +72,9 @@ fn press(app: &mut AppState, code: KeyCode) -> Result<()> {
 }
 
 fn assert_details_document_reachable(width: u16, height: u16) -> Result<()> {
-    let (_root, mut app) = app_fixture()?;
+    let (_root, mut app) = app_fixture_with_long_path(true)?;
     app.set_terminal_size(width, height);
-    app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))?;
     let source = app.modal_lines();
     let full_path = app.workspace_root.display().to_string();
     assert!(source.contains(&full_path));
@@ -123,7 +132,7 @@ fn assert_details_document_reachable(width: u16, height: u16) -> Result<()> {
 }
 
 #[test]
-fn info_details_80x24_reaches_full_workspace_usage_and_last_shortcut() -> Result<()> {
+fn info_details_80x24_reaches_full_workspace_and_complete_costs() -> Result<()> {
     assert_details_document_reachable(80, 24)
 }
 
@@ -178,4 +187,52 @@ fn info_details_buffer_reader_skips_only_wide_occupancy_and_keeps_real_spaces() 
         rendered_row(&buffer, Rect::new(0, 0, 12, 1), 0),
         "中  A🙂 B   "
     );
+}
+
+#[test]
+fn info_details_f4_is_visible_and_opens_the_same_surface_without_a_rail_at_80x24() -> Result<()> {
+    let (_root, mut app) = app_fixture()?;
+    app.set_terminal_size(80, 24);
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, 80, 24),
+        &app,
+        SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    assert_eq!(surface.layout.info_rail.width, 0);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let footer = rendered_row(
+        terminal.backend().buffer(),
+        surface.layout.footer,
+        surface.layout.footer.y,
+    );
+    assert!(footer.contains("F4 details"), "visible footer: {footer}");
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.modal_title(), Some("Details"));
+    assert!(
+        app.modal_lines()
+            .contains(&format!("session: {}", app.session_id))
+    );
+    press(&mut app, KeyCode::End)?;
+    let source = app.modal_lines();
+    let (max_scroll, _) = info_details_scroll_bounds(80, 24, &source);
+    assert_eq!(
+        app.info_details_view().expect("details").scroll_rows,
+        max_scroll
+    );
+    let buffer = render(&app, 80, 24)?;
+    let geometry = details_geometry(Rect::new(0, 0, 80, 24), &source);
+    let last_page = (geometry.body.y..geometry.body.bottom())
+        .map(|row| rendered_row(&buffer, geometry.body, row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(last_page.contains("total spent: not estimated (pricing unavailable)"));
+    assert!(last_page.contains("balance:"));
+    Ok(())
 }

@@ -9,7 +9,6 @@ use sigil_kernel::{
 
 use crate::{
     app::{AppState, ComposerQueueAction, PaneFocus},
-    commands::{global_control_hints, tool_card_control_hints},
     timeline::{ComposerQueueRow, RunPhase, SidebarAgentRow},
     ui::StatusKind,
     workspace_git::WorkspaceGitStatus,
@@ -49,7 +48,6 @@ pub(crate) struct InfoRailViewModel {
     pub code_lines: Vec<String>,
     pub task_lines: Vec<String>,
     pub usage_lines: Vec<String>,
-    pub controls: Vec<String>,
 }
 
 impl InfoRailViewModel {
@@ -58,8 +56,6 @@ impl InfoRailViewModel {
     }
 
     fn build(app: &AppState, detail: bool) -> Self {
-        let controls = info_rail_controls(app, detail);
-
         Self {
             session_title: app.session_display_title(),
             workspace_label: if detail {
@@ -78,7 +74,7 @@ impl InfoRailViewModel {
             } else {
                 info_rail_permission_lines(app)
             },
-            agent_lines: detail
+            agent_lines: (detail && app.agent_sidebar_rows().len() > 1)
                 .then(|| app.agent_graph_summary_line())
                 .flatten()
                 .into_iter()
@@ -97,12 +93,12 @@ impl InfoRailViewModel {
                 )
                 .collect(),
             mcp_lines: if detail {
-                app.mcp_sidebar_lines()
+                app.mcp_details_sidebar_lines()
             } else {
                 app.mcp_attention_sidebar_lines()
             },
             code_lines: if detail {
-                app.code_intelligence_sidebar_lines()
+                app.code_intelligence_detail_lines()
             } else {
                 app.code_intelligence_attention_lines()
             },
@@ -116,14 +112,14 @@ impl InfoRailViewModel {
             } else {
                 Vec::new()
             },
-            controls,
         }
     }
 }
 
 fn displayed_info_rail_agent_rows(app: &AppState, detail: bool) -> Vec<SidebarAgentRow> {
     if detail {
-        app.agent_sidebar_rows()
+        let rows = app.agent_sidebar_rows();
+        if rows.len() > 1 { rows } else { Vec::new() }
     } else {
         info_rail_agent_rows(app)
     }
@@ -204,19 +200,15 @@ pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
 }
 
 fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
-    app.session_sidebar_lines()
-        .into_iter()
-        .chain(std::iter::once(if app.runtime.memory_enabled {
-            format!(
-                "memory: {} docs · {}",
-                app.runtime.memory_document_count, app.runtime.memory_last_status
-            )
-        } else {
-            "memory: off".to_owned()
-        }))
-        .chain(app.task_memory_sidebar_lines())
-        .chain(app.session_review_sidebar_lines())
-        .collect()
+    let mut lines = app.session_sidebar_lines();
+    if app.runtime.memory_enabled {
+        lines.push(format!(
+            "memory: {} docs · {}",
+            app.runtime.memory_document_count, app.runtime.memory_last_status
+        ));
+    }
+    lines.extend(app.session_review_sidebar_lines());
+    lines
 }
 
 pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
@@ -257,7 +249,6 @@ pub(crate) fn info_rail_detail_lines(app: &AppState) -> Vec<String> {
         ("MCP", model.mcp_lines),
         ("LSP", model.code_lines),
         ("Usage", model.usage_lines),
-        ("Global shortcuts", model.controls),
     ] {
         if values.is_empty() {
             continue;
@@ -296,38 +287,19 @@ fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
 }
 
 fn detail_info_rail_usage_lines(app: &AppState) -> Vec<String> {
-    let mut lines = app.usage_sidebar_lines().to_vec();
+    let mut lines = app.usage_detail_lines();
     if let Some(summary) = latest_context_provenance_summary(
         &app.session_browser.current_entries,
         INFO_RAIL_CONTEXT_SOURCE_LIMIT,
     ) {
-        lines.extend(summary.lines());
+        if let Some(warning) = summary.warning {
+            lines.push(format!("warning: {warning}"));
+        }
+        if let Some(action) = summary.recommended_action {
+            lines.push(format!("action: {action}"));
+        }
     }
     lines
-}
-
-fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
-    if !detail {
-        return vec!["Alt-I details".to_owned()];
-    }
-    let mut controls = global_control_hints(
-        app.runtime.is_busy
-            && !app
-                .approval
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.actions_available()),
-    );
-    if app.selected_timeline_text().is_some() {
-        controls.retain(|hint| !hint.starts_with("Ctrl-C:"));
-        controls.insert(0, "Ctrl-C: copy selection".to_owned());
-        controls.insert(1, "Ctrl-L: copy selection or latest response".to_owned());
-    }
-    if app.has_tool_cards() {
-        controls.retain(|hint| !hint.starts_with("Ctrl-T: details view"));
-        controls.extend(tool_card_control_hints());
-    }
-    controls
 }
 
 #[derive(Debug, Clone)]
@@ -1058,14 +1030,28 @@ fn footer_hints(app: &AppState) -> String {
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!("Ctrl-C stop · {queue}Enter add follow-up · Ctrl-B background · F1 help");
+        return format!(
+            "Ctrl-C stop · {queue}Enter add follow-up · Ctrl-B background · F4 details · F1 help"
+        );
     }
     if app.runtime.is_busy {
+        let tasks =
+            sigil_kernel::TaskStateProjection::from_entries(&app.session_browser.current_entries);
+        let pause = if tasks.current_task().is_some_and(|task| {
+            matches!(
+                task.status,
+                sigil_kernel::TaskRunStatus::Started | sigil_kernel::TaskRunStatus::Running
+            ) && task.direct_execution_admission.is_some()
+        }) {
+            "F5 pause · "
+        } else {
+            ""
+        };
         let queue = queue
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!("Ctrl-C stop · {queue}Enter add follow-up · F1 help");
+        return format!("Ctrl-C stop · {pause}{queue}Enter add follow-up · F4 details · F1 help");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -1089,7 +1075,7 @@ fn footer_hints(app: &AppState) -> String {
     } else {
         "Ctrl-J newline"
     };
-    format!("Enter send · {newline_hint} · F1 help · Ctrl-L copy reply · / commands")
+    format!("Enter send · {newline_hint} · F4 details · F1 help · Ctrl-L copy reply · / commands")
 }
 
 fn composer_agent_panel_child_selected(app: &AppState) -> bool {

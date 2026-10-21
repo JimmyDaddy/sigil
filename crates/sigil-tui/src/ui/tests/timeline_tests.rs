@@ -2392,3 +2392,33 @@ fn timeline_render_options_theme_reaches_visible_content_spans() {
     assert_eq!(notice_code.style.fg, Some(palette.markdown_code_fg));
     assert_eq!(notice_code.style.bg, Some(palette.markdown_code_bg));
 }
+
+#[test]
+fn typed_approval_attention_cannot_be_colored_as_error_by_its_subject_text() {
+    let palette = theme::default_palette();
+    let attention = TimelineEntry {
+        role: TimelineRole::Attention,
+        text: "Approval needed · write deny/error-report.md".to_owned(),
+    };
+    let lines = render_timeline_entry_lines(&attention);
+    assert_eq!(lines[0].spans[0].content.as_ref(), "notice");
+    assert_eq!(lines[0].spans[0].style.fg, Some(palette.status_warning));
+    assert_ne!(lines[0].spans[0].style.fg, Some(palette.status_error));
+    assert!(
+        rendered_plain_lines(&lines)
+            .join("\n")
+            .contains("deny/error-report.md")
+    );
+    let failure = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "error: request failed; outcome unknown".to_owned(),
+    };
+    let error_lines = render_timeline_entry_lines(&failure);
+    assert_eq!(error_lines[0].spans[0].content.as_ref(), "error");
+    assert_eq!(error_lines[0].spans[0].style.fg, Some(palette.status_error));
+    assert!(
+        rendered_plain_lines(&error_lines)
+            .join("\n")
+            .contains("outcome unknown")
+    );
+}

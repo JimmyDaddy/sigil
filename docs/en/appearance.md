@@ -16,7 +16,7 @@ syntax_theme = "auto"
 usage_cost_currency = "auto"
 ```
 
-`info_rail` controls whether the right rail starts visible when width allows. `F2` changes visibility for the current run; `Shift-F2` switches a visible rail between compact and detail. In `/config` → **Appearance**, preview theme choices with `Enter` and save with `Ctrl-S`.
+`info_rail` controls whether the right rail starts visible when width allows. `F2` changes visibility for the current run; `F4` opens scrollable workspace and session details, even with the rail hidden (`Alt-I` / `Shift-F2` also work). Open settings with `F3` (keeping the composer draft) or `/config`, then choose **Appearance**; preview theme choices with `Enter` and save with `Ctrl-S`.
 
 `syntax_theme = "auto"` follows the TUI theme. `usage_cost_currency` affects display only. The complete accepted values are in [Configuration Reference](configuration-reference.md#appearance).
 

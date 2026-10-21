@@ -417,15 +417,26 @@ fn render_review_lines(
     if verification_stale_after_checkpoint {
         lines.push("verification: stale after checkpoint restore".to_owned());
     } else if let Some((run_status, verdict)) = latest.latest_readiness {
-        lines.push(format!(
-            "verification: run {} · {}",
-            run_status_label(run_status),
-            verification_verdict_label(verdict)
-        ));
-    } else {
-        lines.push("verification: not evaluated".to_owned());
+        let inactive_verification =
+            matches!(
+                verdict,
+                VerificationVerdict::NotApplicable | VerificationVerdict::NotEvaluated
+            ) && matches!(run_status, RunStatus::Running | RunStatus::Completed);
+        if !inactive_verification {
+            lines.push(format!(
+                "verification: run {} · {}",
+                run_status_label(run_status),
+                verification_verdict_label(verdict)
+            ));
+        }
     }
-    lines.push(checkpoint_label(latest));
+    if latest.precise_restore_available
+        || latest.limited_restore_evidence
+        || latest.unknown_mutations > 0
+        || latest.checkpoint_restores > 0
+    {
+        lines.push(checkpoint_label(latest));
+    }
     if latest.precise_restore_available
         || latest.limited_restore_evidence
         || latest.unknown_mutations > 0

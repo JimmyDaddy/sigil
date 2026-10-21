@@ -168,11 +168,8 @@ impl EventHandler for AppState {
                 self.last_notice = Some(format!("approve {}", call.name));
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(
-                    TimelineRole::Notice,
-                    format!(
-                        "Approval needed · {} · Y allow once, N deny.",
-                        activity_label
-                    ),
+                    TimelineRole::Attention,
+                    format!("Approval needed · {activity_label}"),
                 );
             }
             RunEvent::ToolApprovalResolved {

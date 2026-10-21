@@ -9,6 +9,7 @@ pub enum TimelineRole {
     Thinking,
     Tool,
     Notice,
+    Attention,
 }
 
 #[derive(Debug, Clone)]

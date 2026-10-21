@@ -50,6 +50,10 @@ fn priced_usage_fixture(mut usage: UsageStats) -> UsageStats {
 fn usage_display_distinguishes_unknown_partial_and_trusted_zero_prices() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert!(
+        app.usage_detail_lines()
+            .contains(&"total spent: not estimated (no usage)".to_owned())
+    );
+    assert!(
         app.usage_sidebar_lines()
             .iter()
             .any(|line| line == "total spent: not estimated (no usage)")
@@ -67,6 +71,14 @@ fn usage_display_distinguishes_unknown_partial_and_trusted_zero_prices() -> Resu
     free = snapshot.apply_to_usage(free)?;
     app.handle(RunEvent::Usage(free))?;
     assert!(
+        app.usage_detail_lines()
+            .contains(&"total spent: USD 0.0000".to_owned())
+    );
+    assert!(
+        app.usage_detail_lines()
+            .contains(&"cache tokens: read 0 · write not reported · miss 10".to_owned())
+    );
+    assert!(
         app.usage_sidebar_lines()
             .iter()
             .any(|line| line == "total spent: USD 0.0000")
@@ -82,6 +94,9 @@ fn usage_display_distinguishes_unknown_partial_and_trusted_zero_prices() -> Resu
             .any(|line| line
                 == "total spent: partially estimated (1/2 requests; pricing unavailable)")
     );
+    assert!(app.usage_detail_lines().contains(
+        &"total spent: partially estimated (1/2 requests; pricing unavailable)".to_owned()
+    ));
     let mut unknown = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     unknown.handle(RunEvent::Usage(UsageStats {
         prompt_tokens: 5,
@@ -98,6 +113,28 @@ fn usage_display_distinguishes_unknown_partial_and_trusted_zero_prices() -> Resu
             .usage_sidebar_lines()
             .iter()
             .any(|line| line.contains("USD 0.0000"))
+    );
+    let details = unknown.usage_detail_lines();
+    assert!(details.contains(&"total spent: not estimated (pricing unavailable)".to_owned()));
+    assert!(!details.iter().any(|line| line.contains("USD 0.0000")));
+    for prefix in [
+        "context:",
+        "session tok:",
+        "cache:",
+        "cache tokens:",
+        "total spent:",
+        "spent since opening:",
+        "balance:",
+    ] {
+        assert!(
+            details.iter().any(|line| line.starts_with(prefix)),
+            "missing category: {prefix}"
+        );
+    }
+    assert!(
+        !details
+            .iter()
+            .any(|line| line.contains("layout") || line.starts_with("cache miss source:"))
     );
     Ok(())
 }
@@ -3396,5 +3433,51 @@ fn usage_sidebar_explains_cache_write_and_proven_local_layout_change() -> Result
             .iter()
             .any(|line| { line == "cache miss source: provider miss without local mutation" })
     );
+    Ok(())
+}
+
+#[test]
+fn usage_details_preserve_observed_zero_cache_write_and_balance_failure() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.runtime.stats.cache_write_observed = true;
+    app.runtime.stats.cache_write_tokens = 0;
+    app.runtime.balance_snapshot.available = false;
+    app.runtime.balance_snapshot.status = "balance request failed: service unavailable".to_owned();
+    let details = app.usage_detail_lines();
+    assert!(details.contains(&"cache tokens: read 0 · write 0 · miss 0".to_owned()));
+    assert!(details.contains(&"balance: balance request failed: service unavailable".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn usage_details_preserve_unknown_capacity_recovery_and_disabled_compaction_warning() -> Result<()>
+{
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    config.compaction.enabled = false;
+    config.compaction.context_window_tokens = Some(100);
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.runtime.provider_name = "unknown-provider".to_owned();
+    app.runtime.model_name = "unknown-model".to_owned();
+    app.runtime.model_route = None;
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        ..UsageStats::default()
+    }))?;
+    assert!(
+        app.usage_detail_lines()
+            .iter()
+            .any(|line| line.starts_with("context:") && line.contains("near limit"))
+    );
+    app.compaction_config.context_window_tokens = None;
+    app.runtime.provider_name = "unknown-provider".to_owned();
+    app.runtime.model_name = "unknown-model".to_owned();
+    app.runtime.model_route = None;
+    assert!(app.usage_detail_lines().iter().any(|line| line
+        == "context: capacity unknown · prompt 100 · set fallback_context_window_tokens"));
     Ok(())
 }

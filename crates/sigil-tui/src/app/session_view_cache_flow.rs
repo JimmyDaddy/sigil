@@ -6,7 +6,6 @@ use sigil_kernel::{
 };
 
 use super::formatting::truncate_session_view_text;
-use super::session_flow::short_session_token;
 use super::{AppState, RunPhase, SessionViewCache, TimelineRole, agent_flow, session_review};
 
 impl AppState {
@@ -76,12 +75,8 @@ impl AppState {
             format!("model: {}", self.runtime.model_name),
             format!("effort: {}", self.runtime.reasoning_effort.as_str()),
             format!("phase: {}", self.run_phase_label()),
-            format!("session: {}", short_session_token(&self.session_id)),
+            format!("session: {}", self.session_id),
         ]
-    }
-
-    pub(crate) fn task_memory_sidebar_lines(&self) -> Vec<String> {
-        vec!["task memory: no active V2 checkpoint".to_owned()]
     }
 
     pub(crate) fn session_review_sidebar_lines(&self) -> Vec<String> {

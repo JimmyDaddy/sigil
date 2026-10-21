@@ -420,7 +420,7 @@ fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> 
         .expect("workspace name")
         .to_string_lossy();
     assert!(rendered.contains(workspace_name.as_ref()));
-    assert!(rendered.contains("Alt-I details"));
+    assert!(rendered.contains("F4 details"));
     assert!(rendered.contains("state: ready"));
     assert!(!rendered.contains("permissions"));
     assert!(!rendered.contains("controls"));
@@ -432,7 +432,15 @@ fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> 
     let mut terminal = Terminal::new(TestBackend::new(140, 60))?;
     terminal.draw(|frame| render(frame, &app))?;
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("LSP"));
+    assert!(rendered.contains("Workspace"));
+    assert!(rendered.contains("Session"));
+    assert!(rendered.contains("Usage"));
+    assert!(rendered.contains("model: deepseek-v4-flash"));
+    assert!(rendered.contains("mode: manual"));
+    assert!(
+        !rendered.contains("LSP"),
+        "disabled LSP should not occupy Details rows"
+    );
     Ok(())
 }
 
@@ -3389,4 +3397,26 @@ fn svg_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[test]
+fn render_info_details_keeps_enabled_lsp_and_its_observed_server_state() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    config.code_intelligence.enabled = true;
+    config.code_intelligence.server_startup = sigil_kernel::CodeIntelStartup::Eager;
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.runtime
+        .code_intelligence_server_lines
+        .insert("rust".to_owned(), "rust-analyzer: ready".to_owned());
+    app.set_terminal_size(140, 60);
+    app.handle_key_event(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))?;
+    let mut terminal = Terminal::new(TestBackend::new(140, 60))?;
+    terminal.draw(|frame| render(frame, &app))?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("LSP"));
+    assert!(rendered.contains("rust-analyzer: ready"));
+    assert!(rendered.contains("Usage"));
+    Ok(())
 }

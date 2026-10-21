@@ -594,3 +594,72 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
     app.clear_checkpoint_interaction();
     Ok(())
 }
+
+#[test]
+fn info_details_review_omits_inapplicable_checks_but_preserves_failed_and_interrupted_runs()
+-> Result<()> {
+    use sigil_kernel::{
+        EvidenceScope, ReadinessEvaluatedEntry, ReadinessEvaluation, RunStatus,
+        VerificationVerdict, VisibleCompletionState,
+    };
+    for (status, verdict, expected) in [
+        (
+            RunStatus::Completed,
+            VerificationVerdict::NotApplicable,
+            None,
+        ),
+        (
+            RunStatus::Completed,
+            VerificationVerdict::NotEvaluated,
+            None,
+        ),
+        (
+            RunStatus::Failed,
+            VerificationVerdict::NotApplicable,
+            Some("verification: run failed · not_applicable"),
+        ),
+        (
+            RunStatus::Interrupted,
+            VerificationVerdict::NotEvaluated,
+            Some("verification: run interrupted · not_evaluated"),
+        ),
+        (
+            RunStatus::Completed,
+            VerificationVerdict::Missing,
+            Some("verification: run completed · missing"),
+        ),
+    ] {
+        let entries = vec![
+            SessionLogEntry::User(ModelMessage::user("Read the changelog")),
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+                scope: EvidenceScope::Run("details-review".to_owned()),
+                evaluation: ReadinessEvaluation {
+                    run_status: status,
+                    verification_verdict: verdict,
+                    visible_state: VisibleCompletionState::CompletedUnverified,
+                    reasons: Vec::new(),
+                    required_actions: Vec::new(),
+                },
+                policy_hash: None,
+                workspace_snapshot_id: None,
+            })),
+        ];
+        let lines =
+            super::super::session_review::session_review_sidebar_lines_from_records(&[], &entries);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("review: turn 1/1"))
+        );
+        assert!(lines.contains(&"changes: no files · tools 0 · writes 0".to_owned()));
+        assert!(!lines.contains(&"rewind: no controlled checkpoint".to_owned()));
+        match expected {
+            Some(expected) => assert!(
+                lines.iter().any(|line| line == expected),
+                "{status:?}/{verdict:?}: {lines:?}"
+            ),
+            None => assert!(!lines.iter().any(|line| line.starts_with("verification:"))),
+        }
+    }
+    Ok(())
+}

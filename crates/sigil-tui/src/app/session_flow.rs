@@ -46,7 +46,7 @@ use audit_log::{
     restored_tool_execution_content, restored_tool_occurrences,
     should_render_restored_tool_execution, unix_time_ms,
 };
-pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
+pub(super) use history::{current_focus_label, session_history_display_label};
 use history::{discard_bootstrap_only_session_file, session_entries_have_resumable_activity};
 #[cfg(test)]
 use history::{
@@ -774,10 +774,6 @@ impl AppState {
         self.events.clear();
         self.reset_scroll();
 
-        self.push_timeline(
-            TimelineRole::System,
-            format!("Resumed {}.", self.session_id),
-        );
         self.push_timeline(TimelineRole::Notice, notice.to_owned());
         self.push_event("session", format!("active {}", self.session_id));
         self.push_event("workspace", self.workspace_root.display().to_string());

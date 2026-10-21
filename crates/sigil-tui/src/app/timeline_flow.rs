@@ -1552,7 +1552,10 @@ impl AppState {
             .skip(index.saturating_add(1))
             .find_map(|entry| match entry.role {
                 TimelineRole::Tool => Some(true),
-                TimelineRole::Notice | TimelineRole::Phase | TimelineRole::System => None,
+                TimelineRole::Notice
+                | TimelineRole::Attention
+                | TimelineRole::Phase
+                | TimelineRole::System => None,
                 TimelineRole::User | TimelineRole::Assistant | TimelineRole::Thinking => {
                     Some(false)
                 }

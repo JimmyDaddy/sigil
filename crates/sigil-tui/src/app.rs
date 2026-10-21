@@ -1618,6 +1618,27 @@ impl AppState {
         lines
     }
 
+    pub(crate) fn code_intelligence_detail_lines(&self) -> Vec<String> {
+        if self.runtime.code_intelligence_server_lines.is_empty()
+            && self.runtime.code_intelligence_diagnostics_line.is_none()
+            && self
+                .runtime
+                .code_intelligence_diagnostics_by_path
+                .is_empty()
+            && !self.config_snapshot.as_ref().is_some_and(|config| {
+                config.code_intelligence.enabled
+                    && config.code_intelligence.server_startup
+                        != sigil_kernel::CodeIntelStartup::Off
+                    && config
+                        .composition
+                        .allows(sigil_kernel::OptionalCapability::CodeIntelligence)
+            })
+        {
+            return Vec::new();
+        }
+        self.code_intelligence_sidebar_lines()
+    }
+
     pub(crate) fn code_intelligence_attention_lines(&self) -> Vec<String> {
         self.runtime
             .code_intelligence_diagnostics_by_path
@@ -1935,6 +1956,10 @@ impl AppState {
             // Artifact search is available when activity focus owns the
             // shortcut or the composer is empty.
             if !composer_owns_shortcut {
+                if command == UiCommand::OpenConfig {
+                    self.open_config_panel();
+                    return Ok(None);
+                }
                 if command == UiCommand::OpenChangeReview {
                     self.open_change_review();
                     return Ok(None);

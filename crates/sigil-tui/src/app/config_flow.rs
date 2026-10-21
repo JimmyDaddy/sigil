@@ -2441,6 +2441,29 @@ impl AppState {
             .collect()
     }
 
+    pub(crate) fn mcp_details_sidebar_lines(&self) -> Vec<String> {
+        let Some(config) = self.config_snapshot.as_ref().filter(|config| {
+            config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Mcp)
+        }) else {
+            return Vec::new();
+        };
+        self.mcp_sidebar_lines()
+            .into_iter()
+            .zip(&config.mcp_servers)
+            .filter_map(|(line, server)| {
+                let status = self
+                    .runtime
+                    .mcp_server_statuses
+                    .get(&server.name)
+                    .cloned()
+                    .unwrap_or_else(|| initial_mcp_server_status(server));
+                (!matches!(status, super::McpServerRuntimeStatus::Deferred)).then_some(line)
+            })
+            .collect()
+    }
+
     pub(crate) fn mcp_attention_sidebar_lines(&self) -> Vec<String> {
         let Some(config) = self.config_snapshot.as_ref().filter(|config| {
             config

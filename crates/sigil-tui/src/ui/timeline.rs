@@ -108,7 +108,7 @@ pub(crate) fn render_timeline_entry_lines_with_options_and_cursor(
         )
     } else if entry.role == TimelineRole::Tool {
         render_tool_entry_lines(entry, options, entry_index)
-    } else if entry.role == TimelineRole::Notice {
+    } else if matches!(entry.role, TimelineRole::Notice | TimelineRole::Attention) {
         render_notice_entry_lines(entry, &options.theme.palette)
     } else {
         let mut lines = vec![timeline_header_line_with_palette(
@@ -531,7 +531,11 @@ pub(crate) fn thinking_has_collapsed_content(text: &str) -> bool {
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {
-    let tone = notice_tone(&entry.text);
+    let tone = if entry.role == TimelineRole::Attention {
+        NoticeTone::Info
+    } else {
+        notice_tone(&entry.text)
+    };
     let accent = notice_accent(tone, palette);
     let body_style = notice_body_style(tone, palette);
     let mut lines = vec![timeline_minor_header_line_with_palette(
@@ -606,7 +610,7 @@ fn render_timeline_content_spans_with_palette(
             markdown_options,
             palette,
         ),
-        TimelineRole::Notice => {
+        TimelineRole::Notice | TimelineRole::Attention => {
             render_inline_markdown_spans_with_palette(line, base_style, markdown_options, palette)
         }
         TimelineRole::User => vec![Span::styled(line.to_owned(), base_style)],
