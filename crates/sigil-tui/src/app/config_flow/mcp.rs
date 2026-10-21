@@ -25,10 +25,10 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
             }
         }
     }
-    lines.push(String::new());
-    lines.push(
-        "Ctrl-N import · Enter next server · Down actions · footer activate/refresh".to_owned(),
-    );
+    if config_state.selected_mcp_server().is_some() {
+        lines.push(String::new());
+        lines.push("Ctrl-N import · Enter next server · Down actions".to_owned());
+    }
     lines.push(render_config_hint_row(
         "Import does not start servers; Ctrl-S saves. Advanced transport fields stay in config; resolved secrets never appear here",
     ));

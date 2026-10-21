@@ -147,6 +147,8 @@ pub(crate) struct ConfigState {
     save_binding: ConfigDraftBinding,
     pub(crate) selected_section: ConfigSection,
     pub(crate) show_advanced: bool,
+    /// None follows the selected field; Some is an explicitly scrolled visual row.
+    pub(crate) detail_scroll: Option<usize>,
     pub(crate) selected_field: Option<ConfigField>,
     pub(crate) footer_selected: bool,
     pub(crate) selected_footer_action: ConfigFooterAction,
@@ -183,6 +185,7 @@ impl ConfigState {
             },
             selected_section,
             show_advanced: false,
+            detail_scroll: None,
             selected_field: ConfigField::fields_for_section(selected_section)
                 .first()
                 .copied(),
@@ -231,6 +234,7 @@ impl ConfigState {
     }
 
     pub(crate) fn set_section(&mut self, section: ConfigSection) {
+        self.detail_scroll = None;
         if !section.is_default_surface() {
             self.show_advanced = true;
         }
@@ -248,6 +252,7 @@ impl ConfigState {
     }
 
     pub(crate) fn toggle_advanced_surface(&mut self) {
+        self.detail_scroll = None;
         self.show_advanced = !self.show_advanced;
         if !self.show_advanced && !self.selected_section.is_default_surface() {
             self.set_section(ConfigSection::Provider);
@@ -296,6 +301,7 @@ impl ConfigState {
     }
 
     pub(crate) fn move_field(&mut self, forward: bool) -> ConfigFieldMove {
+        self.detail_scroll = None;
         if self.section_collection_is_empty(self.selected_section) {
             return ConfigFieldMove::Unavailable;
         }
@@ -337,6 +343,7 @@ impl ConfigState {
             return false;
         }
         self.selected_field = Some(field);
+        self.detail_scroll = None;
         self.footer_selected = false;
         true
     }
@@ -346,6 +353,7 @@ impl ConfigState {
             return false;
         };
         self.selected_field = Some(field);
+        self.detail_scroll = None;
         self.footer_selected = false;
         true
     }

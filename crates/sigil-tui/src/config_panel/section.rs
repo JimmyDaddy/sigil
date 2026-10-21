@@ -54,6 +54,20 @@ impl ConfigSection {
         Self::DEFAULT_FLOW.contains(&self)
     }
 
+    pub(crate) fn page_keys_scroll_details(self) -> bool {
+        matches!(
+            self,
+            Self::Storage
+                | Self::Permissions
+                | Self::Web
+                | Self::Memory
+                | Self::Compaction
+                | Self::CodeIntelligence
+                | Self::Terminal
+                | Self::Appearance
+        )
+    }
+
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Provider => "Provider",

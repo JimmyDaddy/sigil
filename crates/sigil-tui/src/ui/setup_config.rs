@@ -34,6 +34,157 @@ pub(super) const CONFIG_FOOTER_COMPACT_WIDTH: u16 = 76;
 const CONFIG_SCROLL_MARKER_WIDTH: u16 = 8;
 const CONFIG_STATUS_MARKER_WIDTH: usize = 2;
 
+#[derive(Default, Clone, Copy)]
+struct ConfigHeaderNavigation {
+    show_advanced: bool,
+    page_scroll: bool,
+}
+
+fn config_advanced_toggle_label(advanced: bool) -> &'static str {
+    if advanced {
+        "[Ctrl-A basic]"
+    } else {
+        "[Ctrl-A advanced]"
+    }
+}
+
+pub(super) fn config_advanced_toggle_area(area: Rect, advanced: bool) -> Option<Rect> {
+    let width = super::text::terminal_cell_width(config_advanced_toggle_label(advanced)) as u16;
+    // The header reserves the right edge for its longest save state.
+    (area.width >= 9 + width + 2 + 13 && area.height > 0).then_some(Rect::new(
+        area.x.saturating_add(9),
+        area.y,
+        width,
+        1,
+    ))
+}
+
+pub(super) struct ConfigVisualRows {
+    pub rows: Vec<Line<'static>>,
+    pub logical_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl ConfigVisualRows {
+    pub fn selected_rows(&self, logical: &[String]) -> Vec<usize> {
+        logical
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("> ") || line.starts_with("selected:"))
+            .flat_map(|(index, _)| self.logical_ranges[index].clone())
+            .collect()
+    }
+
+    pub fn scroll_offset(&self, height: u16, selected: &[usize], manual: Option<usize>) -> usize {
+        manual
+            .map(|offset| offset.min(self.rows.len().saturating_sub(height as usize)))
+            .unwrap_or_else(|| config_scroll_offset(self.rows.len(), height, selected))
+    }
+}
+
+/// Preserve the full source of read-only text before wrapping. Editable rows keep
+/// their action chip; their complete display value is available in advanced Details.
+pub(super) fn config_visual_rows(
+    logical: &[String],
+    width: usize,
+    context_only: bool,
+    palette: &ThemePalette,
+) -> ConfigVisualRows {
+    let details = logical.iter().position(|line| line == "[details]");
+    let mut rows = Vec::new();
+    let mut logical_ranges = Vec::with_capacity(logical.len());
+    for (index, source) in logical.iter().enumerate() {
+        let start = rows.len();
+        let context = context_only || details.is_some_and(|details| index > details);
+        let full_width = super::text::terminal_cell_width(source)
+            .max(source.chars().count())
+            .saturating_add(64);
+        let line = if context {
+            render_config_context_line_with_palette(source, full_width, palette)
+        } else {
+            let compact = index == 1
+                || source.starts_with("  ")
+                || source.starts_with("> ")
+                || source.starts_with('[')
+                || source.starts_with("preview ");
+            render_config_line_with_palette(
+                index,
+                source,
+                if compact { width } else { full_width },
+                palette,
+            )
+        };
+        rows.extend(wrap_config_visual_line(line, width.max(1)));
+        logical_ranges.push(start..rows.len());
+    }
+    ConfigVisualRows {
+        rows,
+        logical_ranges,
+    }
+}
+
+fn wrap_config_visual_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let mut spans = Vec::new();
+    let mut used = 0;
+    let mut ended_with_line_break = false;
+    for span in line.spans {
+        for word in span.content.split_inclusive(char::is_whitespace) {
+            ended_with_line_break = word.ends_with(['\n', '\r']);
+            let cells = super::text::terminal_cell_width(word);
+            if used > 0 && used + cells > width {
+                rows.push(Line::from(std::mem::take(&mut spans)).style(line.style));
+                used = 0;
+            }
+            if cells > width || word.contains(['\n', '\r']) {
+                let mut source = std::mem::take(&mut spans);
+                source.push(Span::styled(word.to_owned(), span.style));
+                let wrapped = super::text::wrap_terminal_lines(vec![Line::from(source)], width);
+                let last = wrapped.len().saturating_sub(1);
+                for (index, part) in wrapped.into_iter().enumerate() {
+                    if index == last {
+                        used = part.width();
+                        spans.extend(part.spans);
+                    } else {
+                        rows.push(part.style(line.style));
+                    }
+                }
+            } else {
+                spans.push(Span::styled(word.to_owned(), span.style));
+                used += cells;
+            }
+        }
+    }
+    if !spans.is_empty() || rows.is_empty() || ended_with_line_break {
+        rows.push(Line::from(spans).style(line.style));
+    }
+    rows
+}
+
+pub(super) fn config_step_hit_spans(source: &str, width: usize) -> Vec<(usize, usize, usize)> {
+    let palette = theme::default_palette();
+    let rendered =
+        render_config_step_line_with_palette(source, palette.config_primary, width, &palette);
+    let mut x = 0;
+    rendered
+        .spans
+        .iter()
+        .filter_map(|span| {
+            let start = x;
+            let cells = super::text::terminal_cell_width(&span.content);
+            x += cells;
+            let section = ConfigSection::FLOW
+                .iter()
+                .find(|section| section.title().eq_ignore_ascii_case(span.content.trim()))?;
+            Some((
+                section.flow_index()?,
+                start,
+                cells.min(width.saturating_sub(start)),
+            ))
+        })
+        .filter(|(_, _, width)| *width > 0)
+        .collect()
+}
+
 #[cfg(test)]
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
@@ -117,9 +268,14 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
         .saturating_sub(footer_gap);
     let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
-        config_panel_height(&main_lines, &context_lines, panel_max_height)
+        config_panel_height(
+            &main_lines,
+            &context_lines,
+            content_area.width,
+            panel_max_height,
+        )
     } else {
-        config_panel_height(&main_lines, &[], panel_max_height)
+        config_panel_height(&main_lines, &[], content_area.width, panel_max_height)
     };
     let panel_area = top_aligned_config_area(content_area, panel_height);
 
@@ -132,10 +288,24 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
                 Constraint::Length(CONFIG_DETAIL_PANEL_WIDTH),
             ])
             .split(panel_area);
-        render_config_panel(frame, content[0], main_lines, panel_bg, palette);
+        render_config_panel(
+            frame,
+            content[0],
+            main_lines,
+            app.config_detail_scroll(),
+            panel_bg,
+            palette,
+        );
         render_config_context_panel(frame, content[2], app, context_lines, panel_bg, palette);
     } else {
-        render_config_panel(frame, panel_area, main_lines, panel_bg, palette);
+        render_config_panel(
+            frame,
+            panel_area,
+            main_lines,
+            app.config_detail_scroll(),
+            panel_bg,
+            palette,
+        );
     }
     if footer_height > 0 {
         let footer_area = Rect {
@@ -235,9 +405,14 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
         .saturating_sub(footer_gap);
     let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
-        config_panel_height(&main_lines, &context_lines, panel_max_height)
+        config_panel_height(
+            &main_lines,
+            &context_lines,
+            content_area.width,
+            panel_max_height,
+        )
     } else {
-        config_panel_height(&main_lines, &[], panel_max_height)
+        config_panel_height(&main_lines, &[], content_area.width, panel_max_height)
     };
     let panel_area = top_aligned_config_area(content_area, panel_height);
     if show_context_panel {
@@ -249,7 +424,14 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
                 Constraint::Length(CONFIG_DETAIL_PANEL_WIDTH),
             ])
             .split(panel_area);
-        render_config_panel(frame, content[0], main_lines, panel_bg, palette);
+        render_config_panel(
+            frame,
+            content[0],
+            main_lines,
+            config.detail_scroll,
+            panel_bg,
+            palette,
+        );
         render_config_context_panel_surface(
             frame,
             content[2],
@@ -259,7 +441,14 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
             palette,
         );
     } else {
-        render_config_panel(frame, panel_area, main_lines, panel_bg, palette);
+        render_config_panel(
+            frame,
+            panel_area,
+            main_lines,
+            config.detail_scroll,
+            panel_bg,
+            palette,
+        );
     }
     if footer_height > 0 {
         let footer_area = Rect {
@@ -281,6 +470,10 @@ fn render_config_header_surface(
 ) {
     let lines = config_header_lines(
         &config.file_label,
+        ConfigHeaderNavigation {
+            show_advanced: config.show_advanced,
+            page_scroll: config.page_scroll_keys,
+        },
         config.dirty,
         config.save_error.as_deref(),
         config
@@ -297,12 +490,14 @@ fn render_config_header_surface(
 
 fn config_header_lines(
     file_label: &str,
+    navigation: ConfigHeaderNavigation,
     dirty: bool,
     save_error: Option<&str>,
     close_warning: Option<&str>,
     width: usize,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    let show_advanced = navigation.show_advanced;
     if width == 0 {
         return Vec::new();
     }
@@ -330,6 +525,23 @@ fn config_header_lines(
                 .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
         );
+        let toggle = config_advanced_toggle_label(show_advanced);
+        if config_advanced_toggle_area(
+            Rect::new(0, 0, width.min(u16::MAX as usize) as u16, 1),
+            show_advanced,
+        )
+        .is_some()
+        {
+            push_config_header_span(&mut spans, &mut remaining, " ", Style::default());
+            push_config_header_span(
+                &mut spans,
+                &mut remaining,
+                toggle,
+                Style::default()
+                    .fg(palette.config_primary)
+                    .bg(palette.config_tab_bg),
+            );
+        }
         let gap = " ".repeat(remaining.saturating_sub(state_width));
         push_config_header_span(&mut spans, &mut remaining, &gap, Style::default());
     }
@@ -350,7 +562,11 @@ fn config_header_lines(
         ))
     } else {
         let context = if matches!(file_label, "" | "config" | "sigil.toml") {
-            "Tab section · Up/Down field · Enter edit".to_owned()
+            if navigation.page_scroll {
+                "Tab section · Up/Down field · Enter edit · PgUp/PgDn scroll".to_owned()
+            } else {
+                "Tab section · Up/Down field · Enter edit · Ctrl-Up/Down scroll".to_owned()
+            }
         } else {
             format!("Config: {file_label}")
         };
@@ -365,58 +581,44 @@ fn config_header_lines(
 fn render_config_context_panel_surface(
     frame: &mut Frame,
     area: Rect,
-    _config: &ConfigSurface,
+    config: &ConfigSurface,
     context_lines: Vec<String>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
     let lines = if context_lines.is_empty() {
-        vec!["Move to a field to inspect its key and behavior.".to_owned()]
+        vec!["Move to a field to inspect its behavior.".to_owned()]
     } else {
         context_lines
     };
-    render_context_panel_lines(frame, area, lines, panel_bg, palette);
+    render_context_panel_lines(frame, area, lines, config.detail_scroll, panel_bg, palette);
 }
 
 fn render_context_panel_lines(
     frame: &mut Frame,
     area: Rect,
     lines: Vec<String>,
+    manual_scroll: Option<usize>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
-    let selected_line_indexes = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| line.starts_with("selected:").then_some(index))
-        .collect::<Vec<_>>();
     let block = config_block_with_palette("Details", palette.config_detail, panel_bg, palette);
     let content_area = block.inner(area);
-    let content_width = content_area.width as usize;
-    let detail = lines
-        .into_iter()
-        .map(|line| render_config_context_line_with_palette(&line, content_width, palette))
-        .collect::<Vec<_>>();
-    let scroll_offset =
-        config_scroll_offset(detail.len(), content_area.height, &selected_line_indexes);
+    let visual = config_visual_rows(&lines, content_area.width as usize, true, palette);
+    let selected = visual.selected_rows(&lines);
+    let offset = visual.scroll_offset(content_area.height, &selected, manual_scroll);
     frame.render_widget(block, area);
     render_config_scroll_markers(
         frame,
         area,
-        detail.len(),
+        visual.rows.len(),
         content_area.height,
-        scroll_offset,
+        offset,
         palette,
     );
-    render_config_selected_row_bgs(
-        frame,
-        content_area,
-        &selected_line_indexes,
-        scroll_offset,
-        palette,
-    );
+    render_config_selected_row_bgs(frame, content_area, &selected, offset, palette);
     frame.render_widget(
-        Paragraph::new(Text::from(detail)).scroll((scroll_offset.min(u16::MAX as usize) as u16, 0)),
+        Paragraph::new(Text::from(visual.rows)).scroll((offset.min(u16::MAX as usize) as u16, 0)),
         content_area,
     );
 }
@@ -432,7 +634,8 @@ fn render_config_footer_surface(
     let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
     let mut action_spans = Vec::new();
     let mut actions_width = 0usize;
-    for (index, label) in config.footer_actions.iter().enumerate() {
+    for (index, action) in config.footer_actions.iter().enumerate() {
+        let label = &action.label;
         if index > 0 {
             action_spans.push(Span::raw(" "));
             actions_width += 1;
@@ -441,6 +644,7 @@ fn render_config_footer_surface(
         action_spans.push(footer_action_span(
             label,
             is_selected,
+            action.enabled,
             footer_action_accent_with_palette(label, palette),
             compact,
             palette,
@@ -525,6 +729,12 @@ fn render_config_header(
         .then(|| app.config_footer_hint());
     let lines = config_header_lines(
         file_label,
+        ConfigHeaderNavigation {
+            show_advanced: app.config_show_advanced(),
+            page_scroll: app
+                .config_selected_section()
+                .is_some_and(|section| section.page_keys_scroll_details()),
+        },
         app.config_is_dirty(),
         app.config_save_error(),
         close_warning.as_deref(),
@@ -559,11 +769,38 @@ fn push_config_header_span(
 pub(super) fn config_panel_height(
     main_lines: &[String],
     context_lines: &[String],
+    width: u16,
     max_height: u16,
 ) -> u16 {
-    let content_rows = main_lines.len().max(context_lines.len()).max(8) as u16;
-    let minimum = 10.min(max_height);
-    content_rows.saturating_add(2).min(max_height).max(minimum)
+    let palette = theme::default_palette();
+    let split = width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    let main_width = if split {
+        width.saturating_sub(CONFIG_DETAIL_PANEL_WIDTH + 2)
+    } else {
+        width
+    };
+    let main = config_visual_rows(
+        main_lines,
+        main_width.saturating_sub(2) as usize,
+        false,
+        &palette,
+    );
+    let context = config_visual_rows(
+        context_lines,
+        CONFIG_DETAIL_PANEL_WIDTH.saturating_sub(2) as usize,
+        true,
+        &palette,
+    );
+    let content_rows = main
+        .rows
+        .len()
+        .max(context.rows.len())
+        .max(8)
+        .min(u16::MAX as usize) as u16;
+    content_rows
+        .saturating_add(2)
+        .min(max_height)
+        .max(10.min(max_height))
 }
 
 pub(super) fn top_aligned_config_area(area: Rect, height: u16) -> Rect {
@@ -577,41 +814,17 @@ fn render_config_panel(
     frame: &mut Frame,
     area: Rect,
     lines: Vec<String>,
+    manual_scroll: Option<usize>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
-    let details_index = lines.iter().position(|line| line == "[details]");
-    let selected_line_indexes = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            ((line.starts_with("> ") && line.contains(':')) || line.starts_with("selected:"))
-                .then_some(index)
-        })
-        .collect::<Vec<_>>();
     let block = config_block_with_palette("", palette.config_primary, panel_bg, palette);
     let content_area = block.inner(area);
-    let content_width = content_area.width as usize;
-    let detail = lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if details_index == Some(index) {
-                render_config_subsection_line_with_palette(
-                    &line,
-                    palette.config_detail,
-                    content_width,
-                    palette,
-                )
-            } else if details_index.is_some_and(|details_index| index > details_index) {
-                render_config_context_line_with_palette(&line, content_width, palette)
-            } else {
-                render_config_line_with_palette(index, &line, content_width, palette)
-            }
-        })
-        .collect::<Vec<_>>();
+    let visual = config_visual_rows(&lines, content_area.width as usize, false, palette);
+    let selected_line_indexes = visual.selected_rows(&lines);
     let scroll_offset =
-        config_scroll_offset(detail.len(), content_area.height, &selected_line_indexes);
+        visual.scroll_offset(content_area.height, &selected_line_indexes, manual_scroll);
+    let detail = visual.rows;
     frame.render_widget(block, area);
     render_config_scroll_markers(
         frame,
@@ -666,51 +879,24 @@ fn render_config_selected_row_bgs(
 fn render_config_context_panel(
     frame: &mut Frame,
     area: Rect,
-    _app: &AppState,
+    app: &AppState,
     context_lines: Vec<String>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
     let lines = if context_lines.is_empty() {
-        vec!["Move to a field to inspect its key and behavior.".to_owned()]
+        vec!["Move to a field to inspect its behavior.".to_owned()]
     } else {
         context_lines
     };
-    let selected_line_indexes = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| line.starts_with("selected:").then_some(index))
-        .collect::<Vec<_>>();
-    let block = config_block_with_palette("Details", palette.config_detail, panel_bg, palette);
-    let content_area = block.inner(area);
-    let content_width = content_area.width as usize;
-    let detail = lines
-        .into_iter()
-        .map(|line| render_config_context_line_with_palette(&line, content_width, palette))
-        .collect::<Vec<_>>();
-    let scroll_offset =
-        config_scroll_offset(detail.len(), content_area.height, &selected_line_indexes);
-    frame.render_widget(block, area);
-    render_config_scroll_markers(
+    render_context_panel_lines(
         frame,
         area,
-        detail.len(),
-        content_area.height,
-        scroll_offset,
+        lines,
+        app.config_detail_scroll(),
+        panel_bg,
         palette,
     );
-    render_config_selected_row_bgs(
-        frame,
-        content_area,
-        &selected_line_indexes,
-        scroll_offset,
-        palette,
-    );
-
-    let widget =
-        Paragraph::new(Text::from(detail)).scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
-
-    frame.render_widget(widget, content_area);
 }
 
 pub(super) fn config_scroll_offset(
@@ -852,6 +1038,7 @@ fn render_config_footer(
         action_spans.push(footer_action_span(
             label,
             is_selected,
+            app.config_footer_action_available(index),
             footer_action_accent_with_palette(label, palette),
             compact,
             palette,
@@ -927,12 +1114,15 @@ fn footer_action_accent_with_palette(label: &str, palette: &ThemePalette) -> Col
 fn footer_action_span(
     label: &str,
     selected: bool,
+    enabled: bool,
     accent: Color,
     compact: bool,
     palette: &ThemePalette,
 ) -> Span<'static> {
     let text = footer_action_text(label, selected, compact);
-    let style = if selected {
+    let style = if !enabled {
+        Style::default().fg(palette.text_disabled)
+    } else if selected {
         Style::default()
             .fg(palette.button_selected_fg)
             .bg(accent)
@@ -1168,21 +1358,34 @@ fn render_config_line_with_palette(
     {
         return line;
     }
+    // Line::styled removes newlines before the visual-row mapper can preserve them.
     if line.starts_with("Type value")
         || line.starts_with("Tab ")
         || line.starts_with("Enter ")
         || line.starts_with("Ctrl-")
     {
-        return Line::styled(line.to_owned(), Style::default().fg(palette.config_warning));
+        return Line::from(Span::styled(
+            line.to_owned(),
+            Style::default().fg(palette.config_warning),
+        ));
     }
     if config_line_is_meta(line) {
-        return Line::styled(line.to_owned(), Style::default().fg(palette.text_muted));
+        return Line::from(Span::styled(
+            line.to_owned(),
+            Style::default().fg(palette.text_muted),
+        ));
     }
     if config_line_looks_like_field(line) {
-        return Line::styled(line.to_owned(), Style::default().fg(palette.text_primary));
+        return Line::from(Span::styled(
+            line.to_owned(),
+            Style::default().fg(palette.text_primary),
+        ));
     }
 
-    Line::styled(line.to_owned(), Style::default().fg(palette.text_secondary))
+    Line::from(Span::styled(
+        line.to_owned(),
+        Style::default().fg(palette.text_secondary),
+    ))
 }
 
 fn render_theme_preview_line_with_palette(

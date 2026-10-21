@@ -52,7 +52,5 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
             ));
         }
     }
-    lines.push(String::new());
-    lines.push("Up/Down skill  PgUp/PgDn wrap  footer use".to_owned());
     lines.extend(render_config_selection_details(config_state));
 }

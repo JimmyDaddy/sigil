@@ -105,8 +105,17 @@ fn config_surface(app: &AppState) -> Option<ConfigSurface> {
         footer_actions: app
             .config_footer_action_labels()
             .into_iter()
-            .map(str::to_owned)
+            .enumerate()
+            .map(|(index, label)| crate::surface::ConfigActionSurface {
+                label: label.to_owned(),
+                enabled: app.config_footer_action_available(index),
+            })
             .collect(),
+        show_advanced: app.config_show_advanced(),
+        page_scroll_keys: app
+            .config_selected_section()
+            .is_some_and(|section| section.page_keys_scroll_details()),
+        detail_scroll: app.config_detail_scroll(),
         save_error: app.config_save_error().map(str::to_owned),
         dirty: app.config_is_dirty(),
         close_guard_armed: app.config_close_guard_armed(),

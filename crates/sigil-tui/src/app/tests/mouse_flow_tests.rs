@@ -546,6 +546,86 @@ fn mouse_click_config_section_selects_step() -> Result<()> {
 }
 
 #[test]
+fn mouse_config_advanced_toggle_matches_ctrl_a_without_editing_the_draft() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 24);
+    app.open_config_panel();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    let entry = layout
+        .config_hit_areas
+        .as_ref()
+        .expect("settings")
+        .advanced_toggle
+        .expect("visible more entry");
+    assert_eq!(
+        layout.hit_target(entry.x, entry.y),
+        HitTarget::ConfigAdvancedToggle
+    );
+    assert!(matches!(
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, entry.x, entry.y), &layout)?,
+        AppMouseOutcome::Redraw
+    ));
+    assert!(app.config_show_advanced());
+    assert!(app.config_detail_lines()[0].contains("1/13"));
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
+    assert!(!app.config_show_advanced());
+    assert!(!app.config_is_dirty());
+    assert!(app.config_detail_lines()[0].contains("1/7"));
+    Ok(())
+}
+
+#[test]
+fn mouse_config_disabled_object_action_is_not_a_target_and_stale_target_is_a_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 24);
+    app.open_config_panel();
+    for section in [
+        ConfigSection::Agents,
+        ConfigSection::Skills,
+        ConfigSection::Plugins,
+        ConfigSection::Mcp,
+    ] {
+        let state = app.config_state.as_mut().expect("settings");
+        state.agent_profiles.clear();
+        state.skill_descriptors.clear();
+        state.plugin_manifests.clear();
+        state.draft.mcp_servers.clear();
+        state.set_section(section);
+        let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+        let areas = layout.config_hit_areas.as_mut().expect("settings hit map");
+        assert!(!areas.footer_actions.iter().any(|action| action.index == 0));
+        let mut stale = areas.footer_actions[0];
+        stale.index = 0;
+        areas.footer_actions.insert(0, stale);
+        let outcome = app.handle_mouse_event(
+            mouse(MouseInputKind::LeftDown, stale.area.x, stale.area.y),
+            &layout,
+        )?;
+        assert!(matches!(outcome, AppMouseOutcome::Noop));
+        assert!(!app.has_modal());
+        assert!(!app.config_is_dirty());
+    }
+    Ok(())
+}
+
+#[test]
+fn mouse_config_wheel_scrolls_full_text_and_keyboard_field_focus_resets_it() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 24);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("settings")
+        .set_section(ConfigSection::Permissions);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+    app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, 20, 12), &layout)?;
+    assert!(app.config_detail_scroll().is_some_and(|offset| offset > 0));
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.config_detail_scroll(), None);
+    Ok(())
+}
+
+#[test]
 fn mouse_click_config_field_selects_then_activates() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);

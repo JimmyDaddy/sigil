@@ -1,4 +1,4 @@
-use super::ConfigSection;
+use super::{ConfigSection, ConfigState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigFooterAction {
@@ -22,6 +22,20 @@ pub(crate) enum ConfigFooterAction {
 }
 
 impl ConfigFooterAction {
+    pub(crate) fn is_available(self, state: &ConfigState) -> bool {
+        match self {
+            Self::TrustAgent | Self::BlockAgent => state.selected_agent().is_some(),
+            Self::UseSkill => state.selected_skill().is_some(),
+            Self::ApprovePlugin | Self::DenyPlugin => state.selected_plugin().is_some(),
+            Self::ActivateMcp => state.selected_mcp_server().is_some(),
+            #[cfg(test)]
+            Self::ToggleAgentEnabled | Self::ToggleAgentUser | Self::ToggleAgentModel => {
+                state.selected_agent().is_some()
+            }
+            _ => true,
+        }
+    }
+
     const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
     const STORAGE_ORDER: [Self; 4] = [
         Self::CleanMutationArtifacts,

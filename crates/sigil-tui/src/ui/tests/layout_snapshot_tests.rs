@@ -1171,20 +1171,22 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
 
-    assert!(config_section_hit_areas(&[], Rect::new(0, 0, 12, 2), 0).is_empty());
+    assert!(config_section_hit_areas(&[], Rect::new(0, 0, 12, 2), 0, &[]).is_empty());
     assert!(
         config_section_hit_areas(
             &["title".to_owned(), "provider".to_owned()],
             Rect::new(0, 0, 12, 1),
             2,
+            &[0..1, 1..2],
         )
         .is_empty()
     );
     assert!(
         config_section_hit_areas(
             &["title".to_owned(), "            provider".to_owned()],
-            Rect::new(0, 0, 4, 2),
+            Rect::new(0, 0, 0, 2),
             0,
+            &[0..1, 1..2],
         )
         .is_empty()
     );
@@ -1195,6 +1197,7 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
             &["Provider: deepseek".to_owned()],
             Rect::new(0, 0, 24, 3),
             1,
+            &[0..1],
         )
         .is_empty()
     );
@@ -1208,6 +1211,7 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
             ],
             Rect::new(0, 0, 24, 1),
             0,
+            &[0..1, 1..2, 2..3],
         )
         .is_empty()
     );
@@ -1215,6 +1219,76 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
         config_footer_action_hit_areas(Rect::new(0, 0, 1, 1), &app).len(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn config_wrapped_logical_rows_and_rendered_tab_window_share_the_hit_map() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.composer.input = "/config".to_owned();
+    app.submit_input()?;
+    app.select_config_section_for_test(ConfigSection::Plugins);
+    let logical = vec![
+        "Provider 1/7 · provider settings".to_owned(),
+        "[provider] permissions web memory compaction mcp appearance".to_owned(),
+        "i A full explanation occupies several visual rows before the actual editable field below it.".to_owned(),
+        "> Model: own-model  [choose]".to_owned(),
+    ];
+    app.select_config_section_for_test(ConfigSection::Provider);
+    let visual = config_visual_rows(&logical, 38, false, &super::super::theme::default_palette());
+    let viewport = Rect::new(4, 5, 38, 20);
+    let hits = config_field_hit_areas(&app, &logical, viewport, 0, &visual.logical_ranges);
+    let model_index = ConfigField::fields_for_section(ConfigSection::Provider)
+        .iter()
+        .position(|field| *field == ConfigField::ProviderModel)
+        .expect("model field");
+    let model = hits
+        .iter()
+        .find(|hit| hit.index == model_index)
+        .expect("model hit");
+    assert!(visual.logical_ranges[2].len() > 1);
+    assert_eq!(
+        model.area.y,
+        viewport.y + visual.logical_ranges[3].start as u16
+    );
+    let clipped = config_field_hit_areas(
+        &app,
+        &logical,
+        Rect::new(4, 5, 38, 3),
+        visual.logical_ranges[3].start,
+        &visual.logical_ranges,
+    );
+    assert_eq!(
+        clipped
+            .iter()
+            .find(|hit| hit.index == model_index)
+            .expect("scrolled model")
+            .area
+            .y,
+        5
+    );
+
+    app.select_config_section_for_test(ConfigSection::Plugins);
+    let lines = app.config_detail_lines();
+    let visual = config_visual_rows(&lines, 70, false, &super::super::theme::default_palette());
+    let tabs = config_section_hit_areas(&lines, Rect::new(0, 0, 70, 20), 0, &visual.logical_ranges);
+    let rendered = visual.rows[visual.logical_ranges[1].start]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(rendered.starts_with("..."));
+    for tab in tabs {
+        let actual = rendered
+            .chars()
+            .skip(tab.area.x as usize)
+            .take(tab.area.width as usize)
+            .collect::<String>();
+        assert_eq!(
+            actual.trim(),
+            ConfigSection::FLOW[tab.index].title().to_ascii_lowercase()
+        );
+    }
     Ok(())
 }
 

@@ -3,6 +3,155 @@ use crate::config_panel::CONFIG_CONTROLS_HINT;
 use super::*;
 
 #[test]
+fn config_visual_rows_preserve_full_boundaries_paths_and_logical_focus() {
+    let palette = theme::default_palette();
+    let boundary = "independent policy; deny/ask cannot be widened";
+    let path = "/own-fixture/state/目录/with-a-long-unbroken-component/input-history.jsonl";
+    let logical = vec![
+        "Permissions 2/7 · tool permissions".to_owned(),
+        "provider [permissions] web memory compaction mcp appearance".to_owned(),
+        format!("- Network boundary: {boundary}"),
+        format!("- Input history: {path}"),
+        "> Mode: manual  [change]".to_owned(),
+        "[details]".to_owned(),
+        "selected: Mode".to_owned(),
+        "The complete rule remains visible and does not change the permission boundary.".to_owned(),
+    ];
+    let visual = config_visual_rows(&logical, 38, false, &palette);
+    assert!(visual.rows.iter().all(|row| row.width() <= 38));
+    for (index, expected) in [(2, boundary), (3, path)] {
+        let actual = visual.rows[visual.logical_ranges[index].clone()]
+            .iter()
+            .map(line_text)
+            .collect::<String>();
+        assert!(actual.contains(expected), "full read-only source: {actual}");
+        assert!(!actual.contains("..."));
+        assert!(visual.logical_ranges[index].len() > 1);
+    }
+    let selected = visual.selected_rows(&logical);
+    assert!(selected.contains(&visual.logical_ranges[4].start));
+    let offset = visual.scroll_offset(5, &selected, None);
+    assert!((offset..offset + 5).contains(&visual.logical_ranges[4].start));
+    assert_eq!(
+        visual.scroll_offset(5, &selected, Some(usize::MAX)),
+        visual.rows.len() - 5
+    );
+    assert_eq!(visual.scroll_offset(5, &selected, Some(0)), 0);
+}
+
+#[test]
+fn config_visual_context_wraps_words_and_retains_the_whole_help_and_raw_key() {
+    let combining = "e\u{301}".repeat(100);
+    let logical = vec![
+        "selected: Model".to_owned(),
+        "Change the saved default without rewriting the current session. All existing routes remain available.".to_owned(),
+        "key: provider.with_a_long_unbroken_metadata_key".to_owned(),
+        format!("value: {combining}"),
+    ];
+    let visual = config_visual_rows(&logical, 28, true, &theme::default_palette());
+    let help = visual.rows[visual.logical_ranges[1].clone()]
+        .iter()
+        .map(line_text)
+        .collect::<String>();
+    assert_eq!(help, format!("i {}", logical[1]));
+    assert!(visual.rows.iter().all(|row| row.width() <= 28));
+    assert!(
+        visual.rows[visual.logical_ranges[1].clone()]
+            .iter()
+            .any(|row| line_text(row).contains("rewriting"))
+    );
+    let raw_key = visual.rows[visual.logical_ranges[2].clone()]
+        .iter()
+        .map(line_text)
+        .collect::<String>();
+    assert!(raw_key.contains("provider.with_a_long_unbroken_metadata_key"));
+    let full_value = visual.rows[visual.logical_ranges[3].clone()]
+        .iter()
+        .map(line_text)
+        .collect::<String>();
+    assert!(full_value.contains(&combining));
+    let multiline = wrap_config_visual_line(
+        Line::from(Span::raw("first failure line\nsecond failure line")),
+        30,
+    );
+    assert_eq!(
+        multiline.iter().map(line_text).collect::<Vec<_>>(),
+        vec!["first failure line", "second failure line"]
+    );
+    let blank_lines = wrap_config_visual_line(Line::from(Span::raw("first\n\nlast\n")), 30);
+    assert_eq!(
+        blank_lines.iter().map(line_text).collect::<Vec<_>>(),
+        vec!["first", "", "last", ""]
+    );
+    let source = vec![
+        "Settings".to_owned(),
+        "[provider] permissions".to_owned(),
+        "first failure line\nsecond failure line".to_owned(),
+        "! first error line\nsecond error line".to_owned(),
+    ];
+    let visual = config_visual_rows(&source, 40, false, &theme::default_palette());
+    assert_eq!(
+        visual.rows[visual.logical_ranges[2].clone()]
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>(),
+        vec!["first failure line", "second failure line"]
+    );
+    assert_eq!(
+        visual.rows[visual.logical_ranges[3].clone()]
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>(),
+        vec!["! first error line", "second error line"]
+    );
+}
+
+#[test]
+fn config_advanced_entry_geometry_matches_the_visible_header_control() {
+    let palette = theme::default_palette();
+    for advanced in [false, true] {
+        let area = Rect::new(3, 2, 72, 3);
+        let hit =
+            config_advanced_toggle_area(area, advanced).expect("advanced entry at 80 columns");
+        let lines = config_header_lines(
+            "sigil.toml",
+            ConfigHeaderNavigation {
+                show_advanced: advanced,
+                ..Default::default()
+            },
+            false,
+            None,
+            None,
+            72,
+            &palette,
+        );
+        let title = line_text(&lines[0]);
+        let expected = config_advanced_toggle_label(advanced);
+        assert_eq!(
+            title
+                .chars()
+                .skip((hit.x - area.x) as usize)
+                .take(hit.width as usize)
+                .collect::<String>(),
+            expected
+        );
+        assert_eq!(hit.y, area.y);
+        assert!(title.contains("saved"));
+    }
+}
+
+#[test]
+fn config_unavailable_object_action_has_no_active_or_selected_style() {
+    let palette = theme::default_palette();
+    let disabled = footer_action_span("trust", true, false, palette.config_primary, true, &palette);
+    assert!(disabled.content.contains("trust"));
+    assert_eq!(disabled.style.fg, Some(palette.text_disabled));
+    assert_eq!(disabled.style.bg, None);
+    let enabled = footer_action_span("trust", true, true, palette.config_primary, true, &palette);
+    assert_eq!(enabled.style.bg, Some(palette.config_primary));
+}
+
+#[test]
 fn config_context_commands_truncate_to_content_width() {
     let line = render_config_context_line(CONFIG_CONTROLS_HINT, 30);
     let text = line_text(&line);
@@ -75,13 +224,21 @@ fn config_context_selected_field_uses_focus_chip() {
 #[test]
 fn config_header_shows_one_state_and_navigation_without_internal_labels() {
     let palette = theme::default_palette();
-    let lines = config_header_lines("sigil.toml", false, None, None, 80, &palette);
+    let lines = config_header_lines(
+        "sigil.toml",
+        ConfigHeaderNavigation::default(),
+        false,
+        None,
+        None,
+        80,
+        &palette,
+    );
     assert_eq!(lines.len(), 2);
     assert!(line_text(&lines[0]).contains("Settings"));
     assert!(line_text(&lines[0]).contains("✓ saved"));
     assert_eq!(
         line_text(&lines[1]),
-        "Tab section · Up/Down field · Enter edit"
+        "Tab section · Up/Down field · Enter edit · Ctrl-Up/Down scroll"
     );
     assert!(lines.iter().all(|line| {
         let text = line_text(line);
@@ -90,12 +247,21 @@ fn config_header_shows_one_state_and_navigation_without_internal_labels() {
             && !text.contains("sigil.toml")
             && !text.contains("status:")
     }));
-    let custom = config_header_lines("project.toml", true, None, None, 80, &palette);
+    let custom = config_header_lines(
+        "project.toml",
+        ConfigHeaderNavigation::default(),
+        true,
+        None,
+        None,
+        80,
+        &palette,
+    );
     assert!(line_text(&custom[0]).contains("△ unsaved"));
     assert_eq!(custom.len(), 2);
     assert_eq!(line_text(&custom[1]), "Config: project.toml");
     let closing = config_header_lines(
         "project.toml",
+        ConfigHeaderNavigation::default(),
         true,
         None,
         Some("status: confirm close - Esc discards"),
@@ -107,6 +273,7 @@ fn config_header_shows_one_state_and_navigation_without_internal_labels() {
     assert!(!line_text(&closing[1]).contains("project.toml"));
     let failed = config_header_lines(
         "sigil.toml",
+        ConfigHeaderNavigation::default(),
         true,
         Some("actual failure"),
         None,
@@ -115,6 +282,40 @@ fn config_header_shows_one_state_and_navigation_without_internal_labels() {
     );
     assert!(line_text(&failed[0]).contains("✕ save failed"));
     assert!(!line_text(&failed[0]).contains("unsaved"));
+}
+
+#[test]
+fn config_header_scroll_hint_matches_the_typed_section_without_duplicate_help() {
+    let palette = theme::default_palette();
+    for section in ConfigSection::FLOW {
+        let page_scroll = section.page_keys_scroll_details();
+        let lines = config_header_lines(
+            "sigil.toml",
+            ConfigHeaderNavigation {
+                show_advanced: true,
+                page_scroll,
+            },
+            false,
+            None,
+            None,
+            72,
+            &palette,
+        );
+        let hint = line_text(&lines[1]);
+        assert_eq!(
+            hint.contains("PgUp/PgDn scroll"),
+            page_scroll,
+            "{section:?}"
+        );
+        assert_eq!(
+            hint.contains("Ctrl-Up/Down scroll"),
+            !page_scroll,
+            "{section:?}"
+        );
+        assert_eq!(hint.matches("Tab section").count(), 1);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].width() <= 72);
+    }
 }
 
 #[test]
@@ -245,9 +446,28 @@ fn centered_config_area_respects_narrow_and_wide_bounds() {
 #[test]
 fn config_header_keeps_state_bounded_on_zero_and_narrow_widths() {
     let palette = theme::default_palette();
-    assert!(config_header_lines("sigil.toml", false, None, None, 0, &palette).is_empty());
+    assert!(
+        config_header_lines(
+            "sigil.toml",
+            ConfigHeaderNavigation::default(),
+            false,
+            None,
+            None,
+            0,
+            &palette
+        )
+        .is_empty()
+    );
     for width in [1, 4, 12, 80] {
-        let lines = config_header_lines("sigil.toml", false, None, None, width, &palette);
+        let lines = config_header_lines(
+            "sigil.toml",
+            ConfigHeaderNavigation::default(),
+            false,
+            None,
+            None,
+            width,
+            &palette,
+        );
         assert!(
             lines
                 .iter()
@@ -292,8 +512,8 @@ fn config_header_span_helpers_stop_when_remaining_width_is_exhausted() {
 fn config_panel_height_and_top_alignment_clamp_to_available_space() {
     let lines = vec![String::from("one"); 3];
 
-    assert_eq!(config_panel_height(&lines, &[], 0), 0);
-    assert_eq!(config_panel_height(&lines, &[], 5), 5);
+    assert_eq!(config_panel_height(&lines, &[], 80, 0), 0);
+    assert_eq!(config_panel_height(&lines, &[], 80, 5), 5);
     assert_eq!(
         top_aligned_config_area(Rect::new(1, 2, 80, 4), 10),
         Rect::new(1, 2, 80, 4)
@@ -532,15 +752,28 @@ fn render_form_line_covers_button_rows_actions_and_invalid_input() {
 
 #[test]
 fn render_config_line_routes_warning_meta_field_and_muted_variants() {
+    use ratatui::widgets::Widget;
+
     let warning = render_config_line(2, "Enter edit", 48);
     let meta = render_config_line(2, "cfg: sigil.toml", 48);
     let field = render_config_line(2, "* Model: deepseek-v4-flash", 48);
     let muted = render_config_line(2, "Provider summary", 48);
 
-    assert_eq!(warning.style.fg, Some(theme::config_warning()));
-    assert_eq!(meta.style.fg, Some(theme::dim()));
-    assert_eq!(field.style.fg, Some(theme::ink()));
-    assert_eq!(muted.style.fg, Some(theme::muted()));
+    for (line, text, color) in [
+        (warning, "Enter edit", theme::config_warning()),
+        (meta, "cfg: sigil.toml", theme::dim()),
+        (field, "* Model: deepseek-v4-flash", theme::ink()),
+        (muted, "Provider summary", theme::muted()),
+    ] {
+        assert_eq!(line_text(&line), text);
+        assert!(line.spans.iter().all(|span| span.style.fg == Some(color)));
+        let area = Rect::new(0, 0, 48, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        Paragraph::new(line).render(area, &mut buffer);
+        for x in 0..text.len() as u16 {
+            assert_eq!(buffer[(x, 0)].fg, color, "visible color for {text} at {x}");
+        }
+    }
 }
 
 #[test]

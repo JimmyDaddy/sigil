@@ -39,10 +39,19 @@ pub(crate) struct ConfigSurface {
     pub detail_lines: Vec<String>,
     pub footer_hint: String,
     pub selected_footer_action: Option<String>,
-    pub footer_actions: Vec<String>,
+    pub footer_actions: Vec<ConfigActionSurface>,
+    pub show_advanced: bool,
+    pub page_scroll_keys: bool,
+    pub detail_scroll: Option<usize>,
     pub save_error: Option<String>,
     pub dirty: bool,
     pub close_guard_armed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigActionSurface {
+    pub label: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

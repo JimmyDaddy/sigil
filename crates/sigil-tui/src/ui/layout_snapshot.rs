@@ -6,7 +6,7 @@ use crate::{
         AppState, ApprovalAction, ApprovalModalView, ComposerQueueAction,
         session_lifecycle_flow::SessionModalAction,
     },
-    config_panel::{ConfigField, ConfigSection},
+    config_panel::ConfigField,
     mouse::HitTarget,
     view_model::{InfoRailViewModel, displayed_info_rail_agent_row_entries},
 };
@@ -22,8 +22,9 @@ use super::{
     },
     setup_config::{
         CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
-        centered_config_area, config_panel_height, config_scroll_offset, footer_action_width,
-        split_config_context_lines, top_aligned_config_area,
+        centered_config_area, config_advanced_toggle_area, config_panel_height,
+        config_step_hit_spans, config_visual_rows, footer_action_width, split_config_context_lines,
+        top_aligned_config_area,
     },
 };
 
@@ -189,6 +190,10 @@ pub struct SetupFieldHitArea {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigHitAreas {
+    pub advanced_toggle: Option<Rect>,
+    pub scroll_offset: usize,
+    pub max_scroll: usize,
+    pub viewport_rows: usize,
     pub sections: Vec<ConfigSectionHitArea>,
     pub fields: Vec<ConfigFieldHitArea>,
     pub footer_actions: Vec<ConfigFooterActionHitArea>,
@@ -426,6 +431,12 @@ impl LayoutSnapshot {
         }
 
         if let Some(areas) = &self.config_hit_areas {
+            if areas
+                .advanced_toggle
+                .is_some_and(|area| contains(area, column, row))
+            {
+                return HitTarget::ConfigAdvancedToggle;
+            }
             for action in &areas.footer_actions {
                 if contains(action.area, column, row) {
                     return HitTarget::ConfigFooterAction {
@@ -786,30 +797,70 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
         panel_area
     };
     let panel_content = inset_rect(main_panel_area, 1, 1);
+    let visual = config_visual_rows(
+        &main_lines,
+        panel_content.width as usize,
+        false,
+        &super::theme::default_palette(),
+    );
+    let selected = visual.selected_rows(&main_lines);
+    let context_rows = if content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH {
+        let (_, context) = split_config_context_lines(app.config_detail_lines());
+        config_visual_rows(
+            &context,
+            CONFIG_DETAIL_PANEL_WIDTH.saturating_sub(2) as usize,
+            true,
+            &super::theme::default_palette(),
+        )
+        .rows
+        .len()
+    } else {
+        0
+    };
+    let max_scroll = visual
+        .rows
+        .len()
+        .max(context_rows)
+        .saturating_sub(panel_content.height as usize);
+    let scroll_offset =
+        visual.scroll_offset(panel_content.height, &selected, app.config_detail_scroll());
+    let manual_offset = app
+        .config_detail_scroll()
+        .map(|offset| offset.min(max_scroll))
+        .unwrap_or(scroll_offset);
     let mut sections = Vec::new();
     let mut fields = Vec::new();
     if panel_content.width > 0 && panel_content.height > 0 {
-        let selected_line_indexes = config_selected_line_indexes(&main_lines);
-        let scroll_offset = config_scroll_offset(
-            main_lines.len(),
-            panel_content.height,
-            &selected_line_indexes,
+        sections = config_section_hit_areas(
+            &main_lines,
+            panel_content,
+            scroll_offset,
+            &visual.logical_ranges,
         );
-        sections = config_section_hit_areas(&main_lines, panel_content, scroll_offset);
-        fields = config_field_hit_areas(app, &main_lines, panel_content, scroll_offset);
+        fields = config_field_hit_areas(
+            app,
+            &main_lines,
+            panel_content,
+            scroll_offset,
+            &visual.logical_ranges,
+        );
     }
     let footer_actions = footer_area
         .filter(|area| area.width > 0 && area.height > 0)
         .map(|area| config_footer_action_hit_areas(area, app))
         .unwrap_or_default();
-
-    (!sections.is_empty() || !fields.is_empty() || !footer_actions.is_empty()).then_some(
-        ConfigHitAreas {
-            sections,
-            fields,
-            footer_actions,
-        },
-    )
+    Some(ConfigHitAreas {
+        advanced_toggle: config_advanced_toggle_area(
+            centered_config_area(outer[0]),
+            app.config_show_advanced(),
+        ),
+        scroll_offset: manual_offset,
+        max_scroll,
+        viewport_rows: panel_content.height as usize,
+        sections,
+        fields,
+        footer_actions,
+    })
 }
 
 fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect, Option<Rect>) {
@@ -828,9 +879,14 @@ fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect
         .saturating_sub(footer_gap);
     let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
-        config_panel_height(&main_lines, &context_lines, panel_max_height)
+        config_panel_height(
+            &main_lines,
+            &context_lines,
+            content_area.width,
+            panel_max_height,
+        )
     } else {
-        config_panel_height(&main_lines, &[], panel_max_height)
+        config_panel_height(&main_lines, &[], content_area.width, panel_max_height)
     };
     let panel_area = top_aligned_config_area(content_area, panel_height);
     let footer_area = (footer_height > 0).then_some(Rect {
@@ -841,60 +897,36 @@ fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect
     (main_lines, panel_area, footer_area)
 }
 
-fn config_selected_line_indexes(lines: &[String]) -> Vec<usize> {
-    lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            (line.starts_with("> ") || line.starts_with("selected:")).then_some(index)
-        })
-        .collect()
-}
-
 fn config_section_hit_areas(
     lines: &[String],
     panel_content: Rect,
     scroll_offset: usize,
+    logical_ranges: &[std::ops::Range<usize>],
 ) -> Vec<ConfigSectionHitArea> {
     let Some(step_line) = lines.get(1) else {
         return Vec::new();
     };
-    if scroll_offset > 1 || 1usize.saturating_sub(scroll_offset) >= panel_content.height as usize {
+    let Some(row) = logical_ranges
+        .get(1)
+        .and_then(|range| range.start.checked_sub(scroll_offset))
+    else {
+        return Vec::new();
+    };
+    if row >= panel_content.height as usize {
         return Vec::new();
     }
-    let y = panel_content
-        .y
-        .saturating_add(1usize.saturating_sub(scroll_offset) as u16);
-    ConfigSection::FLOW
-        .iter()
-        .enumerate()
-        .filter_map(|(index, section)| {
-            let token = config_section_token(*section);
-            let start = step_line.find(&token)?;
-            let width = token.chars().count() as u16;
-            let x = panel_content.x.saturating_add(start as u16);
-            (x < panel_content.x.saturating_add(panel_content.width)).then_some(
-                ConfigSectionHitArea {
-                    index,
-                    area: Rect::new(
-                        x,
-                        y,
-                        width.min(
-                            panel_content
-                                .x
-                                .saturating_add(panel_content.width)
-                                .saturating_sub(x),
-                        ),
-                        1,
-                    ),
-                },
-            )
+    config_step_hit_spans(step_line, panel_content.width as usize)
+        .into_iter()
+        .map(|(index, start, width)| ConfigSectionHitArea {
+            index,
+            area: Rect::new(
+                panel_content.x.saturating_add(start as u16),
+                panel_content.y.saturating_add(row as u16),
+                width as u16,
+                1,
+            ),
         })
         .collect()
-}
-
-fn config_section_token(section: ConfigSection) -> String {
-    section.step_token().to_owned()
 }
 
 fn config_field_hit_areas(
@@ -902,6 +934,7 @@ fn config_field_hit_areas(
     lines: &[String],
     panel_content: Rect,
     scroll_offset: usize,
+    logical_ranges: &[std::ops::Range<usize>],
 ) -> Vec<ConfigFieldHitArea> {
     let Some(section) = app.config_selected_section() else {
         return Vec::new();
@@ -917,20 +950,22 @@ fn config_field_hit_areas(
                         .get(field.display_label().len()..)
                         .is_some_and(|suffix| suffix.starts_with(':'))
             })?;
-            if line_index < scroll_offset {
+            let range = logical_ranges.get(line_index)?;
+            let start = range.start.max(scroll_offset);
+            let end = range
+                .end
+                .min(scroll_offset.saturating_add(panel_content.height as usize));
+            if start >= end {
                 return None;
             }
-            let row_offset = line_index - scroll_offset;
-            if row_offset >= panel_content.height as usize {
-                return None;
-            }
+            let row_offset = start - scroll_offset;
             Some(ConfigFieldHitArea {
                 index,
                 area: Rect::new(
                     panel_content.x,
                     panel_content.y.saturating_add(row_offset as u16),
                     panel_content.width,
-                    1,
+                    (end - start) as u16,
                 ),
             })
         })
@@ -956,7 +991,8 @@ fn config_footer_action_hit_areas(area: Rect, app: &AppState) -> Vec<ConfigFoote
             let width = footer_action_width(label, is_selected, compact) as u16;
             let area = Rect::new(cursor, area.y, width.min(end.saturating_sub(cursor)), 1);
             cursor = cursor.saturating_add(width);
-            Some(ConfigFooterActionHitArea { index, area })
+            app.config_footer_action_available(index)
+                .then_some(ConfigFooterActionHitArea { index, area })
         })
         .collect()
 }

@@ -46,6 +46,7 @@ pub(crate) enum HitTarget {
     ApprovalDiffViewToggle,
     ApprovalMetadataToggle,
     SetupField { index: usize },
+    ConfigAdvancedToggle,
     ConfigSection { index: usize },
     ConfigField { index: usize },
     ConfigFooterAction { index: usize },

@@ -15,12 +15,16 @@ pub(super) fn render_config_detail_header(config_state: &ConfigState) -> Vec<Str
         .collect::<Vec<_>>()
         .join(" ");
     vec![
-        match section.flow_index() {
+        match config_state
+            .visible_sections()
+            .iter()
+            .position(|candidate| *candidate == section)
+        {
             Some(index) => format!(
                 "{} {}/{} · {}",
                 section.title(),
                 index + 1,
-                ConfigSection::FLOW.len(),
+                config_state.visible_sections().len(),
                 section.summary()
             ),
             None => section.title().to_owned(),
@@ -34,19 +38,19 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
     let Some(field) = config_state.selected_field else {
         let mut lines = vec![String::new(), "[details]".to_owned()];
         if config_state.selected_section == ConfigSection::Mcp {
-            lines.push("controls: Tab section · Down actions".to_owned());
-            lines.push("actions: Left/Right action · Ctrl-S save · Esc close".to_owned());
             lines.push("mcp: no configured server to inspect".to_owned());
+            lines.push("Ctrl-N import servers".to_owned());
             return lines;
         }
-        lines.push(CONFIG_CONTROLS_HINT.to_owned());
-        lines.push(CONFIG_ACTIONS_HINT.to_owned());
-        if config_state.selected_section == ConfigSection::Agents {
-            lines.push("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/disable".to_owned());
-        } else if config_state.selected_section == ConfigSection::Skills {
-            lines.push("skills: Up/Down skill · PgUp/PgDn wrap · footer use".to_owned());
-        } else if config_state.selected_section == ConfigSection::Plugins {
-            lines.push("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny".to_owned());
+        match config_state.selected_section {
+            ConfigSection::Agents => lines.push("agents: no agent selected".to_owned()),
+            ConfigSection::Skills => lines.push("skills: no skill selected".to_owned()),
+            ConfigSection::Plugins => lines.push("plugins: no plugin selected".to_owned()),
+            _ if config_state.show_advanced => {
+                lines.push(CONFIG_CONTROLS_HINT.to_owned());
+                lines.push(CONFIG_ACTIONS_HINT.to_owned());
+            }
+            _ => {}
         }
         return lines;
     };
@@ -57,12 +61,17 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
             "selected: {}",
             config_field_display_label(config_state, field)
         ),
-        format!("key: {}", config_field_key_label(config_state, field)),
         config_field_help_text(config_state, field).to_owned(),
-        String::new(),
-        CONFIG_CONTROLS_HINT.to_owned(),
-        CONFIG_ACTIONS_HINT.to_owned(),
     ];
+    if config_state.show_advanced {
+        lines.push(format!("value: {}", config_state.display_value(field)));
+        lines.push(format!(
+            "key: {}",
+            config_field_key_label(config_state, field)
+        ));
+        lines.push(CONFIG_CONTROLS_HINT.to_owned());
+        lines.push(CONFIG_ACTIONS_HINT.to_owned());
+    }
 
     if matches!(field, ConfigField::ProviderApiKey) {
         let env_names = provider_api_key_env_names(&config_state.draft.provider_name)

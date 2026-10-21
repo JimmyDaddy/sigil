@@ -128,14 +128,38 @@ fn resolved_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
 }
 
 #[test]
+fn config_object_action_availability_tracks_the_selected_object_not_only_collection_size() {
+    let mut config = test_config();
+    config.mcp_servers.push(mcp_server_config! {
+        name: "own-server".to_owned(), command: "own-command".to_owned(), ..Default::default()
+    });
+    let mut state = ConfigState::from_root_config(&config);
+    state.agent_profiles.push(resolved_agent("own-agent"));
+    assert!(ConfigFooterAction::TrustAgent.is_available(&state));
+    assert!(ConfigFooterAction::BlockAgent.is_available(&state));
+    assert!(ConfigFooterAction::ActivateMcp.is_available(&state));
+    state.selected_agent_index = usize::MAX;
+    state.selected_mcp_server_index = usize::MAX;
+    assert!(!ConfigFooterAction::TrustAgent.is_available(&state));
+    assert!(!ConfigFooterAction::BlockAgent.is_available(&state));
+    assert!(!ConfigFooterAction::ActivateMcp.is_available(&state));
+    assert!(ConfigFooterAction::Save.is_available(&state));
+    assert!(ConfigFooterAction::Close.is_available(&state));
+}
+
+#[test]
 fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     let root_config = test_config();
     let mut state = ConfigState::from_root_config(&root_config);
 
     state.selected_field = None;
     let empty_details = render_config_selection_details(&state);
-    assert!(empty_details.contains(&CONFIG_CONTROLS_HINT.to_owned()));
-    assert!(empty_details.contains(&CONFIG_ACTIONS_HINT.to_owned()));
+    assert!(!empty_details.contains(&CONFIG_CONTROLS_HINT.to_owned()));
+    assert!(!empty_details.contains(&CONFIG_ACTIONS_HINT.to_owned()));
+    state.show_advanced = true;
+    let advanced_details = render_config_selection_details(&state);
+    assert!(advanced_details.contains(&CONFIG_CONTROLS_HINT.to_owned()));
+    assert!(advanced_details.contains(&CONFIG_ACTIONS_HINT.to_owned()));
 
     state.selected_section = ConfigSection::Provider;
     state.selected_field = Some(ConfigField::ProviderApiKey);
@@ -161,18 +185,18 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.selected_section = ConfigSection::Mcp;
     state.selected_field = None;
     let mcp_details = render_config_selection_details(&state).join("\n");
-    assert!(mcp_details.contains("controls: Tab section · Down actions"));
+    assert!(mcp_details.contains("Ctrl-N import servers"));
     assert!(mcp_details.contains("mcp: no configured server to inspect"));
 
     state.selected_section = ConfigSection::Agents;
     state.selected_field = None;
     let agent_details = render_config_selection_details(&state).join("\n");
-    assert!(agent_details.contains("agents: Up/Down agent"));
+    assert!(agent_details.contains("agents: no agent selected"));
 
     state.selected_section = ConfigSection::Skills;
     state.selected_field = None;
     let skill_details = render_config_selection_details(&state).join("\n");
-    assert!(skill_details.contains("skills: Up/Down skill"));
+    assert!(skill_details.contains("skills: no skill selected"));
 
     assert_eq!(cycle_approval_mode(ApprovalMode::Allow), ApprovalMode::Ask);
     assert_eq!(cycle_approval_mode(ApprovalMode::Ask), ApprovalMode::Deny);
@@ -1046,11 +1070,25 @@ fn activate_selected_mcp_server_guard_paths_cover_busy_section_snapshot_and_sele
     assert_eq!(app.last_notice.as_deref(), Some("busy; activate MCP later"));
 
     app.runtime.is_busy = false;
-    app.config_state
-        .as_mut()
-        .expect("config state should exist")
-        .set_section(ConfigSection::Provider);
-    assert!(app.activate_selected_mcp_server()?.is_none());
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.focus_footer(ConfigFooterAction::ActivateMcp);
+    }
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("settings")
+            .selected_mcp_server()
+            .is_some()
+    );
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
     assert_eq!(
         app.last_notice.as_deref(),
         Some("activate MCP is available in MCP config")

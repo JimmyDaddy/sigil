@@ -178,6 +178,61 @@ impl AppState {
             .collect()
     }
 
+    pub(crate) fn config_footer_action_available(&self, index: usize) -> bool {
+        self.config_state.as_ref().is_some_and(|state| {
+            ConfigFooterAction::action_for_section_index(state.selected_section, index)
+                .is_some_and(|action| action.is_available(state))
+        })
+    }
+
+    pub(crate) fn config_show_advanced(&self) -> bool {
+        self.config_state
+            .as_ref()
+            .is_some_and(|state| state.show_advanced)
+    }
+
+    pub(crate) fn config_detail_scroll(&self) -> Option<usize> {
+        self.config_state
+            .as_ref()
+            .and_then(|state| state.detail_scroll)
+    }
+
+    pub(super) fn toggle_config_advanced_surface(&mut self) {
+        if let Some(state) = self.config_state.as_mut() {
+            state.toggle_advanced_surface();
+            state.close_guard_armed = false;
+            state.pending_connection_delete = None;
+        }
+    }
+
+    pub(super) fn scroll_config_details(&mut self, upward: bool, page: bool, edge: bool) {
+        let layout = crate::ui::LayoutSnapshot::from_app(
+            ratatui::layout::Rect::new(0, 0, self.terminal_width, self.terminal_height),
+            self,
+        );
+        let Some(areas) = layout.config_hit_areas else {
+            return;
+        };
+        let amount = if page {
+            areas.viewport_rows.saturating_sub(1).max(1)
+        } else {
+            3
+        };
+        let offset = if edge {
+            if upward { 0 } else { areas.max_scroll }
+        } else if upward {
+            areas.scroll_offset.saturating_sub(amount)
+        } else {
+            areas
+                .scroll_offset
+                .saturating_add(amount)
+                .min(areas.max_scroll)
+        };
+        if let Some(state) = self.config_state.as_mut() {
+            state.detail_scroll = Some(offset);
+        }
+    }
+
     pub fn config_footer_hint(&self) -> String {
         if self.config_close_guard_armed() {
             "status: confirm close - Esc discards".to_owned()
@@ -358,6 +413,42 @@ impl AppState {
         }
 
         match key.code {
+            KeyCode::Home | KeyCode::End => {
+                self.scroll_config_details(key.code == KeyCode::Home, false, true);
+                return Ok(None);
+            }
+            KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_config_details(key.code == KeyCode::Up, false, false);
+                return Ok(None);
+            }
+            KeyCode::PageUp | KeyCode::PageDown
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    || (key.modifiers.is_empty()
+                        && self.config_state.as_ref().is_some_and(|state| {
+                            state.selected_section.page_keys_scroll_details()
+                        })) =>
+            {
+                self.scroll_config_details(key.code == KeyCode::PageUp, true, false);
+                return Ok(None);
+            }
+            _ => {}
+        }
+
+        if matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+        ) && let Some(state) = self.config_state.as_mut()
+        {
+            state.detail_scroll = None;
+        }
+        match key.code {
             KeyCode::Esc => {
                 return self.attempt_close_config();
             }
@@ -368,14 +459,7 @@ impl AppState {
                 return self.save_config_draft();
             }
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(config_state) = self.config_state.as_mut() {
-                    config_state.toggle_advanced_surface();
-                    self.last_notice = Some(if config_state.show_advanced {
-                        "config advanced surface".to_owned()
-                    } else {
-                        "config simple surface".to_owned()
-                    });
-                }
+                self.toggle_config_advanced_surface();
             }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.config_state.as_ref().is_some_and(|config_state| {
@@ -741,6 +825,12 @@ impl AppState {
                 if let Some(config_state) = self.config_state.as_ref()
                     && config_state.footer_selected
                 {
+                    if !config_state
+                        .selected_footer_action
+                        .is_available(config_state)
+                    {
+                        return Ok(None);
+                    }
                     return match config_state.selected_footer_action {
                         ConfigFooterAction::Save => self.save_config_draft(),
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),

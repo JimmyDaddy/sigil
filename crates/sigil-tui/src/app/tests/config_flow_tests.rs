@@ -1375,7 +1375,7 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/13 · provider settings");
+    assert_eq!(lines[0], "Provider 1/7 · provider settings");
     assert_eq!(
         lines[1],
         "[provider] permissions web memory compaction mcp appearance"
@@ -1388,15 +1388,233 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert!(detail.contains("[advanced]"));
     assert!(detail.contains("[details]"));
     assert!(detail.contains("selected: Connection"));
-    assert!(detail.contains("key: connection"));
-    assert!(detail.contains("controls: Tab section · Up/Down field · Enter edit"));
-    assert!(detail.contains("actions: Down to actions · Ctrl-S save · Esc close"));
+    assert!(!detail.contains("key: connection"));
+    assert!(!detail.contains("controls: Tab section · Up/Down field · Enter edit"));
+    assert!(!detail.contains("actions: Down to actions · Ctrl-S save · Esc close"));
     assert!(!lines.iter().take(3).any(|line| line.contains("Tab")));
     assert!(!detail.contains("beta_base_url"));
     assert!(!detail.contains("user_id_strategy"));
     assert!(!detail.contains("anthropic_base_url"));
     assert!(!detail.contains("strict_tools_mode"));
     assert!(!detail.contains("request_timeout_secs"));
+}
+
+#[test]
+fn config_advanced_toggle_uses_visible_counts_and_preserves_the_unsaved_draft() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app.config_state.as_mut().expect("settings");
+        state.draft.provider_model = "own-unsaved-model".to_owned();
+        state.mark_dirty();
+    }
+    assert!(app.config_detail_lines()[0].contains("1/7"));
+    assert!(
+        !app.config_detail_lines()
+            .iter()
+            .any(|line| line.starts_with("key:"))
+    );
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
+    assert!(app.config_detail_lines()[0].contains("1/13"));
+    assert!(
+        app.config_detail_lines()
+            .iter()
+            .any(|line| line == "key: connection")
+    );
+    app.config_state
+        .as_mut()
+        .expect("settings")
+        .set_section(ConfigSection::Storage);
+    assert!(app.config_detail_lines()[0].contains("2/13"));
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
+    assert!(app.config_detail_lines()[0].contains("1/7"));
+    let state = app.config_state.as_ref().expect("settings");
+    assert_eq!(state.draft.provider_model, "own-unsaved-model");
+    assert!(state.dirty);
+    Ok(())
+}
+
+#[test]
+fn config_empty_object_actions_are_unavailable_and_enter_cannot_dispatch_them() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    for section in [
+        ConfigSection::Agents,
+        ConfigSection::Skills,
+        ConfigSection::Plugins,
+        ConfigSection::Mcp,
+    ] {
+        let state = app.config_state.as_mut().expect("settings");
+        state.agent_profiles.clear();
+        state.skill_descriptors.clear();
+        state.plugin_manifests.clear();
+        state.draft.mcp_servers.clear();
+        state.set_section(section);
+        let actions = ConfigFooterAction::actions_for_section(section);
+        for (index, action) in actions.iter().copied().enumerate() {
+            let object_action = matches!(
+                action,
+                ConfigFooterAction::TrustAgent
+                    | ConfigFooterAction::BlockAgent
+                    | ConfigFooterAction::UseSkill
+                    | ConfigFooterAction::ApprovePlugin
+                    | ConfigFooterAction::DenyPlugin
+                    | ConfigFooterAction::ActivateMcp
+            );
+            assert_eq!(app.config_footer_action_available(index), !object_action);
+            if object_action {
+                app.config_state
+                    .as_mut()
+                    .expect("settings")
+                    .focus_footer(action);
+                let before = app.last_notice().map(str::to_owned);
+                assert!(
+                    app.handle_config_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+                        .is_none()
+                );
+                assert_eq!(app.last_notice(), before.as_deref());
+                assert!(!app.has_modal());
+                assert!(!app.config_is_dirty());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn config_full_text_scroll_is_bounded_and_field_navigation_returns_to_focus() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 24);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("settings")
+        .set_section(ConfigSection::Permissions);
+    app.handle_config_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    let layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 80, 24), &app);
+    let areas = layout.config_hit_areas.expect("settings geometry");
+    assert!(areas.max_scroll > 0);
+    assert_eq!(app.config_detail_scroll(), Some(areas.max_scroll));
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL))?;
+    assert_eq!(
+        app.config_detail_scroll(),
+        Some(areas.max_scroll.saturating_sub(3))
+    );
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    assert_eq!(app.config_detail_scroll(), Some(0));
+    app.handle_config_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_detail_scroll(), None);
+    Ok(())
+}
+
+#[test]
+fn config_plain_page_keys_scroll_all_noncollection_sections_continuously_without_editing()
+-> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 10);
+    app.open_config_panel();
+    for (index, section) in [
+        ConfigSection::Storage,
+        ConfigSection::Permissions,
+        ConfigSection::Web,
+        ConfigSection::Memory,
+        ConfigSection::Compaction,
+        ConfigSection::CodeIntelligence,
+        ConfigSection::Terminal,
+        ConfigSection::Appearance,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(section.page_keys_scroll_details());
+        let state = app.config_state.as_mut().expect("settings");
+        state.set_section(section);
+        state.dirty = index % 2 == 0;
+        let dirty = state.dirty;
+        let binding = state.save_binding();
+        let revision = state.draft_revision;
+        let field = state.selected_field;
+        app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+        let layout =
+            crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 80, 10), &app);
+        let areas = layout.config_hit_areas.expect("settings geometry");
+        let page = areas.viewport_rows.saturating_sub(1).max(1);
+        assert!(
+            areas.max_scroll > page,
+            "{section:?} must exercise a second page"
+        );
+        for (key, expected) in [
+            (KeyCode::PageDown, page),
+            (KeyCode::PageDown, (page * 2).min(areas.max_scroll)),
+            (
+                KeyCode::PageUp,
+                (page * 2).min(areas.max_scroll).saturating_sub(page),
+            ),
+            (KeyCode::PageUp, 0),
+        ] {
+            assert!(
+                app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?
+                    .is_none()
+            );
+            let state = app.config_state.as_ref().expect("settings");
+            assert_eq!(state.detail_scroll, Some(expected), "{section:?} {key:?}");
+            assert_eq!(state.dirty, dirty);
+            assert_eq!(state.save_binding(), binding);
+            assert_eq!(state.draft_revision, revision);
+            assert_eq!(state.selected_field, field);
+            assert_eq!(state.selected_section, section);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn config_plain_page_keys_keep_provider_connection_cycle_and_collection_routing() -> Result<()> {
+    for section in [
+        ConfigSection::Provider,
+        ConfigSection::Agents,
+        ConfigSection::Skills,
+        ConfigSection::Plugins,
+        ConfigSection::Mcp,
+    ] {
+        assert!(!section.page_keys_scroll_details());
+    }
+    let mut config = test_config();
+    let connection = config
+        .connections
+        .values()
+        .next()
+        .expect("fixture connection")
+        .clone();
+    config
+        .connections
+        .insert("own-second".to_owned(), connection);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    let original = app
+        .config_state
+        .as_ref()
+        .expect("settings")
+        .draft
+        .selected_connection_id
+        .clone();
+    app.config_state.as_mut().expect("settings").detail_scroll = Some(3);
+    app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    let state = app.config_state.as_ref().expect("settings");
+    assert_eq!(state.draft.selected_connection_id.as_str(), "own-second");
+    assert_eq!(state.detail_scroll, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("settings")
+            .draft
+            .selected_connection_id,
+        original
+    );
+    assert_eq!(app.config_detail_scroll(), None);
+    Ok(())
 }
 
 #[test]
@@ -1547,8 +1765,8 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     assert!(detail.contains("Advanced overrides: 0 excludes, 0 generated roots"));
     assert!(detail.contains("[details]"));
     assert!(detail.contains("selected: Mode"));
-    assert!(detail.contains("key: mode"));
-    assert!(detail.contains("controls: Tab section"));
+    assert!(!detail.contains("key: mode"));
+    assert!(!detail.contains("controls: Tab section"));
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
     let nav = app.config_nav_lines().join("\n");
@@ -1831,7 +2049,7 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
     assert!(detail.contains("i Ctrl-N imports selected servers"));
-    assert!(detail.contains("controls: Tab section · Down actions"));
+    assert!(detail.contains("Ctrl-N import servers"));
     assert!(detail.contains("mcp: no configured server to inspect"));
     assert!(!detail.contains("servers:"));
     assert!(!detail.contains("args_csv:"));
@@ -1987,7 +2205,7 @@ fn config_appearance_step_shows_info_rail_theme_and_scope() {
     let detail = app.config_detail_lines().join("\n");
     let nav = app.config_nav_lines().join("\n");
 
-    assert!(detail.contains("Appearance 9/13 · TUI theme"));
+    assert!(detail.contains("Appearance 7/7 · TUI theme"));
     assert!(nav.contains("Appearance: Enter toggle/cycle"));
     assert!(nav.contains("Appearance: color overrides in sigil.toml"));
     assert!(detail.contains("[layout]"));
@@ -2023,6 +2241,11 @@ fn config_appearance_step_shows_info_rail_theme_and_scope() {
     assert!(detail.contains("[scope]"));
     assert!(detail.contains("not written to session history"));
     assert!(detail.contains("Theme draft previews immediately"));
+    app.config_state
+        .as_mut()
+        .expect("settings")
+        .toggle_advanced_surface();
+    assert!(app.config_detail_lines()[0].contains("Appearance 9/13 · TUI theme"));
 }
 
 #[test]
@@ -2634,7 +2857,7 @@ fn config_agents_step_renders_empty_and_warning_states() -> Result<()> {
         .focus_footer(ConfigFooterAction::TrustAgent);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no agent selected"));
+    assert_eq!(app.last_notice(), Some("no agent to select"));
 
     app.config_state
         .as_mut()
@@ -2642,7 +2865,7 @@ fn config_agents_step_renders_empty_and_warning_states() -> Result<()> {
         .focus_footer(ConfigFooterAction::ToggleAgentEnabled);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no agent selected"));
+    assert_eq!(app.last_notice(), Some("no agent to select"));
     Ok(())
 }
 
@@ -2993,7 +3216,9 @@ fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
     assert!(detail.contains("Reusable inline skills are discovered"));
     assert!(detail.contains("[warnings]"));
     assert!(detail.contains("... 1 more warnings"));
-    assert!(detail.contains("skills: Up/Down skill · PgUp/PgDn wrap · footer use"));
+    assert!(detail.contains("skills: no skill selected"));
+    assert!(!detail.contains("footer use"));
+    assert!(!app.config_footer_action_available(0));
     Ok(())
 }
 
@@ -3021,6 +3246,13 @@ trust: trusted
         .expect("config state should exist");
     state.set_section(ConfigSection::Skills);
     state.focus_footer(ConfigFooterAction::UseSkill);
+
+    assert!(app.config_footer_action_available(0));
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("skills: Up/Down skill · PgUp/PgDn wrap · footer use")
+    );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -3092,9 +3324,10 @@ trust: trusted
         state.set_section(ConfigSection::Skills);
         state.focus_footer(ConfigFooterAction::UseSkill);
     }
+    let notice_before = empty_app.last_notice().map(str::to_owned);
     let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(empty_app.last_notice(), Some("no skill selected"));
+    assert_eq!(empty_app.last_notice(), notice_before.as_deref());
     Ok(())
 }
 
@@ -3706,9 +3939,10 @@ fn config_plugins_footer_allows_busy_disable_and_guards_wrong_section_and_empty_
         state.set_section(ConfigSection::Plugins);
         state.focus_footer(ConfigFooterAction::DenyPlugin);
     }
+    let notice_before = empty_app.last_notice().map(str::to_owned);
     let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(empty_app.last_notice(), Some("no plugin selected"));
+    assert_eq!(empty_app.last_notice(), notice_before.as_deref());
 
     let mut deny_app = AppState::from_root_config(
         &temp.path().join("deny-sigil.toml"),
@@ -5413,12 +5647,12 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         state.set_section(ConfigSection::Provider);
         state.focus_footer(ConfigFooterAction::ActivateMcp);
     }
+    let notice_before = app.last_notice().map(str::to_owned);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("activate MCP is available in MCP config")
-    );
+    assert_eq!(app.last_notice(), notice_before.as_deref());
+    assert!(!app.has_modal());
+    assert_eq!(app.config_section_title(), Some("Provider"));
 
     {
         let state = app

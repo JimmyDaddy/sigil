@@ -27,7 +27,7 @@ use sigil_kernel::{
 use tempfile::tempdir;
 
 use crate::app::{AppState, PendingPlanApproval};
-use crate::config_panel::ConfigSection;
+use crate::config_panel::{ConfigField, ConfigSection};
 use crate::runner::{
     V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview, WorkerMessage,
 };
@@ -842,11 +842,12 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Settings"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/13"));
+    assert!(rendered.contains("Provider 1/7"));
     assert!(rendered.contains("▸ Connection"));
-    assert!(rendered.contains("key connection"));
-    assert!(rendered.contains("keys Tab section"));
-    assert!(rendered.contains("actions Down to actions"));
+    assert!(!rendered.contains("key connection"));
+    assert!(!rendered.contains("keys Tab section"));
+    assert!(!rendered.contains("actions Down to actions"));
+    assert!(rendered.contains("[Ctrl-A advanced]"));
     assert!(rendered.contains("✓ saved"));
     assert!(!rendered.contains("Status"));
     assert!(!rendered.contains("Actions"));
@@ -1039,7 +1040,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         .bg;
     assert_eq!(actual, expected);
     assert_eq!(
-        cell_fg_at_text(&terminal, "Appearance 9/13", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 7/7", "Appearance"),
         expected_theme.palette.text_primary
     );
     assert_eq!(
@@ -1047,7 +1048,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         expected_theme.palette.text_secondary
     );
     assert_ne!(
-        cell_fg_at_text(&terminal, "Appearance 9/13", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 7/7", "Appearance"),
         Theme::builtin(sigil_kernel::ThemeId::SigilDark)
             .palette
             .text_primary
@@ -1085,7 +1086,7 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
         expected.palette.config_bg
     );
     assert_eq!(
-        cell_fg_at_text(&terminal, "Provider 1/13", "Provider"),
+        cell_fg_at_text(&terminal, "Provider 1/7", "Provider"),
         expected.palette.text_primary
     );
     assert_eq!(
@@ -1138,9 +1139,9 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/13", "> Connection"),
-            (3, "Memory 5/13", "> Memory"),
-            (4, "Compaction 6/13", "> Auto compact"),
+            (0, "Provider 1/7", "> Connection"),
+            (3, "Memory 4/7", "> Memory"),
+            (4, "Compaction 5/7", "> Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.composer.input = "/config".to_owned();
@@ -1212,7 +1213,7 @@ fn render_config_centers_content_on_very_wide_terminals() -> anyhow::Result<()> 
         .expect("config header should render");
     let panel_x = rows
         .iter()
-        .find_map(|row| char_index_of(row, "Provider 1/13"))
+        .find_map(|row| char_index_of(row, "Provider 1/7"))
         .expect("config panel should render");
     let footer_x = rows
         .iter()
@@ -1260,7 +1261,7 @@ fn render_config_header_uses_single_state_and_clear_section() -> anyhow::Result<
         .expect("settings title");
     assert!(title.contains("✓ saved"));
     assert_eq!(rendered.matches("✓ saved").count(), 1);
-    assert!(rendered.contains("Provider 1/13"));
+    assert!(rendered.contains("Provider 1/7"));
     assert!(rendered.contains("> Connection"));
     assert!(rendered.contains("Tab section"));
     assert!(rendered.contains("[Ctrl-S save]"));
@@ -1273,6 +1274,74 @@ fn render_config_header_uses_single_state_and_clear_section() -> anyhow::Result<
             "unnecessary metadata: {redundant}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn render_config_surface_scrolls_complete_readonly_text_with_matching_hit_areas()
+-> anyhow::Result<()> {
+    let mut config = test_config();
+    config.storage.state_root = sigil_kernel::StorageRoot::Path(
+        "/own-fixture/state/long-component-for-full-readonly-text/final-state-directory".to_owned(),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(80, 24);
+    open_config_panel_for_test(&mut app)?;
+    app.select_config_section_for_test(ConfigSection::Storage);
+    let screen = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let layout = crate::ui::LayoutSnapshot::from_app(screen, &app);
+    let initial = layout.config_hit_areas.expect("settings geometry");
+    let max = initial.max_scroll;
+    let page_rows = initial.viewport_rows.saturating_sub(1).max(1);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    let mut all_rows = String::new();
+    for offset in 0..=max.div_ceil(page_rows) {
+        let surface = crate::surface_adapter::build_surface_model(
+            screen,
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: offset as u64 + 1,
+                terminal_epoch: 1,
+            },
+        );
+        assert!(surface.config.as_ref().expect("settings").page_scroll_keys);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        terminal.draw(|frame| super::super::render_surface(frame, &surface))?;
+        let rows = rendered_rows(&terminal);
+        let panel = super::super::setup_config::centered_config_area(ratatui::layout::Rect::new(
+            0, 3, 80, 21,
+        ));
+        all_rows.push_str(
+            &rows
+                .iter()
+                .map(|row| {
+                    row.chars()
+                        .skip(panel.x as usize + 1)
+                        .take(panel.width.saturating_sub(2) as usize)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<String>(),
+        );
+        let layout = crate::ui::LayoutSnapshot::from_app(screen, &app);
+        let areas = layout.config_hit_areas.as_ref().expect("settings geometry");
+        for hit in &areas.fields {
+            assert!(rows[hit.area.y as usize].contains(
+                ConfigField::fields_for_section(ConfigSection::Storage)[hit.index].display_label()
+            ));
+        }
+        assert!(rendered_content(&terminal).contains("[Ctrl-A basic]"));
+        assert!(rendered_content(&terminal).contains("[F3 save+close]"));
+        assert!(rendered_content(&terminal).contains("PgUp/PgDn scroll"));
+        assert_eq!(
+            areas.scroll_offset,
+            offset.saturating_mul(page_rows).min(max)
+        );
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    }
+    assert!(all_rows.contains("final-state-directory"));
+    assert!(all_rows.contains("input-history.jsonl"));
     Ok(())
 }
 
@@ -1832,6 +1901,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1877,10 +1947,23 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
     assert!(selected_bg_cells > 20);
     assert!((15..25).contains(&command_token_cells));
     assert!(rows[key_row].contains("key model"));
-    assert!(rows[help_row].contains("..."));
+    let content =
+        super::super::setup_config::centered_config_area(ratatui::layout::Rect::new(0, 3, 160, 33));
+    let detail_x = content.right() - super::super::setup_config::CONFIG_DETAIL_PANEL_WIDTH + 1;
+    let detail_text = (help_row as u16..buffer.area.height)
+        .flat_map(|y| {
+            (detail_x..content.right() - 1).flat_map(move |x| buffer[(x, y)].symbol().chars())
+        })
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let expected_help = ConfigField::ProviderModel
+        .help_text()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
     assert!(
-        !rendered_content(&terminal)
-            .contains("Switching the saved default does not rewrite the current session")
+        detail_text.contains(&expected_help),
+        "complete field help: {detail_text}"
     );
     Ok(())
 }
@@ -2199,14 +2282,17 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
 }
 
 #[test]
-fn render_config_narrow_screen_truncates_long_values() -> anyhow::Result<()> {
+fn render_config_narrow_screen_keeps_compact_editable_values_and_full_readonly_values()
+-> anyhow::Result<()> {
     let mut config = test_config();
     let long_model =
         "deepseek-v4-pro-with-a-very-very-long-model-name-that-should-truncate".to_owned();
     config.agent.model = long_model.clone();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(96, 28);
     app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let backend = TestBackend::new(96, 28);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2214,9 +2300,21 @@ fn render_config_narrow_screen_truncates_long_values() -> anyhow::Result<()> {
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("deepseek-v4-pro"));
-    assert!(rendered.contains("..."));
-    assert!(!rendered.contains(&long_model));
+    let rows = rendered_rows(&terminal);
+    let editable = rows
+        .iter()
+        .find(|row| row.contains("> Model") && row.contains("[choose]"))
+        .expect("selected editable Model row");
+    assert!(editable.contains("..."));
+    assert!(!editable.contains(&long_model));
     assert!(app.config_detail_lines().join("\n").contains(&long_model));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    terminal.draw(|frame| render(frame, &app))?;
+    assert!(
+        rendered_content(&terminal).contains(&long_model),
+        "full value remains readable after explicit advanced/full-text navigation"
+    );
     Ok(())
 }
 
@@ -2352,7 +2450,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 5/13"));
+    assert!(rendered.contains("Memory 4/7"));
     assert!(rendered.contains("◇ Documents"));
     assert!(rendered.contains("Last scan"));
     assert!(rendered.contains("Root files"));

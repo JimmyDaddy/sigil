@@ -47,7 +47,5 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
             ));
         }
     }
-    lines.push(String::new());
-    lines.push("Up/Down plugin  PgUp/PgDn wrap  footer approve/deny".to_owned());
     lines.extend(render_config_selection_details(config_state));
 }

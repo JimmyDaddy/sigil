@@ -250,6 +250,12 @@ impl AppState {
             crate::mouse::HitTarget::SetupField { index } if self.is_setup_mode() => {
                 self.handle_setup_mouse_field(index)
             }
+            crate::mouse::HitTarget::ConfigAdvancedToggle
+                if self.is_config_mode() && !self.has_modal() =>
+            {
+                self.toggle_config_advanced_surface();
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
+            }
             crate::mouse::HitTarget::ConfigSection { index } if self.is_config_mode() => {
                 Ok(self.handle_config_mouse_section(index))
             }
@@ -609,6 +615,10 @@ impl AppState {
         target: crate::mouse::HitTarget,
         upward: bool,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.is_config_mode() && !self.has_modal() {
+            self.scroll_config_details(upward, false, false);
+            return Ok(crate::mouse::AppMouseOutcome::Redraw);
+        }
         if self.approval.has_actionable_pending() {
             if !self.approval_review_open() {
                 return Ok(crate::mouse::AppMouseOutcome::Noop);
@@ -638,6 +648,7 @@ impl AppState {
             | crate::mouse::HitTarget::ApprovalDiffViewToggle
             | crate::mouse::HitTarget::ApprovalMetadataToggle
             | crate::mouse::HitTarget::SetupField { .. }
+            | crate::mouse::HitTarget::ConfigAdvancedToggle
             | crate::mouse::HitTarget::ConfigSection { .. }
             | crate::mouse::HitTarget::ConfigField { .. }
             | crate::mouse::HitTarget::ConfigFooterAction { .. }
@@ -804,6 +815,9 @@ impl AppState {
             .config_state
             .as_mut()
             .expect("config footer mouse target requires config state");
+        if !action.is_available(config_state) {
+            return Ok(crate::mouse::AppMouseOutcome::Noop);
+        }
         config_state.focus_footer(action);
         self.last_notice = Some(format!("action {}", action.field_label()));
         Ok(mouse_action_outcome(
