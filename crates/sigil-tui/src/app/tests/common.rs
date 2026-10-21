@@ -52,7 +52,7 @@ fn isolated_fixture_base() -> PathBuf {
 }
 
 /// Creates a unique isolated storage root and pins it for the process lifetime.
-fn isolated_fixture_root(label: &str) -> PathBuf {
+pub(crate) fn isolated_fixture_root(label: &str) -> PathBuf {
     let base = isolated_fixture_base();
     let temp = tempfile::Builder::new()
         .prefix(&format!("{label}-{}-", std::process::id()))

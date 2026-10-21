@@ -70,7 +70,9 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
     fs::create_dir_all(&child_dir)?;
 
     let child_ref = sigil_kernel::SessionRef::new_relative("children/child_dir.jsonl")?;
-    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.session_log_path = session_dir.join("parent.jsonl");
     sync_child(
         &mut app,
@@ -308,7 +310,9 @@ fn child_transcript_restore_pairs_maximum_batch_before_latest_eighty_raw_entries
         child_store.append(&SessionLogEntry::ToolResultV3(recorded))?;
     }
 
-    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &test_config());
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.session_log_path = temp.path().join("parent.jsonl");
     app.agent_panel.active_view = AgentView::Child {
         child_task_id: "child-bash-tail".to_owned(),

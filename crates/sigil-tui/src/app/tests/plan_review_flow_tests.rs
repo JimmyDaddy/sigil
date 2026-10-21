@@ -6,7 +6,13 @@ pub(super) fn ready_plan() -> Result<(
     sigil_kernel::Session,
     sigil_kernel::PlanDraftCreatedEntry,
 )> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let workspace = super::common::isolated_fixture_root("sigil-tui-plan-workspace");
+    std::fs::write(workspace.join("README.md"), "# Plan workspace\n")?;
+    let mut config = test_config();
+    // Default "." follows launch cwd; a plan snapshot must not observe parallel repository edits.
+    config.workspace.root = workspace.display().to_string();
+    let mut app = AppState::from_root_config(&workspace.join("sigil.toml"), &config);
+    assert_eq!(app.workspace_root, workspace);
     let snapshot = sigil_runtime::plan_handoff_workspace_snapshot_id(
         app.config_snapshot.as_ref().expect("test configuration"),
         &app.workspace_root,

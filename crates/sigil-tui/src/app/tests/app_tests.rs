@@ -502,7 +502,10 @@ fn agent_flow_selection_refresh_and_rename_edges_cover_private_guards() -> Resul
 
 #[test]
 fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
 
     let rows = app.agent_sidebar_rows();
     assert!(rows.iter().any(|row| {
@@ -510,7 +513,6 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     }));
     assert_eq!(rows.len(), 1);
     assert!(!rows.iter().any(|row| row.muted));
-    let temp = tempdir()?;
     let session_dir = temp.path().join(".sigil/sessions");
     app.session_log_path = session_dir.join("session-parent.jsonl");
     let child_ref = sigil_kernel::SessionRef::new_relative("children/thread_child_1.jsonl")?;
@@ -676,7 +678,9 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
 #[test]
 fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     let temp = tempdir()?;
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     let session_dir = temp.path().join(".sigil/sessions");
     app.session_log_path = session_dir.join("parent.jsonl");
     let session_ref = sigil_kernel::SessionRef::new_relative("children/thread_1.jsonl")?;
