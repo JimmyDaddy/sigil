@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use ratatui::text::Line;
 use sigil_kernel::{
@@ -17,7 +17,6 @@ use crate::{
 
 const INFO_RAIL_AGENT_ROW_LIMIT: usize = 3;
 const INFO_RAIL_TASK_LINE_LIMIT: usize = 4;
-const INFO_RAIL_CONTROL_LIMIT: usize = 3;
 const INFO_RAIL_CONTEXT_SOURCE_LIMIT: usize = 3;
 
 #[derive(Debug, Clone)]
@@ -55,12 +54,19 @@ pub(crate) struct InfoRailViewModel {
 
 impl InfoRailViewModel {
     pub(crate) fn from_app(app: &AppState) -> Self {
-        let detail = app.info_rail_detail_enabled();
+        Self::build(app, false)
+    }
+
+    fn build(app: &AppState, detail: bool) -> Self {
         let controls = info_rail_controls(app, detail);
 
         Self {
             session_title: app.session_display_title(),
-            workspace_label: display_path_label(&app.workspace_root),
+            workspace_label: if detail {
+                app.workspace_root.display().to_string()
+            } else {
+                workspace_basename_label(&app.workspace_root)
+            },
             workspace_git_status: app.workspace_git_status().cloned(),
             session_lines: if detail {
                 detail_info_rail_session_lines(app)
@@ -133,11 +139,7 @@ pub(crate) fn info_rail_agent_rows(app: &AppState) -> Vec<SidebarAgentRow> {
 pub(crate) fn displayed_info_rail_agent_row_entries(
     app: &AppState,
 ) -> Vec<(usize, SidebarAgentRow)> {
-    if app.info_rail_detail_enabled() {
-        app.agent_sidebar_rows().into_iter().enumerate().collect()
-    } else {
-        info_rail_agent_row_entries(app)
-    }
+    info_rail_agent_row_entries(app)
 }
 
 pub(crate) fn info_rail_agent_row_entries(app: &AppState) -> Vec<(usize, SidebarAgentRow)> {
@@ -218,12 +220,57 @@ fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
 }
 
 pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
-    let scope = if app.runtime.is_busy {
-        "locked during run"
-    } else {
-        "saved mode"
-    };
-    vec![format!("mode: {} · {scope}", app.runtime.permission_mode)]
+    app.config_save_error()
+        .map(|error| format!("save failed: {error}"))
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn info_rail_detail_lines(app: &AppState) -> Vec<String> {
+    let model = InfoRailViewModel::build(app, true);
+    let mut lines = vec![
+        "Workspace".to_owned(),
+        model.workspace_label,
+        format!("title: {}", model.session_title),
+    ];
+    if let Some(status) = model.workspace_git_status {
+        lines.push(format!(
+            "git: {} · {}",
+            status.branch,
+            status.change_label()
+        ));
+        lines.push(format!(
+            "staged: {} · modified: {} · untracked: {} · conflicts: {} · ahead: {} · behind: {}",
+            status.staged_entries,
+            status.unstaged_entries,
+            status.untracked_entries,
+            status.conflicted_entries,
+            status.ahead,
+            status.behind,
+        ));
+    }
+    for (title, values) in [
+        ("Session", model.session_lines),
+        ("Permissions", model.permission_lines),
+        ("Agents", model.agent_lines),
+        ("Task", model.task_lines),
+        ("MCP", model.mcp_lines),
+        ("LSP", model.code_lines),
+        ("Usage", model.usage_lines),
+        ("Global shortcuts", model.controls),
+    ] {
+        if values.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(title.to_owned());
+        lines.extend(values);
+    }
+    if let Some(error) = app.config_save_error() {
+        lines.push(String::new());
+        lines.push(format!("save failed: {error}"));
+    }
+    lines
 }
 
 fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
@@ -260,6 +307,9 @@ fn detail_info_rail_usage_lines(app: &AppState) -> Vec<String> {
 }
 
 fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
+    if !detail {
+        return vec!["Alt-I details".to_owned()];
+    }
     let mut controls = global_control_hints(
         app.runtime.is_busy
             && !app
@@ -277,44 +327,7 @@ fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
         controls.retain(|hint| !hint.starts_with("Ctrl-T: details view"));
         controls.extend(tool_card_control_hints());
     }
-    if detail {
-        return controls;
-    }
-
-    let preferred: &[&str] = if app.selected_timeline_text().is_some() {
-        &["Ctrl-C:", "Ctrl-L:", "F2:"]
-    } else if app.has_tool_cards() {
-        &["F2:", "Ctrl-T:", "Ctrl-G:"]
-    } else {
-        &["F1:", "F2:", "Ctrl-C:", "Esc:", "/ or `:"]
-    };
-    let mut compact = Vec::new();
-    for prefix in preferred {
-        if let Some(line) = controls.iter().find(|line| line.starts_with(prefix)) {
-            compact.push(line.clone());
-        }
-        if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
-            break;
-        }
-    }
-    if compact.len() < INFO_RAIL_CONTROL_LIMIT {
-        for line in &controls {
-            if compact.iter().any(|existing| existing == line) {
-                continue;
-            }
-            compact.push(line.clone());
-            if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
-                break;
-            }
-        }
-    }
-    if let Some(details) = controls.iter().find(|line| line.starts_with("Shift-F2:")) {
-        if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
-            compact.pop();
-        }
-        compact.push(details.clone());
-    }
-    compact
+    controls
 }
 
 #[derive(Debug, Clone)]
@@ -1248,14 +1261,10 @@ fn title_case_tool_name(tool_name: &str) -> String {
         .join(" ")
 }
 
-fn display_path_label(path: &Path) -> String {
-    let display = path.to_string_lossy().into_owned();
-    if let Ok(home) = env::var("HOME")
-        && let Some(suffix) = display.strip_prefix(&home)
-    {
-        return format!("~{suffix}");
-    }
-    display
+fn workspace_basename_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

@@ -175,22 +175,9 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
         app.runtime.permission_mode.to_string()
     );
     assert_eq!(view_model.info_rail.session_lines, ["state: ready"]);
-    assert!(!view_model.info_rail.permission_lines.is_empty());
+    assert!(view_model.info_rail.permission_lines.is_empty());
     assert!(view_model.info_rail.code_lines.is_empty());
-    assert!(
-        view_model
-            .info_rail
-            .controls
-            .iter()
-            .any(|line| line == "F1: keyboard help")
-    );
-    assert!(
-        view_model
-            .info_rail
-            .controls
-            .iter()
-            .any(|line| line.starts_with("Shift-F2:"))
-    );
+    assert_eq!(view_model.info_rail.controls, ["Alt-I details"]);
 }
 
 #[test]
@@ -212,11 +199,11 @@ fn compact_footer_omits_empty_statistics_and_keeps_capacity_warnings() -> anyhow
         assert_eq!(UiViewModel::from_app(&app).footer.context_label, expected);
     }
     app.toggle_info_rail_detail();
-    let detail = UiViewModel::from_app(&app);
-    assert!(detail.info_rail.usage_lines.iter().any(|line| {
+    let detail = app.modal_lines();
+    assert!(detail.iter().any(|line| {
         line.starts_with("ctx:") && line.contains("cache=0%") && line.contains("prompt")
     }));
-    assert!(detail.info_rail.usage_lines.iter().any(|line| {
+    assert!(detail.iter().any(|line| {
         line.starts_with("policy:") && line.contains("soft") && line.contains("hard")
     }));
     config.agent.runtime_provider = "custom".to_owned();
@@ -261,9 +248,7 @@ fn footer_hints_explain_copy_selection_and_latest_response() -> anyhow::Result<(
     let selected = UiViewModel::from_app(&app);
     assert!(selected.footer.hints.contains("Ctrl-C copy selection"));
     assert!(
-        selected
-            .info_rail
-            .controls
+        info_rail_detail_lines(&app)
             .iter()
             .any(|line| line == "Ctrl-C: copy selection")
     );
@@ -271,7 +256,7 @@ fn footer_hints_explain_copy_selection_and_latest_response() -> anyhow::Result<(
 }
 
 #[test]
-fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
+fn info_details_opens_full_projection_without_expanding_default_rail() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let compact = UiViewModel::from_app(&app);
 
@@ -288,52 +273,26 @@ fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
             .info_rail
             .controls
             .iter()
-            .any(|line| line == "F2: info rail")
+            .any(|line| line == "Alt-I details")
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
-    let detail = UiViewModel::from_app(&app);
+    let detail = app.modal_lines();
 
     assert!(app.info_rail_detail_enabled());
     for expected in ["model: deepseek-v4-flash", "effort: max", "phase: ready"] {
-        assert!(
-            detail
-                .info_rail
-                .session_lines
-                .iter()
-                .any(|line| line == expected)
-        );
+        assert!(detail.iter().any(|line| line == expected));
     }
-    assert!(
-        detail
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line.starts_with("session: "))
+    assert!(detail.iter().any(|line| line.starts_with("session: ")));
+    assert!(detail.iter().any(|line| line.starts_with("Ctrl-C: quit")));
+    assert!(detail.iter().any(|line| line == "provider: deepseek"));
+    assert!(detail.iter().any(|line| line == "scope: saved default"));
+    assert!(detail.iter().any(|line| line == "Usage"));
+    assert_eq!(
+        UiViewModel::from_app(&app).info_rail.session_lines,
+        compact.info_rail.session_lines
     );
-    assert!(
-        detail
-            .info_rail
-            .controls
-            .iter()
-            .any(|line| line.starts_with("Ctrl-C: quit"))
-    );
-    assert!(
-        detail
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line == "provider: deepseek")
-    );
-    assert!(
-        detail
-            .info_rail
-            .permission_lines
-            .iter()
-            .any(|line| line == "scope: saved default")
-    );
-    assert!(detail.info_rail.usage_lines.len() > compact.info_rail.usage_lines.len());
-    assert_eq!(app.last_notice(), Some("info rail: detail"));
+    assert_eq!(app.last_notice(), Some("details opened"));
     Ok(())
 }
 
@@ -657,7 +616,7 @@ fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
     })?;
     app.toggle_info_rail_detail();
 
-    let usage = UiViewModel::from_app(&app).info_rail.usage_lines.join("\n");
+    let usage = app.modal_lines().join("\n");
     assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
     assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
     assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));
@@ -729,31 +688,11 @@ fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyh
     assert!(view_model.info_rail.task_lines.is_empty());
 
     app.toggle_info_rail_detail();
-    let detail = UiViewModel::from_app(&app);
-    assert!(
-        detail
-            .info_rail
-            .task_lines
-            .contains(&"task: ship task".to_owned())
-    );
-    assert!(
-        detail
-            .info_rail
-            .task_lines
-            .contains(&"status: running".to_owned())
-    );
-    assert!(
-        detail
-            .info_rail
-            .task_lines
-            .contains(&"progress: 0/1 done".to_owned())
-    );
-    assert!(
-        detail
-            .info_rail
-            .task_lines
-            .contains(&"current: v1:step_1 running".to_owned())
-    );
+    let detail = app.modal_lines();
+    assert!(detail.contains(&"task: ship task".to_owned()));
+    assert!(detail.contains(&"status: running".to_owned()));
+    assert!(detail.contains(&"progress: 0/1 done".to_owned()));
+    assert!(detail.contains(&"current: v1:step_1 running".to_owned()));
     Ok(())
 }
 
@@ -802,15 +741,9 @@ fn ui_view_model_projects_enabled_code_intelligence_status() {
     };
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
     app.toggle_info_rail_detail();
-    let view_model = UiViewModel::from_app(&app);
+    let view_model = app.modal_lines();
 
-    assert!(
-        view_model
-            .info_rail
-            .code_lines
-            .iter()
-            .any(|line| line == "status: lazy")
-    );
+    assert!(view_model.iter().any(|line| line == "status: lazy"));
 }
 
 #[test]
@@ -874,36 +807,24 @@ fn code_tool_result_projects_per_server_lsp_status_lines() -> anyhow::Result<()>
     )))?;
 
     app.toggle_info_rail_detail();
-    let view_model = UiViewModel::from_app(&app);
+    let view_model = app.modal_lines();
 
     assert!(
         view_model
-            .info_rail
-            .code_lines
             .iter()
             .any(|line| line == "rust: ready rust-analyzer")
     );
     assert!(
         view_model
-            .info_rail
-            .code_lines
             .iter()
             .any(|line| line == "python: degraded missing binary")
     );
     assert!(
         view_model
-            .info_rail
-            .code_lines
             .iter()
             .any(|line| line == "typescript/javascript: missing typescript-language-server")
     );
-    assert!(
-        view_model
-            .info_rail
-            .code_lines
-            .iter()
-            .any(|line| line == "go: installed gopls")
-    );
+    assert!(view_model.iter().any(|line| line == "go: installed gopls"));
     Ok(())
 }
 
@@ -941,18 +862,14 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
         "diagnostics 1 errors 2 warnings"
     );
     app.toggle_info_rail_detail();
-    let view_model = UiViewModel::from_app(&app);
+    let view_model = app.modal_lines();
     assert!(
         view_model
-            .info_rail
-            .code_lines
             .iter()
             .any(|line| line == "rust: ready rust-analyzer")
     );
     assert!(
         view_model
-            .info_rail
-            .code_lines
             .iter()
             .any(|line| line == "diagnostics: 1 errors 2 warnings")
     );
@@ -999,8 +916,8 @@ fn code_diagnostics_tool_result_projects_latest_file_summaries() -> anyhow::Resu
     )))?;
 
     app.toggle_info_rail_detail();
-    let view_model = UiViewModel::from_app(&app);
-    let code_lines = view_model.info_rail.code_lines;
+    let view_model = app.modal_lines();
+    let code_lines = view_model;
 
     assert!(
         code_lines
@@ -1304,7 +1221,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
 }
 
 #[test]
-fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
+fn activity_controls_stay_in_details_without_filling_default_rail_or_footer() -> anyhow::Result<()>
+{
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolResult(ToolResult::ok(
         "call-1",
@@ -1319,13 +1237,7 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
     assert!(!view_model.footer.hints.contains("Alt-J/K switch"));
     assert!(!view_model.footer.hints.contains("Esc back"));
     assert!(view_model.footer.hints.contains("Enter send"));
-    assert!(
-        view_model
-            .info_rail
-            .controls
-            .iter()
-            .any(|hint| hint == "Ctrl-T: toggle activity")
-    );
+    assert_eq!(view_model.info_rail.controls, ["Alt-I details"]);
     assert!(
         view_model
             .info_rail
@@ -1335,18 +1247,14 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
-    let detail_view_model = UiViewModel::from_app(&app);
+    let detail_view_model = app.modal_lines();
     assert!(
         detail_view_model
-            .info_rail
-            .controls
             .iter()
             .any(|hint| hint == "Alt-J: next activity")
     );
     assert!(
         !detail_view_model
-            .info_rail
-            .controls
             .iter()
             .any(|hint| hint == "Ctrl-T: details view")
     );
@@ -1449,32 +1357,23 @@ fn compact_info_rail_folds_inactive_modules_and_statistics_into_details() -> any
             .info_rail
             .controls
             .iter()
-            .any(|line| line.starts_with("Shift-F2:"))
+            .any(|line| line == "Alt-I details")
     );
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
-    let view_model = UiViewModel::from_app(&app);
+    let view_model = app.modal_lines();
+    assert!(view_model.iter().any(|line| line == "memory: off"));
     assert!(
         view_model
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line == "memory: off")
-    );
-    assert!(
-        view_model
-            .info_rail
-            .agent_lines
             .iter()
             .any(|line| line == "◉ main: ○ current session")
     );
     assert!(
         view_model
-            .info_rail
-            .agent_lines
             .iter()
             .all(|line| !line.contains("no child agents recorded"))
     );
-    assert!(!view_model.info_rail.usage_lines.is_empty());
+    assert!(view_model.iter().any(|line| line == "Usage"));
+    assert!(UiViewModel::from_app(&app).info_rail.usage_lines.is_empty());
     Ok(())
 }
 
@@ -1495,6 +1394,32 @@ fn compact_info_rail_retains_actionable_diagnostics() {
     let model = UiViewModel::from_app(&app);
     assert_eq!(model.info_rail.code_lines, ["src/broken.rs: 1 error"]);
     assert!(model.info_rail.usage_lines.is_empty());
+}
+
+#[test]
+fn compact_info_rail_uses_workspace_basename_and_preserves_complete_details() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().join("event workspace");
+    std::fs::create_dir(&workspace)?;
+    let mut config = test_config();
+    config.workspace.root = workspace.display().to_string();
+    let app = AppState::from_root_config(&workspace.join("sigil.toml"), &config);
+    let compact = UiViewModel::from_app(&app);
+    assert_eq!(compact.info_rail.workspace_label, "event workspace");
+    assert!(compact.info_rail.permission_lines.is_empty());
+    assert_eq!(compact.info_rail.controls, ["Alt-I details"]);
+    assert_eq!(
+        compact.composer.permission_label,
+        app.runtime.permission_mode
+    );
+
+    let details = info_rail_detail_lines(&app);
+    assert!(details.contains(&workspace.display().to_string()));
+    assert!(details.contains(&format!("mode: {}", app.runtime.permission_mode)));
+    for line in app.usage_sidebar_lines() {
+        assert!(details.contains(line), "missing usage fact: {line}");
+    }
+    Ok(())
 }
 
 #[test]

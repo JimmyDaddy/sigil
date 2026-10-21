@@ -633,7 +633,6 @@ pub struct AppState {
     pub timeline_scroll_back: usize,
     pub activity_scroll_back: usize,
     info_rail_visible: bool,
-    info_rail_detail: bool,
     review: ReviewState,
     /// Persisted configuration used for authority/config CAS and product configuration UI.
     config_snapshot: Option<RootConfig>,
@@ -1369,7 +1368,6 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_visible: root_config.appearance.info_rail,
-            info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
             session_runtime_config: Some(runtime_config.clone()),
@@ -1536,7 +1534,6 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_visible: true,
-            info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: None,
             session_runtime_config: None,

@@ -116,15 +116,6 @@ pub(crate) fn render_tool_entry_lines(
                 ));
             }
         }
-        if selected {
-            lines.push(timeline_content_line(
-                accent,
-                vec![Span::styled(
-                    "Ctrl-O details",
-                    Style::default().fg(palette.text_secondary),
-                )],
-            ));
-        }
         if summary.artifact.as_ref().is_some_and(|artifact| {
             artifact.availability != "available"
                 || artifact.persisted_bytes < artifact.observed_bytes

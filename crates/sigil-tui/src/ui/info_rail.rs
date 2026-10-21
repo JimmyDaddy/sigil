@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Paragraph},
 };
 
 use crate::{view_model::InfoRailViewModel, workspace_git::WorkspaceGitStatus};
@@ -35,116 +35,98 @@ pub(crate) fn render_info_rail_with_theme(
         Block::default().style(Style::default().bg(palette.surface_rail)),
         area,
     );
+    let body = info_rail_body_area(area);
+    if body.width > 0 && body.height > 0 {
+        let layout = info_rail_body_layout(view_model, body.width as usize, theme);
+        frame.render_widget(
+            Paragraph::new(Text::from(layout.lines))
+                .style(Style::default().bg(palette.surface_rail)),
+            body,
+        );
+    }
+    if let Some(details) = info_rail_details_area(area) {
+        frame.render_widget(
+            Paragraph::new(truncate_display_width(
+                "Alt-I details",
+                details.width as usize,
+            ))
+            .style(Style::default().fg(palette.text_secondary)),
+            details,
+        );
+    }
+}
+
+pub(super) fn info_rail_body_area(area: Rect) -> Rect {
     let inner = inset_rect(area, 3, 1);
-    if inner.width == 0 || inner.height == 0 {
-        return;
+    Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
     }
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "info",
-            Style::default()
-                .fg(palette.text_secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            truncate_display_width(
-                &view_model.session_title,
-                inner.width.saturating_sub(6).max(1) as usize,
-            ),
-            Style::default()
-                .fg(palette.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    lines.push(Line::from(vec![Span::styled(
-        truncate_display_width(&view_model.workspace_label, inner.width as usize),
-        Style::default().fg(palette.text_muted),
-    )]));
-    if let Some(status) = &view_model.workspace_git_status {
-        lines.extend(render_workspace_git_status(
-            status,
-            inner.width as usize,
-            theme,
-        ));
+}
+
+pub(super) fn info_rail_details_area(area: Rect) -> Option<Rect> {
+    let inner = inset_rect(area, 3, 1);
+    (inner.width > 0 && inner.height > 0)
+        .then(|| Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1))
+}
+
+pub(super) struct InfoRailBodyLayout {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) agent_row_offsets: Vec<usize>,
+}
+
+pub(super) fn info_rail_body_layout(
+    model: &InfoRailViewModel,
+    width: usize,
+    theme: &Theme,
+) -> InfoRailBodyLayout {
+    let palette = &theme.palette;
+    let mut lines = vec![Line::styled(
+        truncate_display_width(&model.workspace_label, width),
+        Style::default()
+            .fg(palette.text_primary)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(status) = &model.workspace_git_status {
+        lines.extend(render_workspace_git_status(status, width, theme));
     }
+    lines.extend(
+        model
+            .session_lines
+            .iter()
+            .map(|value| render_info_line_with_theme(value, width, theme)),
+    );
     lines.push(Line::raw(String::new()));
-
     push_info_section(
         &mut lines,
-        "session",
-        palette.accent_info,
-        view_model.session_lines.iter().cloned(),
-        inner.width as usize,
+        "attention",
+        palette.status_error,
+        model.permission_lines.iter().cloned(),
+        width,
         theme,
     );
-    push_info_section(
-        &mut lines,
-        "permissions",
-        palette.accent_warning,
-        view_model.permission_lines.iter().cloned(),
-        inner.width as usize,
-        theme,
-    );
-    push_info_section(
-        &mut lines,
-        "agents",
-        palette.accent_success,
-        view_model.agent_lines.iter().cloned(),
-        inner.width as usize,
-        theme,
-    );
-    if !view_model.task_lines.is_empty() {
+    let agent_start = lines.len().saturating_add(1);
+    let agent_row_offsets =
+        (agent_start..agent_start.saturating_add(model.agent_lines.len())).collect();
+    for (title, values) in [
+        ("agents", &model.agent_lines),
+        ("task", &model.task_lines),
+        ("MCP", &model.mcp_lines),
+        ("LSP", &model.code_lines),
+    ] {
         push_info_section(
             &mut lines,
-            "task",
-            palette.accent_secondary,
-            view_model.task_lines.iter().cloned(),
-            inner.width as usize,
+            title,
+            palette.text_secondary,
+            values.iter().cloned(),
+            width,
             theme,
         );
     }
-    if !view_model.mcp_lines.is_empty() {
-        push_info_section(
-            &mut lines,
-            "MCP",
-            palette.accent_warning,
-            view_model.mcp_lines.iter().cloned(),
-            inner.width as usize,
-            theme,
-        );
+    InfoRailBodyLayout {
+        lines,
+        agent_row_offsets,
     }
-    push_info_section(
-        &mut lines,
-        "LSP",
-        palette.accent_secondary,
-        view_model.code_lines.iter().cloned(),
-        inner.width as usize,
-        theme,
-    );
-    push_info_section(
-        &mut lines,
-        "usage",
-        palette.accent_info,
-        view_model.usage_lines.iter().cloned(),
-        inner.width as usize,
-        theme,
-    );
-    push_info_section(
-        &mut lines,
-        "controls",
-        palette.accent_danger,
-        view_model.controls.iter().cloned(),
-        inner.width as usize,
-        theme,
-    );
-
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(palette.surface_rail))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
 }
 
 fn render_workspace_git_status(
@@ -177,19 +159,12 @@ fn render_workspace_git_status(
     let detail_width = width.saturating_sub(7);
     let compact = detail_width < 18;
     let mut details = Vec::new();
-    for (count, label, compact_label) in [
-        (status.conflicted_entries, "conf", "!"),
-        (status.staged_entries, "stg", "S"),
-        (status.unstaged_entries, "mod", "M"),
-        (status.untracked_entries, "new", "?"),
-    ] {
-        if count > 0 {
-            details.push(if compact {
-                format!("{compact_label}{count}")
-            } else {
-                format!("{label} {count}")
-            });
-        }
+    if status.conflicted_entries > 0 {
+        details.push(if compact {
+            format!("!{}", status.conflicted_entries)
+        } else {
+            format!("conf {}", status.conflicted_entries)
+        });
     }
     if status.ahead > 0 {
         details.push(format!("↑{}", status.ahead));
@@ -265,19 +240,6 @@ fn push_info_section<I>(
         lines.push(render_info_line_with_theme(&value, width, theme));
     }
     lines.push(Line::raw(String::new()));
-}
-
-pub(super) fn info_rail_header_row_count(
-    view_model: &InfoRailViewModel,
-    width: usize,
-    theme: &Theme,
-) -> usize {
-    3 + view_model
-        .workspace_git_status
-        .as_ref()
-        .map_or(0, |status| {
-            render_workspace_git_status(status, width, theme).len()
-        })
 }
 
 #[cfg(test)]

@@ -45,6 +45,7 @@ pub struct LayoutSnapshot {
     pub composer_input: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
+    pub info_rail_details: Option<Rect>,
     pub task_strip_toggle: Option<Rect>,
     pub verification_card: Option<Rect>,
     pub(crate) composer_queue_hit_areas: Option<ComposerQueueHitAreas>,
@@ -280,6 +281,7 @@ impl LayoutSnapshot {
             ),
             footer: shell.footer,
             info_rail: shell.info_rail,
+            info_rail_details: super::info_rail::info_rail_details_area(shell.info_rail),
             task_strip_toggle: task_strip_toggle_area_for_app(live_content, app),
             verification_card: verification_card_area_for_app(live_content, app),
             composer_queue_hit_areas: composer_queue_hit_areas(live_content, app),
@@ -315,6 +317,7 @@ impl LayoutSnapshot {
             composer_input: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
+            info_rail_details: None,
             task_strip_toggle: None,
             verification_card: None,
             composer_queue_hit_areas: None,
@@ -510,6 +513,12 @@ impl LayoutSnapshot {
         }
         if contains(self.live_panel, column, row) {
             return HitTarget::LivePanel;
+        }
+        if self
+            .info_rail_details
+            .is_some_and(|area| contains(area, column, row))
+        {
+            return HitTarget::InfoRailDetails;
         }
         for row_area in &self.info_rail_agent_rows {
             if contains(row_area.area, column, row) {
@@ -1101,45 +1110,30 @@ fn live_text_row_hit_areas(live_area: Rect, app: &AppState) -> Vec<LiveTextRowHi
 }
 
 fn info_rail_agent_row_hit_areas(info_rail: Rect, app: &AppState) -> Vec<InfoRailAgentRowHitArea> {
-    let inner = inset_rect(info_rail, 3, 1);
-    if inner.width == 0 || inner.height == 0 {
+    let body = super::info_rail::info_rail_body_area(info_rail);
+    if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
 
     let model = InfoRailViewModel::from_app(app);
     let theme = super::theme::resolve_for_app(app);
-    let agent_row_start =
-        super::info_rail::info_rail_header_row_count(&model, inner.width as usize, &theme)
-            .saturating_add(info_section_row_count(model.session_lines.len()))
-            .saturating_add(info_section_row_count(model.permission_lines.len()))
-            .saturating_add(1)
-            .saturating_add(usize::from(
-                app.info_rail_detail_enabled() && app.agent_graph_summary_line().is_some(),
-            ));
+    let rows = super::info_rail::info_rail_body_layout(&model, body.width as usize, &theme);
 
     displayed_info_rail_agent_row_entries(app)
         .into_iter()
         .enumerate()
         .filter_map(|(display_index, (agent_index, _))| {
-            let relative_row = agent_row_start.saturating_add(display_index);
-            if relative_row >= inner.height as usize {
+            let relative_row = *rows.agent_row_offsets.get(display_index)?;
+            if relative_row >= body.height as usize {
                 return None;
             }
             let y_offset = u16::try_from(relative_row).ok()?;
             Some(InfoRailAgentRowHitArea {
                 index: agent_index,
-                area: Rect::new(inner.x, inner.y.saturating_add(y_offset), inner.width, 1),
+                area: Rect::new(body.x, body.y.saturating_add(y_offset), body.width, 1),
             })
         })
         .collect()
-}
-
-fn info_section_row_count(value_count: usize) -> usize {
-    if value_count == 0 {
-        0
-    } else {
-        value_count.saturating_add(2)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

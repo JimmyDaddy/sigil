@@ -583,6 +583,7 @@ impl AppState {
         if self.user_input_attention_is_submitted(&request.identity, &request.request_hash) {
             return;
         }
+        self.dismiss_read_only_modal_for_attention();
         let view = UserInputFormViewModel::from(&request);
         let drafts = empty_user_input_drafts(&view.questions);
         let selected_action = if recovery_command.is_some() {
@@ -633,6 +634,7 @@ impl AppState {
         server_name: String,
         response_tx: crate::runner::McpElicitationResponseTx,
     ) {
+        self.dismiss_read_only_modal_for_attention();
         self.pending_mcp_elicitation = Some(PendingMcpElicitation {
             response_tx: Some(response_tx),
         });

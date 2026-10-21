@@ -1011,6 +1011,16 @@ fn config_private_helpers_cover_missing_snapshot_and_save_guards() -> anyhow::Re
         Some("save failed: model cannot be empty")
     );
     assert_eq!(app.config_save_error(), Some("model cannot be empty"));
+    assert_eq!(
+        crate::view_model::UiViewModel::from_app(&app)
+            .info_rail
+            .permission_lines,
+        ["save failed: model cannot be empty"]
+    );
+    assert!(
+        crate::view_model::info_rail_detail_lines(&app)
+            .contains(&"save failed: model cannot be empty".to_owned())
+    );
     assert_eq!(app.config_selected_field_label(), Some("Model"));
     assert!(app.events.iter().any(|event| {
         event.label == "config:error" && event.detail.contains("model cannot be empty")

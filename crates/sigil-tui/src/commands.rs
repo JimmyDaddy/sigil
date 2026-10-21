@@ -125,10 +125,13 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         command: UiCommand::ToggleInfoRailDetail,
-        keys: &[KeyBinding { label: "Shift-F2" }],
+        keys: &[
+            KeyBinding { label: "Alt-I" },
+            KeyBinding { label: "Shift-F2" },
+        ],
         slash: None,
-        label: "Info rail detail",
-        help: "Toggle the right rail between compact and detailed information.",
+        label: "Details",
+        help: "Open or close scrollable workspace and session details.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -295,7 +298,10 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         command: UiCommand::ToggleSelectedToolCard,
-        keys: &[KeyBinding { label: "Ctrl-T" }],
+        keys: &[
+            KeyBinding { label: "Ctrl-T" },
+            KeyBinding { label: "Ctrl-O" },
+        ],
         slash: None,
         label: "Toggle activity",
         help: "Expand or collapse the focused activity.",
@@ -411,7 +417,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             .expect("info rail visibility metadata exists"),
         control_hint(UiCommand::ToggleInfoRailDetail).expect("info rail metadata exists"),
         if is_busy {
-            "Esc: interrupt".to_owned()
+            "Ctrl-C: cancel work".to_owned()
         } else {
             "Ctrl-C: quit · Ctrl-L: copy reply".to_owned()
         },
@@ -467,6 +473,10 @@ pub(crate) fn common_keyboard_help_lines() -> Vec<String> {
         concise_help_line(
             UiCommand::ToggleThinking,
             "Show or hide activity and thinking details.",
+        ),
+        concise_help_line(
+            UiCommand::ToggleInfoRailDetail,
+            "Workspace and session details.",
         ),
         String::new(),
         "Control".to_owned(),
@@ -562,7 +572,10 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Config".to_owned(),
     ]);
     lines.extend(command_help_lines([UiCommand::ToggleWriteMode]));
-    lines.push("F2: Show/hide info rail. Shift-F2: Toggle compact/detail.".to_owned());
+    lines.extend(command_help_lines([
+        UiCommand::ToggleInfoRailVisibility,
+        UiCommand::ToggleInfoRailDetail,
+    ]));
     lines.extend(command_help_lines([
         UiCommand::OpenConfig,
         UiCommand::OpenDoctor,
@@ -608,7 +621,15 @@ fn command_spec_control_hint(spec: &UiCommandSpec) -> Option<String> {
 }
 
 fn command_spec_help_line(spec: &UiCommandSpec) -> Option<String> {
-    let trigger = spec.keys.first().map(|key| key.label).or(spec.slash)?;
+    let trigger = if spec.keys.is_empty() {
+        spec.slash?.to_owned()
+    } else {
+        spec.keys
+            .iter()
+            .map(|key| key.label)
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
     Some(format!("{trigger}: {}", spec.help))
 }
 

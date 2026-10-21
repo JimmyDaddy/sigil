@@ -86,11 +86,7 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(global.iter().any(|hint| hint == "F1: keyboard help"));
     assert!(global.iter().any(|hint| hint.starts_with("Ctrl-C: quit")));
     assert!(global.iter().any(|hint| hint == "F2: info rail"));
-    assert!(
-        global
-            .iter()
-            .any(|hint| hint == "Shift-F2: info rail detail")
-    );
+    assert!(global.iter().any(|hint| hint == "Alt-I: details"));
     assert!(
         global
             .iter()
@@ -111,7 +107,12 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(
         global_control_hints(true)
             .iter()
-            .any(|hint| hint == "Esc: interrupt")
+            .any(|hint| hint == "Ctrl-C: cancel work")
+    );
+    assert!(
+        global_control_hints(true)
+            .iter()
+            .all(|hint| hint != "Esc: interrupt")
     );
     let activity_controls = tool_card_control_hints().collect::<Vec<_>>();
     assert!(
@@ -210,8 +211,11 @@ fn command_metadata_generates_help_and_control_hints() {
     );
     assert!(
         help.iter()
-            .any(|line| { line == "F2: Show/hide info rail. Shift-F2: Toggle compact/detail." })
+            .any(|line| line == "F2: Show or hide the right info rail for the current run.")
     );
+    assert!(help.iter().any(|line| {
+        line == "Alt-I / Shift-F2: Open or close scrollable workspace and session details."
+    }));
     assert!(help.iter().any(|line| {
         line == "Alt-A: Switch the visible main chat between parent and child agents; /agent can rename child agents."
     }));
@@ -221,7 +225,7 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(help.iter().any(|line| line.contains("Ctrl-G:")));
     assert!(
         help.iter()
-            .any(|line| { line == "Ctrl-T: Expand or collapse the focused activity." })
+            .any(|line| line == "Ctrl-T / Ctrl-O: Expand or collapse the focused activity.")
     );
     assert!(help.iter().any(|line| {
         line == "Alt-N: Read the next bounded page from the focused tool output artifact."

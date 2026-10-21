@@ -66,6 +66,11 @@ pub(crate) struct KeyboardHelpSurface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfoDetailsSurface {
+    pub scroll_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModalSurface {
     pub visible: bool,
     pub checkpoint_restore_visible: bool,
@@ -75,6 +80,7 @@ pub(crate) struct ModalSurface {
     pub config_mode: bool,
     pub session_modal_actions: Vec<(SessionModalAction, String)>,
     pub keyboard_help: Option<KeyboardHelpSurface>,
+    pub info_details: Option<InfoDetailsSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

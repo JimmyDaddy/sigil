@@ -3,7 +3,7 @@ use sigil_runtime::support::SupportBuildInfo;
 
 use super::{
     AppState, ComposerMode, EGRESS_DISCLOSURE_HEIGHT, SetupState,
-    formatting::sidebar_width_for_terminal,
+    formatting::sidebar_width_for_terminal, modal_flow::ModalState,
 };
 
 impl AppState {
@@ -337,7 +337,7 @@ impl AppState {
     }
 
     pub(crate) fn info_rail_detail_enabled(&self) -> bool {
-        self.info_rail_detail
+        matches!(self.modal_state, Some(ModalState::InfoDetails { .. }))
     }
 
     pub(crate) fn info_rail_visible(&self) -> bool {
@@ -365,13 +365,27 @@ impl AppState {
     }
 
     pub(crate) fn toggle_info_rail_detail(&mut self) {
-        self.info_rail_detail = !self.info_rail_detail;
-        let mode = if self.info_rail_detail {
-            "detail"
+        if self.read_only_modal_attention_pending() {
+            self.dismiss_read_only_modal_for_attention();
+            return;
+        }
+        let opened = if self.info_rail_detail_enabled() {
+            self.modal_state = None;
+            false
+        } else if self.modal_state.is_none()
+            || matches!(self.modal_state, Some(ModalState::KeyboardHelp(_)))
+        {
+            self.modal_state = Some(ModalState::InfoDetails { scroll_rows: 0 });
+            true
         } else {
-            "compact"
+            return;
         };
-        self.last_notice = Some(format!("info rail: {mode}"));
+        let mode = if opened {
+            "details opened"
+        } else {
+            "details closed"
+        };
+        self.last_notice = Some(mode.to_owned());
         self.push_event("info_rail", mode);
     }
 
@@ -380,7 +394,7 @@ impl AppState {
             format!("mode: {}", self.runtime.permission_mode),
             "Shift-Tab cycle + save".to_owned(),
             if self.runtime.is_busy {
-                "busy: locked during run".to_owned()
+                "scope: active run".to_owned()
             } else {
                 "scope: saved default".to_owned()
             },

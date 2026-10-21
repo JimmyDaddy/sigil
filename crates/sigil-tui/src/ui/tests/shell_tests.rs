@@ -414,13 +414,21 @@ fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> 
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("info"));
-    assert!(rendered.contains("session"));
+    let workspace_name = app
+        .workspace_root
+        .file_name()
+        .expect("workspace name")
+        .to_string_lossy();
+    assert!(rendered.contains(workspace_name.as_ref()));
+    assert!(rendered.contains("Alt-I details"));
     assert!(rendered.contains("state: ready"));
-    assert!(rendered.contains("permissions"));
+    assert!(!rendered.contains("permissions"));
+    assert!(!rendered.contains("controls"));
     assert!(!rendered.contains("LSP"));
 
+    app.set_terminal_size(140, 60);
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+    assert_eq!(app.modal_title(), Some("Details"));
     let mut terminal = Terminal::new(TestBackend::new(140, 60))?;
     terminal.draw(|frame| render(frame, &app))?;
     let rendered = rendered_content(&terminal);

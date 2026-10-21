@@ -13,7 +13,8 @@
 | 打开帮助或斜杠命令列表 | `F1` / `/` |
 | 提交 | `Enter` |
 | 显示或隐藏信息栏 | `F2` |
-| 切换可见信息栏紧凑/详细模式 | `Shift-F2` |
+| 打开或关闭可滚动的工作区与会话详情 | `Alt-I` / `Shift-F2`；可点击信息栏底部 **Alt-I details** |
+| 滚动详情 / 返回而不提交输入 | `Up/Down`、`PageUp/PageDown`、`Home/End`、滚轮 / `Esc` 或 `Enter` |
 | 滚动会话记录 | `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` |
 | 切换默认权限模式 | `Shift-Tab` |
 | 输入换行 | `Ctrl-J`；终端支持时用 `Shift-Enter` / `Alt-Enter` |
@@ -26,6 +27,7 @@
 | 复制选区；没有选区时复制最新助手回复 | `Ctrl-L`；不包含信息栏 |
 | 取消当前运行 / 关闭浮层 | 无选区时按 `Ctrl-C` / `Esc` |
 | 聚焦并切换活动 | `Ctrl-G`、`Alt-J` / `Alt-K` |
+| 展开或折叠当前聚焦的活动 | `Ctrl-O` |
 | 读取当前聚焦的已保存工具输出的下一页 | `Alt-N` |
 | 在当前聚焦的已保存工具输出中搜索有限长度的字面文本 | `Alt-F` |
 | 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |

@@ -871,10 +871,17 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
     );
 
     for detail in [false, true] {
-        if detail {
-            app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
-        }
         app.set_terminal_size(140, 80);
+        if detail {
+            let before = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 80), &app);
+            app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::SHIFT))?;
+            assert_eq!(app.modal_title(), Some("Details"));
+            let opened = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 80), &app);
+            assert_eq!(opened.info_rail_agent_rows, before.info_rail_agent_rows);
+            assert_eq!(opened.info_rail_details, before.info_rail_details);
+            app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+            assert!(!app.has_modal());
+        }
         let surface = crate::surface_adapter::build_surface_model(
             Rect::new(0, 0, 140, 80),
             &app,

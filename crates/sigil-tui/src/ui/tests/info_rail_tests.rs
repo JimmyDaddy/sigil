@@ -12,7 +12,7 @@ use super::*;
 fn sample_view_model() -> InfoRailViewModel {
     InfoRailViewModel {
         session_title: "Session title that is deliberately longer than the rail".to_owned(),
-        workspace_label: "/tmp/project/with/a/very/long/path".to_owned(),
+        workspace_label: "project".to_owned(),
         workspace_git_status: crate::workspace_git::parse_workspace_git_status(concat!(
             "## feature/tui-status...origin/feature/tui-status [ahead 2]\n",
             "M  staged.rs\n",
@@ -54,9 +54,12 @@ fn render_info_rail_skips_empty_optional_sections() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(TestBackend::new(54, 32))?;
     terminal.draw(|frame| render_info_rail(frame, frame.area(), &model))?;
     let text = rendered_text(&terminal);
-    assert!(text.contains("session"));
-    assert!(text.contains("permissions"));
-    assert!(text.contains("controls"));
+    assert!(text.contains("project"));
+    assert!(text.contains("mode: ready"));
+    assert!(text.contains("attention"));
+    assert!(text.contains("Alt-I details"));
+    assert!(!text.contains("permissions"));
+    assert!(!text.contains("controls"));
     for hidden in ["agents", "task", "MCP", "LSP", "usage"] {
         assert!(
             !text.contains(hidden),
@@ -76,29 +79,31 @@ fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
     })?;
 
     let rendered = rendered_text(&terminal);
-    assert!(rendered.contains("info"));
+    assert!(rendered.contains("project"));
     assert!(rendered.contains("git:"));
     assert!(rendered.contains("feature/tui-status"));
-    assert!(rendered.contains("stg 1"));
-    assert!(rendered.contains("mod 1"));
-    assert!(rendered.contains("new 1"));
+    assert!(rendered.contains("3 changes"));
+    assert!(!rendered.contains("stg 1"));
+    assert!(!rendered.contains("mod 1"));
+    assert!(!rendered.contains("new 1"));
     assert!(rendered.contains("↑2"));
     assert!(rendered.contains("session"));
-    assert!(rendered.contains("permissions"));
+    assert!(rendered.contains("attention"));
     assert!(rendered.contains("agents"));
     assert!(rendered.contains("task"));
     assert!(rendered.contains("MCP"));
     assert!(rendered.contains("filesystem"));
     assert!(rendered.contains("LSP"));
-    assert!(rendered.contains("usage"));
-    assert!(rendered.contains("controls"));
+    assert!(!rendered.contains("tokens: 10/100"));
+    assert!(!rendered.contains("controls"));
+    assert!(rendered.contains("Alt-I details"));
     assert!(rendered.contains("mode"));
     assert!(rendered.contains("approval"));
     Ok(())
 }
 
 #[test]
-fn render_info_rail_splits_busy_git_status_into_readable_narrow_rows() -> anyhow::Result<()> {
+fn render_info_rail_keeps_git_total_without_normal_change_breakdown() -> anyhow::Result<()> {
     let mut view_model = sample_view_model();
     view_model.workspace_git_status = crate::workspace_git::parse_workspace_git_status(&format!(
         "## main\n{}{}{}",
@@ -119,17 +124,16 @@ fn render_info_rail_splits_busy_git_status_into_readable_narrow_rows() -> anyhow
             .collect::<String>()
     };
     assert!(
-        row(3).contains("git: main · 101 changes"),
+        row(2).contains("git: main · 101 changes"),
         "summary row: {:?}",
-        row(3)
+        row(2)
     );
-    assert!(
-        row(4).contains("stg 12 · mod 73 · new 16"),
-        "detail row: {:?}",
-        row(4)
-    );
-    assert!(!row(3).contains("..."));
-    assert!(!row(4).contains("..."));
+    assert!(row(3).contains("mode: ready"));
+    let text = rendered_text(&terminal);
+    assert!(!text.contains("stg 12"));
+    assert!(!text.contains("mod 73"));
+    assert!(!text.contains("new 16"));
+    assert!(!row(2).contains("..."));
     Ok(())
 }
 
@@ -156,9 +160,10 @@ fn render_info_rail_preserves_branch_and_total_at_minimum_rail_width() -> anyhow
             .map(|x| terminal.backend().buffer()[(x, y)].symbol())
             .collect::<String>()
     };
-    assert!(row(3).contains("git: main"));
-    assert!(row(4).contains("101 changes"));
-    assert!(format!("{} {}", row(5), row(6)).contains("S12 M73 ?16"));
+    assert!(row(2).contains("git: main"));
+    assert!(row(3).contains("101 changes"));
+    assert!(row(4).contains("mode: ready"));
+    assert!(!rendered_text(&terminal).contains("S12 M73 ?16"));
     Ok(())
 }
 
@@ -172,6 +177,50 @@ fn render_info_rail_returns_early_when_inner_rect_disappears() -> anyhow::Result
     })?;
 
     assert!(!rendered_text(&terminal).contains("info"));
+    Ok(())
+}
+
+#[test]
+fn info_rail_detail_entry_stays_visible_when_attention_fills_the_body() -> anyhow::Result<()> {
+    let mut model = sample_view_model();
+    model.permission_lines = vec!["save failed: configuration changed on disk".to_owned()];
+    model.code_lines = (0..40)
+        .map(|index| format!("src/file_{index}.rs: 1 error"))
+        .collect();
+    for height in [12, 24] {
+        let area = Rect::new(0, 0, 32, height);
+        let mut terminal = Terminal::new(TestBackend::new(32, height))?;
+        terminal.draw(|frame| render_info_rail(frame, area, &model))?;
+        let details = info_rail_details_area(area).expect("details entry");
+        let row = (details.x..details.right())
+            .map(|x| terminal.backend().buffer()[(x, details.y)].symbol())
+            .collect::<String>();
+        assert!(row.contains("Alt-I details"), "{row:?}");
+        assert!(details.y >= info_rail_body_area(area).bottom());
+        assert!(rendered_text(&terminal).contains("save failed:"));
+    }
+    Ok(())
+}
+
+#[test]
+fn info_rail_agent_offsets_match_rendered_rows_after_compact_header() -> anyhow::Result<()> {
+    for width in [32, 54] {
+        let model = sample_view_model();
+        let area = Rect::new(0, 0, width, 24);
+        let body = info_rail_body_area(area);
+        let layout = info_rail_body_layout(&model, body.width as usize, &Theme::default());
+        let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+        terminal.draw(|frame| render_info_rail(frame, area, &model))?;
+        for (offset, label) in layout.agent_row_offsets.iter().zip(["main", "helper"]) {
+            assert!(*offset < body.height as usize);
+            let y = body.y + *offset as u16;
+            let row = (body.x..body.right())
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>();
+            assert!(row.contains(label), "expected {label}: {row:?}");
+            assert_ne!(y, info_rail_details_area(area).expect("details entry").y);
+        }
+    }
     Ok(())
 }
 

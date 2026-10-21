@@ -13,7 +13,8 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Open help / slash selector | `F1` / `/` |
 | Submit | `Enter` |
 | Show or hide info rail | `F2` |
-| Switch visible rail compact/detail | `Shift-F2` |
+| Open or close scrollable workspace/session details | `Alt-I` / `Shift-F2`; click **Alt-I details** in the rail |
+| Scroll details / close without submitting | `Up/Down`, `PageUp/PageDown`, `Home/End`, mouse wheel / `Esc` or `Enter` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
 | Insert composer newline | `Ctrl-J`; `Shift-Enter` / `Alt-Enter` when supported |
@@ -26,6 +27,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Copy selection, or latest assistant reply when no selection is active | `Ctrl-L`; info rail is excluded |
 | Cancel current run / close overlay | `Ctrl-C` with no selection / `Esc` |
 | Focus and move through activity | `Ctrl-G`, `Alt-J` / `Alt-K` |
+| Expand or collapse focused activity | `Ctrl-O` |
 | Read the next bounded page from focused saved tool output | `Alt-N` |
 | Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |

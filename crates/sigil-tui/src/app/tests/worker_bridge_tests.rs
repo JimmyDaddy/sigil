@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::modal_flow::ModelCatalogState;
+use crate::app::modal_flow::{ModelCatalogState, SecretInputTarget};
 use crate::app::tests::common::adaptive_test_compaction_preview;
 use crate::app::{ComposerMode, PlanWorkbenchAction};
 use crate::runner::{
@@ -5475,11 +5475,14 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "work"
     ));
     inject_write_file_approval(&mut app, sample_approval_preview())?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    app.open_secret_input(SecretInputTarget::ConfigProviderApiKey, "staged-key");
     assert!(app.has_modal());
+    assert_eq!(app.modal_title(), Some("API Key"));
     assert!(app.approval.pending.is_some());
     app.set_pending_user_input(pending_text_user_input_request()?);
     assert!(app.pending_user_input().is_some());
+    assert!(app.has_modal());
+    assert!(app.runtime.is_busy);
 
     app.handle_worker_message(WorkerMessage::RunFinished {
         result: sigil_kernel::AgentRunResult {

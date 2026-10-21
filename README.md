@@ -46,6 +46,8 @@
 
 Desktop and TUI show bounded live previews while an answer is streaming, then replace them with the saved result. Reopening a session restores committed history; a truncated preview is not the complete answer. In Desktop, use “View complete message” to read the saved text page by page. Plan revision can keep accepting input while details load, and an interrupted cleanup remains visible as unfinished recovery work. Only the current session and protocol formats are supported; older formats are rejected without automatic migration.
 
+TUI keeps the rail compact. Press `Alt-I` / `Shift-F2`, or click **Alt-I details** in the rail, for scrollable workspace, session, and usage details even in narrow terminals. `F1` lists the keys; `Ctrl-O` expands focused tool output.
+
 In TUI, `Alt-B` opens completed conversation turns for branching. Choose a turn, then edit your next draft in the new session; branching does not send it or restore workspace files. See the [TUI guide](docs/en/user-guide.md#controlled-checkpoints-and-conversation-forks).
 
 ## Start in under a minute

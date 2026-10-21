@@ -107,6 +107,18 @@ fn successful_inspection_is_compact_and_keeps_full_details_reachable() {
     assert_eq!(collapsed.len(), 1);
     assert!(plain_text(&collapsed).contains("README.md"));
     assert!(!plain_text(&collapsed).contains("precise-tail"));
+    let activity = tool_activity_view(&entry, 0).expect("read activity");
+    let selected = render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions {
+            selected_tool_activity_key: Some(activity.key),
+            ..options.clone()
+        },
+        0,
+    );
+    assert_eq!(selected.len(), 1);
+    assert!(plain_text(&selected).contains("README.md"));
+    assert!(!plain_text(&selected).contains("Ctrl-O details"));
     let expanded = render_tool_entry_lines(
         &entry,
         &TimelineRenderOptions {

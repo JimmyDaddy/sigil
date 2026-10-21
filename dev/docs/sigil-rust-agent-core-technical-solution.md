@@ -2093,7 +2093,7 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
   退出诊断记录具体 owned thread、闭集收尾阶段、耗时和
   未结束数量；诊断 snapshot 不授予取消或资源权限。所有 run 入口先完成可失败的 preflight、
   注册 root task，再在实际 spawn 前发布 stop capability，失败 admission 不留下过期 owner。
-- 右侧信息区 + composer 下状态行：默认精简展示 workspace/git、写权限及实际活动，未启用模块、缓存、上下文与费用统计放入详情；费用按真实已估算/未估算请求覆盖标记未知与部分估算，不把缺少报价的零值当作免费。正常启动阶段只替换临时状态，成功流水不进入历史；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起
+- 右侧信息区 + composer 下状态行：默认精简展示工作区 basename/Git 及实际活动，写权限由 composer 表达；完整路径、未启用模块、缓存、上下文与费用统计放入独立可滚动详情浮层；费用按真实已估算/未估算请求覆盖标记未知与部分估算，不把缺少报价的零值当作免费。正常启动阶段只替换临时状态，成功流水不进入历史；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Alt-I` / `Shift-F2` 或信息栏底部的详情入口打开同一详情浮层，80×24 也可滚动到底；窄终端仍按布局能力自动收起信息栏
 - 模态或侧栏审批区：展示工具预览、写操作 diff、允许/拒绝动作
 - Plan revision guidance：`Revise` 进入独立的 `Plan revision` 卡片，而不是泛化的 “Input required”
   表单；多行 guidance 编辑区使用 `Enter` 提交、`Shift-Enter` 换行与真实文本光标，`Esc` 和提交失败保留草稿。

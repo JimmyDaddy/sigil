@@ -219,13 +219,8 @@ fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
     assert!(review.contains("rewind: controlled checkpoint available"));
 
     app.toggle_info_rail_detail();
-    let view = crate::view_model::UiViewModel::from_app(&app);
-    assert!(
-        view.info_rail
-            .session_lines
-            .iter()
-            .any(|line| line.contains("review: turn 1/1"))
-    );
+    let detail = app.modal_lines();
+    assert!(detail.iter().any(|line| line.contains("review: turn 1/1")));
     Ok(())
 }
 

@@ -62,6 +62,7 @@ pub(crate) enum HitTarget {
     Composer,
     LivePanel,
     InfoRailAgentRow { index: usize },
+    InfoRailDetails,
     InfoRail,
     Background,
 }

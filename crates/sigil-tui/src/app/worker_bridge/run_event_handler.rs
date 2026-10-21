@@ -155,6 +155,7 @@ impl EventHandler for AppState {
                 };
                 let family_available = pending.command_family_allow_pattern.is_some();
                 let activity_label = approval_activity_label(&pending);
+                self.dismiss_read_only_modal_for_attention();
                 self.approval.pending = Some(pending);
                 self.active_pane = PaneFocus::Activity;
                 self.approval.scroll_back = 0;

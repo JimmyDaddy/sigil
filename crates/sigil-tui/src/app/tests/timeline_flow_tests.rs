@@ -3063,7 +3063,7 @@ fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     assert_eq!(app.session_display_title(), "first line");
 
     app.runtime.is_busy = true;
-    assert_eq!(app.permission_card_lines()[2], "busy: locked during run");
+    assert_eq!(app.permission_card_lines()[2], "scope: active run");
     assert!(app.footer_status_line().contains("Ctrl-C cancel"));
 }
 

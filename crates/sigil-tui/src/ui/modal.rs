@@ -1,5 +1,7 @@
+mod info_details;
 mod keyboard_help;
 
+pub(crate) use info_details::info_details_scroll_bounds;
 pub(crate) use keyboard_help::keyboard_help_scroll_bounds;
 
 use std::borrow::Cow;
@@ -28,6 +30,10 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let visual = modal_visual(app);
+    if let Some(details) = app.info_details_view() {
+        info_details::render_info_details(frame, &app.modal_lines(), &details, &visual);
+        return;
+    }
     if let Some(help) = app.keyboard_help_view() {
         keyboard_help::render_keyboard_help(frame, &app.modal_lines(), &help, &visual);
         return;
@@ -124,6 +130,10 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         return;
     }
     let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
+    if let Some(details) = modal.info_details.as_ref() {
+        info_details::render_info_details(frame, &modal.lines, details, &visual);
+        return;
+    }
     if let Some(help) = modal.keyboard_help.as_ref() {
         keyboard_help::render_keyboard_help(frame, &modal.lines, help, &visual);
         return;

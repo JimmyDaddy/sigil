@@ -29,6 +29,18 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.info_rail_detail_enabled() {
+            let code = match input.kind {
+                crate::mouse::MouseInputKind::ScrollUp => KeyCode::Up,
+                crate::mouse::MouseInputKind::ScrollDown => KeyCode::Down,
+                _ => return Ok(crate::mouse::AppMouseOutcome::Noop),
+            };
+            for _ in 0..3 {
+                let outcome = self.handle_modal_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+                self.apply_modal_outcome(outcome);
+            }
+            return Ok(crate::mouse::AppMouseOutcome::Redraw);
+        }
         if self.change_review_modal_open()
             || self.mcp_import_modal_open()
             || self.conversation_fork_modal_open()
@@ -401,6 +413,10 @@ impl AppState {
             {
                 Ok(self.click_info_rail_agent_row(index, target))
             }
+            crate::mouse::HitTarget::InfoRailDetails if !self.approval.has_actionable_pending() => {
+                self.toggle_info_rail_detail();
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
+            }
             crate::mouse::HitTarget::InfoRail if !self.approval.has_actionable_pending() => {
                 Ok(self.click_info_rail(target))
             }
@@ -440,6 +456,10 @@ impl AppState {
             crate::mouse::HitTarget::Composer => Ok(self.click_composer(input, layout)),
             crate::mouse::HitTarget::InfoRailAgentRow { index } => {
                 Ok(self.click_info_rail_agent_row(index, target))
+            }
+            crate::mouse::HitTarget::InfoRailDetails => {
+                self.toggle_info_rail_detail();
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::InfoRail => Ok(self.click_info_rail(target)),
             crate::mouse::HitTarget::VerificationCard => {
@@ -628,7 +648,7 @@ impl AppState {
             | crate::mouse::HitTarget::SessionModalAction { .. } => {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }
-            crate::mouse::HitTarget::InfoRail => {
+            crate::mouse::HitTarget::InfoRail | crate::mouse::HitTarget::InfoRailDetails => {
                 self.active_pane = PaneFocus::Activity;
                 self.move_sidebar_selection(!upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
