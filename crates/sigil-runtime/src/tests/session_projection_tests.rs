@@ -34,6 +34,40 @@ fn finalized_session(path: &Path, prompt: &str, provider: &str, model: &str) -> 
         .to_owned())
 }
 
+fn explicit_plan_session(path: &Path, objective: &str) -> Result<String> {
+    let store = JsonlSessionStore::new(path)?;
+    let mut session = Session::load_from_store("custom", "model", store)?;
+    let turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "explicit-plan-source",
+        "explicit-plan-run",
+    )?;
+    let review_id = sigil_kernel::plan_review_id_for_source(&turn);
+    let attempt_id = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
+    session.append_control(ControlEntry::PlanReviewAttempt(
+        sigil_kernel::PlanReviewAttemptEntry {
+            plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_id),
+            child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+            plan_review_id: review_id,
+            attempt_id,
+            source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+            source_turn: turn,
+            explicit_objective: Some(objective.to_owned()),
+            route_decision_id: None,
+            revision_request_id: None,
+            attempt_ordinal: 1,
+            base_plan_id: None,
+            base_plan_hash: None,
+            workspace_snapshot_id: None,
+            pending_user_input: None,
+            status: sigil_kernel::PlanReviewAttemptStatus::Started,
+            terminal_reason: None,
+            recorded_at_ms: 1,
+        },
+    ))?;
+    Ok(session.session_scope_id().to_owned())
+}
+
 fn projection_service(
     root: &Path,
     workspace_id: &str,
@@ -52,6 +86,150 @@ fn projection_service(
         root.join("projections/session-catalog-v1.sqlite3"),
     );
     (lifecycle, projection)
+}
+
+#[test]
+fn catalog_explicit_plan_title_is_searchable_without_a_user_message() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "plan-search");
+    let source = lifecycle.session_dir.join("agenda.jsonl");
+    let session_id = explicit_plan_session(&source, "为活动组织者准备议程工具")?;
+    let before = fs::read(&source)?;
+    projection.reconcile()?;
+    let page = projection.query(SessionCatalogProjectionQuery {
+        search: Some("议程".to_owned()),
+        ..SessionCatalogProjectionQuery::default()
+    })?;
+
+    assert_eq!(page.entries.len(), 1);
+    let row = &page.entries[0];
+    assert_eq!(row.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(row.title.as_deref(), Some("为活动组织者准备议程工具"));
+    assert_eq!(row.user_message_count, 0);
+    assert_eq!(row.source_state, LocalSessionCatalogState::Ready);
+    assert_eq!(fs::read(&source)?, before);
+    Ok(())
+}
+
+#[test]
+fn catalog_explicit_plan_title_preserves_manual_and_generated_title_priority() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "plan-title-priority");
+    let manual = lifecycle.session_dir.join("manual.jsonl");
+    let generated = lifecycle.session_dir.join("generated.jsonl");
+    let manual_id = explicit_plan_session(&manual, "后备议程目标")?;
+    let generated_id = explicit_plan_session(&generated, "另一后备议程目标")?;
+    let manual_before = fs::read(&manual)?;
+    let generated_before = fs::read(&generated)?;
+    lifecycle.rename_session(
+        &SessionRef::new_relative("manual.jsonl")?,
+        &manual_id,
+        "人工指定标题",
+        2,
+    )?;
+    for (session_ref, session_id) in [
+        ("manual.jsonl", manual_id.as_str()),
+        ("generated.jsonl", generated_id.as_str()),
+    ] {
+        lifecycle.record_generated_title(
+            &SessionRef::new_relative(session_ref)?,
+            session_id,
+            "系统生成标题",
+            "custom",
+            "model",
+            None,
+            None,
+            3,
+        )?;
+    }
+    projection.reconcile()?;
+    let rows = projection.list_workspace_entries()?;
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.session_ref == "manual.jsonl")
+            .and_then(|row| row.title.as_deref()),
+        Some("人工指定标题")
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.session_ref == "generated.jsonl")
+            .and_then(|row| row.title.as_deref()),
+        Some("系统生成标题")
+    );
+    assert!(rows.iter().all(|row| row.user_message_count == 0));
+    assert_eq!(fs::read(&manual)?, manual_before);
+    assert_eq!(fs::read(&generated)?, generated_before);
+    Ok(())
+}
+
+#[test]
+fn catalog_explicit_plan_title_revision_reprojects_unchanged_null_titles_per_workspace()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (first_lifecycle, first) = projection_service(temp.path(), "first-plan-workspace");
+    let (second_lifecycle, second) = projection_service(temp.path(), "second-plan-workspace");
+    let first_source = first_lifecycle.session_dir.join("same-name.jsonl");
+    let second_source = second_lifecycle.session_dir.join("same-name.jsonl");
+    explicit_plan_session(&first_source, "第一工作区议程")?;
+    explicit_plan_session(&second_source, "第二工作区议程")?;
+    first.reconcile()?;
+    second.reconcile()?;
+    let first_bytes = fs::read(&first_source)?;
+    let second_bytes = fs::read(&second_source)?;
+    let first_modified = fs::metadata(&first_source)?.modified()?;
+    let second_modified = fs::metadata(&second_source)?.modified()?;
+    let connection = Connection::open(first.database_path())?;
+    connection.execute(
+        "UPDATE session_catalog_entry_v1 SET title = NULL, title_search = NULL",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE session_catalog_workspace_v1 SET projection_revision = ?1",
+        [SESSION_CATALOG_PROJECTION_REVISION - 1],
+    )?;
+    drop(connection);
+    let query = || SessionCatalogProjectionQuery {
+        search: Some("议程".to_owned()),
+        ..SessionCatalogProjectionQuery::default()
+    };
+    assert!(first.query(query())?.entries.is_empty());
+    let rebuilt = first.reconcile()?;
+    assert!(rebuilt.generation_changed);
+    assert_eq!(rebuilt.reused_source_count, 0);
+    assert_eq!(rebuilt.updated_source_count, 1);
+    assert_eq!(
+        first.query(query())?.entries[0].title.as_deref(),
+        Some("第一工作区议程")
+    );
+    assert_eq!(second.list_workspace_entries()?[0].title, None);
+    let untouched_revision: u16 = Connection::open(first.database_path())?.query_row(
+        "SELECT projection_revision FROM session_catalog_workspace_v1 WHERE workspace_id = ?1",
+        [&second_lifecycle.workspace_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(untouched_revision, SESSION_CATALOG_PROJECTION_REVISION - 1);
+    let unchanged = first.reconcile()?;
+    assert!(!unchanged.generation_changed);
+    assert_eq!(unchanged.reused_source_count, 1);
+    second.reconcile()?;
+    assert_eq!(
+        second.query(query())?.entries[0].title.as_deref(),
+        Some("第二工作区议程")
+    );
+    assert!(
+        first
+            .query(SessionCatalogProjectionQuery {
+                search: Some("第二工作区".to_owned()),
+                ..SessionCatalogProjectionQuery::default()
+            })?
+            .entries
+            .is_empty()
+    );
+    assert_eq!(fs::read(&first_source)?, first_bytes);
+    assert_eq!(fs::read(&second_source)?, second_bytes);
+    assert_eq!(fs::metadata(&first_source)?.modified()?, first_modified);
+    assert_eq!(fs::metadata(&second_source)?.modified()?, second_modified);
+    Ok(())
 }
 
 #[test]
@@ -807,7 +985,7 @@ fn projection_revision_change_rebuilds_without_decoding_retired_row_values() -> 
         "chat",
     )?;
     projection.rebuild()?;
-    assert_eq!(SESSION_CATALOG_PROJECTION_REVISION, 5);
+    assert_eq!(SESSION_CATALOG_PROJECTION_REVISION, 6);
     let connection = Connection::open(projection.database_path())?;
     connection.execute(
         "UPDATE session_catalog_workspace_v1 SET projection_revision = ?1",

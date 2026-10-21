@@ -575,6 +575,135 @@ fn session_list_projects_promoted_user_title_and_count_without_user_message_even
     Ok(())
 }
 
+fn session_list_plan_attempt(
+    session_scope_id: &str,
+    source: crate::PlanReviewSource,
+    objective: Option<&str>,
+) -> Result<crate::PlanReviewAttemptEntry> {
+    let turn = crate::ConversationTurnRef::new(session_scope_id, "plan-source", "plan-run")?;
+    let review_id = crate::plan_review_id_for_source(&turn);
+    let attempt_id = crate::plan_review_attempt_id_for_review(&review_id);
+    Ok(crate::PlanReviewAttemptEntry {
+        plan_id: crate::plan_review_plan_id_for_attempt(&review_id, &attempt_id),
+        child_session_ref: crate::plan_review_child_session_ref(&review_id, &attempt_id),
+        plan_review_id: review_id,
+        attempt_id,
+        source,
+        source_turn: turn,
+        explicit_objective: objective.map(str::to_owned),
+        route_decision_id: None,
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: crate::PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 1,
+    })
+}
+
+#[test]
+fn session_list_explicit_plan_title_has_no_synthetic_user_message() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("plan-only.jsonl"))?;
+    let mut session = crate::Session::load_from_store("mock", "model", store.clone())?;
+    let attempt = session_list_plan_attempt(
+        session.session_scope_id(),
+        crate::PlanReviewSource::ExplicitPlanCommand,
+        Some("为读书会整理议程"),
+    )?;
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt))?;
+    let before = std::fs::read(store.path())?;
+    let records = read_records(&store)?;
+    let projection = session_list_projection_from_records(&records)?;
+    let entry = projection.latest_session().expect("explicit Plan row");
+
+    assert_eq!(entry.title.as_deref(), Some("为读书会整理议程"));
+    assert_eq!(entry.user_message_count, 0);
+    assert!(records.iter().all(|record| {
+        record.stored_event().event_kind() != Some(DurableEventType::UserMessageRecorded)
+    }));
+    assert_eq!(std::fs::read(store.path())?, before);
+    Ok(())
+}
+
+#[test]
+fn session_list_explicit_plan_title_never_overrides_a_real_user_title() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    for user_first in [true, false] {
+        let store = JsonlSessionStore::new(temp.path().join(format!("user-{user_first}.jsonl")))?;
+        let mut session = crate::Session::load_from_store("mock", "model", store.clone())?;
+        if user_first {
+            session.append_user_message(ModelMessage::user("真实用户会话标题"))?;
+        }
+        session.append_control(ControlEntry::PlanReviewAttempt(session_list_plan_attempt(
+            session.session_scope_id(),
+            crate::PlanReviewSource::ExplicitPlanCommand,
+            Some("后备议程标题"),
+        )?))?;
+        if !user_first {
+            session.append_user_message(ModelMessage::user("真实用户会话标题"))?;
+        }
+        let projection = session_list_projection_from_records(&read_records(&store)?)?;
+        let entry = projection.latest_session().expect("message row");
+        assert_eq!(entry.title.as_deref(), Some("真实用户会话标题"));
+        assert_eq!(entry.user_message_count, 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn session_list_explicit_plan_title_keeps_the_existing_display_bound() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("long-plan.jsonl"))?;
+    let mut session = crate::Session::load_from_store("mock", "model", store.clone())?;
+    let objective = format!("  议程{}  ", "中".repeat(200));
+    session.append_control(ControlEntry::PlanReviewAttempt(session_list_plan_attempt(
+        session.session_scope_id(),
+        crate::PlanReviewSource::ExplicitPlanCommand,
+        Some(&objective),
+    )?))?;
+    let projection = session_list_projection_from_records(&read_records(&store)?)?;
+    let title = projection
+        .latest_session()
+        .and_then(|entry| entry.title.as_deref())
+        .expect("Plan title");
+    assert!(title.starts_with("议程"));
+    assert!(title.ends_with("..."));
+    assert_eq!(title.chars().count(), 163);
+    Ok(())
+}
+
+#[test]
+fn session_list_explicit_plan_title_requires_the_same_session_and_explicit_source() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    for source in [
+        crate::PlanReviewSource::ExplicitPlanCommand,
+        crate::PlanReviewSource::AutomaticConversationRoute,
+    ] {
+        let store = JsonlSessionStore::new(temp.path().join(format!("{}.jsonl", source.as_str())))?;
+        let mut session = crate::Session::load_from_store("mock", "model", store.clone())?;
+        let scope = if source == crate::PlanReviewSource::ExplicitPlanCommand {
+            "different-session"
+        } else {
+            session.session_scope_id()
+        };
+        let objective =
+            (source == crate::PlanReviewSource::ExplicitPlanCommand).then_some("其他会话的议程");
+        session.append_control(ControlEntry::PlanReviewAttempt(session_list_plan_attempt(
+            scope, source, objective,
+        )?))?;
+        let projection = session_list_projection_from_records(&read_records(&store)?)?;
+        assert_eq!(
+            projection.latest_session().expect("session row").title,
+            None
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn agent_graph_projection_rebuilds_v2_stream_and_store() -> Result<()> {
     let temp = tempfile::tempdir()?;

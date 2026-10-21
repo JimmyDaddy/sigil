@@ -39,8 +39,8 @@ pub use query::{
 
 pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 3;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
-// Increment whenever unchanged durable sources must be revalidated against a new strict parser.
-const SESSION_CATALOG_PROJECTION_REVISION: u16 = 5;
+// Increment whenever unchanged durable sources need new validation or display projection rules.
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 6;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
 const MAX_RECOVERY_LEASE_RETRIES: usize = 20;

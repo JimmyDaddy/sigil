@@ -977,6 +977,27 @@ pub fn session_list_projection_from_records(
     for record in records {
         apply_session_list_projection_record(&mut projection, &mut cursor, record)?;
     }
+    // Explicit Plan commands intentionally have no provider user turn. Apply their display-only
+    // fallback after real messages so message titles win regardless of durable event order.
+    for record in records {
+        let Some(entry) = projection.sessions.get_mut(record.session_id()) else {
+            continue;
+        };
+        if entry.title.is_none()
+            && let Some(domain_record) = record.domain_event_record()?
+            && let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) =
+                crate::session::session_entry_from_domain_event(&domain_record.event)?
+            && attempt.source == crate::PlanReviewSource::ExplicitPlanCommand
+            && attempt.source_turn.session_scope_id == entry.session_id
+            && let Some(objective) = attempt.explicit_objective.as_deref()
+        {
+            let safe = crate::safe_persistence_text(objective);
+            let content = safe.trim();
+            if !content.is_empty() {
+                entry.title = Some(truncate_title(content));
+            }
+        }
+    }
     Ok(SessionListProjectionSnapshot::from(&projection))
 }
 
