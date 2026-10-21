@@ -1,4 +1,5 @@
 import { useLocale } from "./i18n";
+import { SafeMarkdown } from "./SafeMarkdown";
 import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail } from "./types";
 import { Button } from "./ui/primitives";
 
@@ -21,7 +22,7 @@ export function PlanCard({
   disabled,
   busy,
   failure,
-  detail,
+  detail: receivedDetail,
   detailOpen,
   detailBusy,
   detailFailure,
@@ -30,6 +31,9 @@ export function PlanCard({
   onDecision,
 }: PlanCardProps) {
   const { t } = useLocale();
+  const detail = receivedDetail?.planId === review.planId && receivedDetail.planHash === review.planHash
+    ? receivedDetail : undefined;
+  const hasLegacyMarkdown = detail?.legacyMarkdown !== undefined;
   const primaryAction: PlanDecisionAction | undefined = review.allowedActions.includes("run")
     ? "run"
     : review.allowedActions[0];
@@ -51,13 +55,13 @@ export function PlanCard({
       {review.planHash === undefined ? null : (
         <div className="plan-card-overview">
           <div className="plan-card-metrics" aria-label={t("planReviewOverview")}>
-            {review.stepCount === undefined ? null : (
+            {hasLegacyMarkdown || review.stepCount === undefined || review.stepCount === 0 ? null : (
               <span>{t("planReviewSteps", { count: review.stepCount })}</span>
             )}
-            {review.targetPathCount === undefined ? null : (
+            {hasLegacyMarkdown || review.targetPathCount === undefined || review.targetPathCount === 0 ? null : (
               <span>{t("planReviewTargetPaths", { count: review.targetPathCount })}</span>
             )}
-            {review.suggestedCheckCount === undefined ? null : (
+            {hasLegacyMarkdown || review.suggestedCheckCount === undefined || review.suggestedCheckCount === 0 ? null : (
               <span>{t("planReviewSuggestedChecks", { count: review.suggestedCheckCount })}</span>
             )}
             <span>{t(`planReviewSource_${review.source}`)}</span>
@@ -154,6 +158,12 @@ export function PlanCard({
 
       {detailOpen && detail !== undefined ? (
         <div className="plan-workbench" data-testid="plan-workbench">
+          {detail.legacyMarkdown !== undefined ? (
+            <div className="message-content">
+              <SafeMarkdown text={detail.legacyMarkdown}
+                contentId={`plan:${detail.planId}:${detail.planHash}`} codeBlockVariant="embedded" />
+            </div>
+          ) : <>
           <section>
             <h4>{t("planDetailSummary")}</h4>
             <p>{detail.summary}</p>
@@ -206,6 +216,7 @@ export function PlanCard({
           {detail.notes.length === 0 ? null : (
             <section><h4>{t("planDetailNotes")}</h4><ul>{detail.notes.map((note) => <li key={note}>{note}</li>)}</ul></section>
           )}
+          </>}
         </div>
       ) : null}
 
