@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { useLocale } from "./i18n";
 import type {
@@ -43,6 +43,7 @@ export function UserInputCard({
   onResume,
 }: UserInputCardProps) {
   const { t } = useLocale();
+  const titleId = useId();
   const [drafts, setDrafts] = useState<Record<string, DraftValue>>({});
   const [validation, setValidation] = useState<AnswerValidationIssue>();
 
@@ -80,14 +81,17 @@ export function UserInputCard({
     && request.questions[0].question === request.prompt;
 
   return (
-    <section className="user-input-card sg-bounded-content" aria-labelledby="user-input-title">
-      <header>
+    <section
+      className={`user-input-card sg-bounded-content${waitingForContinuation ? " user-input-card-answered" : ""}`}
+      aria-labelledby={titleId}
+    >
+      {waitingForContinuation ? <h3 id={titleId} className="sr-only">{request.prompt}</h3> : <header>
         <div>
           <span className="plan-card-eyebrow">{t("userInputRequired")}</span>
-          <h3 id="user-input-title">{request.prompt}</h3>
+          <h3 id={titleId}>{request.prompt}</h3>
         </div>
         <span className="user-input-status">{t(`userInputPurpose_${request.purpose}`)}</span>
-      </header>
+      </header>}
 
       {(queueLength ?? 0) > 1 ? (
         <nav className="plan-card-actions" aria-label={t("userInputQueueLabel")}>
@@ -102,14 +106,14 @@ export function UserInputCard({
       ) : null}
 
       {waitingForContinuation ? (
-        <div className="user-input-recovery" role="status">
-          <p>{request.status === "decision_accepted"
+        <div className="user-input-summary">
+          <p role="status">{request.status === "decision_accepted"
             ? t("userInputAcceptedRecovery")
             : t("userInputContinuationRunning")}</p>
-          {request.answerReceipt?.answeredQuestionIds.length ? (
-            <small>{t("userInputAnsweredFields", {
-              fields: request.answerReceipt.answeredQuestionIds.join(", "),
-            })}</small>
+          {request.status === "decision_accepted" && onResume !== undefined ? (
+            <Button type="button" variant="primary" disabled={busy} onClick={onResume}>
+              {busy ? t("userInputResuming") : t("userInputResume")}
+            </Button>
           ) : null}
         </div>
       ) : <div className="user-input-fields">
@@ -126,24 +130,16 @@ export function UserInputCard({
         ))}
       </div>}
 
-      {validation === undefined ? null : (
+      {waitingForContinuation || validation === undefined ? null : (
         <div className="user-input-error" role="alert">
           {t(validation.kind === "required_answer" ? "userInputAnswerRequired" : "userInputOtherRequired", {
             question: validation.question,
           })}
         </div>
       )}
-      {failure ? <div className="user-input-error" role="alert">{t("userInputDecisionFailed")}</div> : null}
+      {failure ? <div className="user-input-error" role="alert">{t(waitingForContinuation ? "userInputContinuationFailed" : "userInputDecisionFailed")}</div> : null}
 
-      {waitingForContinuation ? (
-        <div className="plan-card-actions">
-          {request.status === "decision_accepted" && onResume !== undefined ? (
-            <Button type="button" variant="primary" disabled={busy} onClick={onResume}>
-              {busy ? t("userInputResuming") : t("userInputResume")}
-            </Button>
-          ) : null}
-        </div>
-      ) : <div className="plan-card-actions">
+      {waitingForContinuation ? null : <div className="plan-card-actions">
         {request.allowedActions.includes("decline") ? (
           <Button type="button" variant="secondary" disabled={busy} onClick={() => onDecision({ kind: "declined" })}>
             {t("userInputDecline")}

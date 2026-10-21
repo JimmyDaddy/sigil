@@ -228,8 +228,9 @@ describe("UserInputCard recovery", () => {
     );
 
     expect(screen.queryByRole("textbox", { name: "Workspace" })).toBeNull();
-    expect(screen.getByText(/Answered fields: workspace/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Resume saved answer" }));
+    expect(screen.getByRole("status").textContent).toBe("Answer saved. Continue without answering again.");
+    expect(screen.queryByText(/Answered fields:/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(onResume).toHaveBeenCalledTimes(1);
   });
 
@@ -258,5 +259,117 @@ describe("UserInputCard recovery", () => {
     await user.click(screen.getByRole("button", { name: "Next" }));
     expect(onPrevious).toHaveBeenCalledTimes(1);
     expect(onNext).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("UserInputCard answered-state hierarchy", () => {
+  const answeredCopy = {
+    en: { saved: "Answer saved. Continue without answering again.", running: "Answer received. Continuing…", required: "Input required", resume: "Continue", previous: "Previous", next: "Next", resuming: "Continuing…" },
+    "zh-CN": { saved: "回答已保存，可直接继续，无需重新填写。", running: "已收到回答，正在继续…", required: "需要你的输入", resume: "继续", previous: "上一个", next: "下一个", resuming: "正在继续…" },
+  };
+
+  it.each([
+    ["en", "continuation_claimed"], ["en", "continuation_started"],
+    ["zh-CN", "continuation_claimed"], ["zh-CN", "continuation_started"],
+  ] as const)("shows a quiet received state for %s %s, retaining the question's accessible name", (locale, status) => {
+    window.localStorage.setItem("sigil.desktop.locale.v1", locale);
+    const request = acceptedRequest();
+    request.status = status;
+    request.questions[0].id = "activity_name";
+    request.answerReceipt!.answeredQuestionIds = ["activity_name"];
+    const onResume = vi.fn();
+    const { container } = render(<LocaleProvider><UserInputCard request={request} busy={false} failure={false} onDecision={vi.fn()} onResume={onResume} /></LocaleProvider>);
+    const region = screen.getByRole("region", { name: request.prompt });
+    expect(region.classList.contains("user-input-card-answered")).toBe(true);
+    expect(within(region).getByRole("status").textContent).toBe(answeredCopy[locale].running);
+    expect(within(region).getByRole("heading", { name: request.prompt }).classList.contains("sr-only")).toBe(true);
+    expect(screen.queryByText(answeredCopy[locale].required)).toBeNull();
+    expect(screen.queryByText(/activity_name/)).toBeNull();
+    expect(region.querySelector("header")).toBeNull();
+    expect(container.querySelector(".user-input-recovery")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: answeredCopy[locale].resume })).toBeNull();
+    expect(onResume).not.toHaveBeenCalled();
+  });
+
+  it.each(["en", "zh-CN"] as const)("retains saved-answer retry, failure and queue navigation in %s", async (locale) => {
+    window.localStorage.setItem("sigil.desktop.locale.v1", locale);
+    const user = userEvent.setup();
+    const onResume = vi.fn();
+    const onDecision = vi.fn();
+    const onPrevious = vi.fn();
+    const onNext = vi.fn();
+    const request = acceptedRequest();
+    render(<LocaleProvider><UserInputCard request={request} busy={false} failure queuePosition={2} queueLength={3} onPrevious={onPrevious} onNext={onNext} onDecision={onDecision} onResume={onResume} /></LocaleProvider>);
+    expect(screen.getByRole("status").textContent).toBe(answeredCopy[locale].saved);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByText(answeredCopy[locale].required)).toBeNull();
+    await user.click(screen.getByRole("button", { name: answeredCopy[locale].resume }));
+    await user.click(screen.getByRole("button", { name: answeredCopy[locale].previous }));
+    await user.click(screen.getByRole("button", { name: answeredCopy[locale].next }));
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(onPrevious).toHaveBeenCalledTimes(1);
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
+  it("switches the same question from requested to saved to running without resubmitting or changing the answer", async () => {
+    const user = userEvent.setup();
+    const request = { ...acceptedRequest(), status: "requested" as const, answerReceipt: undefined };
+    const onDecision = vi.fn();
+    const onResume = vi.fn();
+    const card = (current: UserInputRequest, busy = false) => <LocaleProvider><UserInputCard request={current} busy={busy} failure={false} onDecision={onDecision} onResume={onResume} /></LocaleProvider>;
+    const { rerender } = render(card(request));
+    expect(screen.getByText("Input required")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Submit and continue" }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+    const answer = "  活动名称 A  ";
+    await user.type(screen.getByRole("textbox", { name: request.prompt }), answer);
+    await user.click(screen.getByRole("button", { name: "Submit and continue" }));
+    expect(onDecision).toHaveBeenCalledExactlyOnceWith({ kind: "submitted", answers: [{ questionId: "workspace", value: { kind: "text", value: answer } }] });
+    rerender(card(acceptedRequest()));
+    expect(screen.getByRole("status").textContent).toBe(answeredCopy.en.saved);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onResume).toHaveBeenCalledTimes(1);
+    rerender(card({ ...acceptedRequest(), status: "continuation_started" }));
+    expect(screen.getByRole("status").textContent).toBe(answeredCopy.en.running);
+    expect(screen.queryByText("Input required")).toBeNull();
+    expect(onDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a running continuation failure and other pending questions reachable", async () => {
+    const user = userEvent.setup();
+    const onNext = vi.fn();
+    render(<LocaleProvider><UserInputCard request={{ ...acceptedRequest(), status: "continuation_started" }} busy={false} failure queueLength={2} onNext={onNext} onDecision={vi.fn()} onResume={vi.fn()} /></LocaleProvider>);
+    expect(screen.getByRole("status").textContent).toBe(answeredCopy.en.running);
+    expect(screen.getByRole("alert").textContent).toBe("Could not continue. Reload the latest question and try again.");
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-ask an accepted question because of stale local required-field validation", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn();
+    const request = { ...acceptedRequest(), status: "requested" as const, answerReceipt: undefined };
+    const card = (current: UserInputRequest) => <LocaleProvider><UserInputCard request={current} busy={false} failure={false} onDecision={onDecision} onResume={vi.fn()} /></LocaleProvider>;
+    const { rerender } = render(card(request));
+    await user.click(screen.getByRole("button", { name: "Submit and continue" }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(onDecision).not.toHaveBeenCalled();
+    rerender(card(acceptedRequest()));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Input required")).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  it("keeps a busy accepted answer's existing resume and queue actions disabled", () => {
+    render(<LocaleProvider><UserInputCard request={acceptedRequest()} busy failure={false} queueLength={2} onNext={vi.fn()} onDecision={vi.fn()} onResume={vi.fn()} /></LocaleProvider>);
+    expect((screen.getByRole("button", { name: "Continuing…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe(answeredCopy.en.saved);
   });
 });
