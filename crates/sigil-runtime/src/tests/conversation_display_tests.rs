@@ -226,14 +226,99 @@ fn conversation_display_rejects_cancel_without_exact_input_resolution_source() -
     Ok(())
 }
 
+fn append_display_waiting_input(
+    session: &mut Session,
+    run_id: &str,
+    logical_root: &str,
+    request_id: &str,
+    call_id: &str,
+) -> Result<sigil_kernel::UserInputRequestedV1> {
+    use sigil_kernel::{
+        AgentThreadId, LogicalRunId, SessionScopeId, UserInputActionV1,
+        UserInputContinuationBindingV1, UserInputIdentityV1, UserInputPurposeV1,
+        UserInputQuestionV1, UserInputRequestId, UserInputRequestV1, UserInputRequestedV1,
+        UserInputSourceV1,
+    };
+    let scope = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new(run_id, 1)?)?;
+    let call = ToolCall {
+        id: call_id.to_owned(),
+        name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let assistant = ModelMessage::assistant(None, vec![call.clone()]);
+    let assistant_id = assistant.id.clone();
+    session.append_assistant_message(assistant)?;
+    let request = UserInputRequestedV1::new(UserInputRequestV1 {
+        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+        identity: UserInputIdentityV1 {
+            session_scope_id: SessionScopeId::new(&scope)?,
+            root_logical_run_id: LogicalRunId::new(logical_root)?,
+            // Distinct sources may each have one pending request, as the kernel requires.
+            source_thread_id: AgentThreadId::new(request_id)?,
+            request_id: UserInputRequestId::new(request_id)?,
+            generation: 1,
+            source_binding_hash: format!(
+                "sha256:{}",
+                sigil_kernel::sha256_hex(&serde_json::to_vec(&call)?)
+            ),
+        },
+        source: UserInputSourceV1::Agent,
+        purpose: UserInputPurposeV1::Clarification,
+        prompt: "Choose the scope".to_owned(),
+        questions: vec![UserInputQuestionV1 {
+            id: "scope".to_owned(),
+            question: "Which scope?".to_owned(),
+            description: None,
+            required: true,
+            options: Vec::new(),
+            multiple: false,
+        }],
+        allowed_actions: vec![
+            UserInputActionV1::Submit,
+            UserInputActionV1::Decline,
+            UserInputActionV1::CancelRun,
+        ],
+        requested_at_unix_ms: 10,
+        continuation: Some(UserInputContinuationBindingV1 {
+            assistant_message_id: assistant_id,
+            tool_call_id: call.id,
+            provider_name: "provider".to_owned(),
+            model_name: "model".to_owned(),
+        }),
+    })?;
+    session.append_controls_with_public_outbox(
+        vec![ControlEntry::UserInputRequested(Box::new(request.clone()))],
+        run_id,
+        1,
+    )?;
+    lifecycle.append_finalized_with_outbox(
+        &ConversationRunFinalizedEntryV1::new(
+            run_id,
+            ConversationRunTerminalStatusV1::AwaitingUserInput,
+            None,
+            None,
+            10,
+            &SecretRedactor::empty(),
+        )?,
+        &terminal_outbox(
+            &scope,
+            run_id,
+            2,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: request_id.to_owned(),
+                generation: 1,
+                request_hash: request.request_hash.clone(),
+            },
+        )?,
+    )?;
+    Ok(request)
+}
+
 #[test]
 fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() -> Result<()> {
-    use sigil_kernel::{
-        AgentThreadId, LogicalRunId, SessionScopeId, UserInputActionV1, UserInputCommandId,
-        UserInputContinuationBindingV1, UserInputDecisionCommandV1, UserInputDecisionV1,
-        UserInputIdentityV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
-        UserInputRequestV1, UserInputRequestedV1, UserInputSourceV1,
-    };
+    use sigil_kernel::{UserInputCommandId, UserInputDecisionCommandV1, UserInputDecisionV1};
     for (decision, expected) in [
         (
             UserInputDecisionV1::RunCancelled,
@@ -246,78 +331,24 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
     ] {
         let (_temp, store, mut session) = durable_session()?;
         let scope = session.session_scope_id().to_owned();
-        let lifecycle = session.conversation_run_lifecycle_recorder()?;
-        lifecycle.append_started(&ConversationRunStartedEntryV1::new("input-root", 1)?)?;
-        let call = ToolCall {
-            id: "input-call".to_owned(),
-            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
-            args_json: "{}".to_owned(),
-        };
-        let assistant = ModelMessage::assistant(None, vec![call.clone()]);
-        let assistant_id = assistant.id.clone();
-        session.append_assistant_message(assistant)?;
-        let request = UserInputRequestedV1::new(UserInputRequestV1 {
-            schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
-            identity: UserInputIdentityV1 {
-                session_scope_id: SessionScopeId::new(&scope)?,
-                root_logical_run_id: LogicalRunId::new("input-root")?,
-                source_thread_id: AgentThreadId::new("main")?,
-                request_id: UserInputRequestId::new("input-request")?,
-                generation: 1,
-                source_binding_hash: format!(
-                    "sha256:{}",
-                    sigil_kernel::sha256_hex(&serde_json::to_vec(&call)?)
-                ),
-            },
-            source: UserInputSourceV1::Agent,
-            purpose: UserInputPurposeV1::Clarification,
-            prompt: "Choose the scope".to_owned(),
-            questions: vec![UserInputQuestionV1 {
-                id: "scope".to_owned(),
-                question: "Which scope?".to_owned(),
-                description: None,
-                required: true,
-                options: Vec::new(),
-                multiple: false,
-            }],
-            allowed_actions: vec![
-                UserInputActionV1::Submit,
-                UserInputActionV1::Decline,
-                UserInputActionV1::CancelRun,
-            ],
-            requested_at_unix_ms: 10,
-            continuation: Some(UserInputContinuationBindingV1 {
-                assistant_message_id: assistant_id,
-                tool_call_id: call.id,
-                provider_name: "provider".to_owned(),
-                model_name: "model".to_owned(),
-            }),
-        })?;
-        session.append_controls_with_public_outbox(
-            vec![ControlEntry::UserInputRequested(Box::new(request.clone()))],
+        let request = append_display_waiting_input(
+            &mut session,
             "input-root",
-            1,
+            "input-root",
+            "input-request",
+            "input-call",
         )?;
-        lifecycle.append_finalized_with_outbox(
-            &ConversationRunFinalizedEntryV1::new(
-                "input-root",
-                ConversationRunTerminalStatusV1::AwaitingUserInput,
-                None,
-                None,
-                10,
-                &SecretRedactor::empty(),
-            )?,
-            &terminal_outbox(
-                &scope,
-                "input-root",
-                2,
-                PublicRunEventKind::RunAwaitingUserInput {
-                    request_id: "input-request".to_owned(),
-                    generation: 1,
-                    request_hash: request.request_hash.clone(),
-                },
-            )?,
-        )?;
+        let requested = conversation_display_page_from_records(
+            &store.read_event_records_writer()?,
+            &scope,
+            None,
+            50,
+            None,
+        )?
+        .items
+        .into_iter()
+        .find(|item| item.kind == ConversationDisplayItemKindV1::Tool)
+        .context("requested input tool")?;
         sigil_kernel::accept_user_input_decision(
             &mut session,
             UserInputDecisionCommandV1 {
@@ -336,6 +367,7 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
         let records = store.read_event_records_writer()?;
         let mut cursor = None;
         let mut terminals = Vec::new();
+        let mut input_tools = Vec::new();
         loop {
             let page = conversation_display_page_from_records(
                 &records,
@@ -357,11 +389,35 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
                     .filter(|item| item.kind == ConversationDisplayItemKindV1::Terminal)
                     .map(|item| item.status),
             );
+            input_tools.extend(
+                page.items
+                    .into_iter()
+                    .filter(|item| item.kind == ConversationDisplayItemKindV1::Tool),
+            );
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
+        assert_eq!(input_tools.len(), 2);
+        let settled = input_tools
+            .iter()
+            .find(|item| item.status == ConversationDisplayStatusV1::Completed)
+            .context("settled input tool")?;
+        assert_eq!(settled.run_id.as_deref(), Some("input-root"));
+        assert_eq!(
+            settled.reconciles,
+            Some(vec![
+                requested.display_id,
+                conversation_live_provisional_id(
+                    &scope,
+                    "input-root",
+                    &ConversationLiveProvisionalSlotV1::Tool {
+                        call_id: "input-call".to_owned()
+                    }
+                )?,
+            ])
+        );
         assert!(terminals.contains(&ConversationDisplayStatusV1::AwaitingUserInput));
         assert_eq!(
             terminals
@@ -371,6 +427,420 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
             1
         );
     }
+    Ok(())
+}
+
+fn append_display_input_result(
+    session: &mut Session,
+    call_id: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    let result = ToolResult::ok(
+        call_id,
+        sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
+        "input settlement fact",
+        ToolResultMeta {
+            details,
+            ..ToolResultMeta::default()
+        },
+    );
+    let (recorded, _) = ToolResultRecordedV3::capture(
+        &result,
+        session.tool_artifact_store().as_ref(),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    session.append(SessionLogEntry::ToolResultV3(recorded))
+}
+
+fn all_display_items(
+    records: &[SessionStreamRecord],
+    scope: &str,
+) -> Result<Vec<crate::conversation_display::ConversationDisplayItemV1>> {
+    let mut items = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page =
+            conversation_display_page_from_records(records, scope, cursor.as_deref(), 50, None)?;
+        items.extend(page.items);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(items);
+        }
+    }
+}
+
+#[test]
+fn conversation_display_input_settlement_keeps_exact_origin_when_new_runs_reuse_call_id()
+-> Result<()> {
+    use sigil_kernel::{UserInputCommandId, UserInputDecisionCommandV1, UserInputDecisionV1};
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let first = append_display_waiting_input(
+        &mut session,
+        "first-input-run",
+        "first-input-run",
+        "first-question",
+        "reused-call",
+    )?;
+    let second = append_display_waiting_input(
+        &mut session,
+        "second-input-run",
+        "second-input-run",
+        "second-question",
+        "reused-call",
+    )?;
+    let requested = all_display_items(&store.read_event_records_writer()?, &scope)?
+        .into_iter()
+        .filter(|item| item.kind == ConversationDisplayItemKindV1::Tool)
+        .map(|item| (item.run_id.clone().expect("requested run"), item.display_id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("third-active-run", 20)?)?;
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "reused-call".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    ))?;
+    for (request, decision, command_id) in [
+        (
+            first,
+            UserInputDecisionV1::RunCancelled,
+            "cancel-first-question",
+        ),
+        (
+            second,
+            UserInputDecisionV1::Declined,
+            "decline-second-question",
+        ),
+    ] {
+        sigil_kernel::accept_user_input_decision(
+            &mut session,
+            UserInputDecisionCommandV1 {
+                identity: request.request.identity,
+                request_hash: request.request_hash,
+                command_id: UserInputCommandId::new(command_id)?,
+                decision,
+            },
+            20,
+        )?;
+    }
+    // Both settlement rows must still carry their own source after row-cache eviction.
+    for index in 0..120 {
+        session.append_user_message(ModelMessage::user(format!("after both inputs {index}")))?;
+    }
+    let items = all_display_items(&store.read_event_records_writer()?, &scope)?;
+    let settled = items
+        .iter()
+        .filter(|item| {
+            item.kind == ConversationDisplayItemKindV1::Tool
+                && item.status == ConversationDisplayStatusV1::Completed
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), 2);
+    for run_id in ["first-input-run", "second-input-run"] {
+        let item = settled
+            .iter()
+            .find(|item| item.run_id.as_deref() == Some(run_id))
+            .context("input settlement retains its original run")?;
+        assert_eq!(
+            item.reconciles,
+            Some(vec![
+                requested[run_id].clone(),
+                conversation_live_provisional_id(
+                    &scope,
+                    run_id,
+                    &ConversationLiveProvisionalSlotV1::Tool {
+                        call_id: "reused-call".to_owned(),
+                    }
+                )?,
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conversation_display_input_submitted_continuation_reconciles_original_outer_run() -> Result<()> {
+    use sigil_kernel::{
+        UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId, UserInputDecisionCommandV1,
+        UserInputDecisionV1,
+    };
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    // A Task's logical root is not necessarily its containing conversation's run id.
+    let request = append_display_waiting_input(
+        &mut session,
+        "outer-conversation",
+        "inner-task-run",
+        "submitted-question",
+        "submitted-call",
+    )?;
+    let requested = all_display_items(&store.read_event_records_writer()?, &scope)?
+        .into_iter()
+        .find(|item| item.kind == ConversationDisplayItemKindV1::Tool)
+        .context("requested input tool")?;
+    sigil_kernel::accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: request.request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: UserInputCommandId::new("submit-question")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "current workspace".to_owned(),
+                    },
+                }],
+            },
+        },
+        20,
+    )?;
+    for now in [30, 40] {
+        sigil_kernel::prepare_user_input_continuation(
+            &mut session,
+            &request.request.identity,
+            &request.request_hash,
+            "input-supervisor",
+            "input-physical-attempt",
+            now,
+        )?;
+    }
+    let items = all_display_items(&store.read_event_records_writer()?, &scope)?;
+    let settled = items
+        .iter()
+        .filter(|item| {
+            item.kind == ConversationDisplayItemKindV1::Tool
+                && item.status == ConversationDisplayStatusV1::Completed
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settled.len(),
+        1,
+        "replayed continuation does not settle the tool twice"
+    );
+    assert_eq!(settled[0].run_id.as_deref(), Some("outer-conversation"));
+    assert_eq!(
+        settled[0].reconciles,
+        Some(vec![
+            requested.display_id,
+            conversation_live_provisional_id(
+                &scope,
+                "outer-conversation",
+                &ConversationLiveProvisionalSlotV1::Tool {
+                    call_id: "submitted-call".to_owned(),
+                }
+            )?,
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_input_result_requires_exact_metadata_before_reconciling() -> Result<()> {
+    for mismatch in ["missing", "request", "generation", "hash", "call"] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let request = append_display_waiting_input(
+            &mut session,
+            "waiting-input",
+            "waiting-input",
+            "bound-question",
+            "reused-call",
+        )?;
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&ConversationRunStartedEntryV1::new("unrelated-run", 20)?)?;
+        session.append_assistant_message(ModelMessage::assistant(
+            None,
+            vec![ToolCall {
+                id: "reused-call".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        ))?;
+        let mut details = json!({
+            "request_id": request.request.identity.request_id.as_str(),
+            "generation": request.request.identity.generation,
+            "request_hash": request.request_hash,
+        });
+        match mismatch {
+            "missing" => details = json!({}),
+            "request" => details["request_id"] = json!("another-question"),
+            "generation" => details["generation"] = json!(2),
+            "hash" => details["request_hash"] = json!(format!("sha256:{}", "b".repeat(64))),
+            "call" => {}
+            _ => unreachable!("bounded mismatch cases"),
+        }
+        append_display_input_result(
+            &mut session,
+            if mismatch == "call" {
+                "another-call"
+            } else {
+                "reused-call"
+            },
+            details,
+        )?;
+        let page = conversation_display_page_from_records(
+            &store.read_event_records_writer()?,
+            &scope,
+            None,
+            50,
+            None,
+        )?;
+        let settled = page
+            .items
+            .iter()
+            .find(|item| {
+                item.kind == ConversationDisplayItemKindV1::Tool
+                    && item.status == ConversationDisplayStatusV1::Completed
+            })
+            .context("unbound settlement fact")?;
+        assert_eq!(
+            settled.run_id, None,
+            "{mismatch} cannot borrow the current run"
+        );
+        assert_eq!(
+            settled.reconciles, None,
+            "{mismatch} cannot retire either requested tool"
+        );
+        assert!(
+            matches!(&settled.content, ConversationDisplayContentV1::Tool { output: Some(output), .. }
+            if output == "input settlement fact")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conversation_display_input_result_does_not_infer_a_missing_assistant_binding() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let request = append_display_waiting_input(
+        &mut session,
+        "input-source-run",
+        "input-source-run",
+        "input-source-question",
+        "input-source-call",
+    )?;
+    append_display_input_result(
+        &mut session,
+        "input-source-call",
+        json!({
+            "request_id": request.request.identity.request_id.as_str(),
+            "generation": request.request.identity.generation,
+            "request_hash": request.request_hash,
+        }),
+    )?;
+    let mut records = store.read_event_records_writer()?;
+    let source = records
+        .iter_mut()
+        .find(|record| {
+            matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Assistant(_)))
+            )
+        })
+        .context("assistant source record")?;
+    let mut message = match source.session_log_entry()? {
+        Some(SessionLogEntry::Assistant(message)) => message,
+        _ => unreachable!("selected assistant record"),
+    };
+    // Preserve valid envelopes and the typed request, but remove its exact assistant source.
+    // A matching call id and request metadata must not repair this missing binding by guessing.
+    message.id = "another-assistant".to_owned();
+    let event = source.stored_event();
+    let mut payload = event.payload.clone();
+    payload["session_log_entry"] = serde_json::to_value(SessionLogEntry::Assistant(message))?;
+    *source = SessionStreamRecord::Stored(StoredEvent::new(
+        event.event_kind().context("assistant event kind")?,
+        event.event_class,
+        event.event_id.clone(),
+        event.session_id.clone(),
+        event.stream_sequence,
+        payload,
+    )?);
+    let page = conversation_display_page_from_records(&records, &scope, None, 50, None)?;
+    let result = page
+        .items
+        .iter()
+        .find(|item| {
+            item.kind == ConversationDisplayItemKindV1::Tool
+                && item.status == ConversationDisplayStatusV1::Completed
+        })
+        .context("settlement fact")?;
+    assert_eq!(result.run_id, None);
+    assert_eq!(result.reconciles, None);
+    Ok(())
+}
+
+#[test]
+fn conversation_display_input_settlement_does_not_reuse_a_consumed_request_origin() -> Result<()> {
+    use sigil_kernel::{UserInputCommandId, UserInputDecisionCommandV1, UserInputDecisionV1};
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let request = append_display_waiting_input(
+        &mut session,
+        "settled-input",
+        "settled-input",
+        "settled-question",
+        "reused-call",
+    )?;
+    sigil_kernel::accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: request.request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: UserInputCommandId::new("settle-once")?,
+            decision: UserInputDecisionV1::RunCancelled,
+        },
+        20,
+    )?;
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("later-input", 30)?)?;
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "reused-call".to_owned(),
+            name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    ))?;
+    append_display_input_result(
+        &mut session,
+        "reused-call",
+        json!({
+            "request_id": request.request.identity.request_id.as_str(),
+            "generation": request.request.identity.generation,
+            "request_hash": request.request_hash,
+        }),
+    )?;
+    let items = all_display_items(&store.read_event_records_writer()?, &scope)?;
+    let settled = items
+        .iter()
+        .filter(|item| {
+            item.kind == ConversationDisplayItemKindV1::Tool
+                && item.status == ConversationDisplayStatusV1::Completed
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), 2);
+    assert_eq!(
+        settled
+            .iter()
+            .filter(|item| item.run_id.as_deref() == Some("settled-input"))
+            .count(),
+        1
+    );
+    let late = settled.iter().find(|item| matches!(&item.content,
+        ConversationDisplayContentV1::Tool { output: Some(output), .. } if output == "input settlement fact"))
+        .context("late duplicate settlement fact")?;
+    assert_eq!(late.run_id, None);
+    assert_eq!(
+        late.reconciles, None,
+        "a settled request cannot retire a later call"
+    );
     Ok(())
 }
 

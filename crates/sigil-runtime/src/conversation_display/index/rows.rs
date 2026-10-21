@@ -14,6 +14,10 @@ pub(super) struct RowProjectionState {
 pub(super) struct RowSourceContext {
     active_run: Option<ActiveRunProjection>,
     tool: Option<(String, ToolProjection)>,
+    waiting_input: Option<(
+        sigil_kernel::UserInputIdentityV1,
+        WaitingInputToolProjection,
+    )>,
     execution: Option<(String, ToolProjection)>,
     terminal: Option<(String, command::CommandTerminalState)>,
     approval: Option<(String, String)>,
@@ -24,15 +28,27 @@ pub(super) struct RowSourceContext {
 
 impl RowProjectionState {
     pub(super) fn context(&self, record: &SessionStreamRecord) -> Result<RowSourceContext> {
+        let waiting_input = match record.session_log_entry()? {
+            Some(SessionLogEntry::ToolResultV3(result)) => self
+                .tools
+                .input_origin_for_result(&result)
+                .map(|(identity, origin)| (identity.clone(), origin.clone())),
+            _ => None,
+        };
         let (tool, approval) = match record.session_log_entry()? {
-            Some(SessionLogEntry::ToolResultV3(result)) => (
-                self.tools
-                    .items
-                    .get(&ToolProjectionKey::Call(result.call_id.clone()))
-                    .cloned()
-                    .map(|tool| (result.call_id, tool)),
-                None,
-            ),
+            Some(SessionLogEntry::ToolResultV3(result)) => {
+                let tool = if result.tool_name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME {
+                    waiting_input
+                        .as_ref()
+                        .map(|(_, origin)| origin.tool.clone())
+                } else {
+                    self.tools
+                        .items
+                        .get(&ToolProjectionKey::Call(result.call_id.clone()))
+                        .cloned()
+                };
+                (tool.map(|tool| (result.call_id, tool)), None)
+            }
             Some(SessionLogEntry::Control(ControlEntry::ToolApproval(approval))) => (
                 None,
                 self.approvals
@@ -43,7 +59,9 @@ impl RowProjectionState {
             _ => (None, None),
         };
         let execution_id = match record.session_log_entry()? {
-            Some(SessionLogEntry::ToolResultV3(result)) => {
+            Some(SessionLogEntry::ToolResultV3(result))
+                if result.tool_name != sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME =>
+            {
                 command::execution_id_from_result(&result)
             }
             Some(SessionLogEntry::Control(ControlEntry::TerminalTask(task))) => {
@@ -74,6 +92,7 @@ impl RowProjectionState {
             terminal,
             active_run: self.active_run.clone(),
             tool,
+            waiting_input,
             tool_source: None,
             approval,
             skill: self.active_run.as_ref().and_then(|run| {
@@ -177,6 +196,7 @@ impl RowSourceContext {
                     )
                     .collect(),
                 terminals: self.terminal.clone().into_iter().collect(),
+                waiting_inputs: self.waiting_input.clone().into_iter().collect(),
             },
             approvals: self.approval.clone().into_iter().collect(),
             skills: self.skill.clone().into_iter().collect(),

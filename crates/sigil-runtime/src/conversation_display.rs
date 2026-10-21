@@ -452,6 +452,7 @@ enum ToolProjectionKey {
 struct ToolProjectionState {
     items: HashMap<ToolProjectionKey, ToolProjection>,
     terminals: HashMap<String, command::CommandTerminalState>,
+    waiting_inputs: BTreeMap<sigil_kernel::UserInputIdentityV1, WaitingInputToolProjection>,
 }
 
 #[derive(Debug, Clone)]
@@ -460,12 +461,99 @@ struct ToolProjection {
     requested_display_id: String,
     requested_sequence: u64,
     requested_call_id: String,
+    requested_message_id: String,
+    requested_run_id: Option<String>,
     execution_run_id: Option<String>,
     execution_started_at_ms: Option<u64>,
     latest_execution_display_id: Option<String>,
     execution_artifact: Option<command::CommandArtifactProjection>,
     input: Option<String>,
     input_json_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct WaitingInputToolProjection {
+    request_hash: String,
+    tool: ToolProjection,
+}
+
+impl ToolProjectionState {
+    fn apply_input_binding(
+        &mut self,
+        control: &ControlEntry,
+        scope: &str,
+        active_run: &Option<ActiveRunProjection>,
+    ) -> Result<()> {
+        match control {
+            ControlEntry::UserInputRequested(requested) => {
+                requested.validate()?;
+                let Some(binding) = requested.request.continuation.as_ref() else {
+                    return Ok(());
+                };
+                let Some(tool) = self
+                    .items
+                    .get(&ToolProjectionKey::Call(binding.tool_call_id.clone()))
+                    .filter(|tool| {
+                        requested.request.identity.session_scope_id.as_str() == scope
+                            && tool.name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME
+                            && tool.requested_message_id == binding.assistant_message_id
+                            && tool.requested_run_id.is_some()
+                            && tool.requested_run_id == active_run_id(active_run)
+                    })
+                else {
+                    return Ok(());
+                };
+                if let Some(previous) = self.waiting_inputs.get(&requested.request.identity)
+                    && (previous.request_hash != requested.request_hash
+                        || previous.tool.requested_display_id != tool.requested_display_id)
+                {
+                    bail!("user input display continuation changed its exact source");
+                }
+                self.waiting_inputs.insert(
+                    requested.request.identity.clone(),
+                    WaitingInputToolProjection {
+                        request_hash: requested.request_hash.clone(),
+                        tool: tool.clone(),
+                    },
+                );
+            }
+            ControlEntry::UserInputResolved(resolved) => {
+                if self
+                    .waiting_inputs
+                    .get(&resolved.identity)
+                    .is_some_and(|origin| origin.request_hash == resolved.request_hash)
+                {
+                    self.waiting_inputs.remove(&resolved.identity);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn input_origin_for_result(
+        &self,
+        result: &sigil_kernel::ToolResultRecordedV3,
+    ) -> Option<(
+        &sigil_kernel::UserInputIdentityV1,
+        &WaitingInputToolProjection,
+    )> {
+        if result.tool_name != sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME {
+            return None;
+        }
+        let facts = &result.facts.tool_specific;
+        let request_id = facts.get("request_id")?.as_str()?;
+        let generation = facts.get("generation")?.as_u64()?;
+        let request_hash = facts.get("request_hash")?.as_str()?;
+        let mut matches = self.waiting_inputs.iter().filter(|(identity, origin)| {
+            identity.request_id.as_str() == request_id
+                && u64::from(identity.generation) == generation
+                && origin.request_hash == request_hash
+                && origin.tool.requested_call_id == result.call_id
+        });
+        let origin = matches.next()?;
+        matches.next().is_none().then_some(origin)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1455,6 +1543,11 @@ fn project_lifecycle(
             }
             let status = map_terminal_status(finalized.status())?;
             let run_id = finalized.run_id().to_owned();
+            if finalized.status() != ConversationRunTerminalStatusV1::AwaitingUserInput {
+                tools.waiting_inputs.retain(|_, origin| {
+                    origin.tool.requested_run_id.as_deref() != Some(run_id.as_str())
+                });
+            }
             *terminal_frontier = Some(ConversationTerminalFrontierV1 {
                 run_id: run_id.clone(),
                 session_stream_sequence: record.stream_sequence(),
@@ -1498,6 +1591,9 @@ fn project_session_entry(
     approval_items: &mut HashMap<String, String>,
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
+    if let SessionLogEntry::Control(control) = &entry {
+        tools.apply_input_binding(control, expected_scope, active_run)?;
+    }
     match entry {
         SessionLogEntry::User(message) => {
             let (run_id, reconcile_live_user) = match active_run.as_mut() {
@@ -1646,6 +1742,8 @@ fn project_session_entry(
                         requested_display_id: item.display_id.clone(),
                         requested_sequence: record.stream_sequence(),
                         requested_call_id: tool_name_key,
+                        requested_message_id: message.id.clone(),
+                        requested_run_id: run_id.clone(),
                         execution_run_id: None,
                         execution_started_at_ms: None,
                         latest_execution_display_id: None,
@@ -1662,12 +1760,22 @@ fn project_session_entry(
             Ok(items)
         }
         SessionLogEntry::ToolResultV3(result) => {
-            let tool = tools
-                .items
-                .get(&ToolProjectionKey::Call(result.call_id.clone()))
-                .cloned();
+            let is_input_result = result.tool_name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME;
+            let input_origin = tools
+                .input_origin_for_result(&result)
+                .map(|(identity, origin)| (identity.clone(), origin.clone()));
+            let tool = if is_input_result {
+                input_origin.as_ref().map(|(_, origin)| origin.tool.clone())
+            } else {
+                tools
+                    .items
+                    .get(&ToolProjectionKey::Call(result.call_id.clone()))
+                    .cloned()
+            };
             let display = result.display_view();
-            let origin = command::execution_id_from_result(&result)
+            let origin = (!is_input_result)
+                .then(|| command::execution_id_from_result(&result))
+                .flatten()
                 .and_then(|id| tools.items.get(&ToolProjectionKey::Execution(id)))
                 .cloned();
             let mut command = command_result_projection(
@@ -1695,7 +1803,13 @@ fn project_session_entry(
                     Some(tool_artifact_availability_label(unavailable.availability).to_owned()),
                 ),
             };
-            let run_id = active_run_id(active_run);
+            // Input settlement can follow an Awaiting terminal or another run's start. Only
+            // the typed request binding may recover its original run and replacement anchors.
+            let run_id = if is_input_result {
+                tool.as_ref().and_then(|tool| tool.requested_run_id.clone())
+            } else {
+                active_run_id(active_run)
+            };
             let mut item = new_item(
                 expected_scope,
                 record,
@@ -1763,6 +1877,9 @@ fn project_session_entry(
             }
             if !reconciles.is_empty() {
                 item.reconciles = Some(reconciles);
+            }
+            if let Some((identity, _)) = input_origin {
+                tools.waiting_inputs.remove(&identity);
             }
             Ok(vec![item])
         }
