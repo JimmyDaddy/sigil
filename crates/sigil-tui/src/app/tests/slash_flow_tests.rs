@@ -1612,6 +1612,108 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
 }
 
 #[test]
+fn resume_selector_exact_durable_id_keeps_the_typed_target_and_original_ordinal() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let config = config_for_workspace(fixture.path());
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    let id = "4d17a623-30c8-5dde-bc65-c751f2aaa3b8";
+    let target = fixture.path().join("opaque-b/records.jsonl");
+    app.session_browser.history = vec![
+        crate::sessions::SessionHistoryEntry {
+            path: fixture.path().join("opaque-a/records.jsonl"),
+            label: "first-label".to_owned(),
+            session_id: Some("93d49c3f-5ea9-5067-bb41-2eb563a433b4".to_owned()),
+            title: Some(format!("Cross-reference {id}")),
+            modified_epoch_secs: 2,
+            bytes: 128,
+        },
+        crate::sessions::SessionHistoryEntry {
+            path: target.clone(),
+            label: "second-label".to_owned(),
+            session_id: Some(id.to_owned()),
+            title: Some("Report canary".to_owned()),
+            modified_epoch_secs: 1,
+            bytes: 128,
+        },
+    ];
+    for query in [id.to_owned(), id.to_ascii_uppercase()] {
+        app.composer.input = format!("/resume {query}");
+        let rows = app.slash_selector_rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the exact durable identity wins over a title mentioning it"
+        );
+        assert_eq!(rows[0].0, "2", "retain the unfiltered candidate ordinal");
+        assert!(rows[0].1.contains("Report canary"));
+        assert!(
+            !rows[0].1.contains(id),
+            "matching an ID must not add default UUID metadata"
+        );
+        assert_eq!(app.slash_selector_empty_message(), None);
+        let selected = app.selected_slash_entry().expect("exact ID candidate");
+        assert_eq!(selected.fill, "/resume 2");
+        assert_eq!(selected.resolved.arg, target.display().to_string());
+    }
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?,
+        Some(AppAction::SwitchSession { session_log_path }) if session_log_path == target
+    ));
+    Ok(())
+}
+
+#[test]
+fn resume_selector_durable_id_matching_preserves_existing_literal_queries() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let config = config_for_workspace(fixture.path());
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    let first = fixture.path().join("opaque-alpha/records.jsonl");
+    let second = fixture.path().join("opaque-beta/records.jsonl");
+    app.session_browser.history = vec![
+        crate::sessions::SessionHistoryEntry {
+            path: first.clone(),
+            label: "first-label".to_owned(),
+            session_id: None,
+            title: Some("Alpha notes".to_owned()),
+            modified_epoch_secs: 2,
+            bytes: 128,
+        },
+        crate::sessions::SessionHistoryEntry {
+            path: second.clone(),
+            label: "second-label".to_owned(),
+            session_id: Some("4d17a623-30c8-5dde-bc65-c751f2aaa3b8".to_owned()),
+            title: Some("Report canary".to_owned()),
+            modified_epoch_secs: 1,
+            bytes: 128,
+        },
+    ];
+    for (query, expected) in [
+        ("first-label", &first),
+        ("Report canary", &second),
+        ("opaque-beta", &second),
+        ("latest", &first),
+    ] {
+        app.composer.input = format!("/resume {query}");
+        let selected = app.selected_slash_entry().expect("existing literal query");
+        assert_eq!(
+            selected.resolved.arg,
+            expected.display().to_string(),
+            "query={query}"
+        );
+    }
+    app.composer.input = "/resume 2".to_owned();
+    assert!(app.slash_selector_rows().iter().any(|row| row.0 == "2"));
+    assert_eq!(app.resolve_resume_target("2"), Some(second));
+    app.composer.input = "/resume 4d17a623-30c8-5dde-bc65-c751f2aaa3b9".to_owned();
+    assert!(app.slash_selector_rows().is_empty());
+    assert_eq!(
+        app.slash_selector_empty_message(),
+        Some("no matching session")
+    );
+    Ok(())
+}
+
+#[test]
 fn resume_selector_empty_message_distinguishes_no_match_from_no_sessions() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_browser.history = vec![crate::sessions::SessionHistoryEntry {

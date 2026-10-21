@@ -327,7 +327,21 @@ impl AppState {
 
     fn resume_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
         let query = arg.trim().to_ascii_lowercase();
-        self.resume_candidate_indices()
+        let candidates = self.resume_candidate_indices();
+        let exact_session = candidates.iter().copied().find(|index| {
+            !query.is_empty()
+                && self
+                    .session_browser
+                    .history
+                    .get(*index)
+                    .is_some_and(|entry| {
+                        entry
+                            .session_id
+                            .as_deref()
+                            .is_some_and(|id| id.eq_ignore_ascii_case(&query))
+                    })
+        });
+        candidates
             .into_iter()
             .enumerate()
             .filter_map(|(candidate_index, entry_index)| {
@@ -343,7 +357,10 @@ impl AppState {
                     entry.path.display().to_string().to_ascii_lowercase()
                 );
                 let latest_match = query == "latest" && candidate_index == 0;
-                let include = query.is_empty() || latest_match || search_text.contains(&query);
+                let include = exact_session.map_or_else(
+                    || query.is_empty() || latest_match || search_text.contains(&query),
+                    |index| index == entry_index,
+                );
                 include.then(|| SlashSelectorEntry {
                     fill: format!("/resume {ordinal}"),
                     label: ordinal.to_string(),
