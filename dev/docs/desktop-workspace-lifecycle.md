@@ -22,6 +22,10 @@
 
 已有 ConversationPanel 使用自身 session continuity、run owner 与 run context。provider inventory 正在读取、读取失败或默认模型未配置，都不卸载已有会话；失败仅显示局部提示和重试/设置入口。没有已选会话时继续显示相应 onboarding 或配置错误。recent-workspace 写入失败也不撤销已打开 workspace 的成功结果。
 
+普通工作区切换、最近项目、共享历史访问入口，以及关闭当前工作区后选择剩余工作区，都通过现有 typed recent-workspace 操作更新最近顺序。已打开的 Ready 工作区立即切换，canonical Ready 的原生打开路径复用其运行实例；关闭的最近项目仍须原生打开成功才激活。重启按最近顺序恢复，保留原有“重新打开最近工作区”偏好。
+
+renderer 的工作区导航按选择顺序串行调用原生操作，并以独立选择序号淘汰旧响应、旧错误和尚未开始的旧请求，避免迟到打开反写最近顺序后抢回新选择。该序号同样覆盖选择器、启动恢复和后台工作区快照，不改变会话运行、审批或取消的 authority。已打开工作区遇到 typed 最近索引未知、无效或不可读时仍可使用，并明确提示最近顺序未更新；真实运行实例错误继续显示原有错误。
+
 同一后端切换会话时，空闲会话的强租约缓存仍会释放；尚有实际 supervisor 持有的租约通过本 driver 的弱索引按 durable scope 与 canonical path 精确复用，因此切回等待审批的会话不会误报另一窗口占用。弱索引不延长租约寿命；实际 owner 释放后仍重新获取租约，其他 driver 的占用继续返回 Busy，renderer 不以本地缓存代替租约校验。
 
 这些展示规则不批准新的 provider route，不覆盖运行状态或真实权限错误。启动 run、取消与审批仍由原 application/runtime owner 校验准确的 scope 和身份。

@@ -242,6 +242,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     ...remainingOverrides
   } = overrides;
   let simulatedOwner: ConversationContinuity["foregroundOwner"];
+  let bootstrappedWorkspaces: WorkspaceSummary[] = [];
   return {
     pickMcpImport: vi.fn(async () => null),
     applyMcpImport: vi.fn(async () => ({ importedNames: [], reloadRequired: false })),
@@ -249,12 +250,16 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     ingestImage: vi.fn(async () => { throw new Error("no fixture image"); }),
     releaseImages: vi.fn(async () => {}),
     messageImage: vi.fn(async () => { throw new Error("no fixture image"); }),
-    bootstrap: async () => ({
-      appearance: defaultAppearance,
-      ...(bootstrap === undefined
-        ? { protocolVersion: 2, workspaces: [], recentWorkspaces: [] }
-        : await bootstrap()),
-    }),
+    bootstrap: async () => {
+      const result: DesktopBootstrap = {
+        appearance: defaultAppearance,
+        ...(bootstrap === undefined
+          ? { protocolVersion: 2, workspaces: [], recentWorkspaces: [] }
+          : await bootstrap()),
+      };
+      bootstrappedWorkspaces = result.workspaces;
+      return result;
+    },
     updateState: async () => ({
       phase: "unsupported",
       channel: "beta",
@@ -361,7 +366,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       saveWarning: false,
     }),
     pickWorkspace: async () => ({ cancelled: false, workspace }),
-    openRecentWorkspace: async () => workspace,
+    openRecentWorkspace: async (workspaceId) => bootstrappedWorkspaces.find((candidate) => candidate.id === workspaceId) ?? workspace,
     closeWorkspace: async () => [],
     catalog: async () => emptyCatalog,
     createSession: async () => ({
@@ -8724,13 +8729,15 @@ describe("shared conversation history navigation", () => {
   it("returns to the exact original open workspace without creating a conversation", async () => {
     const user = userEvent.setup();
     const createSession = vi.fn();
+    const openRecentWorkspace = vi.fn(async () => original);
     const catalog = vi.fn(async (workspaceId: string) => ({ ...emptyCatalog, workspaceId,
       ...(workspaceId === current.id ? { legacySharedHistory: history } : {}) }));
-    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [current, original], recentWorkspaces: [] }), catalog, createSession })} />);
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [current, original], recentWorkspaces: [] }), catalog, createSession, openRecentWorkspace })} />);
     const notice = await screen.findByRole("complementary", { name: "Shared conversation history" });
     expect(within(notice).getByText(/desktop-workspace · original · dogfood/)).toBeTruthy();
     await user.click(within(notice).getByRole("button", { name: "Open shared history workspace" }));
     await waitFor(() => expect(catalog).toHaveBeenCalledWith(original.id, expect.anything()));
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(original.id));
     expect(screen.getByRole("button", { name: "Switch workspace: desktop-workspace · original · dogfood" })).toBeTruthy();
     expect(createSession).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("complementary", { name: "Shared conversation history" })).toBeNull());
@@ -8874,4 +8881,164 @@ it("ignores a deferred empty workspace create rejection after switching to anoth
   await user.click(screen.getByRole("button", { name: "Start a conversation" }));
   await readyComposer();
   expect(createSession).toHaveBeenNthCalledWith(2, other.id, "New conversation", expect.anything());
+});
+
+describe("workspace activation persistence", () => {
+  const alpha = { ...workspace, id: "workspace-activation-alpha", displayName: "Alpha" };
+  const beta = { ...workspace, id: "workspace-activation-beta", displayName: "Beta" };
+  const gamma = { ...workspace, id: "workspace-activation-gamma", displayName: "Gamma" };
+  const catalog = async (workspaceId: string) => ({ ...emptyCatalog, workspaceId });
+
+  it("persists an already-open workspace selection and restores it after renderer and native restart", async () => {
+    const user = userEvent.setup();
+    let nativeOpened = [alpha, beta];
+    let nativeRecent = [alpha, beta];
+    const openRecentWorkspace = vi.fn(async (id: string) => {
+      const selected = [alpha, beta].find((candidate) => candidate.id === id)!;
+      nativeRecent = [selected, ...nativeRecent.filter((candidate) => candidate.id !== id)];
+      if (!nativeOpened.some((candidate) => candidate.id === id)) nativeOpened.push(selected);
+      return selected;
+    });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: nativeOpened,
+        recentWorkspaces: nativeRecent.map((candidate) => ({ ...candidate, isOpen: nativeOpened.some((opened) => opened.id === candidate.id) })) }),
+      catalog, openRecentWorkspace,
+    });
+    const first = render(<App bridge={bridge} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(beta.id));
+    expect(nativeRecent[0].id).toBe(beta.id);
+    expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+
+    first.unmount();
+    nativeOpened = [];
+    render(<App bridge={bridge} />);
+    expect(await screen.findByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledTimes(2));
+    expect(openRecentWorkspace).toHaveBeenLastCalledWith(beta.id);
+    expect(nativeOpened.map((candidate) => candidate.id)).toEqual([beta.id]);
+  });
+
+  it.each(["success", "failure"] as const)("keeps the newer selection and native recent order after an old activation %s", async (outcome) => {
+    const user = userEvent.setup();
+    const first = deferred<WorkspaceSummary>();
+    let nativeMostRecent = alpha.id;
+    const openRecentWorkspace = vi.fn(async (id: string) => {
+      const result = id === beta.id ? await first.promise : gamma;
+      nativeMostRecent = result.id;
+      return result;
+    });
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta, gamma], recentWorkspaces: [] }), catalog, openRecentWorkspace })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(beta.id));
+    await user.click(screen.getByRole("button", { name: "Switch workspace: Beta" }));
+    await user.click(screen.getByRole("button", { name: "Gamma" }));
+    expect(screen.getByRole("button", { name: "Switch workspace: Gamma" })).toBeTruthy();
+    expect(openRecentWorkspace).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      if (outcome === "success") first.resolve(beta);
+      else first.reject({ code: "workspace_server_start_failed", message: "Obsolete activation failure" });
+      await first.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenLastCalledWith(gamma.id));
+    expect(nativeMostRecent).toBe(gamma.id);
+    expect(screen.getByRole("button", { name: "Switch workspace: Gamma" })).toBeTruthy();
+    expect(screen.queryByText("Obsolete activation failure")).toBeNull();
+  });
+
+  it("keeps the active workspace and reports a genuine closed-recent open failure", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha], recentWorkspaces: [{ ...beta, isOpen: false }] }), catalog,
+      openRecentWorkspace: async () => { throw { code: "workspace_server_start_failed", message: "Beta could not start" }; },
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    expect((await screen.findAllByText("Beta could not start")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Switch workspace: Alpha" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Workspace unavailable" })).toBeNull();
+  });
+
+  it.each(["recent_workspace_unknown", "recent_workspaces_invalid", "recent_workspaces_unavailable"])(
+    "keeps an already-open workspace usable when its auxiliary index returns %s", async (code) => {
+      const user = userEvent.setup();
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta], recentWorkspaces: [] }), catalog,
+        openRecentWorkspace: async () => { throw { code, message: "Recent index unavailable" }; },
+      })} />);
+      await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+      await user.click(screen.getByRole("button", { name: "Beta" }));
+      expect((await screen.findAllByText("Beta is ready, but the recent-workspace list could not be updated.")).length).toBeGreaterThan(0);
+      expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Start a conversation" }) as HTMLButtonElement).disabled).toBe(false);
+    },
+  );
+
+  it("does not classify an already-open workspace runtime failure as an auxiliary index warning", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta], recentWorkspaces: [] }), catalog,
+      openRecentWorkspace: async () => { throw { code: "workspace_server_start_failed", message: "Beta runtime unavailable" }; },
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    expect((await screen.findAllByText("Beta runtime unavailable")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Beta is ready, but the recent-workspace list could not be updated.")).toBeNull();
+  });
+
+  it.each(["success", "failure"] as const)("does not let a late picker %s replace a newer open-workspace choice", async (outcome) => {
+    const user = userEvent.setup();
+    const picker = deferred<Awaited<ReturnType<DesktopBridge["pickWorkspace"]>>>();
+    const pickWorkspace = vi.fn(() => picker.promise);
+    const openRecentWorkspace = vi.fn(async () => beta);
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta], recentWorkspaces: [] }), catalog, pickWorkspace, openRecentWorkspace })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Open workspace" }));
+    await waitFor(() => expect(pickWorkspace).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+    expect(openRecentWorkspace).not.toHaveBeenCalled();
+    await act(async () => {
+      if (outcome === "success") picker.resolve({ cancelled: false, workspace: gamma });
+      else picker.reject({ code: "workspace_server_start_failed", message: "Obsolete picker failure" });
+      await picker.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(beta.id));
+    expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+    expect(screen.queryByText("Obsolete picker failure")).toBeNull();
+  });
+
+  it("persists the ready workspace selected after closing the active one", async () => {
+    const user = userEvent.setup();
+    const closeWorkspace = vi.fn(async () => [beta]);
+    const openRecentWorkspace = vi.fn(async () => beta);
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta], recentWorkspaces: [] }), catalog, closeWorkspace, openRecentWorkspace })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Close Alpha" }));
+    await waitFor(() => expect(closeWorkspace).toHaveBeenCalledWith(alpha.id, false));
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(beta.id));
+    expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
+  });
+
+  it("skips an activation superseded before its native recent write starts", async () => {
+    const user = userEvent.setup();
+    const picker = deferred<Awaited<ReturnType<DesktopBridge["pickWorkspace"]>>>();
+    const pickWorkspace = vi.fn(() => picker.promise);
+    const openRecentWorkspace = vi.fn(async () => gamma);
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [alpha, beta, gamma], recentWorkspaces: [] }), catalog, pickWorkspace, openRecentWorkspace })} />);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Open workspace" }));
+    await waitFor(() => expect(pickWorkspace).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Switch workspace: Alpha" }));
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    await user.click(screen.getByRole("button", { name: "Switch workspace: Beta" }));
+    await user.click(screen.getByRole("button", { name: "Gamma" }));
+    await act(async () => { picker.resolve({ cancelled: true }); await picker.promise; });
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledOnce());
+    expect(openRecentWorkspace).toHaveBeenCalledWith(gamma.id);
+    expect(screen.getByRole("button", { name: "Switch workspace: Gamma" })).toBeTruthy();
+  });
 });

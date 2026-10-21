@@ -158,8 +158,20 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
   const sessionRenameInputRef = useRef<HTMLInputElement>(null);
   const sessionSelectionEpoch = useRef(0);
+  const workspaceSelectionEpoch = useRef(0);
+  const workspaceNavigationTail = useRef<Promise<unknown>>(Promise.resolve());
   const activeWorkspaceIdRef = useRef(activeWorkspaceId);
   activeWorkspaceIdRef.current = activeWorkspaceId;
+
+  const runWorkspaceNavigation = useCallback(<T,>(selectionEpoch: number, operation: () => Promise<T>) => {
+    // Native opens also persist the recent index. Preserve user order there, not
+    // merely in React state, and skip superseded operations that have not begun.
+    const result = workspaceNavigationTail.current.then(() =>
+      workspaceSelectionEpoch.current === selectionEpoch ? operation() : undefined,
+    );
+    workspaceNavigationTail.current = result.catch(() => undefined);
+    return result;
+  }, []);
 
   const dismissWorkspaceClose = useCallback(() => {
     if (pendingWorkspaceClose !== undefined) {
@@ -210,18 +222,22 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         ) {
           return current;
         }
-        return bootstrap.workspaces.find((workspace) => workspace.state === "ready")?.id;
+        return bootstrap.recentWorkspaces.find((recent) => bootstrap.workspaces.some(
+          (workspace) => workspace.id === recent.id && workspace.state === "ready",
+        ))?.id ?? bootstrap.workspaces.find((workspace) => workspace.state === "ready")?.id;
       });
     },
     [appearance.sync],
   );
 
   const refresh = useCallback(async () => {
+    const selectionEpoch = ++workspaceSelectionEpoch.current;
     setLoadState("loading");
     setMessage(t("checkingWorkspaces"));
     setWorkspaceRecovery(undefined);
     try {
       const bootstrap = await bridge.bootstrap();
+      if (workspaceSelectionEpoch.current !== selectionEpoch) return;
       applyBootstrap(bootstrap);
       const readyWorkspace = bootstrap.workspaces.find((workspace) => workspace.state === "ready");
       const mostRecentWorkspace = bootstrap.recentWorkspaces[0];
@@ -231,7 +247,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         && readReopenLastWorkspace()
       ) {
         try {
-          const workspace = await bridge.openRecentWorkspace(mostRecentWorkspace.id);
+          const workspace = await runWorkspaceNavigation(selectionEpoch, () => bridge.openRecentWorkspace(mostRecentWorkspace.id));
+          if (workspaceSelectionEpoch.current !== selectionEpoch || workspace === undefined) return;
           setWorkspaces([workspace]);
           setRecentWorkspaces((current) => [
             { id: workspace.id, displayName: workspace.displayName, locationLabel: workspace.locationLabel, isOpen: true },
@@ -242,6 +259,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           setMessage(t("workspaceRestored", { name: workspace.displayName }));
           return;
         } catch (error) {
+          if (workspaceSelectionEpoch.current !== selectionEpoch) return;
           setLoadState("error");
           const recovery = workspaceRecoveryFromError(
             "recent",
@@ -261,6 +279,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           : t("sigilReady"),
       );
     } catch (error) {
+      if (workspaceSelectionEpoch.current !== selectionEpoch) return;
       setLoadState("error");
       const recovery = workspaceRecoveryFromError(
         "bootstrap",
@@ -270,17 +289,20 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setWorkspaceRecovery(recovery);
       setMessage(recovery.message);
     }
-  }, [applyBootstrap, bridge, t]);
+  }, [applyBootstrap, bridge, runWorkspaceNavigation, t]);
 
   useEffect(() => {
     void refresh();
+    return () => { workspaceSelectionEpoch.current += 1; };
   }, [refresh]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      const selectionEpoch = workspaceSelectionEpoch.current;
       void bridge
         .bootstrap()
         .then((bootstrap) => {
+          if (workspaceSelectionEpoch.current !== selectionEpoch) return;
           applyBootstrap(bootstrap);
           const unavailable = bootstrap.workspaces.find(
             (workspace) => workspace.state !== "ready",
@@ -294,6 +316,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           }
         })
         .catch(() => {
+          if (workspaceSelectionEpoch.current !== selectionEpoch) return;
           setWorkspaceHealthError(t("workspaceServiceUnavailable"));
         });
     }, 2_000);
@@ -476,15 +499,18 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       { id: workspace.id, displayName: workspace.displayName, locationLabel: workspace.locationLabel, isOpen: true },
       ...current.filter((candidate) => candidate.id !== workspace.id),
     ]);
+    activeWorkspaceIdRef.current = workspace.id;
     setActiveWorkspaceId(workspace.id);
     setWorkspaceRecovery(undefined);
   };
 
   const pickWorkspace = async () => {
+    const selectionEpoch = ++workspaceSelectionEpoch.current;
     setLoadState("working");
     setMessage(t("waitingWorkspaceSelection"));
     try {
-      const selection = await bridge.pickWorkspace();
+      const selection = await runWorkspaceNavigation(selectionEpoch, () => bridge.pickWorkspace());
+      if (workspaceSelectionEpoch.current !== selectionEpoch || selection === undefined) return;
       if (selection.cancelled || selection.workspace === undefined) {
         setLoadState("ready");
         const cancelledMessage = t("workspaceSelectionCancelled");
@@ -505,15 +531,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setMessage(readyMessage);
       }
     } catch (error) {
+      if (workspaceSelectionEpoch.current !== selectionEpoch) return;
       setLoadState("error");
       const recovery = workspaceRecoveryFromError(
         "picker",
         error,
         t("workspaceOpenFailed"),
         undefined,
-        activeWorkspace !== undefined,
+        activeWorkspaceIdRef.current !== undefined,
       );
-      if (activeWorkspace !== undefined) {
+      if (activeWorkspaceIdRef.current !== undefined) {
         setLoadState("ready");
         setWorkspaceRecovery(undefined);
         setMessage(recovery.message);
@@ -526,31 +553,45 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   };
 
   const openRecentWorkspace = async (recent: RecentWorkspaceSummary) => {
-    if (recent.isOpen) {
-      setActiveWorkspaceId(recent.id);
-      setWorkspaceRecovery(undefined);
-      setNavigationOpen(false);
-      return;
+    const selectionEpoch = ++workspaceSelectionEpoch.current;
+    const existing = workspaces.find((workspace) => workspace.id === recent.id && workspace.state === "ready");
+    if (existing !== undefined) {
+      rememberOpenWorkspace(existing);
+      setLoadState("ready");
+    } else {
+      setLoadState("working");
     }
-    setLoadState("working");
+    navigate("conversation");
+    setNavigationOpen(false);
     setMessage(t("openingWorkspace", { name: recent.displayName }));
     try {
-      const workspace = await bridge.openRecentWorkspace(recent.id);
+      const workspace = await runWorkspaceNavigation(selectionEpoch, () => bridge.openRecentWorkspace(recent.id));
+      if (workspaceSelectionEpoch.current !== selectionEpoch || workspace === undefined) return;
       rememberOpenWorkspace(workspace);
       setNavigationOpen(false);
       setLoadState("ready");
       const readyMessage = t("workspaceReady", { name: workspace.displayName });
       setMessage(readyMessage);
     } catch (error) {
+      if (workspaceSelectionEpoch.current !== selectionEpoch) return;
+      if (existing !== undefined && [
+        "recent_workspace_unknown", "recent_workspaces_invalid", "recent_workspaces_unavailable",
+      ].includes(errorCode(error) ?? "")) {
+        const degradedMessage = t("workspaceReadyRecentPersistenceDegraded", { name: existing.displayName });
+        setLoadState("ready");
+        setMessage(degradedMessage);
+        notify({ message: degradedMessage, tone: "warning" });
+        return;
+      }
       setLoadState("error");
       const recovery = workspaceRecoveryFromError(
         "recent",
         error,
         t("recentWorkspaceOpenFailed"),
         recent,
-        activeWorkspace !== undefined,
+        activeWorkspaceIdRef.current !== undefined,
       );
-      if (activeWorkspace !== undefined) {
+      if (activeWorkspaceIdRef.current !== undefined) {
         setLoadState("ready");
         setWorkspaceRecovery(undefined);
         setMessage(recovery.message);
@@ -577,27 +618,34 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   };
 
   const closeWorkspace = async (workspaceId: string, confirmed = false) => {
+    const selectionEpoch = ++workspaceSelectionEpoch.current;
     setLoadState("working");
     setMessage(t("closingWorkspace"));
     try {
-      const remaining = await bridge.closeWorkspace(workspaceId, confirmed);
+      const remaining = await runWorkspaceNavigation(selectionEpoch, () => bridge.closeWorkspace(workspaceId, confirmed));
+      if (workspaceSelectionEpoch.current !== selectionEpoch || remaining === undefined) return;
       setWorkspaces(remaining);
       setRecentWorkspaces((current) =>
         current.map((recent) =>
           recent.id === workspaceId ? { ...recent, isOpen: false } : recent,
         ),
       );
-      setActiveWorkspaceId((current) =>
-        current === workspaceId
-          ? remaining.find((workspace) => workspace.state === "ready")?.id
-          : current,
-      );
       setLoadState("ready");
       const closedMessage = t("workspaceClosed");
       setMessage(closedMessage);
       setPendingWorkspaceClose(undefined);
       window.requestAnimationFrame(() => workspaceSwitcherRef.current?.focus());
+      if (activeWorkspaceIdRef.current === workspaceId) {
+        const next = remaining.find((workspace) => workspace.state === "ready");
+        if (next === undefined) {
+          activeWorkspaceIdRef.current = undefined;
+          setActiveWorkspaceId(undefined);
+        } else {
+          await openRecentWorkspace({ ...next, isOpen: true });
+        }
+      }
     } catch (error) {
+      if (workspaceSelectionEpoch.current !== selectionEpoch) return;
       if (
         ["workspace_active_runs", "workspace_run_state_unavailable"].includes(
           errorCode(error) ?? "",
@@ -925,8 +973,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     if (legacyHistory === undefined) return;
     setNavigationOpen(false);
     if (legacyWorkspace !== undefined) {
-      setActiveWorkspaceId(legacyWorkspace.id);
-      navigate("conversation");
+      void openRecentWorkspace({ ...legacyWorkspace, isOpen: true });
     } else if (legacyRecent !== undefined) {
       void openRecentWorkspace(legacyRecent);
     } else {
@@ -1034,9 +1081,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           activeWorkspaceId={activeWorkspaceId}
           busy={loadState === "working"}
           onSelect={(workspaceId) => {
-            setActiveWorkspaceId(workspaceId);
-            navigate("conversation");
-            setNavigationOpen(false);
+            const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+            if (workspace !== undefined) void openRecentWorkspace({ ...workspace, isOpen: true });
           }}
           onOpenRecent={(recent) => void openRecentWorkspace(recent)}
           onChoose={() => void pickWorkspace()}
