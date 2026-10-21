@@ -534,11 +534,20 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     lines
 }
 
-pub(crate) fn metadata_slash_help_lines() -> Vec<String> {
+pub(crate) fn metadata_slash_help_lines(task_unavailable_hint: Option<&str>) -> Vec<String> {
     COMMAND_SPECS
         .iter()
         .filter(|spec| spec.surface == CommandSurface::Slash)
-        .filter_map(|spec| spec.slash.map(|slash| format!("{slash}: {}", spec.help)))
+        .filter_map(|spec| {
+            spec.slash.map(|slash| {
+                let help = if spec.command == UiCommand::SubmitTask {
+                    task_unavailable_hint.unwrap_or(spec.help)
+                } else {
+                    spec.help
+                };
+                format!("{slash}: {help}")
+            })
+        })
         .collect()
 }
 

@@ -504,7 +504,10 @@ impl AppState {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
                 lines.push("Slash commands".to_owned());
-                lines.extend(metadata_slash_help_lines());
+                lines.extend(metadata_slash_help_lines(
+                    self.task_command_blocker()
+                        .map(|blocker| blocker.short_hint()),
+                ));
                 let metadata_slash_commands = metadata_slash_commands().collect::<Vec<_>>();
                 lines.extend(SLASH_COMMANDS.iter().filter_map(|spec| {
                     if metadata_slash_commands.contains(&spec.canonical) {

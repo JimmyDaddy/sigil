@@ -55,3 +55,11 @@
 - 正常待批请求使用 host 内部 typed attention 角色，中性提示色不受命令或文件名中的 error/deny 文字影响。历史只描述待批对象，不附瞬时 Y/N；决策键以当前 review/footer 为准，真实错误与结果未知仍保留。
 
 本轮代码、测试与格式检查由执行者准备；编译、测试和新二进制实机资格化由统一 Cargo owner 分别记录，不以 C4 原生截图替代 C5 结果。
+
+## Task 未启用时的入口
+
+`/task` 的下拉和 F1 完整帮助按当前有效配置与会话的 durable capability binding 显示可用状态。未选择 Task、模块被关闭或旧会话创建时没有 Task 时，提交不会清空原文、粘贴折叠或光标，也不会先进入 Preparing；正文说明具体恢复步骤。命令不会为旧会话自动增加能力，普通输入不做关键词路由。
+
+当前 TUI 设置面板没有 composition / Task 总开关，Agents 页的启停仅管理 agent profile。最小 Task 配置是在 `sigil.toml` 中保留 `profile = "core"`，将 `"task_orchestration"` 加入 `[composition].enhancements`，并设置 `[task].enabled = true`；保留已有其它 enhancement，不替换为不需要的模块。更改后退出并重新启动产品，再新建会话。Plan 与 Task 使用同一项 Task orchestration，不需要额外 Plan capability。
+
+原会话的能力绑定和历史保持原样。原生测试若使用独立 Task 配置，应使用新的隔离身份和工作区，只复制自有连接配置及场景输入；不复制 bootstrap、会话/控制日志、锁、artifact 或旧绑定。准备配置不算 `/task`、暂停、继续或真实模型已通过。

@@ -132,6 +132,158 @@ fn task_command_dispatches_durable_task_when_idle() -> Result<()> {
 }
 
 #[test]
+fn task_availability_rejects_core_commands_before_clearing_draft_or_preparing() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = config_for_workspace(root.path());
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    // A persisted module default is not a selected capability.
+    assert!(config.task.enabled);
+    for prompt in [
+        "/task".to_owned(),
+        "/task continue 保留原文".to_owned(),
+        format!("  /task 中文任务\n{}\n  ", "draft ".repeat(2_000)),
+    ] {
+        let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+        app.handle_paste_text(&prompt);
+        app.composer.input_cursor = 3;
+        let original = app.composer.input.clone();
+        let paste_spans = app.composer.input_paste_spans.clone();
+        let submission_intent = std::sync::Arc::clone(&app.runtime.run_submission_intent);
+        if prompt.len() > 10_000 {
+            assert!(!paste_spans.is_empty(), "exercise a real collapsed paste");
+        }
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+        assert!(action.is_none());
+        assert_eq!(app.composer.input, original);
+        assert_eq!(app.composer.input_cursor, 3);
+        assert_eq!(app.composer.input_paste_spans, paste_spans);
+        assert!(!app.runtime.is_busy);
+        assert_eq!(app.runtime.run_phase, RunPhase::Idle);
+        assert!(std::sync::Arc::ptr_eq(
+            &submission_intent,
+            &app.runtime.run_submission_intent
+        ));
+        assert_eq!(app.last_notice(), Some("Task unavailable · see sigil.toml"));
+        assert!(app.timeline.iter().any(|entry| {
+            entry.role == TimelineRole::Notice
+                && entry.text.contains("[composition].enhancements")
+                && entry.text.contains("restart and start a new session")
+        }));
+        assert!(
+            !app.timeline
+                .iter()
+                .any(|entry| entry.role == TimelineRole::User)
+        );
+        assert!(app.composer.pending_queue_enqueues.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn task_availability_requires_the_selected_module_to_be_enabled() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = config_for_workspace(root.path());
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::TaskOrchestration],
+    );
+    config.task.enabled = false;
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.composer.input = "/task continue existing goal".to_owned();
+
+    assert!(app.submit_input()?.is_none());
+
+    assert_eq!(app.composer.input, "/task continue existing goal");
+    assert!(!app.runtime.is_busy);
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text.contains("[task].enabled = true")
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_availability_keeps_a_durable_core_session_restricted_after_config_selection() -> Result<()>
+{
+    let root = tempdir()?;
+    let mut config = config_for_workspace(root.path());
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::TaskOrchestration],
+    );
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    let binding = SessionLogEntry::Control(ControlEntry::SessionCompositionBound(
+        sigil_kernel::SessionCompositionSnapshotV1::new(Default::default()),
+    ));
+    app.sync_current_session_state(vec![binding]);
+    app.composer.input = "/task new selected config is not old session authority".to_owned();
+    let original = app.composer.input.clone();
+    let entries = serde_json::to_value(&app.session_browser.current_entries)?;
+
+    assert!(app.submit_input()?.is_none());
+
+    assert_eq!(app.composer.input, original);
+    assert!(!app.runtime.is_busy);
+    assert_eq!(
+        serde_json::to_value(&app.session_browser.current_entries)?,
+        entries
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text.contains("session was created without Task")
+    }));
+    app.composer.input = "/task".to_owned();
+    assert_eq!(
+        app.slash_selector_rows(),
+        vec![(
+            "/task".to_owned(),
+            "Task unavailable · see sigil.toml".to_owned()
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn task_availability_preserves_enabled_explicit_start_and_continue_routes() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = config_for_workspace(root.path());
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::TaskOrchestration],
+    );
+    for continuing in [false, true] {
+        let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+        app.sync_current_session_state(vec![SessionLogEntry::Control(
+            ControlEntry::SessionCompositionBound(sigil_kernel::SessionCompositionSnapshotV1::new(
+                config.selected_capabilities(),
+            )),
+        )]);
+        app.composer.input = if continuing {
+            "/task continue exact follow-up".to_owned()
+        } else {
+            "/task implement the event statistics goal".to_owned()
+        };
+
+        let action = app.submit_input()?;
+
+        if continuing {
+            assert!(
+                matches!(action, Some(AppAction::ContinueTask { task_id: None, guidance: Some(guidance) }) if guidance == "exact follow-up")
+            );
+        } else {
+            assert!(
+                matches!(action, Some(AppAction::SubmitTask(objective)) if objective == "implement the event statistics goal")
+            );
+        }
+        assert!(app.runtime.is_busy);
+        assert_eq!(app.runtime.run_phase, RunPhase::Preparing);
+        assert!(app.composer.input.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn empty_plan_command_enters_one_shot_plan_mode() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/plan".to_owned();

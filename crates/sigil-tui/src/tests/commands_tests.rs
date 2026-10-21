@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn task_availability_help_override_preserves_the_command_directory() {
+    let available = metadata_slash_help_lines(None);
+    let unavailable = metadata_slash_help_lines(Some("Task unavailable · see sigil.toml"));
+    assert_eq!(available.len(), unavailable.len());
+    assert!(unavailable.contains(&"/task: Task unavailable · see sigil.toml".to_owned()));
+    for line in available.iter().filter(|line| !line.starts_with("/task:")) {
+        assert!(unavailable.contains(line), "unchanged command: {line}");
+    }
+    assert!(available.contains(&"/task: Start or continue a durable multi-step task.".to_owned()));
+}
+
+#[test]
 fn maps_tool_card_key_events_to_commands() {
     assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
@@ -201,7 +213,7 @@ fn command_metadata_generates_help_and_control_hints() {
         line == "Alt-F: Search a bounded literal in the focused tool output artifact."
     }));
 
-    let slash = metadata_slash_help_lines();
+    let slash = metadata_slash_help_lines(None);
     assert!(slash.iter().any(|line| line.starts_with("/config:")));
     assert!(help.iter().any(|line| line == "F3: Open TUI config panel."));
     assert!(

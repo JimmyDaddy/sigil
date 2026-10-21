@@ -57,6 +57,40 @@ fn test_config() -> RootConfig {
 }
 
 #[test]
+fn task_availability_hint_is_visible_in_an_eighty_column_palette() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.set_terminal_size(80, 24);
+    app.handle_paste_text("/task");
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, 80, 24),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("/task"));
+    assert!(rendered.contains("Task unavailable · see sigil.toml"));
+    assert!(!rendered.contains("start or continue a durable task"));
+    Ok(())
+}
+
+#[test]
 fn slash_selector_overlay_rect_tracks_composer_width() {
     let live = Rect::new(0, 0, 120, 24);
     let composer = Rect::new(0, 20, 120, 4);

@@ -262,6 +262,13 @@ impl AppState {
         command: ResolvedSlashCommand,
         prompt: String,
     ) -> Result<Option<AppAction>> {
+        if command.canonical == "/task"
+            && let Some(blocker) = self.task_command_blocker()
+        {
+            self.last_notice = Some(blocker.short_hint().to_owned());
+            self.push_timeline(TimelineRole::Notice, blocker.recovery_hint());
+            return Ok(None);
+        }
         self.composer.input.clear();
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();

@@ -63,7 +63,7 @@ fn keyboard_help_common_uses_command_metadata_and_all_retains_the_full_directory
     for line in keyboard_help_lines(true) {
         assert!(all.contains(&line), "missing full keyboard help: {line}");
     }
-    for line in metadata_slash_help_lines() {
+    for line in metadata_slash_help_lines(None) {
         assert!(all.contains(&line), "missing metadata slash help: {line}");
     }
     let metadata = metadata_slash_commands().collect::<Vec<_>>();
@@ -80,6 +80,35 @@ fn keyboard_help_common_uses_command_metadata_and_all_retains_the_full_directory
     }
     app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
     assert_eq!(app.modal_lines(), common);
+    Ok(())
+}
+
+#[test]
+fn task_availability_palette_and_full_help_share_the_current_session_hint() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.set_terminal_size(80, 24);
+    app.composer.input = "/task".to_owned();
+    let rows = app.slash_selector_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "/task");
+    assert_eq!(rows[0].1, "Task unavailable · see sigil.toml");
+    press(&mut app, KeyCode::F(1))?;
+    press(&mut app, KeyCode::Tab)?;
+    let help = app.modal_lines();
+    assert!(help.contains(&format!("/task: {}", rows[0].1)));
+    assert!(
+        !help
+            .iter()
+            .any(|line| line == "/task: Start or continue a durable multi-step task.")
+    );
+    assert!(help.iter().any(|line| line.starts_with("/new:")));
+    assert!(help.iter().any(|line| line.starts_with("/config:")));
+    press(&mut app, KeyCode::Esc)?;
+    assert_eq!(app.composer.input, "/task");
     Ok(())
 }
 

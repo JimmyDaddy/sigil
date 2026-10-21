@@ -1,10 +1,48 @@
-use sigil_kernel::{RootConfig, TerminalKeyboardEnhancement};
+use sigil_kernel::{
+    ControlEntry, OptionalCapability, RootConfig, SessionLogEntry, TerminalKeyboardEnhancement,
+};
 use sigil_runtime::support::SupportBuildInfo;
 
 use super::{
     AppState, ComposerMode, EGRESS_DISCLOSURE_HEIGHT, SetupState,
     formatting::sidebar_width_for_terminal, modal_flow::ModalState,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskCommandBlocker {
+    NotSelected,
+    Disabled,
+    SessionWithoutTask,
+    ConfigurationUnavailable,
+}
+
+impl TaskCommandBlocker {
+    pub(super) fn short_hint(self) -> &'static str {
+        match self {
+            Self::NotSelected | Self::Disabled | Self::SessionWithoutTask => {
+                "Task unavailable · see sigil.toml"
+            }
+            Self::ConfigurationUnavailable => "Task unavailable · check sigil.toml",
+        }
+    }
+
+    pub(super) fn recovery_hint(self) -> &'static str {
+        match self {
+            Self::NotSelected => {
+                "Task is not selected. In sigil.toml, add \"task_orchestration\" to [composition].enhancements and enable [task].enabled, then restart and start a new session."
+            }
+            Self::Disabled => {
+                "Task is disabled. Set [task].enabled = true in sigil.toml, then restart and start a new session."
+            }
+            Self::SessionWithoutTask => {
+                "This session was created without Task. Start a new session with Task enabled; the existing session keeps its original capabilities."
+            }
+            Self::ConfigurationUnavailable => {
+                "Task availability cannot be checked. Review sigil.toml and retry after the runtime is ready."
+            }
+        }
+    }
+}
 
 impl AppState {
     pub(crate) fn set_support_build_info(&mut self, build_info: SupportBuildInfo) {
@@ -87,6 +125,31 @@ impl AppState {
 
     pub(crate) fn session_runtime_config_snapshot(&self) -> Option<&RootConfig> {
         self.session_runtime_config.as_ref()
+    }
+
+    pub(super) fn task_command_blocker(&self) -> Option<TaskCommandBlocker> {
+        let Some(config) = self.session_runtime_config.as_ref() else {
+            return Some(TaskCommandBlocker::ConfigurationUnavailable);
+        };
+        if !config
+            .composition
+            .allows(OptionalCapability::TaskOrchestration)
+        {
+            return Some(TaskCommandBlocker::NotSelected);
+        }
+        if !config.task.enabled {
+            return Some(TaskCommandBlocker::Disabled);
+        }
+        if self.session_browser.current_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionCompositionBound(binding))
+                    if !binding.capabilities.contains(&OptionalCapability::TaskOrchestration)
+            )
+        }) {
+            return Some(TaskCommandBlocker::SessionWithoutTask);
+        }
+        None
     }
 
     pub(crate) fn current_session_route(&self) -> Option<sigil_kernel::ResolvedModelRoute> {

@@ -96,7 +96,7 @@ impl AppState {
             .any(|keyword| keyword.starts_with(query))
     }
 
-    fn slash_command_entries(token: &str, arg: &str) -> Vec<SlashSelectorEntry> {
+    fn slash_command_entries(&self, token: &str, arg: &str) -> Vec<SlashSelectorEntry> {
         Self::slash_command_matches(token)
             .into_iter()
             .map(|spec| {
@@ -114,7 +114,13 @@ impl AppState {
                 SlashSelectorEntry {
                     fill,
                     label: spec.canonical.to_owned(),
-                    description: format!("{}{}", spec.description, aliases),
+                    description: if spec.canonical == "/task"
+                        && let Some(blocker) = self.task_command_blocker()
+                    {
+                        blocker.short_hint().to_owned()
+                    } else {
+                        format!("{}{}", spec.description, aliases)
+                    },
                     resolved: ResolvedSlashCommand {
                         canonical: spec.canonical.to_owned(),
                         arg: arg.to_owned(),
@@ -576,7 +582,7 @@ impl AppState {
         {
             entries
         } else {
-            let mut entries = Self::slash_command_entries(token, &arg);
+            let mut entries = self.slash_command_entries(token, &arg);
             if Self::exact_slash_command(token).is_none() {
                 entries.extend(self.slash_agent_entries(token, &arg));
                 entries.extend(self.slash_skill_entries(token, &arg));
