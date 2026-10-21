@@ -28,6 +28,7 @@ async fn recent_store_persists_private_paths_but_projects_only_safe_summary() {
         vec![RecentWorkspaceSummary {
             id: "workspace-safe".to_owned(),
             display_name: "Workspace".to_owned(),
+            location_label: sigil_desktop::workspace_location_label(&workspace),
             is_open: true,
         }]
     );
@@ -68,4 +69,37 @@ async fn recent_store_rejects_oversized_or_unknown_records_without_path_errors()
             .to_string()
             .contains(temp.path().to_string_lossy().as_ref())
     );
+}
+
+#[tokio::test]
+async fn recent_store_disambiguates_same_names_without_projecting_paths() {
+    let temp = tempfile::tempdir().expect("temporary directory should create");
+    let first = temp.path().join("original/shared/desktop-workspace");
+    let second = temp.path().join("polish/shared/desktop-workspace");
+    std::fs::create_dir_all(&first).expect("first workspace should create");
+    std::fs::create_dir_all(&second).expect("second workspace should create");
+    let mut store = RecentWorkspaceStore::new(temp.path().join("recent.json"));
+    for (id, path) in [("original", &first), ("polish", &second)] {
+        store
+            .upsert(id.to_owned(), "desktop-workspace".to_owned(), path)
+            .await
+            .expect("workspace should persist");
+    }
+    let summaries = store
+        .list(&BTreeSet::new())
+        .await
+        .expect("recent list should project");
+    assert_eq!(summaries[0].display_name, summaries[1].display_name);
+    assert_eq!(
+        summaries[0].location_label.as_deref(),
+        Some("shared · polish")
+    );
+    assert_eq!(
+        summaries[1].location_label.as_deref(),
+        Some("shared · original")
+    );
+    let projected = serde_json::to_string(&summaries).expect("summaries serialize");
+    assert!(!projected.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!projected.contains("workspaceRoot"));
+    assert!(!projected.contains("workspace_root"));
 }

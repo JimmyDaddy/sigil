@@ -16,6 +16,8 @@ const MAX_RECENT_FILE_BYTES: u64 = 64 * 1024;
 pub(crate) struct RecentWorkspaceSummary {
     pub(crate) id: String,
     pub(crate) display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) location_label: Option<String>,
     pub(crate) is_open: bool,
 }
 
@@ -60,6 +62,7 @@ impl RecentWorkspaceStore {
             .map(|entry| RecentWorkspaceSummary {
                 id: entry.id.clone(),
                 display_name: entry.display_name.clone(),
+                location_label: sigil_desktop::workspace_location_label(&entry.workspace_root),
                 is_open: open_workspace_ids.contains(&entry.id),
             })
             .collect())

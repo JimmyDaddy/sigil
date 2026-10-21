@@ -136,6 +136,26 @@ pub struct LocalSessionCatalogEntry {
 pub struct LocalSessionCatalog {
     pub entries: Vec<LocalSessionCatalogEntry>,
     pub truncated_entry_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_shared_history: Option<LegacySharedSessionHistory>,
+}
+
+/// Bounded navigation information for unchanged shared history in the original authority realm.
+/// It never grants access to another workspace or substitutes for session reopen validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct LegacySharedSessionHistory {
+    pub workspace_id: String,
+    pub workspace_label: String,
+    pub source_state: LegacySharedSessionHistorySourceState,
+}
+
+/// Truthful metadata observation, without replaying or certifying the old sources.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacySharedSessionHistorySourceState {
+    Present,
+    Unverified,
 }
 
 /// Canonical durable source proven safe for reopening in the current workspace.
@@ -378,6 +398,7 @@ pub struct LocalSessionLifecycleService {
     /// source is current-schema managed storage.
     managed_artifact_store_root: Option<PathBuf>,
     managed_artifact_staging_root: Option<PathBuf>,
+    legacy_shared_history: Option<LegacySharedSessionHistory>,
 }
 
 /// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
@@ -410,6 +431,7 @@ impl LocalSessionLifecycleService {
             managed_session_log_root: None,
             managed_artifact_store_root: None,
             managed_artifact_staging_root: None,
+            legacy_shared_history: None,
         }
     }
 
@@ -417,6 +439,16 @@ impl LocalSessionLifecycleService {
     #[must_use]
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
+    }
+
+    /// Attaches display-only navigation to retained legacy history; no source root changes.
+    #[must_use]
+    pub fn with_legacy_shared_history(
+        mut self,
+        history: Option<LegacySharedSessionHistory>,
+    ) -> Self {
+        self.legacy_shared_history = history;
+        self
     }
 
     /// RFC-0071 R71.6: relocates the lifecycle journal under the composition's
@@ -699,6 +731,7 @@ impl LocalSessionLifecycleService {
         Ok(LocalSessionCatalog {
             entries,
             truncated_entry_count,
+            legacy_shared_history: self.legacy_shared_history.clone(),
         })
     }
 

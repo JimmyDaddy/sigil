@@ -88,6 +88,8 @@ struct HttpSessionCatalogPage {
     entries: Vec<HttpSessionCatalogEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_shared_history: Option<sigil_runtime::LegacySharedSessionHistory>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +129,7 @@ impl From<SessionCatalogProjectionPage> for HttpSessionCatalogPage {
             truncated_source_count: page.truncated_source_count,
             entries: page.entries.into_iter().map(Into::into).collect(),
             next_cursor: page.next_cursor,
+            legacy_shared_history: page.legacy_shared_history,
         }
     }
 }

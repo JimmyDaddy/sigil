@@ -2,6 +2,14 @@
 
 `sigil-desktop::DesktopWorkspaceManager` 是每个 canonical workspace 的 native child owner。renderer 只使用 opaque workspace/session ID，不取得路径、bearer、process handle 或通用 I/O。全局 map 的锁只覆盖接纳、短状态读取和发布；启动、退出、pipe drain 与 reap 在 manager 持有的 operation task 内推进。
 
+同一用户配置可供多个工作区同时使用。Resource Authority 为每个工作区保存独立的 controller realm、进程 inventory、cutover/configuration generation 和受管存储配额锁；provider 配置继续共享。同一工作区的第二个进程仍需通过原有 live-owner 检查，不因打开另一个工作区而关闭原服务或放宽资源权限。
+
+升级保留原 config-key realm 的物理目录、authority 身份及全部旧共享 session。旧记录没有工作区归属，因此首次成功升级启动只把当前经配置快照及物理身份验证的工作区记为共享历史的访问位置，不宣称它是历史 owner。原有 manifest、authenticator、live-owner、资源 identity 与配置 generation 校验均继续执行；合法配置更新和原子替换按既有 generation 规则处理。仅在完整 boot 成功后追加访问位置，不复制、改写或按 catalog 推断迁移旧 session。其它工作区使用独立子 realm 和工作区内的受管状态根。
+
+共享历史访问位置的目录继续展示并恢复全部旧共享来源，包括曾从其它工作区看见的记录。新 realm 的目录通过可缺失的 `legacy_shared_history` 提示该位置的安全名称和 opaque ID，指引从工作区菜单切回查看；未列出时可重新打开该工作区。观察到实际旧记录时为 `present`，来源暂不能核实时为 `unverified`，两者均不改变会话准入或授予跨工作区访问。
+
+查询 bootstrap manifest 路径只解析位置，不创建 realm。已存在但缺少必要元数据、无法证明初始化来源的目录仍保留并拒绝启动，不因目录为空或 catalog 缓存缺失而重建 authority。
+
 ## 唯一 owner 与关闭
 
 - Opening/restart 期间保留 canonical root 与已知 workspace ID 的 reservation；Closing 直到确认 cleanup 完成也保留 reservation。同 root 的打开、重启、关闭互斥，无关 workspace 仍可取得 typed client、停止运行和完成审批。

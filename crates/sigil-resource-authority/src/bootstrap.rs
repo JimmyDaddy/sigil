@@ -17,6 +17,9 @@ use serde::de::DeserializeOwned;
 
 use sigil_kernel::resource::CanonicalHash;
 
+mod workspace;
+pub use workspace::AuthorityBootstrapWorkspaceV1;
+
 /// Bootstrap error classification (closed).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BootstrapErrorV1 {
@@ -51,6 +54,7 @@ pub enum AuthorityBootstrapObjectClassV1 {
     ProcessInventory,
     ProcessInventoryRequirement,
     ProcessInventoryAuthenticator,
+    WorkspaceBinding,
 }
 
 /// Resolved platform roots for one authority instance.
@@ -95,9 +99,9 @@ const MAX_BOOTSTRAP_METADATA_BYTES: u64 = 2 * 1024 * 1024;
 /// Host-owned durable store for bootstrap metadata.
 ///
 /// The store is deliberately independent of the caller-provided config parent and configured
-/// workspace/storage roots. One config identity gets one private directory beneath the user's
-/// Sigil directory; the parent hierarchy and the instance directory are owner-only before any
-/// lock or metadata file is opened. The runtime may only use the fixed object classes below.
+/// workspace/storage roots. A configuration owns a private namespace beneath the user's Sigil
+/// directory; workspace realms retain independent controller ownership within it. The original
+/// realm keeps its identity when explicitly bound during an upgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityBootstrapStoreV1 {
     namespace: PathBuf,
@@ -192,6 +196,14 @@ impl AuthorityBootstrapStoreV1 {
         root: PathBuf,
         authority_epoch: u64,
     ) -> Result<(Self, AuthorityBootstrapPublicationGuard), BootstrapErrorV1> {
+        Self::open_namespace_with_publication(root.clone(), root, authority_epoch)
+    }
+
+    fn open_namespace_with_publication(
+        namespace: PathBuf,
+        root: PathBuf,
+        authority_epoch: u64,
+    ) -> Result<(Self, AuthorityBootstrapPublicationGuard), BootstrapErrorV1> {
         let admission_path = bootstrap_admission_lock_path(&root)?;
         ensure_owner_only_directory(admission_path.parent().ok_or_else(|| {
             BootstrapErrorV1::HardeningFailed("bootstrap admission lock has no parent".to_owned())
@@ -201,7 +213,7 @@ impl AuthorityBootstrapStoreV1 {
             .lock_exclusive()
             .map_err(|_| BootstrapErrorV1::WriterLockContended)?;
         validate_bootstrap_admission_lock(&admission_path, &admission)?;
-        let store = Self::open(root.clone(), root, authority_epoch)?;
+        let store = Self::open(namespace, root, authority_epoch)?;
         #[cfg(test)]
         admitted_bootstrap_open_test_hook();
         let publication = store.acquire_publication()?;
@@ -332,6 +344,7 @@ impl AuthorityBootstrapStoreV1 {
             AuthorityBootstrapObjectClassV1::ProcessInventoryAuthenticator => {
                 "process-inventory-authenticator.json"
             }
+            AuthorityBootstrapObjectClassV1::WorkspaceBinding => "workspace-binding-v1.json",
         };
         self.root.join(name)
     }

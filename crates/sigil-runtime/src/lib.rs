@@ -383,6 +383,7 @@ pub use session_lifecycle::{
     DEFAULT_SESSION_CATALOG_MAX_ENTRIES, DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES,
     DEFAULT_SESSION_CATALOG_MAX_TOTAL_VALIDATION_BYTES, DEFAULT_SESSION_CATALOG_PAGE_SIZE,
     DEFAULT_SESSION_EXPORT_MAX_BYTES, DEFAULT_SESSION_EXPORT_MAX_MESSAGES,
+    LegacySharedSessionHistory, LegacySharedSessionHistorySourceState,
     LocalSessionArtifactGcJournalBinding, LocalSessionCatalog, LocalSessionCatalogEntry,
     LocalSessionCatalogState, LocalSessionDeleteJournalBinding,
     LocalSessionDisplayNameJournalBinding, LocalSessionExportJournalBinding,

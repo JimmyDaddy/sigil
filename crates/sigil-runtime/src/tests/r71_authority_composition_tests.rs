@@ -9,6 +9,9 @@ use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
 #[path = "r71_bootstrap_upgrade_tests.rs"]
 mod bootstrap_upgrade;
 
+#[path = "r71_workspace_boot_tests.rs"]
+mod workspace_boot;
+
 fn write_r71_boot_config(config: &Path) {
     let fixture_root = config.parent().expect("config parent");
     let state = fixture_root.join(".r71-test-state");

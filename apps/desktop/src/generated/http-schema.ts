@@ -4162,6 +4162,13 @@ export interface components {
             /** Format: uint64 */
             version: number;
         };
+        /** @description Navigation-only information about unchanged shared sources in the original workspace; it does not grant access or validate those sessions. */
+        LegacySharedSessionHistory: {
+            /** @enum {string} */
+            source_state: "present" | "unverified";
+            workspace_id: string;
+            workspace_label: string;
+        };
         LiveRunUpdate: {
             attempt_id: string;
             /** Format: uint64 */
@@ -4928,6 +4935,7 @@ export interface components {
             generation: number;
             /** Format: uint64 */
             identity_conflict_count: number;
+            legacy_shared_history?: components["schemas"]["LegacySharedSessionHistory"] | null;
             next_cursor?: string | null;
             /** Format: uint64 */
             reconciled_at_unix_ms: number;
@@ -5006,7 +5014,7 @@ export interface components {
         SessionRouteRecoveryView: {
             allowed_actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
             /** @enum {string} */
-            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "authority_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
             recovery_binding: string;
             retryable: boolean;
         };

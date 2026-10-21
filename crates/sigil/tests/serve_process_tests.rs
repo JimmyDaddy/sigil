@@ -682,14 +682,27 @@ impl Drop for DesktopServeProcess {
 }
 
 fn spawn_serve(workspace: &Path, config_path: &Path, token: &str) -> ServeProcess {
-    let stdout_path = workspace.join("serve.stdout");
-    let stderr_path = workspace.join("serve.stderr");
+    spawn_serve_with_home(workspace, config_path, token, None)
+}
+
+fn spawn_serve_with_home(
+    workspace: &Path,
+    config_path: &Path,
+    token: &str,
+    user_home: Option<&Path>,
+) -> ServeProcess {
+    let output_id = uuid::Uuid::new_v4();
+    let stdout_path = workspace.join(format!("serve-{output_id}.stdout"));
+    let stderr_path = workspace.join(format!("serve-{output_id}.stderr"));
     let stdout = File::create(&stdout_path).expect("serve stdout should create");
     let stderr = File::create(&stderr_path).expect("serve stderr should create");
     let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
-    common::isolated_child_environment(workspace)
-        .expect("serve child environment should create")
-        .apply_to_command(&mut command);
+    let child_environment = match user_home {
+        Some(home) => common::isolated_child_environment_for_home(home),
+        None => common::isolated_child_environment(workspace),
+    }
+    .expect("serve child environment should create");
+    child_environment.apply_to_command(&mut command);
     let child = command
         .current_dir(workspace)
         .env("SIGIL_HTTP_TOKEN", token)
@@ -3436,6 +3449,9 @@ async fn desktop_review_serve_contract_sends_outdated_exact_diff_without_restori
 
 #[path = "serve_process/plugin_tests.rs"]
 mod plugin_contract_tests;
+
+#[path = "serve_process/workspace_authority_tests.rs"]
+mod workspace_authority_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_review_serve_contract_applies_approved_edit_and_passes_independent_check()

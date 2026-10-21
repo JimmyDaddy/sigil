@@ -54,6 +54,8 @@ pub struct RuntimeAuthorityCompositionV1 {
     pub plugin_hook_execution: Option<std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>>,
     /// Managed one-shot command route used by the built-in Bash surface.
     pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
+    /// Display-only navigation to legacy shared sources retained in the original realm.
+    pub legacy_shared_history: Option<crate::session_lifecycle::LegacySharedSessionHistory>,
     authority_generation: AuthorityGeneration,
     borrowed_workspace_registry: std::sync::Arc<
         std::sync::Mutex<sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1>,
@@ -841,6 +843,7 @@ fn compose_runtime_authority_inner(
         extension_execution,
         plugin_hook_execution,
         command_execution,
+        legacy_shared_history: None,
         authority_generation: authority,
         borrowed_workspace_registry: registry,
     })
@@ -854,16 +857,19 @@ fn hash_path_binding(label: &str, state_anchor: &Path) -> CanonicalHash {
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
-fn ensure_authority_anchors(paths: &crate::paths::SigilPaths) -> Result<(), BootAuthorityErrorV1> {
-    for anchor in [&paths.state_root, &paths.scratch_root] {
+fn ensure_authority_anchors(
+    state_anchor: &Path,
+    execution_temp_anchor: &Path,
+) -> Result<(), BootAuthorityErrorV1> {
+    for anchor in [state_anchor, execution_temp_anchor] {
         std::fs::create_dir_all(anchor)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         sigil_kernel::secure_private_path_permissions(anchor)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     }
-    std::fs::create_dir_all(paths.state_root.join("cache"))
+    std::fs::create_dir_all(state_anchor.join("cache"))
         .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
-    sigil_kernel::secure_private_path_permissions(&paths.state_root.join("cache"))
+    sigil_kernel::secure_private_path_permissions(&state_anchor.join("cache"))
         .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     Ok(())
 }
@@ -1040,6 +1046,39 @@ pub enum BootAuthorityErrorV1 {
     Bootstrap(sigil_resource_authority::bootstrap::BootstrapErrorV1),
 }
 
+fn open_workspace_bootstrap(
+    snapshot: &ValidatedAuthorityConfigSnapshotV1,
+) -> Result<
+    (
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+        sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+        sigil_resource_authority::bootstrap::AuthorityBootstrapWorkspaceV1,
+    ),
+    BootAuthorityErrorV1,
+> {
+    use sigil_resource_authority::bootstrap::{
+        AuthorityBootstrapStoreV1, AuthorityBootstrapWorkspaceV1, BootstrapErrorV1,
+    };
+    let workspace = AuthorityBootstrapWorkspaceV1::observe(snapshot.workspace_root())
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    if workspace.identity() != snapshot.workspace_identity {
+        return Err(BootAuthorityErrorV1::Bootstrap(
+            BootstrapErrorV1::IdentityDrift,
+        ));
+    }
+    let (bootstrap, publication) =
+        AuthorityBootstrapStoreV1::for_canonical_config_workspace_with_publication(
+            snapshot.config_path(),
+            &workspace,
+        )
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    // An unbound historical realm was shared by every workspace using this config. Its first
+    // successful upgraded boot records a history access anchor, not a historical owner. The
+    // existing authenticated inventory, predecessor and configuration-generation checks below
+    // remain authoritative, including when a user legitimately replaces the config file.
+    Ok((bootstrap, publication, workspace))
+}
+
 /// Keeps startup blockers that need the durable recovery protocol distinct from malformed
 /// bootstrap bytes. No inventory error is downgraded into an auto-repairable fresh bootstrap.
 fn map_process_inventory_boot_error(
@@ -1098,11 +1137,7 @@ fn build_current_boot_transaction_inner(
     let config = config_snapshot.config().clone();
     let workspace_root = config_snapshot.workspace_root().to_path_buf();
     let resolved_paths = config_snapshot.resolved_paths().clone();
-    let (bootstrap, publication) =
-        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path_with_publication(
-            config_snapshot.config_path(),
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    let (bootstrap, publication, workspace) = open_workspace_bootstrap(&config_snapshot)?;
     let (cutover, composition) = compose_current_boot_authority_locked(
         &config_snapshot,
         &resolved_paths.state_root,
@@ -1123,6 +1158,9 @@ fn build_current_boot_transaction_inner(
         ensure_config_snapshot_is_current(&config_snapshot)?;
     }
     publish_current_boot_manifest(&bootstrap, &publication, &cutover)?;
+    bootstrap
+        .bind_workspace(&publication, &workspace)
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     drop(publication);
     Ok(RuntimeCurrentBootTransactionV1 {
         config,
@@ -1212,13 +1250,10 @@ pub fn boot_current_schema_with_expected_config(
 pub fn authority_bootstrap_manifest_path(
     config_path: &Path,
 ) -> Result<PathBuf, BootAuthorityErrorV1> {
-    let bootstrap =
-        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
-            config_path,
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
-    Ok(bootstrap
-        .path(sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer))
+    sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::cutover_manifest_path_for_config(
+        config_path,
+    )
+    .map_err(BootAuthorityErrorV1::Bootstrap)
 }
 
 /// Builds the current-schema authority composition for one valid boot surface. Publication of the
@@ -1242,19 +1277,19 @@ pub fn compose_current_boot_authority(
     ),
     BootAuthorityErrorV1,
 > {
-    let (bootstrap, publication) =
-        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path_with_publication(
-            config_snapshot.config_path(),
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
-    compose_current_boot_authority_locked(
+    let (bootstrap, publication, workspace) = open_workspace_bootstrap(config_snapshot)?;
+    let composed = compose_current_boot_authority_locked(
         config_snapshot,
         state_anchor,
         cache_root,
         execution_temp_root,
         &bootstrap,
         &publication,
-    )
+    )?;
+    bootstrap
+        .bind_workspace(&publication, &workspace)
+        .map_err(BootAuthorityErrorV1::Bootstrap)?;
+    Ok(composed)
 }
 
 /// Durable control, session, artifact and adapter records remain authority-backed in every
@@ -1317,7 +1352,16 @@ fn compose_current_boot_authority_locked(
         config_snapshot.config_hash(),
         predecessor.as_ref(),
     )?;
-    ensure_authority_anchors(paths)?;
+    // The original realm retains its historical managed paths. New workspace realms must also
+    // own independent storage/quota locks; sharing the global root would create a second
+    // controller even after the process-inventory namespaces had been separated.
+    let workspace_state_anchor = paths.workspace_state_root.join("authority-v1");
+    let state_anchor = if bootstrap.root() == bootstrap.namespace() {
+        state_anchor
+    } else {
+        workspace_state_anchor.as_path()
+    };
+    ensure_authority_anchors(state_anchor, execution_temp_root)?;
     let observer_binding = sigil_process_observer::canonical_digest(
         format!(
             "sigil-runtime-process-observer-v2\0{}\0{}\0{}",
@@ -1413,7 +1457,7 @@ fn compose_current_boot_authority_locked(
     let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
         crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
     ));
-    let composition = match compose_runtime_authority_with_product_updater_at_generation(
+    let mut composition = match compose_runtime_authority_with_product_updater_at_generation(
         state_anchor,
         cache_root,
         execution_temp_root,
@@ -1443,7 +1487,82 @@ fn compose_current_boot_authority_locked(
             error.clone(),
         ))
     })?;
+    composition.legacy_shared_history =
+        legacy_shared_history_notice(bootstrap, publication, &paths.state_root)?;
     Ok((decision, composition))
+}
+
+fn legacy_shared_history_notice(
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+    state_root: &Path,
+) -> Result<Option<crate::session_lifecycle::LegacySharedSessionHistory>, BootAuthorityErrorV1> {
+    use crate::session_lifecycle::LegacySharedSessionHistory;
+    let Some(workspace) = bootstrap
+        .legacy_shared_history_workspace(publication)
+        .map_err(BootAuthorityErrorV1::Bootstrap)?
+    else {
+        return Ok(None);
+    };
+    let Some(source_state) = observe_legacy_shared_sources(&state_root.join("managed/session-log"))
+    else {
+        return Ok(None);
+    };
+    let label = workspace.canonical_root().file_name().map_or_else(
+        || "workspace".to_owned(),
+        |name| {
+            sigil_kernel::safe_persistence_text(&name.to_string_lossy())
+                .chars()
+                .take(80)
+                .collect()
+        },
+    );
+    Ok(Some(LegacySharedSessionHistory {
+        workspace_id: crate::workspace_id_for_root(workspace.canonical_root()),
+        workspace_label: label,
+        source_state,
+    }))
+}
+
+fn observe_legacy_shared_sources(
+    root: &Path,
+) -> Option<crate::session_lifecycle::LegacySharedSessionHistorySourceState> {
+    use crate::session_lifecycle::LegacySharedSessionHistorySourceState as State;
+    match std::fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return Some(State::Unverified),
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Some(State::Unverified),
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= 1_024 {
+            return Some(State::Unverified);
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return Some(State::Unverified),
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() && !kind.is_symlink() => {}
+            _ => return Some(State::Unverified),
+        }
+        match std::fs::symlink_metadata(entry.path().join("records.jsonl")) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() > 0 =>
+            {
+                return Some(State::Present);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {}
+            _ => return Some(State::Unverified),
+        }
+    }
+    None
 }
 
 fn publish_current_boot_manifest(

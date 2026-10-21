@@ -639,6 +639,16 @@ pub(crate) struct DesktopCatalogPage {
     entries: Vec<DesktopCatalogEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_shared_history: Option<DesktopLegacySharedHistorySummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopLegacySharedHistorySummary {
+    workspace_id: String,
+    workspace_label: String,
+    source_state: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -2417,6 +2427,20 @@ impl From<DesktopSessionCatalogPage> for DesktopCatalogPage {
             truncated_source_count: value.truncated_source_count,
             entries: value.entries.into_iter().map(Into::into).collect(),
             next_cursor: value.next_cursor,
+            legacy_shared_history: value.legacy_shared_history.map(|history| {
+                DesktopLegacySharedHistorySummary {
+                    workspace_id: history.workspace_id,
+                    workspace_label: history.workspace_label,
+                    source_state: match history.source_state {
+                        sigil_desktop::DesktopLegacySharedSessionHistorySourceState::Present => {
+                            "present"
+                        }
+                        sigil_desktop::DesktopLegacySharedSessionHistorySourceState::Unverified => {
+                            "unverified"
+                        }
+                    },
+                }
+            }),
         }
     }
 }

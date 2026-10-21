@@ -5428,6 +5428,31 @@
         ],
         "type": "object"
       },
+      "LegacySharedSessionHistory": {
+        "description": "Navigation-only information about unchanged shared sources in the original workspace; it does not grant access or validate those sessions.",
+        "properties": {
+          "source_state": {
+            "enum": [
+              "present",
+              "unverified"
+            ],
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "workspace_label": {
+            "maxLength": 80,
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "workspace_label",
+          "source_state"
+        ],
+        "type": "object"
+      },
       "LiveRunUpdate": {
         "properties": {
           "attempt_id": {
@@ -8950,6 +8975,16 @@
             "format": "uint64",
             "type": "integer"
           },
+          "legacy_shared_history": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LegacySharedSessionHistory"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "next_cursor": {
             "type": [
               "string",
@@ -9295,6 +9330,7 @@
               "model_route_not_configured",
               "connection_config_invalid",
               "provider_unavailable",
+              "authority_unavailable",
               "session_already_active",
               "session_writer_busy",
               "session_stream_invalid"

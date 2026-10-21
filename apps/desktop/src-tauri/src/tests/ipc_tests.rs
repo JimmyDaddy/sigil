@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn legacy_catalog_navigation_is_allowlisted_and_preserves_unknown_source_state() {
+    for state in ["present", "unverified"] {
+        let native: DesktopSessionCatalogPage = serde_json::from_value(serde_json::json!({
+            "workspace_id": "new-workspace", "generation": 1, "reconciled_at_unix_ms": 2,
+            "degraded_source_count": 0, "identity_conflict_count": 0, "truncated_source_count": 0,
+            "entries": [], "legacy_shared_history": {
+                "workspace_id": "original-workspace", "workspace_label": "原工作区",
+                "source_state": state, "workspace_path": "/must-not-reach-renderer"
+            }
+        }))
+        .expect("typed catalog");
+        let safe = serde_json::to_value(DesktopCatalogPage::from(native)).expect("safe projection");
+        assert_eq!(
+            safe["legacySharedHistory"]["workspaceId"],
+            "original-workspace"
+        );
+        assert_eq!(safe["legacySharedHistory"]["workspaceLabel"], "原工作区");
+        assert_eq!(safe["legacySharedHistory"]["sourceState"], state);
+        assert!(!safe.to_string().contains("must-not-reach-renderer"));
+    }
+}
+
+#[test]
+fn legacy_catalog_navigation_is_optional_for_existing_servers() {
+    let native: DesktopSessionCatalogPage = serde_json::from_value(serde_json::json!({
+        "workspace_id": "workspace", "generation": 1, "reconciled_at_unix_ms": 2,
+        "degraded_source_count": 0, "identity_conflict_count": 0, "truncated_source_count": 0,
+        "entries": []
+    }))
+    .expect("existing catalog");
+    let safe = serde_json::to_value(DesktopCatalogPage::from(native)).expect("safe projection");
+    assert!(safe.get("legacySharedHistory").is_none());
+}
+
+#[test]
 fn approval_receipt_projection_preserves_route_identity_and_revision() {
     let native = serde_json::from_value::<NativeApprovalCommandReceipt>(serde_json::json!({
         "command_id": "approval-command-1",
@@ -96,6 +131,7 @@ fn workspace_selection_keeps_recent_index_degradation_separate_from_open_success
         workspace: Some(DesktopWorkspaceSummary {
             id: "workspace-1".to_owned(),
             display_name: "Workspace".to_owned(),
+            location_label: Some("Parent · Ancestor".to_owned()),
             server_version: "0.0.1".to_owned(),
             state: sigil_desktop::DesktopConnectionState::Ready,
         }),
@@ -103,6 +139,7 @@ fn workspace_selection_keeps_recent_index_degradation_separate_from_open_success
     };
     let projected = serde_json::to_value(selection).expect("workspace selection serializes");
     assert_eq!(projected["cancelled"], false);
+    assert_eq!(projected["workspace"]["locationLabel"], "Parent · Ancestor");
     assert_eq!(projected["workspace"]["id"], "workspace-1");
     assert_eq!(projected["recentPersistenceDegraded"], true);
 }

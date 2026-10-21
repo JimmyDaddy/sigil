@@ -59,6 +59,8 @@ pub struct SessionCatalogProjectionPage {
     pub entries: Vec<SessionCatalogProjectionEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_shared_history: Option<super::super::LegacySharedSessionHistory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -244,6 +246,7 @@ impl SessionCatalogProjectionService {
             truncated_source_count: metadata.truncated_source_count,
             entries,
             next_cursor,
+            legacy_shared_history: self.lifecycle.legacy_shared_history.clone(),
         })
     }
 }

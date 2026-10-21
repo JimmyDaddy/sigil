@@ -94,16 +94,17 @@ pub use dto::{
     DesktopIntentOperationFileSummary, DesktopIntentOperationKind, DesktopIntentOperationPreview,
     DesktopIntentOperationResolution, DesktopIntentSource, DesktopIntentStack,
     DesktopIntentStackState, DesktopIntentVerificationImpact,
-    DesktopIntentVerificationImpactSummary, DesktopIntentVersionRef, DesktopMcpImportApplyRequest,
-    DesktopMcpImportApplyResult, DesktopMcpImportCandidate, DesktopMcpImportPreview,
-    DesktopModelSelectionPolicy, DesktopPendingApproval, DesktopPendingApprovalDisplay,
-    DesktopPendingApprovalSubject, DesktopPermissionMode, DesktopPlanAction, DesktopPlanAgentRole,
-    DesktopPlanCheckCommand, DesktopPlanCheckEffect, DesktopPlanDecisionAction,
-    DesktopPlanDecisionCommandReceipt, DesktopPlanDecisionRequest, DesktopPlanIsolationMode,
-    DesktopPlanLineage, DesktopPlanReview, DesktopPlanReviewCandidate, DesktopPlanReviewDetail,
-    DesktopPlanReviewSource, DesktopPlanReviewStatus, DesktopPlanReviewStepDetail,
-    DesktopPlanRevisionStatus, DesktopPlanRevisionSummary, DesktopPlanSourceRef,
-    DesktopPlanSourceTurn, DesktopPlanStepMode, DesktopPlanSuggestedCheck,
+    DesktopIntentVerificationImpactSummary, DesktopIntentVersionRef,
+    DesktopLegacySharedSessionHistory, DesktopLegacySharedSessionHistorySourceState,
+    DesktopMcpImportApplyRequest, DesktopMcpImportApplyResult, DesktopMcpImportCandidate,
+    DesktopMcpImportPreview, DesktopModelSelectionPolicy, DesktopPendingApproval,
+    DesktopPendingApprovalDisplay, DesktopPendingApprovalSubject, DesktopPermissionMode,
+    DesktopPlanAction, DesktopPlanAgentRole, DesktopPlanCheckCommand, DesktopPlanCheckEffect,
+    DesktopPlanDecisionAction, DesktopPlanDecisionCommandReceipt, DesktopPlanDecisionRequest,
+    DesktopPlanIsolationMode, DesktopPlanLineage, DesktopPlanReview, DesktopPlanReviewCandidate,
+    DesktopPlanReviewDetail, DesktopPlanReviewSource, DesktopPlanReviewStatus,
+    DesktopPlanReviewStepDetail, DesktopPlanRevisionStatus, DesktopPlanRevisionSummary,
+    DesktopPlanSourceRef, DesktopPlanSourceTurn, DesktopPlanStepMode, DesktopPlanSuggestedCheck,
     DesktopProviderConfigMode, DesktopProviderConnectionEntry, DesktopProviderConnectionInventory,
     DesktopProviderConnectionIssue, DesktopProviderConnectionReadiness,
     DesktopProviderCredentialSource, DesktopProviderDefaultModelSaveRequest,
@@ -174,7 +175,7 @@ pub use launcher::{
 };
 pub use manager::{
     DesktopConnectionState, DesktopWorkspaceManager, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary, workspace_location_label,
 };
 pub use protocol::{DesktopServerAuthentication, DesktopServerCapabilities, DesktopServerInfo};
 pub use sigil_application::message_content::{

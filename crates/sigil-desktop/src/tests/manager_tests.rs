@@ -296,3 +296,47 @@ mod lifecycle {
         assert!(manager.lock_state().opening_roots.is_empty());
     }
 }
+
+#[test]
+fn workspace_location_label_projects_only_bounded_ancestor_names() {
+    let first = workspace_location_label(Path::new("/private/source-a/shared/desktop-workspace"));
+    let second = workspace_location_label(Path::new("/private/source-b/shared/desktop-workspace"));
+    assert_eq!(first.as_deref(), Some("shared · source-a"));
+    assert_eq!(second.as_deref(), Some("shared · source-b"));
+    assert_ne!(first, second);
+    let value = serde_json::to_string(&first).expect("location label serializes");
+    assert!(!value.contains("private"));
+    assert!(!value.contains('/'));
+    assert!(!value.contains("desktop-workspace"));
+}
+
+#[test]
+fn workspace_location_label_has_no_fabricated_root_or_unsafe_label() {
+    assert_eq!(workspace_location_label(Path::new("/")), None);
+    assert_eq!(
+        workspace_location_label(Path::new("/desktop-workspace")),
+        None
+    );
+    assert_eq!(
+        workspace_location_label(Path::new("/safe/bad\nname/workspace")),
+        None
+    );
+    assert_eq!(
+        workspace_location_label(Path::new("/bad\tancestor/parent/workspace")),
+        None
+    );
+    assert_eq!(
+        workspace_location_label(Path::new(&format!("/safe/{}/workspace", "中".repeat(25)))),
+        None
+    );
+}
+
+#[test]
+fn workspace_summary_reads_old_json_without_location_label() {
+    let summary: DesktopWorkspaceSummary = serde_json::from_value(serde_json::json!({
+        "id": "workspace-old", "displayName": "workspace", "serverVersion": "0.0.1", "state": "ready"
+    })).expect("old renderer summary remains readable");
+    assert_eq!(summary.location_label, None);
+    let projected = serde_json::to_value(summary).expect("summary serializes");
+    assert!(projected.get("locationLabel").is_none());
+}

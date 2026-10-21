@@ -3458,7 +3458,20 @@ pub fn http_openapi_document() -> Value {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/SessionCatalogEntry" }
                         },
-                        "next_cursor": { "type": ["string", "null"] }
+                        "next_cursor": { "type": ["string", "null"] },
+                        "legacy_shared_history": {
+                            "oneOf": [{ "$ref": "#/components/schemas/LegacySharedSessionHistory" }, { "type": "null" }]
+                        }
+                    }
+                },
+                "LegacySharedSessionHistory": {
+                    "type": "object",
+                    "description": "Navigation-only information about unchanged shared sources in the original workspace; it does not grant access or validate those sessions.",
+                    "required": ["workspace_id", "workspace_label", "source_state"],
+                    "properties": {
+                        "workspace_id": { "type": "string" },
+                        "workspace_label": { "type": "string", "maxLength": 80 },
+                        "source_state": { "type": "string", "enum": ["present", "unverified"] }
                     }
                 },
                 "SessionCatalogEntry": {
@@ -3726,7 +3739,7 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "code": {
                             "type": "string",
-                            "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                            "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "authority_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
                         },
                         "allowed_actions": {
                             "type": "array",

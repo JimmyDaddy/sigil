@@ -1677,6 +1677,7 @@ impl HttpProductionRunDriver {
         {
             let lifecycle_namespace_key = lifecycle.workspace_id().to_owned();
             let lifecycle = lifecycle
+                .with_legacy_shared_history(composition.legacy_shared_history.clone())
                 .with_managed_writer(
                     Arc::clone(&composition.storage_writer),
                     lifecycle_namespace_key,

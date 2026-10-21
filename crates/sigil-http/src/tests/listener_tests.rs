@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn legacy_catalog_navigation_survives_http_projection_and_contract() {
+    let page = SessionCatalogProjectionPage {
+        workspace_id: "new-workspace".to_owned(),
+        generation: 1,
+        reconciled_at_unix_ms: 2,
+        degraded_source_count: 0,
+        identity_conflict_count: 0,
+        truncated_source_count: 0,
+        entries: Vec::new(),
+        next_cursor: None,
+        legacy_shared_history: Some(sigil_runtime::LegacySharedSessionHistory {
+            workspace_id: "original-workspace".to_owned(),
+            workspace_label: "原工作区".to_owned(),
+            source_state: sigil_runtime::LegacySharedSessionHistorySourceState::Unverified,
+        }),
+    };
+    let value = serde_json::to_value(HttpSessionCatalogPage::from(page)).expect("HTTP page");
+    assert_eq!(
+        value["legacy_shared_history"]["workspace_id"],
+        "original-workspace"
+    );
+    assert_eq!(value["legacy_shared_history"]["source_state"], "unverified");
+    let contract = crate::http_openapi_document();
+    assert!(
+        contract["components"]["schemas"]["SessionCatalogPage"]["properties"]
+            .get("legacy_shared_history")
+            .is_some()
+    );
+}
+
+#[test]
 fn run_recovery_conflict_is_a_typed_409_envelope() {
     let response = registry_error_response(HttpRegistryError::SessionRunRecoveryRequired {
         recovery: crate::HttpSessionRouteRecoveryView {

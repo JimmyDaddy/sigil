@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -62,6 +62,8 @@ pub enum DesktopConnectionState {
 pub struct DesktopWorkspaceSummary {
     pub id: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location_label: Option<String>,
     pub server_version: String,
     pub state: DesktopConnectionState,
 }
@@ -525,9 +527,31 @@ fn summary(id: &str, workspace: &ManagedWorkspace) -> DesktopWorkspaceSummary {
     DesktopWorkspaceSummary {
         id: id.to_owned(),
         display_name: workspace.display_name.clone(),
+        location_label: workspace_location_label(&workspace.canonical_root),
         server_version: workspace.process.server_info().server_version.clone(),
         state: workspace.state,
     }
+}
+
+/// Projects at most two ancestor basenames for native workspace disambiguation.
+///
+/// This pure display helper never resolves a path or returns an executable path.
+/// Roots, non-Unicode, control-bearing or oversized components have no label.
+#[must_use]
+pub fn workspace_location_label(canonical_root: &Path) -> Option<String> {
+    let parent = canonical_root.parent()?;
+    let mut labels = Vec::new();
+    for ancestor in std::iter::once(parent).chain(parent.parent()) {
+        let Some(name) = ancestor.file_name() else {
+            continue;
+        };
+        let name = name.to_str()?;
+        if name.trim().is_empty() || name.len() > 72 || name.chars().any(char::is_control) {
+            return None;
+        }
+        labels.push(name);
+    }
+    (!labels.is_empty()).then(|| labels.join(" · "))
 }
 
 fn validate_display_name(value: &str) -> Result<(), DesktopWorkspaceManagerError> {
