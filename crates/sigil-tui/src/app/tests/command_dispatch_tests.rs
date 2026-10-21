@@ -99,7 +99,10 @@ fn f5_pauses_only_the_exact_running_direct_task() -> Result<()> {
         })),
         SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission)),
     ]);
-    app.runtime.is_busy = true;
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: task_id.as_str().to_owned(),
+        objective: "pause safely".to_owned(),
+    })?;
 
     let footer = crate::view_model::UiViewModel::from_app(&app).footer;
     assert!(footer.hints.contains("F5 pause"));
@@ -264,5 +267,49 @@ fn f5_and_alt_p_do_not_pause_an_ordinary_running_conversation() -> Result<()> {
             .hints
             .contains("F5 pause")
     );
+    Ok(())
+}
+
+#[test]
+fn task_pause_projection_does_not_use_a_different_tasks_durable_admission() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    let old_task = sigil_kernel::TaskId::new("old_task")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: old_task.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "old objective".to_owned(),
+            title: None,
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(old_task, "old objective", 1),
+        )),
+    ]);
+    for active in [None, Some("new_task")] {
+        app.clear_worker_run_state();
+        if let Some(task_id) = active {
+            app.handle_worker_message(WorkerMessage::TaskRunStarted {
+                task_id: task_id.to_owned(),
+                objective: "new objective".to_owned(),
+            })?;
+        } else {
+            app.runtime.is_busy = true;
+        }
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE))?
+                .is_none()
+        );
+        assert!(
+            !crate::view_model::UiViewModel::from_app(&app)
+                .footer
+                .hints
+                .contains("F5 pause")
+        );
+    }
     Ok(())
 }

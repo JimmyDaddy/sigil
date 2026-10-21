@@ -1006,6 +1006,9 @@ fn footer_hints(app: &AppState) -> String {
             return format!("{state} · Esc input");
         }
         if !app.approval_review_open() {
+            if app.active_task_pause_request().is_ok() {
+                return "F5 pause · Shift-Tab review · Ctrl-C cancel · Enter queue".to_owned();
+            }
             return "Approval pending · Shift-Tab review · Enter queue · Ctrl-C cancel".to_owned();
         }
         return "Esc input · Y allow once · N deny · Tab switch · Enter select · M details"
@@ -1035,14 +1038,7 @@ fn footer_hints(app: &AppState) -> String {
         );
     }
     if app.runtime.is_busy {
-        let tasks =
-            sigil_kernel::TaskStateProjection::from_entries(&app.session_browser.current_entries);
-        let pause = if tasks.current_task().is_some_and(|task| {
-            matches!(
-                task.status,
-                sigil_kernel::TaskRunStatus::Started | sigil_kernel::TaskRunStatus::Running
-            ) && task.direct_execution_admission.is_some()
-        }) {
+        let pause = if app.active_task_pause_request().is_ok() {
             "F5 pause · "
         } else {
             ""

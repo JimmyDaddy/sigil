@@ -537,6 +537,21 @@ impl AppState {
                     ),
                 );
             }
+            WorkerMessage::TaskStateSynchronized {
+                session_id,
+                run_id,
+                task_id,
+                public_sequence,
+                entries,
+            } => {
+                if session_id == self.session_id
+                    && self.runtime.is_busy
+                    && self.runtime.active_task.as_ref().is_some_and(|active| active.task_id == task_id)
+                    && self.accept_task_state_frontier(&session_id, &run_id, public_sequence)
+                {
+                    self.sync_current_session_state_from_delivered_entries(entries);
+                }
+            }
             WorkerMessage::TaskProviderRouteDiagnosticsUpdated { snapshot } => {
                 self.runtime.task_provider_route_diagnostics = snapshot;
             }

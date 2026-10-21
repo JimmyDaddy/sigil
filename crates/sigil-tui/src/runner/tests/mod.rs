@@ -14,6 +14,7 @@ mod plan_handoff_e2e_tests;
 mod session_lifecycle_runtime_tests;
 mod session_tests;
 mod spawn_tests;
+mod task_pause_projection_tests;
 mod user_input_recovery_tests;
 mod verification_e2e_tests;
 mod worker_loop_state_tests;

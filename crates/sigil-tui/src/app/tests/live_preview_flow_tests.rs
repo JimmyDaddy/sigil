@@ -99,3 +99,127 @@ fn discarded_and_terminal_live_output_cannot_return_after_a_later_frontier() {
     assert!(app.live_preview.pending.is_empty());
     assert!(app.live_preview.run_id.is_empty());
 }
+
+fn task_snapshot_fixture() -> anyhow::Result<(
+    tempfile::TempDir,
+    AppState,
+    Vec<sigil_kernel::SessionLogEntry>,
+)> {
+    let root = tempfile::tempdir()?;
+    let mut config = crate::app::tests::common::test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskRunStarted {
+        task_id: "snapshot_task".to_owned(),
+        objective: "preserve the durable Task".to_owned(),
+    })?;
+    app.live_preview.session_id = app.session_id.clone();
+    app.live_preview.run_id = "current-run".to_owned();
+    app.live_preview.durable_sequence = 1;
+    let task_id = sigil_kernel::TaskId::new("snapshot_task")?;
+    let entries = vec![
+        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "preserve the durable Task".to_owned(),
+                title: None,
+                status: sigil_kernel::TaskRunStatus::Started,
+                reason: None,
+            },
+        )),
+        sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::TaskDirectExecutionAdmittedV1(
+                sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+                    task_id.clone(),
+                    "preserve the durable Task",
+                    1,
+                ),
+            ),
+        ),
+        sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::TaskRunCancellationScopeBound(
+                sigil_kernel::TaskRunCancellationScopeBoundEntry {
+                    task_id,
+                    run_scope_id: "current-scope".to_owned(),
+                },
+            ),
+        ),
+    ];
+    Ok((root, app, entries))
+}
+
+#[test]
+fn task_pause_projection_rejects_foreign_session_run_task_and_older_frontier() -> anyhow::Result<()>
+{
+    for invalid in ["session", "run", "task", "frontier"] {
+        let (_root, mut app, entries) = task_snapshot_fixture()?;
+        let before = serde_json::to_value(&app.session_browser.current_entries)?;
+        let message = crate::runner::WorkerMessage::TaskStateSynchronized {
+            session_id: if invalid == "session" {
+                "old-session".to_owned()
+            } else {
+                app.session_id.clone()
+            },
+            run_id: if invalid == "run" {
+                "old-run".to_owned()
+            } else {
+                "current-run".to_owned()
+            },
+            task_id: if invalid == "task" {
+                "old_task".to_owned()
+            } else {
+                "snapshot_task".to_owned()
+            },
+            public_sequence: if invalid == "frontier" { 0 } else { 1 },
+            entries,
+        };
+        app.handle_worker_message(message)?;
+        assert_eq!(
+            serde_json::to_value(&app.session_browser.current_entries)?,
+            before,
+            "reject {invalid}"
+        );
+        assert!(app.active_task_pause_request().is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn task_pause_projection_is_applied_once_without_overwriting_later_live_entries()
+-> anyhow::Result<()> {
+    let (_root, mut app, entries) = task_snapshot_fixture()?;
+    let snapshot = |app: &AppState| crate::runner::WorkerMessage::TaskStateSynchronized {
+        session_id: app.session_id.clone(),
+        run_id: "current-run".to_owned(),
+        task_id: "snapshot_task".to_owned(),
+        public_sequence: 1,
+        entries: entries.clone(),
+    };
+    app.handle_worker_message(snapshot(&app))?;
+    assert!(app.active_task_pause_request().is_ok());
+    app.handle(RunEvent::Control(sigil_kernel::ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: sigil_kernel::TaskId::new("snapshot_task")?,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "preserve the durable Task".to_owned(),
+            title: None,
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        },
+    )))?;
+    let after_live = serde_json::to_value(&app.session_browser.current_entries)?;
+    // A duplicate is already unsafe before the separate frontier wakeup arrives.
+    app.handle_worker_message(snapshot(&app))?;
+    assert_eq!(
+        serde_json::to_value(&app.session_browser.current_entries)?,
+        after_live
+    );
+    app.accept_live_durable_frontier(&app.session_id.clone(), "current-run", 2);
+    app.handle_worker_message(snapshot(&app))?;
+    assert_eq!(
+        serde_json::to_value(&app.session_browser.current_entries)?,
+        after_live
+    );
+    Ok(())
+}

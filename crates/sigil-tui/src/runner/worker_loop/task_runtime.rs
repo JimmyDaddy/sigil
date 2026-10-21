@@ -460,6 +460,7 @@ where
             cancellation_handle,
             tool_artifact_read_budget,
         } = request;
+        handler.synchronize_task_state(session, &task_id)?;
         sigil_runtime::agent_supervisor::task_execution::run_admitted_task_execution(
             session,
             sigil_runtime::agent_supervisor::task_execution::AdmittedTaskExecution {
@@ -543,7 +544,9 @@ where
         cancellation_handle,
         tool_artifact_read_budget,
     } = request;
-    let result = bind_task_run_cancellation_scope(session, &task_id, &cancellation_handle);
+    let result = bind_task_run_cancellation_scope(session, &task_id, &cancellation_handle)
+        .map_err(anyhow::Error::msg)
+        .and_then(|()| handler.synchronize_task_state(session, &task_id));
     let continuation_entry_frontier = session.entries().len();
     let result = match result {
         Ok(()) => match managed_verification_execution {
@@ -552,7 +555,12 @@ where
                     session,
                     sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
                         requested_task_id: Some(task_id.clone()),
-                        guidance: Some(guidance.expose_secret().to_owned()),
+                        guidance: match guidance_receipt.control {
+                            sigil_kernel::TaskContinuationControlKind::ResumeTask => None,
+                            sigil_kernel::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance => {
+                                Some(guidance.expose_secret().to_owned())
+                            }
+                        },
                         guidance_promotion: None,
                         continuation_guidance_receipt: Some(guidance_receipt),
                         explicit_guidance_run_id: None,
@@ -574,7 +582,7 @@ where
                 "task continuation requires the managed verification route"
             )),
         },
-        Err(error) => Err(anyhow::Error::msg(error)),
+        Err(error) => Err(error),
     };
     finalize_task_continuation_root(
         session,
@@ -648,6 +656,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         tool_artifact_read_budget,
     } = request;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+    handler.synchronize_task_state(session, &task_id)?;
     sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
         session,
         sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {

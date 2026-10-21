@@ -3,27 +3,30 @@ use crate::commands::UiCommand;
 use sigil_kernel::{CodeIntelStartup, TerminalTaskProjection};
 
 impl AppState {
-    pub(super) fn request_active_task_pause(&mut self) -> Option<AppAction> {
+    pub(crate) fn active_task_pause_request(
+        &self,
+    ) -> Result<sigil_kernel::TaskPauseRequest, String> {
         if !self.runtime.is_busy {
-            self.last_notice = Some("no active task to pause".to_owned());
-            return None;
+            return Err("no active task to pause".to_owned());
         }
+        let active = self
+            .runtime
+            .active_task
+            .as_ref()
+            .ok_or_else(|| "the active run is not a durable task".to_owned())?;
         let projection =
             sigil_kernel::TaskStateProjection::from_entries(&self.session_browser.current_entries);
-        let Some(task) = projection.current_task() else {
-            self.last_notice = Some("the active run is not a durable task".to_owned());
-            return None;
-        };
+        let task = projection.current_task().filter(|task| task.task_id.as_str() == active.task_id)
+            .ok_or_else(|| "the active task's durable execution binding is not available yet; use Ctrl-C to cancel".to_owned())?;
         if !matches!(
             task.status,
             sigil_kernel::TaskRunStatus::Started | sigil_kernel::TaskRunStatus::Running
         ) {
-            self.last_notice = Some(format!(
+            return Err(format!(
                 "task {} is already {}",
                 task.task_id.as_str(),
                 task.status.as_str()
             ));
-            return None;
         }
         let request = if let Some(admission) = task.direct_execution_admission.as_ref() {
             sigil_kernel::TaskPauseRequest::direct(
@@ -31,19 +34,30 @@ impl AppState {
                 admission.admission_id.clone(),
             )
         } else if task.latest_plan_version.is_some() {
-            self.last_notice = Some(
+            return Err(
                 "task has no direct execution authority; start a direct Task instead".to_owned(),
             );
-            return None;
         } else {
-            self.last_notice =
-                Some("task execution has not been admitted yet; use Ctrl-C to cancel".to_owned());
-            return None;
+            return Err(
+                "task execution has not been admitted yet; use Ctrl-C to cancel".to_owned(),
+            );
         };
-        self.last_notice = Some(format!("pausing task {}", task.task_id.as_str()));
+        Ok(request)
+    }
+
+    pub(super) fn request_active_task_pause(&mut self) -> Option<AppAction> {
+        let request = match self.active_task_pause_request() {
+            Ok(request) => request,
+            Err(notice) => {
+                self.last_notice = Some(notice);
+                return None;
+            }
+        };
+        let task_id = request.task_id.as_str();
+        self.last_notice = Some(format!("pausing task {task_id}"));
         self.push_timeline(
             super::TimelineRole::Notice,
-            format!("Pause requested for task {}.", task.task_id.as_str()),
+            format!("Pause requested for task {task_id}."),
         );
         Some(AppAction::PauseTask { request })
     }

@@ -16,6 +16,7 @@ pub(super) struct LivePreviewState {
     retired_arguments: BTreeSet<String>,
     slots: BTreeMap<String, usize>,
     durable_sequence: u64,
+    task_state_sequence: Option<u64>,
     pending: BTreeMap<String, LiveRunUpdate>,
     execution_pending: BTreeMap<String, LiveRunUpdate>,
     execution_revisions: BTreeMap<String, u64>,
@@ -23,6 +24,23 @@ pub(super) struct LivePreviewState {
 }
 
 impl AppState {
+    pub(super) fn accept_task_state_frontier(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> bool {
+        if session_id != self.live_preview.session_id
+            || run_id != self.live_preview.run_id
+            || sequence < self.live_preview.durable_sequence
+            || self.live_preview.task_state_sequence.is_some()
+        {
+            return false;
+        }
+        self.live_preview.task_state_sequence = Some(sequence);
+        true
+    }
+
     pub(super) fn attach_live_preview(&mut self, source: sigil_runtime::RuntimeLivePreviewSource) {
         if source.session_id() != self.session_id || source.is_terminal() {
             return;

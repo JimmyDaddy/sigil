@@ -1299,6 +1299,13 @@ pub enum WorkerMessage {
         task_id: String,
         objective: String,
     },
+    TaskStateSynchronized {
+        session_id: String,
+        run_id: String,
+        task_id: String,
+        public_sequence: u64,
+        entries: Vec<SessionLogEntry>,
+    },
     TaskProviderRouteDiagnosticsUpdated {
         snapshot: TaskProviderRouteDiagnosticsSnapshot,
     },

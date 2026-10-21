@@ -98,6 +98,39 @@ impl ChannelEventHandler {
         Ok(())
     }
 
+    pub(in crate::runner) fn synchronize_task_state(
+        &self,
+        session: &Session,
+        task_id: &sigil_kernel::TaskId,
+    ) -> Result<()> {
+        let (session_id, run_id, _) = self
+            .public_run_identity
+            .as_ref()
+            .ok_or_else(|| anyhow!("task state synchronization requires a public run"))?;
+        anyhow::ensure!(
+            session_id == session.session_scope_id(),
+            "task state synchronization belongs to another session"
+        );
+        let public_sequence = self
+            .recorder
+            .as_ref()
+            .ok_or_else(|| anyhow!("task state synchronization requires its run recorder"))?
+            .lock()
+            .map_err(|_| anyhow!("application event recorder is unavailable"))?
+            .public_sequence()?;
+        // Admission and cancellation bindings were already appended by the Task owner. This is
+        // a host-private snapshot; replaying them through `handle` would append them a second time.
+        self.sender
+            .send(WorkerMessage::TaskStateSynchronized {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                task_id: task_id.as_str().to_owned(),
+                public_sequence,
+                entries: session.entries().to_vec(),
+            })
+            .map_err(|error| anyhow!("failed to synchronize durable task state: {error}"))
+    }
+
     pub(super) fn finish_public_run(
         &mut self,
         result: &Result<sigil_kernel::AgentRunOutput>,
