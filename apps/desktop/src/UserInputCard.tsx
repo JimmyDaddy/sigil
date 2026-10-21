@@ -14,6 +14,10 @@ type SingleSelectDraft =
   | { kind: "other"; value: string };
 type MultiSelectDraft = { optionIds: string[]; other: string };
 type DraftValue = string | SingleSelectDraft | MultiSelectDraft;
+interface AnswerValidationIssue {
+  kind: "required_answer" | "required_other";
+  question: string;
+}
 
 interface UserInputCardProps {
   request: UserInputRequest;
@@ -40,7 +44,7 @@ export function UserInputCard({
 }: UserInputCardProps) {
   const { t } = useLocale();
   const [drafts, setDrafts] = useState<Record<string, DraftValue>>({});
-  const [validation, setValidation] = useState<string>();
+  const [validation, setValidation] = useState<AnswerValidationIssue>();
 
   useEffect(() => {
     setDrafts(Object.fromEntries(request.questions.map((question) => [
@@ -63,7 +67,7 @@ export function UserInputCard({
     const answers: UserInputAnswer[] = [];
     for (const question of request.questions) {
       const answer = answerForQuestion(question, drafts[question.id]);
-      if (typeof answer === "string") {
+      if (answer !== undefined && "kind" in answer) {
         setValidation(answer);
         return;
       }
@@ -72,6 +76,8 @@ export function UserInputCard({
     onDecision({ kind: "submitted", answers });
   };
   const waitingForContinuation = request.status !== "requested";
+  const singleQuestionMatchesPrompt = request.questions.length === 1
+    && request.questions[0].question === request.prompt;
 
   return (
     <section className="user-input-card sg-bounded-content" aria-labelledby="user-input-title">
@@ -109,7 +115,7 @@ export function UserInputCard({
       ) : <div className="user-input-fields">
         {request.questions.map((question) => (
           <fieldset key={question.id} disabled={busy}>
-            <legend>{question.question}</legend>
+            <legend className={singleQuestionMatchesPrompt ? "sr-only" : undefined}>{question.question}</legend>
             {question.description === undefined ? null : <small>{question.description}</small>}
             <UserInputQuestionField
               question={question}
@@ -120,7 +126,13 @@ export function UserInputCard({
         ))}
       </div>}
 
-      {validation === undefined ? null : <div className="user-input-error" role="alert">{validation}</div>}
+      {validation === undefined ? null : (
+        <div className="user-input-error" role="alert">
+          {t(validation.kind === "required_answer" ? "userInputAnswerRequired" : "userInputOtherRequired", {
+            question: validation.question,
+          })}
+        </div>
+      )}
       {failure ? <div className="user-input-error" role="alert">{t("userInputDecisionFailed")}</div> : null}
 
       {waitingForContinuation ? (
@@ -159,6 +171,7 @@ function UserInputQuestionField({
   value: DraftValue | undefined;
   onChange: (value: DraftValue) => void;
 }) {
+  const { t } = useLocale();
   if (question.options.length === 0) {
     return (
       <TextArea
@@ -187,13 +200,13 @@ function UserInputQuestionField({
             }
           }}
         >
-          <option value="">Select…</option>
+          <option value="">{t("userInputSelectPlaceholder")}</option>
           {question.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          <option value="other">Other…</option>
+          <option value="other">{t("userInputOtherOption")}</option>
         </Select>
         {selected.kind === "other" ? (
           <TextField
-            label={`${question.question} Other`}
+            label={t("userInputOtherAnswerLabel", { question: question.question })}
             labelHidden
             type="text"
             value={selected.value}
@@ -221,7 +234,7 @@ function UserInputQuestionField({
         />
       ))}
       <TextField
-        label={`${question.question} Other`}
+        label={t("userInputOtherAnswerLabel", { question: question.question })}
         labelHidden
         type="text"
         value={selected.other}
@@ -234,8 +247,8 @@ function UserInputQuestionField({
 function answerForQuestion(
   question: UserInputQuestion,
   draft: DraftValue | undefined,
-): UserInputAnswer | string | undefined {
-  const missing = `${question.question} requires an answer.`;
+): UserInputAnswer | AnswerValidationIssue | undefined {
+  const missing: AnswerValidationIssue = { kind: "required_answer", question: question.question };
   if (question.options.length === 0) {
     const value = typeof draft === "string" ? draft : "";
     return value.length === 0
@@ -246,7 +259,7 @@ function answerForQuestion(
     const selected = isSingleSelectDraft(draft) ? draft : { kind: "option" as const, optionId: "" };
     if (selected.kind === "other") {
       return selected.value.length === 0
-        ? question.required ? `${question.question} requires an Other value.` : undefined
+        ? question.required ? { kind: "required_other", question: question.question } : undefined
         : { questionId: question.id, value: { kind: "single_select", other: selected.value } };
     }
     return selected.optionId.length === 0
