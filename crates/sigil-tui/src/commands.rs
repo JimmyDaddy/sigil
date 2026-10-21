@@ -524,6 +524,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Ctrl-A/E: Move to the start/end of the current composer line.".to_owned(),
         "Ctrl-B/F or Left/Right: Move the composer cursor by character.".to_owned(),
         "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),
+        "Shift-Left/Right/Up/Down or Shift-Home/End: Select composer text; typing or pasting replaces it.".to_owned(),
         "Backspace/Delete, Ctrl-H, Ctrl-W, Ctrl/Alt-Backspace, or Ctrl/Alt-Delete: Delete composer text.".to_owned(),
         "Ctrl-K/Y: Kill to composer line end and yank the killed text.".to_owned(),
         "Ctrl-Z: Restore the last draft cleared with Esc.".to_owned(),

@@ -232,3 +232,18 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(metadata_slash_commands().any(|command| command == "/plan"));
     assert!(metadata_slash_commands().any(|command| command == "/task"));
 }
+
+#[test]
+fn composer_selection_help_describes_replacement_and_preserves_readline_controls() {
+    let help = keyboard_help_lines(true);
+    assert!(help.iter().any(|line| line == "Shift-Left/Right/Up/Down or Shift-Home/End: Select composer text; typing or pasting replaces it."));
+    assert!(
+        help.iter()
+            .any(|line| line == "Ctrl-A/E: Move to the start/end of the current composer line.")
+    );
+    assert!(
+        common_keyboard_help_lines()
+            .iter()
+            .all(|line| !line.starts_with("Shift-Left/Right/Up/Down"))
+    );
+}

@@ -312,13 +312,74 @@ fn wrapped_line(
     }
 }
 
-pub(crate) fn wrap_composer_input(text: &str, width: usize) -> Vec<String> {
-    let mut rows = Vec::new();
-    for line in text.split('\n') {
-        rows.extend(wrap_display_width(line, width));
+#[derive(Debug, Default)]
+pub(crate) struct ComposerInputRow {
+    pub(crate) text: String,
+    pub(crate) graphemes: Vec<ComposerInputGrapheme>,
+    pub(crate) line_break: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ComposerInputGrapheme {
+    pub(crate) bytes: std::ops::Range<usize>,
+    pub(crate) characters: std::ops::Range<usize>,
+}
+
+pub(crate) fn wrap_composer_input(text: &str, width: usize) -> Vec<ComposerInputRow> {
+    let width = width.max(1);
+    let mut rows = vec![ComposerInputRow::default()];
+    let mut row_index = 0usize;
+    let mut column = 0usize;
+    let mut character_index = 0usize;
+    let mut virtual_row = false;
+    for grapheme in text.graphemes(true) {
+        let end = character_index + grapheme.chars().count();
+        let characters = character_index..end;
+        character_index = end;
+        if grapheme == "\n" {
+            if virtual_row {
+                rows[row_index - 1].line_break = Some(characters);
+            } else {
+                rows[row_index].line_break = Some(characters);
+                rows.push(ComposerInputRow::default());
+                row_index += 1;
+            }
+            virtual_row = false;
+            column = 0;
+            continue;
+        }
+        let Some(grapheme_width) = terminal_grapheme_width(grapheme) else {
+            continue;
+        };
+        if column > 0 && column.saturating_add(grapheme_width) > width {
+            rows.push(ComposerInputRow::default());
+            row_index += 1;
+            column = 0;
+        }
+        let visible = if grapheme_width > width {
+            "?".to_owned()
+        } else {
+            sanitize_terminal_text(grapheme)
+        };
+        virtual_row = false;
+        let row = &mut rows[row_index];
+        let start = row.text.len();
+        row.text.push_str(&visible);
+        row.graphemes.push(ComposerInputGrapheme {
+            bytes: start..row.text.len(),
+            characters,
+        });
+        if grapheme_width >= width || column.saturating_add(grapheme_width) == width {
+            rows.push(ComposerInputRow::default());
+            row_index += 1;
+            virtual_row = true;
+            column = 0;
+        } else {
+            column += grapheme_width;
+        }
     }
-    if rows.is_empty() {
-        rows.push(String::new());
+    if virtual_row {
+        rows.pop();
     }
     rows
 }
@@ -352,6 +413,7 @@ pub(crate) fn visual_position_for_char_cursor(
     let mut row = 0usize;
     let mut column = 0usize;
     let mut char_index = 0usize;
+    let mut wrapped_boundary = false;
     for grapheme in input.graphemes(true) {
         let grapheme_chars = grapheme.chars().count();
         let grapheme_end = char_index.saturating_add(grapheme_chars);
@@ -360,8 +422,11 @@ pub(crate) fn visual_position_for_char_cursor(
         }
         char_index = grapheme_end;
         if grapheme == "\n" {
-            row = row.saturating_add(1);
+            if !wrapped_boundary {
+                row = row.saturating_add(1);
+            }
             column = 0;
+            wrapped_boundary = false;
             continue;
         }
         let Some(grapheme_width) = terminal_grapheme_width(grapheme) else {
@@ -374,8 +439,10 @@ pub(crate) fn visual_position_for_char_cursor(
         if grapheme_width >= width || column.saturating_add(grapheme_width) == width {
             row = row.saturating_add(1);
             column = 0;
+            wrapped_boundary = true;
         } else {
             column = column.saturating_add(grapheme_width);
+            wrapped_boundary = false;
         }
     }
     (row, column)

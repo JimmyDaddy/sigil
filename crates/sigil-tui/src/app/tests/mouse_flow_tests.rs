@@ -1154,11 +1154,15 @@ fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.composer.input_cursor, 2);
 
+    app.composer.input_selection_anchor = Some(7);
+    assert_eq!(app.composer_input_selection(), Some(2..7));
     let unchanged =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(unchanged, AppMouseOutcome::Redraw));
     assert_eq!(app.composer.input_cursor, 2);
+
+    assert_eq!(app.composer.input_selection_anchor, None);
 
     let mut composer_only_layout = layout.clone();
     composer_only_layout.composer_input = Rect::default();

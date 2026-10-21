@@ -1546,6 +1546,7 @@ fn queue_edit_restores_the_unsent_composer_draft_on_cancel_and_success() -> Resu
     )?]);
     app.composer.input = "unfinished draft".to_owned();
     app.composer.input_cursor = 4;
+    app.composer.input_selection_anchor = Some(10);
     let image = sigil_kernel::ImageAttachment::from_bytes(
         "draft-image",
         sigil_kernel::ImageMimeType::Png,
@@ -1558,10 +1559,12 @@ fn queue_edit_restores_the_unsent_composer_draft_on_cancel_and_success() -> Resu
     assert!(app.focus_composer_queue_panel());
     assert!(app.begin_edit_selected_queue_item());
     assert_eq!(app.composer.input, "queued prompt");
+    assert_eq!(app.composer.input_selection_anchor, None);
     assert!(app.composer.image_attachments.is_empty());
     assert!(app.cancel_queue_edit());
     assert_eq!(app.composer.input, "unfinished draft");
     assert_eq!(app.composer.input_cursor, 4);
+    assert_eq!(app.composer_input_selection(), Some(4..10));
     assert_eq!(app.composer.image_attachments, vec![image.clone()]);
     assert_eq!(app.composer.selected_image_attachment, Some(0));
 
@@ -1576,6 +1579,7 @@ fn queue_edit_restores_the_unsent_composer_draft_on_cancel_and_success() -> Resu
     assert!(app.composer.queue_edit_target.is_none());
     assert_eq!(app.composer.input, "unfinished draft");
     assert_eq!(app.composer.input_cursor, 4);
+    assert_eq!(app.composer_input_selection(), Some(4..10));
     assert_eq!(app.composer.image_attachments, vec![image]);
     assert_eq!(app.composer.selected_image_attachment, Some(0));
     Ok(())
@@ -2495,4 +2499,533 @@ fn input_history_recording_deduplicates_caps_and_restores_draft() {
     assert_eq!(app.composer.input, "draft");
     assert_eq!(app.composer.input_history_index, None);
     assert_eq!(app.composer.input_history_draft, None);
+}
+
+fn composer_selection_fixture() -> Result<(tempfile::TempDir, AppState)> {
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.set_terminal_size(80, 24);
+    app.active_pane = PaneFocus::Composer;
+    Ok((root, app))
+}
+
+#[test]
+fn composer_selection_shift_right_replaces_native_unicode_paste() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.handle_paste_text("甲乙🙂丙");
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+    app.handle_paste_text("替");
+    assert_eq!(app.composer.input, "甲乙替丙");
+    assert_eq!(app.composer.input_cursor, 3);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_reverses_shrinks_and_ordinary_arrows_collapse() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.set_input_and_cursor("甲🌿乙🙂丙".to_owned());
+    app.move_input_cursor_home();
+    app.move_input_cursor_right();
+    app.move_input_cursor_right();
+    for _ in 0..2 {
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+    }
+    assert_eq!(app.composer_input_selection(), Some(2..4));
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert_eq!(view_model.composer.selection, Some(2..4));
+    assert_eq!(view_model.composer.input, app.composer.input);
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(2..3));
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(1..2));
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input_cursor, 2);
+    assert_eq!(app.composer.input_selection_anchor, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input_cursor, 2);
+    assert_eq!(app.composer.input_selection_anchor, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('替'), KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "甲🌿替乙🙂丙");
+    Ok(())
+}
+
+#[test]
+fn composer_selection_editing_replaces_complete_combining_and_zwj_graphemes() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    let family = "👨‍👩‍👧‍👦";
+    for (key, expected, killed) in [
+        (
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            "前后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            "前后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            "前后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            "前后",
+            true,
+        ),
+        (
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+            "前后",
+            true,
+        ),
+        (
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+            "前后",
+            true,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            "前后",
+            true,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            "前\n后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            "前\n后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('替'), KeyModifiers::NONE),
+            "前替后",
+            false,
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            "前粘回后",
+            false,
+        ),
+    ] {
+        app.set_input_and_cursor(format!("前e\u{301}{family}后"));
+        app.composer.input_kill_buffer = Some("粘回".to_owned());
+        app.move_input_cursor_home();
+        app.move_input_cursor_right();
+        for _ in 0..2 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+        }
+        assert_eq!(
+            app.composer_input_selection(),
+            Some(1..3 + family.chars().count())
+        );
+        assert!(
+            app.handle_key_event(key)?.is_none(),
+            "editing must not submit: {key:?}"
+        );
+        assert_eq!(app.composer.input, expected, "key: {key:?}");
+        assert_eq!(app.composer.input_selection_anchor, None);
+        if killed {
+            assert_eq!(
+                app.composer.input_kill_buffer.as_deref(),
+                Some(format!("e\u{301}{family}").as_str())
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn composer_selection_shift_vertical_and_home_end_keep_history_and_slash_draft() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.set_terminal_size(16, 24); // Ten terminal cells after composer padding.
+    app.composer
+        .input_history
+        .push("must not replace the draft".to_owned());
+    app.set_input_and_cursor("0123456789abcdefghijK".to_owned());
+    app.move_input_cursor_home();
+    for _ in 0..4 {
+        app.move_input_cursor_right();
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(4..14));
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(0..4));
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer.input, "0123456789abcdefghijK");
+    assert_eq!(app.composer.input_history_index, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(4..21));
+
+    app.set_input_and_cursor("abcd\nxy\nlast".to_owned());
+    app.move_input_cursor_home();
+    for _ in 0..3 {
+        app.move_input_cursor_right();
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(3..7));
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(3..10));
+    app.handle_paste_text("替");
+    assert_eq!(app.composer.input, "abc替st");
+
+    app.set_input_and_cursor("/mod".to_owned());
+    assert!(app.has_slash_selector());
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer.input, "/mod");
+    assert_eq!(app.composer.input_history_index, None);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_shift_word_navigation_replaces_selected_words() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.set_input_and_cursor("one two three".to_owned());
+    app.handle_key_event(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ))?;
+    assert_eq!(app.composer_input_selection(), Some(8..13));
+    app.handle_paste_text("四");
+    assert_eq!(app.composer.input, "one two 四");
+    app.move_input_cursor_home();
+    app.handle_key_event(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ))?;
+    assert_eq!(app.composer_input_selection(), Some(0..3));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('替'), KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "替 two 四");
+    Ok(())
+}
+
+#[test]
+fn composer_selection_empty_paste_keeps_selection_and_large_paste_unfolds_before_editing()
+-> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    let large = "甲".repeat(10_001);
+    app.handle_paste_text(&large);
+    assert!(app.composer_display_input().contains("Pasted text #1"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_display_input(), large);
+    assert_eq!(app.composer_input_selection(), Some(10_000..10_001));
+    app.handle_paste_text("");
+    app.handle_paste_text("\u{1b}");
+    assert_eq!(app.composer_input_selection(), Some(10_000..10_001));
+    app.handle_paste_text("替");
+    assert_eq!(app.composer.input, format!("{}替", "甲".repeat(10_000)));
+    assert_eq!(app.composer.input_selection_anchor, None);
+
+    app.set_input_and_cursor("甲乙丙".to_owned());
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    app.handle_paste_text(&large);
+    assert_eq!(app.composer.input, large);
+    assert!(app.composer_display_input().contains("Pasted text #1"));
+    assert_eq!(app.composer.input_cursor, 10_001);
+    assert_eq!(app.composer.input_selection_anchor, None);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_rejected_submit_keeps_draft_and_enter_submits_or_queues_whole_draft()
+-> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.set_input_and_cursor("/definitely-unknown-selection-test".to_owned());
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    let original = app.composer.input.clone();
+    let anchor = app.composer.input_selection_anchor;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.composer.input, original);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert_eq!(app.composer.input_cursor, 0);
+
+    for busy in [false, true] {
+        app.runtime.is_busy = busy;
+        app.set_input_and_cursor("keep whole selected draft".to_owned());
+        app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        if busy {
+            assert!(
+                matches!(action, Some(AppAction::QueueConversationInput { prompt, .. }) if prompt == "keep whole selected draft")
+            );
+        } else {
+            assert!(
+                matches!(action, Some(AppAction::SubmitPrompt(prompt)) if prompt == "keep whole selected draft")
+            );
+        }
+        assert!(app.composer.input.is_empty());
+        assert_eq!(app.composer.input_selection_anchor, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn composer_selection_async_admission_rollback_restores_exact_multiline_draft_and_cursor()
+-> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    let original = "  甲🌿\n乙🙂丙  ";
+    app.handle_paste_text(original);
+    app.move_input_cursor_home();
+    for _ in 0..3 {
+        app.move_input_cursor_right();
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+    let cursor = app.composer.input_cursor;
+    let anchor = app.composer.input_selection_anchor;
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        .expect("real composer submission");
+    assert!(matches!(&action, AppAction::SubmitPrompt(prompt) if prompt == original.trim()));
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_selection_anchor, None);
+    assert!(app.runtime.is_busy);
+    app.restore_unadmitted_run_input(&action);
+    assert_eq!(app.composer.input, original);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert_eq!(app.composer_input_selection(), Some(3..4));
+    assert!(!app.runtime.is_busy);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_async_admission_rollback_preserves_folded_paste_and_attachments() -> Result<()>
+{
+    let (_root, mut app) = composer_selection_fixture()?;
+    let original = "甲".repeat(10_001);
+    app.handle_paste_text(&original);
+    let display = app.composer_display_input();
+    let attachment = sigil_kernel::ImageAttachment::from_bytes(
+        "selection-rollback-image",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?;
+    app.composer.image_attachments.push(attachment.clone());
+    app.composer.selected_image_attachment = Some(0);
+    let action = app.submit_input()?.expect("attachment submission");
+    assert!(
+        matches!(&action, AppAction::SubmitPromptWithAttachments { prompt, attachments }
+        if prompt == &original && attachments == &vec![attachment.clone()])
+    );
+    app.restore_unadmitted_run_input(&action);
+    assert_eq!(app.composer.input, original);
+    assert_eq!(app.composer_display_input(), display);
+    assert_eq!(app.composer.input_cursor, 10_001);
+    assert_eq!(app.composer.image_attachments, vec![attachment]);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    Ok(())
+}
+
+#[test]
+fn composer_selection_async_admission_rollback_does_not_overwrite_new_draft_or_new_submission()
+-> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.handle_paste_text("old requested input");
+    let old_action = app.submit_input()?.expect("old composer submission");
+    app.handle_paste_text("新草稿🙂");
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    let selection = app.composer_input_selection();
+    let cursor = app.composer.input_cursor;
+    app.restore_unadmitted_run_input(&old_action);
+    assert_eq!(app.composer.input, "新草稿🙂");
+    assert_eq!(app.composer_input_selection(), selection);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert!(!app.runtime.is_busy);
+
+    let new_action = app.submit_input()?.expect("new composer submission");
+    assert!(app.runtime.is_busy);
+    app.restore_unadmitted_run_input(&old_action);
+    assert!(app.composer.input.is_empty());
+    assert!(
+        app.runtime.is_busy,
+        "late old rejection cannot retire the new submission"
+    );
+    app.restore_unadmitted_run_input(&new_action);
+    assert_eq!(app.composer.input, "新草稿🙂");
+    assert_eq!(app.composer_input_selection(), selection);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert!(!app.runtime.is_busy);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_async_admission_rollback_rejects_changed_run_binding_and_session()
+-> Result<()> {
+    let (root, mut app) = composer_selection_fixture()?;
+    app.handle_paste_text("original scope draft");
+    let action = app.submit_input()?.expect("composer submission");
+    let original_intent = std::sync::Arc::clone(&app.runtime.run_submission_intent);
+    // The launcher also rejects stale receipts by this exact opaque run-intent identity.
+    app.runtime.run_submission_intent = std::sync::Arc::new(());
+    app.restore_unadmitted_run_input(&action);
+    assert!(app.composer.input.is_empty());
+    assert!(app.runtime.is_busy);
+    app.runtime.run_submission_intent = original_intent;
+    let other_path = root.path().join("other-session.jsonl");
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&other_path),
+        session_log_path: other_path.clone(),
+        provider_name: "fixture-provider".to_owned(),
+        model_name: "fixture-model".to_owned(),
+        entries: Vec::new(),
+    })?;
+    app.restore_unadmitted_run_input(&action);
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.session_log_path, other_path);
+    assert!(!app.runtime.is_busy);
+    Ok(())
+}
+
+#[test]
+fn composer_selection_leaves_attachment_focus_before_deleting_highlighted_text() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    let attachment = sigil_kernel::ImageAttachment::from_bytes(
+        "selection-focus-image",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?;
+    app.composer.image_attachments.push(attachment.clone());
+    for deletion in [KeyCode::Backspace, KeyCode::Delete] {
+        app.set_input_and_cursor("abc".to_owned());
+        app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+        assert_eq!(app.composer.selected_image_attachment, Some(0));
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))?;
+        assert_eq!(app.composer_input_selection(), Some(0..1));
+        assert_eq!(app.composer.selected_image_attachment, None);
+        let view_model = crate::view_model::UiViewModel::from_app(&app);
+        assert_eq!(view_model.composer.selection, Some(0..1));
+        assert!(!view_model.composer.image_attachments[0].selected);
+        app.handle_key_event(KeyEvent::new(deletion, KeyModifiers::NONE))?;
+        assert_eq!(app.composer.input, "bc");
+        assert_eq!(app.composer.input_selection_anchor, None);
+        assert_eq!(app.composer.image_attachments, vec![attachment.clone()]);
+    }
+    Ok(())
+}
+
+#[test]
+fn composer_selection_pasted_image_focus_clears_text_selection_before_attachment_delete()
+-> Result<()> {
+    let (root, mut app) = composer_selection_fixture()?;
+    let path = root.path().join("sample.png");
+    write_test_png(&path)?;
+    app.handle_paste_text("abc");
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(0..3));
+    app.handle_paste_text(&path.to_string_lossy());
+    assert_eq!(app.composer.input, "abc");
+    assert_eq!(app.composer_input_selection(), None);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    assert_eq!(app.composer.image_attachments.len(), 1);
+    app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "abc");
+    assert!(app.composer.image_attachments.is_empty());
+    Ok(())
+}
+
+#[test]
+fn composer_selection_clipboard_image_admission_clears_text_selection() -> Result<()> {
+    let (root, mut app) = composer_selection_fixture()?;
+    let image_path = root.path().join("clipboard.png");
+    write_test_png(&image_path)?;
+    app.handle_paste_text("甲🙂乙");
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    assert_eq!(app.composer_input_selection(), Some(0..3));
+
+    // This is the same encoded-image entry point used after the launcher's clipboard read.
+    app.handle_clipboard_image(std::fs::read(&image_path)?);
+
+    assert_eq!(app.composer.input, "甲🙂乙");
+    assert_eq!(app.composer.input_cursor, 0);
+    assert_eq!(app.composer.input_selection_anchor, None);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    assert_eq!(app.composer.image_attachments.len(), 1);
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert_eq!(view_model.composer.selection, None);
+    assert!(view_model.composer.image_attachments[0].selected);
+    app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    assert!(app.composer.image_attachments.is_empty());
+    assert_eq!(app.composer.input, "甲🙂乙");
+    Ok(())
+}
+
+#[test]
+fn composer_selection_rejected_clipboard_and_path_images_keep_draft_selection() -> Result<()> {
+    let (root, mut app) = composer_selection_fixture()?;
+    let valid_path = root.path().join("valid.png");
+    let invalid_path = root.path().join("invalid.png");
+    write_test_png(&valid_path)?;
+    std::fs::write(&invalid_path, [0, 1, 2, 3])?;
+    let encoded_png = std::fs::read(&valid_path)?;
+    app.handle_paste_text("甲🙂乙");
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    let draft = app.composer.input.clone();
+    let cursor = app.composer.input_cursor;
+    let anchor = app.composer.input_selection_anchor;
+
+    app.handle_clipboard_image(vec![0, 1, 2, 3]);
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert!(app.composer.image_attachments.is_empty());
+    assert_eq!(app.composer.selected_image_attachment, None);
+    app.handle_paste_text(&invalid_path.to_string_lossy());
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert!(app.composer.image_attachments.is_empty());
+    assert_eq!(app.composer.selected_image_attachment, None);
+
+    // Reach the real quota through the shared encoded-image admission, not injected state.
+    for _ in 0..sigil_kernel::MAX_IMAGE_ATTACHMENTS_PER_TURN {
+        app.handle_clipboard_image(encoded_png.clone());
+    }
+    assert_eq!(
+        app.composer.image_attachments.len(),
+        sigil_kernel::MAX_IMAGE_ATTACHMENTS_PER_TURN
+    );
+    app.move_input_cursor_end();
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+    let cursor = app.composer.input_cursor;
+    let anchor = app.composer.input_selection_anchor;
+    let attachments = app.composer.image_attachments.clone();
+    assert_eq!(app.composer.selected_image_attachment, None);
+    assert_eq!(app.composer_input_selection(), Some(0..3));
+
+    app.handle_clipboard_image(encoded_png);
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert_eq!(app.composer.image_attachments, attachments);
+    assert_eq!(app.composer.selected_image_attachment, None);
+    app.handle_paste_text(&valid_path.to_string_lossy());
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert_eq!(app.composer.image_attachments, attachments);
+    assert_eq!(app.composer.selected_image_attachment, None);
+    assert_eq!(
+        app.last_notice(),
+        Some("image rejected; use a valid PNG, JPEG, or WebP within the attachment limits")
+    );
+    Ok(())
 }

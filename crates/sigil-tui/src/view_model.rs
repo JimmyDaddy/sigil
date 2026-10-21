@@ -320,6 +320,7 @@ pub(crate) struct ComposerViewModel {
     pub input: String,
     pub input_rows: u16,
     pub cursor_position: (u16, u16),
+    pub selection: Option<std::ops::Range<usize>>,
 }
 
 impl ComposerViewModel {
@@ -359,6 +360,7 @@ impl ComposerViewModel {
             input: app.composer_display_input(),
             input_rows: app.composer_input_rows(),
             cursor_position: app.input_cursor_visual_position(),
+            selection: app.composer_input_selection(),
         }
     }
 }

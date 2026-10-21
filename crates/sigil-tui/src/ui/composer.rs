@@ -12,8 +12,8 @@ use super::{
     geometry::inset_rect,
     status_indicator::{FocusKind, StatusIndicator, focus_style_with_palette},
     text::{
-        pad_display_width, sanitize_terminal_text, terminal_cell_width, truncate_display_width,
-        wrap_composer_input,
+        ComposerInputRow, pad_display_width, sanitize_terminal_text, terminal_cell_width,
+        truncate_display_width, wrap_composer_input,
     },
     theme::Theme,
 };
@@ -132,7 +132,15 @@ pub(crate) fn render_input_with_theme(
             .into_iter()
             .skip(row_offset)
             .take(visible_rows)
-            .map(|row| render_input_row(&row, input_width, input_bg, theme))
+            .map(|row| {
+                render_selected_input_row(
+                    &row,
+                    view_model.selection.as_ref(),
+                    input_width,
+                    input_bg,
+                    theme,
+                )
+            })
             .collect::<Vec<_>>();
         while lines.len() < visible_rows {
             lines.push(Line::from(vec![Span::styled(
@@ -141,12 +149,56 @@ pub(crate) fn render_input_with_theme(
             )]));
         }
         frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .style(Style::default().bg(input_bg))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(Text::from(lines)).style(Style::default().bg(input_bg)),
             input_inner,
         );
     }
+}
+
+fn render_selected_input_row(
+    row: &ComposerInputRow,
+    selection: Option<&std::ops::Range<usize>>,
+    width: usize,
+    input_bg: Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some(selection) = selection else {
+        return render_input_row(&row.text, width, input_bg, theme);
+    };
+    let palette = &theme.palette;
+    let base = Style::default().fg(palette.text_primary).bg(input_bg);
+    let selected = Style::default()
+        .fg(palette.selection_fg)
+        .bg(palette.selection_bg);
+    let command = known_slash_command_token(&row.text);
+    let intersects =
+        |range: &std::ops::Range<usize>| range.start < selection.end && selection.start < range.end;
+    let mut spans = row
+        .graphemes
+        .iter()
+        .map(|grapheme| {
+            let mut style = if command.as_ref().is_some_and(|command| {
+                command.start <= grapheme.bytes.start && grapheme.bytes.start < command.end
+            }) {
+                base.fg(palette.accent_info).add_modifier(Modifier::BOLD)
+            } else {
+                base
+            };
+            if intersects(&grapheme.characters) {
+                style = style.patch(selected);
+            }
+            Span::styled(row.text[grapheme.bytes.clone()].to_owned(), style)
+        })
+        .collect::<Vec<_>>();
+    let mut padding = width.saturating_sub(terminal_cell_width(&row.text));
+    if padding > 0 && row.line_break.as_ref().is_some_and(intersects) {
+        spans.push(Span::styled(" ", selected));
+        padding -= 1;
+    }
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), base));
+    }
+    Line::from(spans)
 }
 
 fn render_input_row(row: &str, width: usize, input_bg: Color, theme: &Theme) -> Line<'static> {

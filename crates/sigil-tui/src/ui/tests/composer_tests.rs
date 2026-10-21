@@ -20,6 +20,7 @@ fn composer_header_prioritizes_mode_and_permission_on_narrow_screen() -> anyhow:
         input: "你好".to_owned(),
         input_rows: 1,
         cursor_position: (4, 0),
+        selection: None,
     };
     let mut terminal = Terminal::new(TestBackend::new(32, 5))?;
     terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
@@ -70,6 +71,7 @@ fn composer_highlights_known_slash_command_token() -> anyhow::Result<()> {
         input: "/task fix typo".to_owned(),
         input_rows: 1,
         cursor_position: (14, 0),
+        selection: None,
     };
     let backend = TestBackend::new(72, 5);
     let mut terminal = Terminal::new(backend)?;
@@ -130,6 +132,7 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
         input: "/resume".to_owned(),
         input_rows: 1,
         cursor_position: (7, 0),
+        selection: None,
     };
     let backend = TestBackend::new(72, 5);
     let mut terminal = Terminal::new(backend)?;
@@ -171,6 +174,7 @@ fn composer_renders_selected_attachment_above_the_input() -> anyhow::Result<()> 
         input: "describe it".to_owned(),
         input_rows: 1,
         cursor_position: (11, 0),
+        selection: None,
     };
     let backend = TestBackend::new(88, 6);
     let mut terminal = Terminal::new(backend)?;
@@ -212,6 +216,7 @@ fn compact_composer_windows_attachments_around_selection_and_keeps_input_visible
         input: "draft remains editable".to_owned(),
         input_rows: 1,
         cursor_position: (5, 0),
+        selection: None,
     };
     let area = ratatui::layout::Rect::new(0, 0, 40, 6);
     let backend = TestBackend::new(40, 6);
@@ -270,6 +275,7 @@ fn composer_cursor_origin_scrolls_with_multiline_input() {
         input: "one\ntwo\nthree\nfour".to_owned(),
         input_rows: 4,
         cursor_position: (2, 3),
+        selection: None,
     };
 
     assert_eq!(
@@ -291,6 +297,7 @@ fn composer_cursor_origin_returns_none_when_input_area_disappears() {
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
 
     assert_eq!(
@@ -312,6 +319,7 @@ fn composer_cursor_position_clamps_to_the_visible_input_width() {
         input: "abcdefgh".to_owned(),
         input_rows: 8,
         cursor_position: (8, 7),
+        selection: None,
     };
 
     assert_eq!(
@@ -333,6 +341,7 @@ fn render_input_with_insufficient_height_skips_render_and_keeps_empty_area() -> 
         input: "hello".to_owned(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(20, 1);
     let mut terminal = Terminal::new(backend)?;
@@ -363,6 +372,7 @@ fn render_input_pads_unused_input_rows_with_input_background() -> anyhow::Result
         input: "one".to_owned(),
         input_rows: 1,
         cursor_position: (3, 0),
+        selection: None,
     };
     let backend = TestBackend::new(32, 6);
     let mut terminal = Terminal::new(backend)?;
@@ -401,6 +411,7 @@ fn render_composer_gutter_with_zero_height_does_not_panic() -> anyhow::Result<()
                 input: "".to_owned(),
                 input_rows: 1,
                 cursor_position: (0, 0),
+                selection: None,
             },
         );
     })?;
@@ -429,6 +440,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(8, 2);
     let mut terminal = Terminal::new(backend)?;
@@ -504,6 +516,7 @@ fn render_agent_panel_shows_agent_rows() -> anyhow::Result<()> {
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(96, 8);
     let mut terminal = Terminal::new(backend)?;
@@ -560,6 +573,7 @@ fn render_agent_panel_omits_queue_rows_from_agent_surface() -> anyhow::Result<()
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(96, 8);
     let mut terminal = Terminal::new(backend)?;
@@ -611,6 +625,7 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(96, 8);
     let mut terminal = Terminal::new(backend)?;
@@ -672,6 +687,7 @@ fn render_agent_panel_keeps_each_logical_row_single_line_at_24_columns() -> anyh
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(24, 4);
     let mut terminal = Terminal::new(backend)?;
@@ -721,6 +737,7 @@ fn compact_agent_panel_windows_late_selection_and_keeps_actions_visible() -> any
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
+        selection: None,
     };
     let backend = TestBackend::new(80, 3);
     let mut terminal = Terminal::new(backend)?;
@@ -746,6 +763,247 @@ fn compact_agent_panel_windows_late_selection_and_keeps_actions_visible() -> any
             show_actions: true,
             hidden_count: 4,
         }
+    );
+    Ok(())
+}
+
+fn composer_selection_view_model(
+    input: &str,
+    selection: std::ops::Range<usize>,
+    width: usize,
+) -> ComposerViewModel {
+    let (row, column) =
+        crate::ui::visual_position_for_char_cursor(input, input.chars().count(), width);
+    ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        permission_label: "manual".to_owned(),
+        model_name: "test-model".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        image_attachments: Vec::new(),
+        input: input.to_owned(),
+        input_rows: row as u16 + 1,
+        cursor_position: (column as u16, row as u16),
+        selection: Some(selection),
+    }
+}
+
+// Ratatui draws a whole wide grapheme from its leading cell and skips hidden
+// continuation cells in the backend diff. Verify the emitted occupied columns.
+fn composer_drawn_background_at(
+    buffer: &ratatui::buffer::Buffer,
+    column: u16,
+    row: u16,
+) -> Option<ratatui::style::Color> {
+    let blank = ratatui::buffer::Buffer::empty(buffer.area);
+    let mut background = None;
+    for (x, y, cell) in blank.diff_iter(buffer) {
+        let width = terminal_cell_width(cell.symbol()).max(1) as u16;
+        if y == row && x <= column && column < x.saturating_add(width) {
+            background = Some(cell.bg);
+        }
+    }
+    background
+}
+
+#[test]
+fn composer_selection_highlight_follows_wide_grapheme_wrap_without_selecting_padding()
+-> anyhow::Result<()> {
+    let mut view_model = composer_selection_view_model("ab你Z", 2..3, 3);
+    view_model.cursor_position = (2, 1);
+    let mut terminal = Terminal::new(TestBackend::new(9, 6))?;
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+    let buffer = terminal.backend().buffer();
+    let palette = Theme::default().palette;
+    assert_eq!(buffer[(3, 3)].symbol(), "a");
+    assert_eq!(buffer[(5, 3)].symbol(), " ");
+    assert_eq!(buffer[(5, 3)].bg, palette.surface_input);
+    assert_eq!(buffer[(3, 4)].symbol(), "你");
+    assert_eq!(buffer[(3, 4)].bg, palette.selection_bg);
+    assert_eq!(terminal_cell_width(buffer[(3, 4)].symbol()), 2);
+    for column in 3..5 {
+        assert_eq!(
+            composer_drawn_background_at(buffer, column, 4),
+            Some(palette.selection_bg)
+        );
+    }
+    assert_eq!(buffer[(5, 4)].symbol(), "Z");
+    assert_eq!(buffer[(5, 4)].bg, palette.surface_input);
+
+    view_model.selection = None;
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+    let buffer = terminal.backend().buffer();
+    for column in 3..5 {
+        assert_eq!(
+            composer_drawn_background_at(buffer, column, 4),
+            Some(palette.surface_input)
+        );
+    }
+    assert_eq!(buffer[(5, 3)].bg, palette.surface_input);
+    assert_eq!(buffer[(5, 4)].symbol(), "Z");
+    Ok(())
+}
+
+#[test]
+fn composer_selection_80_by_24_viewport_preserves_source_offsets_and_cursor() -> anyhow::Result<()>
+{
+    let mut view_model = composer_selection_view_model("first\nmiddle\n甲🙂tail", 14..16, 74);
+    let area = Rect::new(0, 19, 80, 5);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| render_input(frame, area, &view_model))?;
+    let input = composer_input_area(area, view_model.input_rows, 0);
+    assert_eq!(input.height, 1);
+    let buffer = terminal.backend().buffer();
+    let palette = Theme::default().palette;
+    assert_eq!(buffer[(input.x, input.y)].symbol(), "甲");
+    assert_eq!(buffer[(input.x, input.y)].bg, palette.surface_input);
+    assert_eq!(buffer[(input.x + 2, input.y)].symbol(), "🙂");
+    assert_eq!(buffer[(input.x + 2, input.y)].bg, palette.selection_bg);
+    assert_eq!(
+        terminal_cell_width(buffer[(input.x + 2, input.y)].symbol()),
+        2
+    );
+    for column in input.x + 2..input.x + 4 {
+        assert_eq!(
+            composer_drawn_background_at(buffer, column, input.y),
+            Some(palette.selection_bg)
+        );
+    }
+    assert_eq!(buffer[(input.x + 4, input.y)].symbol(), "t");
+    assert_eq!(buffer[(input.x + 4, input.y)].bg, palette.selection_bg);
+    assert_eq!(buffer[(input.x + 5, input.y)].symbol(), "a");
+    assert_eq!(buffer[(input.x + 5, input.y)].bg, palette.surface_input);
+    assert_eq!(buffer[(input.x + 8, input.y)].bg, palette.surface_input);
+    assert_eq!(
+        composer_cursor_position(area, &view_model),
+        Some((input.x + 8, input.y))
+    );
+    assert_ne!(buffer[(3, 20)].bg, palette.selection_bg);
+
+    view_model.selection = None;
+    terminal.draw(|frame| render_input(frame, area, &view_model))?;
+    let buffer = terminal.backend().buffer();
+    for column in input.x + 2..input.x + 5 {
+        assert_eq!(
+            composer_drawn_background_at(buffer, column, input.y),
+            Some(palette.surface_input)
+        );
+    }
+    assert_eq!(buffer[(input.x, input.y)].symbol(), "甲");
+    assert_eq!(buffer[(input.x + 5, input.y)].symbol(), "a");
+    assert_eq!(
+        composer_cursor_position(area, &view_model),
+        Some((input.x + 8, input.y))
+    );
+    Ok(())
+}
+
+#[test]
+fn composer_selection_overlay_preserves_slash_emphasis_and_whole_graphemes() {
+    let theme = Theme::default();
+    let rows = wrap_composer_input("/task fix", 20);
+    let line = render_selected_input_row(
+        &rows[0],
+        Some(&(1..3)),
+        20,
+        theme.palette.surface_input,
+        &theme,
+    );
+    assert_eq!(line.spans[0].content.as_ref(), "/");
+    assert_eq!(line.spans[0].style.fg, Some(theme.palette.accent_info));
+    assert_eq!(line.spans[1].content.as_ref(), "t");
+    assert_eq!(line.spans[1].style.bg, Some(theme.palette.selection_bg));
+    assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(line.spans[3].content.as_ref(), "s");
+    assert_eq!(line.spans[3].style.fg, Some(theme.palette.accent_info));
+    assert_eq!(line.spans[3].style.bg, Some(theme.palette.surface_input));
+
+    let rows = wrap_composer_input("e\u{301}👨‍👩‍👧‍👦ｶﾞ", 10);
+    let line = render_selected_input_row(
+        &rows[0],
+        Some(&(1..3)),
+        10,
+        theme.palette.surface_input,
+        &theme,
+    );
+    assert_eq!(line.spans[0].content.as_ref(), "e\u{301}");
+    assert_eq!(line.spans[0].style.bg, Some(theme.palette.selection_bg));
+    assert_eq!(line.spans[1].content.as_ref(), "👨‍👩‍👧‍👦");
+    assert_eq!(line.spans[1].style.bg, Some(theme.palette.selection_bg));
+    assert_eq!(line.spans[2].content.as_ref(), "ｶﾞ");
+    assert_eq!(line.spans[2].style.bg, Some(theme.palette.surface_input));
+}
+
+#[test]
+fn composer_selection_hard_newline_marks_one_cell_without_selecting_rest_of_padding() {
+    let theme = Theme::default();
+    let rows = wrap_composer_input("a\n\nbc\n", 10);
+    let selection = 1..5;
+    assert_eq!(rows.len(), 4);
+    for row in rows.iter().take(3) {
+        let line = render_selected_input_row(
+            row,
+            Some(&selection),
+            10,
+            theme.palette.surface_input,
+            &theme,
+        );
+        let visible = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(terminal_cell_width(&visible), 10);
+        let padding = line.spans.last().expect("unselected trailing padding");
+        assert_eq!(padding.style.bg, Some(theme.palette.surface_input));
+    }
+    let blank_line = render_selected_input_row(
+        &rows[1],
+        Some(&selection),
+        10,
+        theme.palette.surface_input,
+        &theme,
+    );
+    assert_eq!(blank_line.spans[0].content.as_ref(), " ");
+    assert_eq!(
+        blank_line.spans[0].style.bg,
+        Some(theme.palette.selection_bg)
+    );
+    assert_eq!(blank_line.spans[1].content.as_ref(), "         ");
+    assert_eq!(
+        blank_line.spans[1].style.bg,
+        Some(theme.palette.surface_input)
+    );
+    let tail = render_selected_input_row(
+        &rows[3],
+        Some(&selection),
+        10,
+        theme.palette.surface_input,
+        &theme,
+    );
+    assert!(
+        tail.spans
+            .iter()
+            .all(|span| span.style.bg == Some(theme.palette.surface_input))
+    );
+}
+
+#[test]
+fn composer_selection_exact_width_newline_has_no_extra_blank_line_before_selected_text()
+-> anyhow::Result<()> {
+    let view_model = composer_selection_view_model("abc\nX", 4..5, 3);
+    assert_eq!(view_model.cursor_position, (1, 1));
+    let mut terminal = Terminal::new(TestBackend::new(9, 6))?;
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(3, 3)].symbol(), "a");
+    assert_eq!(buffer[(5, 3)].symbol(), "c");
+    assert_eq!(buffer[(3, 4)].symbol(), "X");
+    assert_eq!(buffer[(3, 4)].bg, Theme::default().palette.selection_bg);
+    assert_eq!(
+        composer_cursor_position(Rect::new(0, 0, 9, 6), &view_model),
+        Some((4, 4))
     );
     Ok(())
 }

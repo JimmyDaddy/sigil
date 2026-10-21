@@ -520,6 +520,7 @@ impl AppState {
         self.blur_verification_card();
         self.active_pane = PaneFocus::Composer;
         self.blur_composer_aux_panels();
+        self.composer.input_selection_anchor = None;
         self.position_input_cursor_from_mouse(input.column, input.row, layout);
         crate::mouse::AppMouseOutcome::Redraw
     }

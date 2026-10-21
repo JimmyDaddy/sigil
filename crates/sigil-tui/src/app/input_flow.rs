@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
@@ -45,11 +45,98 @@ impl AppState {
     pub(super) fn set_input_and_cursor(&mut self, input: String) {
         self.composer.input = normalize_composer_text(&input);
         self.composer.input_cursor = self.input_char_len();
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
     }
 
     pub(super) fn clamp_input_cursor(&mut self) {
-        self.composer.input_cursor = self.composer.input_cursor.min(self.input_char_len());
+        self.composer.input_cursor = grapheme_boundary_at_or_before(
+            &self.composer.input,
+            self.composer.input_cursor.min(self.input_char_len()),
+        );
+        self.composer.input_selection_anchor = self.composer.input_selection_anchor.map(|anchor| {
+            grapheme_boundary_at_or_before(&self.composer.input, anchor.min(self.input_char_len()))
+        });
+    }
+
+    pub(crate) fn composer_input_selection(&self) -> Option<Range<usize>> {
+        let anchor = self.composer.input_selection_anchor?;
+        let cursor = self.composer.input_cursor;
+        if anchor == cursor {
+            return None;
+        }
+        let start = grapheme_boundary_at_or_before(&self.composer.input, anchor.min(cursor));
+        let end = grapheme_boundary_at_or_after(&self.composer.input, anchor.max(cursor));
+        (start < end).then_some(start..end)
+    }
+
+    fn take_input_selection(&mut self) -> Option<Range<usize>> {
+        let selection = self.composer_input_selection();
+        self.composer.input_selection_anchor = None;
+        selection
+    }
+
+    fn remove_input_selection(&mut self) -> bool {
+        let Some(selection) = self.take_input_selection() else {
+            return false;
+        };
+        self.remove_input_range(selection);
+        true
+    }
+
+    fn handle_composer_selection_movement(&mut self, key: KeyEvent) -> bool {
+        if self.active_pane != PaneFocus::Composer
+            || !matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            return false;
+        }
+        let extending = key.modifiers.contains(KeyModifiers::SHIFT);
+        if !extending && self.composer.input_selection_anchor.is_none() {
+            return false;
+        }
+        self.clamp_input_cursor();
+        let anchor = self
+            .composer
+            .input_selection_anchor
+            .unwrap_or(self.composer.input_cursor);
+        if extending {
+            self.clear_selected_image_attachment();
+            // Unfold a collapsed paste before its raw offsets become a visible selection.
+            self.composer.input_selection_anchor = None;
+        }
+        match key.code {
+            KeyCode::Left if has_control_without_alt(key) || has_alt_without_control(key) => {
+                self.move_input_cursor_word_left()
+            }
+            KeyCode::Right if has_control_without_alt(key) || has_alt_without_control(key) => {
+                self.move_input_cursor_word_right()
+            }
+            KeyCode::Left => self.move_input_cursor_left(),
+            KeyCode::Right => self.move_input_cursor_right(),
+            KeyCode::Home => self.move_input_cursor_home(),
+            KeyCode::End => self.move_input_cursor_end(),
+            KeyCode::Up => {
+                self.move_input_cursor_vertical(true);
+            }
+            KeyCode::Down => {
+                self.move_input_cursor_vertical(false);
+            }
+            _ => unreachable!(),
+        }
+        if extending {
+            self.composer.input_selection_anchor = Some(anchor);
+        }
+        self.reset_input_history_navigation();
+        self.reset_slash_selector();
+        true
     }
 
     pub(super) fn input_last_visual_row(&self) -> usize {
@@ -76,6 +163,7 @@ impl AppState {
         if character.is_control() && character != '\n' {
             return;
         }
+        self.remove_input_selection();
         self.composer.input_paste_spans.clear();
         self.discard_cleared_input_draft();
         let byte_index = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
@@ -88,6 +176,9 @@ impl AppState {
     }
 
     pub(super) fn insert_input_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         self.composer.input_paste_spans.clear();
         self.insert_input_text_preserving_paste_spans(text);
     }
@@ -96,6 +187,7 @@ impl AppState {
         if text.is_empty() {
             return;
         }
+        self.remove_input_selection();
         self.discard_cleared_input_draft();
         let byte_index = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
         self.composer.input.insert_str(byte_index, text);
@@ -142,6 +234,7 @@ impl AppState {
     }
 
     fn insert_paste_text(&mut self, text: &str) {
+        self.remove_input_selection();
         let start = self.composer.input_cursor;
         let char_count = text.chars().count();
         self.insert_input_text_preserving_paste_spans(text);
@@ -186,6 +279,10 @@ impl AppState {
                 }
                 _ => {}
             }
+        }
+
+        if self.handle_composer_selection_movement(key) {
+            return Ok(Some(None));
         }
 
         match key.code {
@@ -459,6 +556,9 @@ impl AppState {
     }
 
     pub(super) fn remove_input_character_before_cursor(&mut self) {
+        if self.remove_input_selection() {
+            return;
+        }
         if self.composer.input_cursor == 0 {
             return;
         }
@@ -469,6 +569,9 @@ impl AppState {
     }
 
     pub(super) fn remove_input_character_at_cursor(&mut self) {
+        if self.remove_input_selection() {
+            return;
+        }
         if self.composer.input_cursor >= self.input_char_len() {
             return;
         }
@@ -480,6 +583,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_word_before_cursor(&mut self) {
+        if let Some(selection) = self.take_input_selection() {
+            self.kill_input_range(selection);
+            return;
+        }
         let end = grapheme_boundary_at_or_after(&self.composer.input, self.composer.input_cursor);
         let start =
             grapheme_boundary_at_or_before(&self.composer.input, self.previous_input_word_start());
@@ -490,6 +597,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_word_after_cursor(&mut self) {
+        if let Some(selection) = self.take_input_selection() {
+            self.kill_input_range(selection);
+            return;
+        }
         let start =
             grapheme_boundary_at_or_before(&self.composer.input, self.composer.input_cursor);
         let end = grapheme_boundary_at_or_after(&self.composer.input, self.next_input_word_end());
@@ -500,50 +611,70 @@ impl AppState {
     }
 
     pub(super) fn move_input_cursor_left(&mut self) {
+        if let Some(selection) = self.take_input_selection() {
+            self.composer.input_paste_spans.clear();
+            self.composer.input_cursor = selection.start;
+            return;
+        }
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor =
             previous_grapheme_boundary(&self.composer.input, self.composer.input_cursor);
     }
 
     pub(super) fn move_input_cursor_right(&mut self) {
+        if let Some(selection) = self.take_input_selection() {
+            self.composer.input_paste_spans.clear();
+            self.composer.input_cursor = selection.end;
+            return;
+        }
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor =
             next_grapheme_boundary(&self.composer.input, self.composer.input_cursor);
     }
 
     pub(super) fn move_input_cursor_home(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor = 0;
     }
 
     pub(super) fn move_input_cursor_end(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor = self.input_char_len();
     }
 
     pub(super) fn move_input_cursor_line_start(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor = self.current_input_line_start();
     }
 
     pub(super) fn move_input_cursor_line_end(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor = self.current_input_line_end();
     }
 
     pub(super) fn move_input_cursor_word_left(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor =
             grapheme_boundary_at_or_before(&self.composer.input, self.previous_input_word_start());
     }
 
     pub(super) fn move_input_cursor_word_right(&mut self) {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.composer.input_cursor =
             grapheme_boundary_at_or_after(&self.composer.input, self.next_input_word_end());
     }
 
     pub(super) fn kill_input_to_line_end(&mut self) {
+        if let Some(selection) = self.take_input_selection() {
+            self.kill_input_range(selection);
+            return;
+        }
         let line_end = self.current_input_line_end();
         let range = if self.composer.input_cursor < line_end {
             Some(self.composer.input_cursor..line_end)
@@ -569,6 +700,7 @@ impl AppState {
         }
         self.composer.input.clear();
         self.composer.input_cursor = 0;
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
     }
 
@@ -588,6 +720,7 @@ impl AppState {
     }
 
     pub(super) fn move_input_cursor_vertical(&mut self, up: bool) -> bool {
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         let width = self.composer_wrap_width();
         let (row, column) = self.visual_position_for_cursor(self.composer.input_cursor, width);
@@ -710,6 +843,7 @@ impl AppState {
             return removed;
         }
         self.composer.input_paste_spans.clear();
+        self.composer.input_selection_anchor = None;
         self.composer
             .input
             .replace_range(byte_start..byte_end, replacement);

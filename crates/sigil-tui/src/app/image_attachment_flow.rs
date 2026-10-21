@@ -38,7 +38,6 @@ impl AppState {
         true
     }
 
-    #[cfg(not(test))]
     pub(crate) fn attach_clipboard_image(&mut self, encoded_png: Vec<u8>) -> Result<()> {
         if !self.can_accept_image_attachment_input() {
             anyhow::bail!("image attachments are only available in an idle Build composer");
@@ -49,7 +48,6 @@ impl AppState {
         )
     }
 
-    #[cfg(not(test))]
     pub(crate) fn handle_clipboard_image(&mut self, encoded_png: Vec<u8>) {
         if self.attach_clipboard_image(encoded_png).is_err() {
             self.show_image_attachment_notice(IMAGE_REJECTED_NOTICE);
@@ -79,6 +77,7 @@ impl AppState {
         message.image_attachments.push(attachment.clone());
         validate_message_image_attachments(&message)?;
 
+        self.composer.input_selection_anchor = None;
         self.composer.image_attachments.push(attachment);
         self.composer.selected_image_attachment =
             Some(self.composer.image_attachments.len().saturating_sub(1));

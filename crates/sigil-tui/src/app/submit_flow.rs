@@ -4,16 +4,46 @@ use anyhow::Result;
 use sigil_kernel::{SkillDescriptor, SkillRunMode, SkillTrustState};
 
 use super::session_flow::current_focus_label;
+use super::state::{QueueEditComposerDraft, SubmittedComposerDraft};
 use super::{AgentView, AppAction, AppState, ComposerMode, PaneFocus, RunPhase, TimelineRole};
 use crate::slash::ResolvedSlashCommand;
 
 impl AppState {
     pub(crate) fn begin_run_submission_intent(&mut self) {
+        self.composer.submitted_input_draft = None;
         self.runtime.run_submission_intent = std::sync::Arc::new(());
         self.runtime.submission_timing = Some(super::run_timing::SubmissionTiming::new());
     }
 
     pub(crate) fn restore_unadmitted_run_input(&mut self, action: &AppAction) {
+        if let Some(snapshot) = self.composer.submitted_input_draft.as_ref() {
+            if snapshot.session_id != self.session_id
+                || snapshot.session_log_path != self.session_log_path
+                || !snapshot
+                    .run_submission_intent
+                    .ptr_eq(&std::sync::Arc::downgrade(
+                        &self.runtime.run_submission_intent,
+                    ))
+                || !same_composer_submission_action(&snapshot.action, action)
+            {
+                return;
+            }
+            let snapshot = self
+                .composer
+                .submitted_input_draft
+                .take()
+                .expect("matching draft checked");
+            if self.composer.input.is_empty() && self.composer.image_attachments.is_empty() {
+                self.composer.input = snapshot.draft.input;
+                self.composer.input_cursor = snapshot.draft.input_cursor;
+                self.composer.input_selection_anchor = snapshot.draft.input_selection_anchor;
+                self.composer.input_paste_spans = snapshot.draft.input_paste_spans;
+                self.composer.image_attachments = snapshot.draft.image_attachments;
+                self.composer.selected_image_attachment = snapshot.draft.selected_image_attachment;
+            }
+            self.clear_worker_run_state();
+            return;
+        }
         if self.composer.input.is_empty() && self.composer.image_attachments.is_empty() {
             match action {
                 AppAction::SubmitPrompt(prompt) => self.set_input_and_cursor(prompt.clone()),
@@ -47,6 +77,34 @@ impl AppState {
     }
 
     pub fn submit_input(&mut self) -> Result<Option<AppAction>> {
+        let draft = QueueEditComposerDraft {
+            input: self.composer.input.clone(),
+            input_cursor: self.composer.input_cursor,
+            input_selection_anchor: self.composer.input_selection_anchor,
+            input_paste_spans: self.composer.input_paste_spans.clone(),
+            image_attachments: self.composer.image_attachments.clone(),
+            selected_image_attachment: self.composer.selected_image_attachment,
+        };
+        let result = self.submit_input_inner();
+        if let Ok(Some(action)) = &result
+            && is_composer_run_submission(action)
+            && self.composer.input.is_empty()
+        {
+            // This bounded UI snapshot is not an admission or a durable execution owner.
+            self.composer.submitted_input_draft = Some(SubmittedComposerDraft {
+                session_id: self.session_id.clone(),
+                session_log_path: self.session_log_path.clone(),
+                run_submission_intent: std::sync::Arc::downgrade(
+                    &self.runtime.run_submission_intent,
+                ),
+                action: action.clone(),
+                draft,
+            });
+        }
+        result
+    }
+
+    fn submit_input_inner(&mut self) -> Result<Option<AppAction>> {
         let prompt = self.composer.input.trim().to_owned();
         let has_attachments = !self.composer.image_attachments.is_empty();
         if prompt.is_empty() && !has_attachments {
@@ -97,6 +155,7 @@ impl AppState {
                 if action.is_some() {
                     self.composer.input.clear();
                     self.composer.input_cursor = 0;
+                    self.composer.input_selection_anchor = None;
                     self.composer.input_paste_spans.clear();
                     self.pending_mouse_slash_confirmation = None;
                     self.reset_slash_selector();
@@ -174,6 +233,7 @@ impl AppState {
             self.push_optimistic_conversation_timeline_entry(safe_prompt, &target);
             self.composer.input.clear();
             self.composer.input_cursor = 0;
+            self.composer.input_selection_anchor = None;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.last_notice = Some("saving follow-up".to_owned());
@@ -189,6 +249,7 @@ impl AppState {
         if self.composer.mode == ComposerMode::Plan {
             self.composer.input.clear();
             self.composer.input_cursor = 0;
+            self.composer.input_selection_anchor = None;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.return_timeline_to_live_tail();
@@ -217,6 +278,7 @@ impl AppState {
 
         self.composer.input.clear();
         self.composer.input_cursor = 0;
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         let attachments = std::mem::take(&mut self.composer.image_attachments);
         self.composer.selected_image_attachment = None;
@@ -271,6 +333,7 @@ impl AppState {
         }
         self.composer.input.clear();
         self.composer.input_cursor = 0;
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
@@ -366,6 +429,7 @@ impl AppState {
         if arg.is_empty() {
             self.composer.input.clear();
             self.composer.input_cursor = 0;
+            self.composer.input_selection_anchor = None;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.composer.mode = ComposerMode::Plan;
@@ -387,6 +451,7 @@ impl AppState {
         self.clear_pending_plan_approval();
         self.composer.input.clear();
         self.composer.input_cursor = 0;
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.return_timeline_to_live_tail();
@@ -521,6 +586,7 @@ impl AppState {
         self.clear_pending_plan_approval();
         self.composer.input.clear();
         self.composer.input_cursor = 0;
+        self.composer.input_selection_anchor = None;
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.return_timeline_to_live_tail();
@@ -655,5 +721,82 @@ fn slash_skill_display_kind(skill: &SkillDescriptor) -> &'static str {
         "command"
     } else {
         "skill"
+    }
+}
+
+fn is_composer_run_submission(action: &AppAction) -> bool {
+    matches!(
+        action,
+        AppAction::SubmitPrompt(_)
+            | AppAction::SubmitPromptWithAttachments { .. }
+            | AppAction::SubmitPlanPrompt(_)
+            | AppAction::SubmitTask(_)
+            | AppAction::ContinueTask { .. }
+            | AppAction::InvokeInlineSkill { .. }
+            | AppAction::InvokeChildSessionSkill { .. }
+            | AppAction::InvokeAgentProfile { .. }
+    )
+}
+
+fn same_composer_submission_action(left: &AppAction, right: &AppAction) -> bool {
+    match (left, right) {
+        (AppAction::SubmitPrompt(a), AppAction::SubmitPrompt(b))
+        | (AppAction::SubmitPlanPrompt(a), AppAction::SubmitPlanPrompt(b))
+        | (AppAction::SubmitTask(a), AppAction::SubmitTask(b)) => a == b,
+        (
+            AppAction::SubmitPromptWithAttachments {
+                prompt: a,
+                attachments: b,
+            },
+            AppAction::SubmitPromptWithAttachments {
+                prompt: c,
+                attachments: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::ContinueTask {
+                task_id: a,
+                guidance: b,
+            },
+            AppAction::ContinueTask {
+                task_id: c,
+                guidance: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::InvokeInlineSkill {
+                skill_id: a,
+                arguments: b,
+                attachments: c,
+            },
+            AppAction::InvokeInlineSkill {
+                skill_id: d,
+                arguments: e,
+                attachments: f,
+            },
+        ) => a == d && b == e && c == f,
+        (
+            AppAction::InvokeChildSessionSkill {
+                skill_id: a,
+                arguments: b,
+            },
+            AppAction::InvokeChildSessionSkill {
+                skill_id: c,
+                arguments: d,
+            },
+        ) => a == c && b == d,
+        (
+            AppAction::InvokeAgentProfile {
+                profile_id: a,
+                prompt: b,
+                parent_prompt: c,
+            },
+            AppAction::InvokeAgentProfile {
+                profile_id: d,
+                prompt: e,
+                parent_prompt: f,
+            },
+        ) => a == d && b == e && c == f,
+        _ => false,
     }
 }

@@ -448,6 +448,7 @@ impl AppState {
             self.composer.queue_edit_draft = Some(QueueEditComposerDraft {
                 input: self.composer.input.clone(),
                 input_cursor: self.composer.input_cursor,
+                input_selection_anchor: self.composer.input_selection_anchor,
                 input_paste_spans: self.composer.input_paste_spans.clone(),
                 image_attachments: std::mem::take(&mut self.composer.image_attachments),
                 selected_image_attachment: self.composer.selected_image_attachment.take(),
@@ -604,6 +605,7 @@ impl AppState {
         };
         self.composer.input = draft.input;
         self.composer.input_cursor = draft.input_cursor;
+        self.composer.input_selection_anchor = draft.input_selection_anchor;
         self.composer.input_paste_spans = draft.input_paste_spans;
         self.composer.image_attachments = draft.image_attachments;
         self.composer.selected_image_attachment = draft.selected_image_attachment;

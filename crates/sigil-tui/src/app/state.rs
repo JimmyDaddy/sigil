@@ -21,9 +21,10 @@ use crate::{
 };
 
 use super::{
-    ActiveAgentChildTranscript, AgentView, ComposerMode, ComposerPasteSpan, ComposerQueueAction,
-    MutationArtifactRetentionPreview, PendingPlanApproval, PendingUserInputForm, SessionViewCache,
-    TimelineRenderStore, TimelineTextSelection, ToolActivityCacheEntry,
+    ActiveAgentChildTranscript, AgentView, AppAction, ComposerMode, ComposerPasteSpan,
+    ComposerQueueAction, MutationArtifactRetentionPreview, PendingPlanApproval,
+    PendingUserInputForm, SessionViewCache, TimelineRenderStore, TimelineTextSelection,
+    ToolActivityCacheEntry,
     egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure},
     modal_flow::PendingModelPickerRefresh,
     runtime_status::{McpProgressState, McpServerRuntimeStatus},
@@ -257,6 +258,8 @@ pub(crate) struct ComposerState {
     pub(crate) deferred_queue_promotions: Vec<ConversationInputQueuedEntry>,
     pub(crate) next_optimistic_queue_id: u64,
     pub(crate) input_cursor: usize,
+    pub(crate) input_selection_anchor: Option<usize>,
+    pub(in crate::app) submitted_input_draft: Option<SubmittedComposerDraft>,
     pub(in crate::app) input_paste_spans: Vec<ComposerPasteSpan>,
     pub(crate) input_history_index: Option<usize>,
     pub(crate) input_history_draft: Option<String>,
@@ -290,6 +293,8 @@ impl Default for ComposerState {
             deferred_queue_promotions: Vec::new(),
             next_optimistic_queue_id: 1,
             input_cursor: 0,
+            input_selection_anchor: None,
+            submitted_input_draft: None,
             input_paste_spans: Vec::new(),
             input_history_index: None,
             input_history_draft: None,
@@ -302,9 +307,19 @@ impl Default for ComposerState {
 }
 
 #[derive(Debug)]
+pub(in crate::app) struct SubmittedComposerDraft {
+    pub(in crate::app) session_id: String,
+    pub(in crate::app) session_log_path: PathBuf,
+    pub(in crate::app) run_submission_intent: std::sync::Weak<()>,
+    pub(in crate::app) action: AppAction,
+    pub(in crate::app) draft: QueueEditComposerDraft,
+}
+
+#[derive(Debug)]
 pub(crate) struct QueueEditComposerDraft {
     pub(crate) input: String,
     pub(crate) input_cursor: usize,
+    pub(crate) input_selection_anchor: Option<usize>,
     pub(in crate::app) input_paste_spans: Vec<ComposerPasteSpan>,
     pub(crate) image_attachments: Vec<ImageAttachment>,
     pub(crate) selected_image_attachment: Option<usize>,

@@ -57,7 +57,12 @@ fn composer_cursor_width_uses_the_same_graphemes_as_rendering() {
         (1, 0)
     );
     assert_eq!(visual_position_for_char_cursor("ｶﾞ", 2, 4), (0, 2));
-    assert_eq!(wrap_composer_input("ｶﾞ", 2), vec!["ｶﾞ"]);
+    let rows = wrap_composer_input("ｶﾞ", 2);
+    assert_eq!(
+        rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+        vec!["ｶﾞ"]
+    );
+    assert_eq!(rows[0].graphemes[0].characters, 0..2);
 }
 
 #[test]
@@ -110,21 +115,52 @@ fn terminal_text_drops_standalone_zero_width_graphemes_but_keeps_joined_ones() {
 
 #[test]
 fn wrap_composer_input_handles_empty_and_split_lines() {
-    assert_eq!(wrap_composer_input("", 10), vec![String::new()]);
+    let rows = wrap_composer_input("", 10);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].text.is_empty());
+    let rows = wrap_composer_input("a\nbc", 1);
     assert_eq!(
-        wrap_composer_input("a\nbc", 1),
-        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b", "c"]
     );
+    assert_eq!(rows[0].line_break, Some(1..2));
+    assert_eq!(rows[1].graphemes[0].characters, 2..3);
+    // The trailing virtual caret row is not a glyph row; a hard newline consumes it once.
+    assert_eq!(
+        visual_position_for_char_cursor("a\nbc", 4, 1),
+        (rows.len(), 0)
+    );
+    assert_eq!(visual_position_for_char_cursor("a\nbc", 2, 1), (1, 0));
 }
 
 #[test]
 fn one_cell_rows_replace_unrenderable_wide_graphemes_without_phantom_rows() {
     assert_eq!(wrap_display_width("你", 1), vec!["?".to_owned()]);
-    assert_eq!(wrap_composer_input("你", 1), vec!["?".to_owned()]);
+    let composer_rows = wrap_composer_input("你", 1);
+    assert_eq!(composer_rows.len(), 1);
+    assert_eq!(composer_rows[0].text, "?");
+    assert_eq!(composer_rows[0].graphemes[0].characters, 0..1);
+    assert_eq!(
+        visual_position_for_char_cursor("你", 1, 1),
+        (composer_rows.len(), 0)
+    );
 
     let rows = wrap_terminal_lines(vec![Line::raw("你")], 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].spans[0].content.as_ref(), "?");
+}
+
+#[test]
+fn composer_selection_wrapped_rows_keep_raw_offsets_across_newlines_and_sanitization() {
+    let rows = wrap_composer_input("ab你Z\n\ne\u{301}\u{1b}🙂", 3);
+    assert_eq!(rows[0].text, "ab");
+    assert_eq!(rows[1].text, "你Z");
+    assert_eq!(rows[1].graphemes[0].characters, 2..3);
+    assert_eq!(rows[1].line_break, Some(4..5));
+    assert_eq!(rows[2].line_break, Some(5..6));
+    assert_eq!(rows[3].text, "e\u{301}🙂");
+    assert_eq!(rows[3].graphemes[0].characters, 6..8);
+    assert_eq!(rows[3].graphemes[1].characters, 9..10);
 }
 
 #[test]

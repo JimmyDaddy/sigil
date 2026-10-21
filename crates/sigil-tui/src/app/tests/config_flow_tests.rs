@@ -5534,6 +5534,7 @@ fn f3_config_draft_fixture() -> Result<(tempfile::TempDir, AppState)> {
     app.set_terminal_size(100, 32);
     app.handle_paste_text("保留第一行  alpha\nsecond line with  spaces\n第三行 🙂");
     app.composer.input_cursor = 7;
+    app.composer.input_selection_anchor = Some(12);
     app.push_timeline(TimelineRole::Assistant, "Select this historical response");
     assert!(!app.begin_timeline_text_selection_at(0, 0));
     assert!(app.update_timeline_text_selection_at(0, 4));
@@ -5546,6 +5547,7 @@ fn f3_config_cancel_preserves_multiline_draft_cursor_selection_and_history() -> 
     let (_root, mut app) = f3_config_draft_fixture()?;
     let draft = app.composer.input.clone();
     let cursor = app.composer.input_cursor;
+    let composer_selection = app.composer_input_selection();
     let paste_spans = app.composer.input_paste_spans.clone();
     let selection = app.selected_timeline_text();
     let history = app.composer.input_history.clone();
@@ -5557,6 +5559,7 @@ fn f3_config_cancel_preserves_multiline_draft_cursor_selection_and_history() -> 
     assert!(app.is_config_mode());
     assert_eq!(app.composer.input, draft);
     assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer_input_selection(), composer_selection);
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
             .is_none()
@@ -5564,6 +5567,7 @@ fn f3_config_cancel_preserves_multiline_draft_cursor_selection_and_history() -> 
     assert!(!app.is_config_mode());
     assert_eq!(app.composer.input, draft);
     assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer_input_selection(), composer_selection);
     assert_eq!(app.composer.input_paste_spans, paste_spans);
     assert_eq!(app.selected_timeline_text(), selection);
     assert_eq!(app.composer.input_history, history);
@@ -5576,6 +5580,7 @@ fn f3_config_save_uses_typed_config_saved_and_preserves_multiline_draft() -> Res
     let (_root, mut app) = f3_config_draft_fixture()?;
     let draft = app.composer.input.clone();
     let cursor = app.composer.input_cursor;
+    let composer_selection = app.composer_input_selection();
     let paste_spans = app.composer.input_paste_spans.clone();
     let selection = app.selected_timeline_text();
     let history = app.composer.input_history.clone();
@@ -5598,6 +5603,7 @@ fn f3_config_save_uses_typed_config_saved_and_preserves_multiline_draft() -> Res
     assert_eq!(persisted.model_request.request_timeout_secs, 240);
     assert_eq!(app.composer.input, draft);
     assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer_input_selection(), composer_selection);
     assert_eq!(app.composer.input_paste_spans, paste_spans);
     assert_eq!(app.selected_timeline_text(), selection);
     assert_eq!(app.composer.input_history, history);
@@ -5610,6 +5616,7 @@ fn f3_config_dirty_cancel_preserves_multiline_draft_and_slash_config_stays_compa
     let (_root, mut app) = f3_config_draft_fixture()?;
     let draft = app.composer.input.clone();
     let cursor = app.composer.input_cursor;
+    let composer_selection = app.composer_input_selection();
     let config_before = std::fs::read(&app.config_path)?;
     app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
     {
@@ -5624,6 +5631,7 @@ fn f3_config_dirty_cancel_preserves_multiline_draft_and_slash_config_stays_compa
     assert!(!app.is_config_mode());
     assert_eq!(app.composer.input, draft);
     assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer_input_selection(), composer_selection);
     assert_eq!(std::fs::read(&app.config_path)?, config_before);
 
     let root = tempdir()?;
