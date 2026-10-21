@@ -1326,7 +1326,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Back to settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
-    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
   });
 
   it("shows the first-run path before a workspace is selected", async () => {
@@ -1428,7 +1428,7 @@ describe("desktop workspace and history shell", () => {
         contextWindowTokens: 262144,
       }),
     ));
-    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
     expect(createSession).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
@@ -1894,7 +1894,7 @@ describe("desktop workspace and history shell", () => {
       saveProviderDefaultModel,
     })} />);
 
-    await screen.findByRole("heading", { name: "Select a conversation" });
+    await screen.findByRole("heading", { name: "No conversations yet" });
     const newConversation = screen.getByRole("button", { name: "New conversation" });
     expect(newConversation.hasAttribute("disabled")).toBe(false);
     await user.click(newConversation);
@@ -1948,7 +1948,7 @@ describe("desktop workspace and history shell", () => {
         createSession,
       })} />);
 
-      expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+      expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
       const newConversation = screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement;
       expect(newConversation.disabled).toBe(false);
       await user.click(newConversation);
@@ -2116,7 +2116,7 @@ describe("desktop workspace and history shell", () => {
       createSession,
     })} />);
 
-    await screen.findByRole("heading", { name: "Select a conversation" });
+    await screen.findByRole("heading", { name: "No conversations yet" });
     await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
     await user.click(screen.getByRole("button", { name: "beta" }));
     await waitFor(() => expect(providerConnections).toHaveBeenCalledWith(betaWorkspace.id));
@@ -2140,7 +2140,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
     expect(openRecentWorkspace).toHaveBeenCalledWith(workspace.id);
     expect(screen.getByRole("complementary", { name: "Conversation navigation" })).toBeTruthy();
   });
@@ -2270,7 +2270,7 @@ describe("desktop workspace and history shell", () => {
       openSession,
     })} />);
 
-    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
     await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
     expect(readLastSession(workspace.id)).toBeUndefined();
   });
@@ -2312,7 +2312,7 @@ describe("desktop workspace and history shell", () => {
     expect(document.querySelector(".statusbar")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
     expect(openRecentWorkspace).toHaveBeenNthCalledWith(1, workspace.id);
     expect(openRecentWorkspace).toHaveBeenNthCalledWith(2, workspace.id);
   });
@@ -8714,4 +8714,164 @@ it.each(["retired", "terminal"] as const)("A1 records only visible accepted cont
     expect(within(disclosure).getByText("new accepted output").closest(".message-content")).not.toBeNull();
     expect((await observations()).filter((entry) => entry.phase === "first_content")).toHaveLength(1);
   }
+});
+
+describe("shared conversation history navigation", () => {
+  const current: WorkspaceSummary = { id: "workspace-new-realm", displayName: "desktop-workspace", locationLabel: "polish · dogfood", serverVersion: "0.0.1", state: "ready" };
+  const original: WorkspaceSummary = { ...current, id: "workspace-previous-realm", locationLabel: "original · dogfood" };
+  const history = { workspaceId: original.id, workspaceLabel: original.displayName, sourceState: "present" as const };
+
+  it("returns to the exact original open workspace without creating a conversation", async () => {
+    const user = userEvent.setup();
+    const createSession = vi.fn();
+    const catalog = vi.fn(async (workspaceId: string) => ({ ...emptyCatalog, workspaceId,
+      ...(workspaceId === current.id ? { legacySharedHistory: history } : {}) }));
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [current, original], recentWorkspaces: [] }), catalog, createSession })} />);
+    const notice = await screen.findByRole("complementary", { name: "Shared conversation history" });
+    expect(within(notice).getByText(/desktop-workspace · original · dogfood/)).toBeTruthy();
+    await user.click(within(notice).getByRole("button", { name: "Open shared history workspace" }));
+    await waitFor(() => expect(catalog).toHaveBeenCalledWith(original.id, expect.anything()));
+    expect(screen.getByRole("button", { name: "Switch workspace: desktop-workspace · original · dogfood" })).toBeTruthy();
+    expect(createSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Shared conversation history" })).toBeNull());
+  });
+
+  it("reopens the exact previous recent workspace through the existing native action", async () => {
+    const user = userEvent.setup();
+    const openRecentWorkspace = vi.fn(async (_id: string) => original);
+    const createSession = vi.fn();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [current], recentWorkspaces: [{ id: original.id, displayName: original.displayName, locationLabel: original.locationLabel, isOpen: false }] }),
+      catalog: async (workspaceId) => ({ ...emptyCatalog, workspaceId, ...(workspaceId === current.id ? { legacySharedHistory: history } : {}) }),
+      openRecentWorkspace, createSession,
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Open shared history workspace" }));
+    await waitFor(() => expect(openRecentWorkspace).toHaveBeenCalledWith(original.id));
+    expect(await screen.findByRole("button", { name: "Switch workspace: desktop-workspace · original · dogfood" })).toBeTruthy();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("explains unverified history without treating it as deleted or a permission block", async () => {
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [current], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, workspaceId: current.id, legacySharedHistory: { ...history, sourceState: "unverified" } }),
+    })} />);
+    const notice = await screen.findByRole("complementary", { name: "Shared conversation history" });
+    expect(within(notice).getByText(/could not be checked/)).toBeTruthy();
+    expect(within(notice).getByText(/no records were moved or deleted/)).toBeTruthy();
+    expect(within(notice).queryByRole("alert")).toBeNull();
+    await waitFor(() => expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("opens the existing workspace menu when the original workspace is not listed", async () => {
+    const user = userEvent.setup();
+    const pickWorkspace = vi.fn();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [current], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, workspaceId: current.id, legacySharedHistory: history }), pickWorkspace,
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Open workspace menu" }));
+    expect(await screen.findByRole("dialog", { name: "Switch workspace: desktop-workspace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open workspace" })).toBeTruthy();
+    expect(pickWorkspace).not.toHaveBeenCalled();
+  });
+
+  it.each(["stale", "self"] as const)("does not show a %s shared history hint", async (kind) => {
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [current], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, workspaceId: kind === "stale" ? original.id : current.id, legacySharedHistory: { ...history, workspaceId: kind === "self" ? current.id : original.id } }),
+    })} />);
+    await screen.findByText("No matching conversation.");
+    expect(screen.queryByRole("complementary", { name: "Shared conversation history" })).toBeNull();
+  });
+});
+
+describe("empty workspace guidance", () => {
+  it("starts from the main empty workspace action through the existing create handler", async () => {
+    const user = userEvent.setup();
+    const createSession = vi.fn(async (_workspaceId: string) => ({ id: "empty-workspace-created", label: "New conversation", runCount: 0 }));
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), createSession })} />);
+    expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Start a conversation" }));
+    await readyComposer();
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(createSession.mock.calls[0]?.[0]).toBe(workspace.id);
+  });
+
+  it("keeps existing history navigation instead of presenting the empty workspace action", async () => {
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [{ sessionRef: "existing.jsonl", sessionId: "existing-session", sourceState: "ready", sourceBytes: 512, sourceModifiedAtUnixMs: 1, title: "Existing work", userMessageCount: 1, assistantMessageCount: 1, toolResultCount: 0, pinned: false }] }),
+    })} />);
+    await screen.findByRole("button", { name: /^Existing work/ });
+    expect(screen.getByRole("heading", { name: "Select a conversation" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start a conversation" })).toBeNull();
+  });
+
+  it("offers an explicit clear-search action after switching an empty workspace without resetting scope implicitly", async () => {
+    const user = userEvent.setup();
+    const other = { ...workspace, id: "workspace-empty-other", displayName: "Other" };
+    const catalog = vi.fn(async (workspaceId: string, _request: unknown) => ({ ...emptyCatalog, workspaceId }));
+    render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace, other], recentWorkspaces: [] }), catalog })} />);
+    await screen.findByRole("heading", { name: "No conversations yet" });
+    await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "previous-query");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(catalog).toHaveBeenCalledWith(workspace.id, expect.objectContaining({ query: "previous-query" })));
+    await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+    await user.click(screen.getByRole("button", { name: "Other" }));
+    await waitFor(() => expect(catalog).toHaveBeenCalledWith(other.id, expect.objectContaining({ query: "previous-query" })));
+    await user.click(await screen.findByRole("button", { name: "Clear search and filters" }));
+    await waitFor(() => expect(catalog).toHaveBeenLastCalledWith(other.id, expect.objectContaining({ query: undefined, provider: undefined, pinned: undefined, state: undefined })));
+    expect((screen.getByRole("textbox", { name: "Search conversations" }) as HTMLInputElement).value).toBe("");
+    expect(await screen.findByRole("button", { name: "Start a conversation" })).toBeTruthy();
+  });
+});
+
+
+it.each([false, true])("qualifies the empty workspace create action from typed recovery actions (allowed=%s)", async (allowed) => {
+  const user = userEvent.setup();
+  const createSession = vi.fn(async () => { throw { routeRecovery: {
+    code: "authority_unavailable", allowedActions: allowed ? ["start_new_session"] : ["back_to_session_library"], recoveryBinding: "", retryable: false,
+  } }; });
+  render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), createSession })} />);
+  await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+  expect(await screen.findByText("Workspace access is unavailable. Review the available recovery options.")).toBeTruthy();
+  if (allowed) {
+    expect(screen.getByRole("button", { name: "Start a conversation" })).toBeTruthy();
+  } else {
+    expect(screen.queryByRole("button", { name: "Start a conversation" })).toBeNull();
+    const recovery = screen.getByRole("heading", { name: "Conversation unavailable" }).closest("div")!;
+    expect(within(recovery).getByRole("button", { name: "Manage conversations" })).toBeTruthy();
+    expect(within(recovery).queryByRole("button", { name: "Retry conversation" })).toBeNull();
+  }
+  expect(createSession).toHaveBeenCalledOnce();
+});
+
+
+it("ignores a deferred empty workspace create rejection after switching to another workspace", async () => {
+  const user = userEvent.setup();
+  const other = { ...workspace, id: "workspace-create-scope-other", displayName: "Other" };
+  const first = deferred<SessionSummary>();
+  const createSession = vi.fn()
+    .mockImplementationOnce(() => first.promise)
+    .mockResolvedValueOnce({ id: "http-create-scope-other", label: "Other conversation", runCount: 0 });
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace, other], recentWorkspaces: [] }),
+    catalog: async (workspaceId) => ({ ...emptyCatalog, workspaceId }), createSession,
+  })} />);
+  await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+  expect(createSession).toHaveBeenCalledOnce();
+  await user.click(screen.getByRole("button", { name: "Switch workspace: sigil" }));
+  await user.click(screen.getByRole("button", { name: "Other" }));
+  await waitFor(() => expect((screen.getByRole("button", { name: "Start a conversation" }) as HTMLButtonElement).disabled).toBe(false));
+  await act(async () => {
+    first.reject({ routeRecovery: { code: "authority_unavailable", allowedActions: ["back_to_session_library"], recoveryBinding: "", retryable: false } });
+    await first.promise.catch(() => undefined);
+  });
+  expect(screen.getByRole("button", { name: "Switch workspace: Other" })).toBeTruthy();
+  expect(screen.queryByText("Workspace access is unavailable. Review the available recovery options.")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Conversation unavailable" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Start a conversation" }));
+  await readyComposer();
+  expect(createSession).toHaveBeenNthCalledWith(2, other.id, "New conversation", expect.anything());
 });

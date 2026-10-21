@@ -1,6 +1,7 @@
 import { useRef, useState, type RefObject } from "react";
 
 import type { RecentWorkspaceSummary, WorkspaceSummary } from "../../types";
+import { workspaceDisplayLabel } from "./workspacePresentation";
 import { useLocale } from "../../i18n";
 import { StatusIndicator } from "../../ui/feedback";
 import { Icon } from "../../ui/icons";
@@ -35,6 +36,8 @@ export function WorkspaceSwitcher({
   const resolvedTriggerRef = triggerRef ?? localTriggerRef;
   const active = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
   const closedRecent = recentWorkspaces.filter((recent) => !recent.isOpen);
+  const candidates = [...workspaces, ...recentWorkspaces];
+  const label = (workspace: WorkspaceSummary | RecentWorkspaceSummary) => workspaceDisplayLabel(workspace, candidates);
   const closeAndRestore = () => {
     setOpen(false);
     window.requestAnimationFrame(() => resolvedTriggerRef.current?.focus());
@@ -53,14 +56,14 @@ export function WorkspaceSwitcher({
             <span className="workspace-switcher-placeholder">{t("workspaces")}</span>
           ) : (
             <StatusIndicator
-              label={active.displayName}
+              label={label(active)}
               tone={active.state === "ready" ? "success" : "danger"}
             />
           )}
           <span aria-hidden="true">⌄</span>
         </span>
       }
-      accessibleLabel={active === undefined ? t("switchWorkspace") : t("switchWorkspaceNamed", { name: active.displayName })}
+      accessibleLabel={active === undefined ? t("switchWorkspace") : t("switchWorkspaceNamed", { name: label(active) })}
       open={open}
       onOpenChange={setOpen}
       triggerRef={resolvedTriggerRef}
@@ -80,6 +83,7 @@ export function WorkspaceSwitcher({
                   className="workspace-switcher-row"
                   type="button"
                   variant="quiet"
+                  aria-label={label(workspace)}
                   aria-current={workspace.id === activeWorkspaceId ? "page" : undefined}
                   onClick={() => {
                     onSelect(workspace.id);
@@ -90,9 +94,10 @@ export function WorkspaceSwitcher({
                     label={workspace.displayName}
                     tone={workspace.state === "ready" ? "success" : "danger"}
                   />
+                  {label(workspace) === workspace.displayName ? null : <small>{workspace.locationLabel}</small>}
                 </Button>
                 <IconButton
-                  aria-label={t("closeWorkspace", { name: workspace.displayName })}
+                  aria-label={t("closeWorkspace", { name: label(workspace) })}
                   icon={<Icon name="close" />}
                   onClick={() => {
                     setOpen(false);
@@ -113,12 +118,14 @@ export function WorkspaceSwitcher({
                     className="workspace-switcher-row"
                     type="button"
                     variant="quiet"
+                    aria-label={label(recent)}
                     onClick={() => {
                       onOpenRecent(recent);
                       closeAndRestore();
                     }}
                   >
-                    {recent.displayName}
+                    <span>{recent.displayName}</span>
+                    {label(recent) === recent.displayName ? null : <small>{recent.locationLabel}</small>}
                   </Button>
                 </li>
               ))}

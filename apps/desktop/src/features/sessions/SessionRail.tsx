@@ -2,7 +2,7 @@ import type { FormEvent, RefObject } from "react";
 
 import { ErrorCard } from "../../ErrorCard";
 import { HistoryContent, type HistoryState } from "../../HistoryPanel";
-import type { CatalogEntry, CatalogPage, CatalogSourceState } from "../../types";
+import type { CatalogEntry, CatalogPage, CatalogSourceState, LegacySharedSessionHistory } from "../../types";
 import { useLocale } from "../../i18n";
 import { Icon } from "../../ui/icons";
 import { Button, Checkbox, IconButton, Popover, Select, TextField, Tooltip } from "../../ui/primitives";
@@ -10,6 +10,10 @@ import { Button, Checkbox, IconButton, Popover, Select, TextField, Tooltip } fro
 interface SessionRailProps {
   readonly historyState: HistoryState;
   readonly catalog: CatalogPage;
+  readonly legacyHistory?: LegacySharedSessionHistory;
+  readonly legacyWorkspaceLabel?: string;
+  readonly onOpenLegacyHistory?: () => void;
+  readonly legacyWorkspaceAvailable?: boolean;
   readonly selectedSessionId?: string;
   readonly navigationBusy: boolean;
   readonly openingSessionRef?: string;
@@ -38,6 +42,10 @@ interface SessionRailProps {
 export function SessionRail({
   historyState,
   catalog,
+  legacyHistory,
+  legacyWorkspaceLabel,
+  onOpenLegacyHistory,
+  legacyWorkspaceAvailable = false,
   selectedSessionId,
   navigationBusy,
   openingSessionRef,
@@ -124,6 +132,12 @@ export function SessionRail({
           onAction={onRetrySession}
         />
       )}
+      {legacyHistory === undefined ? null : <aside className="session-legacy-notice" aria-label={t("legacySharedHistory")}>
+        <p>{t(legacyHistory.sourceState === "present" ? "legacySharedHistoryPresent" : "legacySharedHistoryUnverified", { name: legacyWorkspaceLabel ?? legacyHistory.workspaceLabel })}</p>
+        {onOpenLegacyHistory === undefined ? null : <Button type="button" variant="quiet" onClick={onOpenLegacyHistory}>
+          {t(legacyWorkspaceAvailable ? "returnToLegacyWorkspace" : "openWorkspaceMenu")}
+        </Button>}
+      </aside>}
       <div className="session-rail-scroll">
         <HistoryContent
           state={historyState}

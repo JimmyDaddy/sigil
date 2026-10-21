@@ -5,6 +5,7 @@ export type ConnectionState = "ready" | "exited" | "crashed";
 export interface WorkspaceSummary {
   id: string;
   displayName: string;
+  locationLabel?: string;
   serverVersion: string;
   state: ConnectionState;
 }
@@ -134,6 +135,7 @@ export type ControlLogRecoveryOutcome =
 export interface RecentWorkspaceSummary {
   id: string;
   displayName: string;
+  locationLabel?: string;
   isOpen: boolean;
 }
 
@@ -174,6 +176,12 @@ export interface CatalogEntry {
   pinned: boolean;
 }
 
+export interface LegacySharedSessionHistory {
+  workspaceId: string;
+  workspaceLabel: string;
+  sourceState: "present" | "unverified";
+}
+
 export interface CatalogPage {
   workspaceId: string;
   generation: number;
@@ -183,6 +191,7 @@ export interface CatalogPage {
   truncatedSourceCount: number;
   entries: CatalogEntry[];
   nextCursor?: string;
+  legacySharedHistory?: LegacySharedSessionHistory;
 }
 
 export interface SessionSummary {

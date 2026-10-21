@@ -14,6 +14,8 @@
   .workspace-switcher-list li { display: flex; min-width: 0; align-items: center; gap: var(--sg-sys-space-1); }
   .workspace-switcher-row { min-width: 0; flex: 1; justify-content: flex-start; overflow: hidden; }
   .workspace-switcher-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .workspace-switcher-row > span { display: grid; gap: 2px; text-align: left; }
+  .workspace-switcher-row small { display: block; overflow: hidden; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; text-overflow: ellipsis; }
   .workspace-switcher-row[aria-current="page"] { color: var(--sg-sys-color-on-primary-container); background: var(--sg-sys-color-primary-container); }
   .workspace-switcher-list .sg-icon-button { width: 32px; min-width: 32px; min-height: 32px; }
   .workspace-recent-group { display: grid; gap: var(--sg-sys-space-1); padding-top: var(--sg-sys-space-2); border-top: 1px solid var(--sg-sys-color-outline); }

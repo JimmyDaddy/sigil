@@ -13,6 +13,9 @@
   .session-filter-panel .sg-field { min-width: 0; }
   .active-filter-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); color: var(--sg-sys-color-on-surface-variant); font-size: 11px; }
   .active-filter-clear { width: 28px; min-width: 28px; min-height: 28px; border-color: transparent; background: transparent; }
+  .session-legacy-notice { flex: 0 0 auto; padding: 4px 2px; color: var(--sg-sys-color-on-surface-variant); font-size: 11px; line-height: 1.5; }
+  .session-legacy-notice p { margin: 0; overflow-wrap: anywhere; }
+  .session-legacy-notice > button { min-height: 28px; margin-top: 3px; padding: 2px 4px; font-size: 11px; }
   .session-rail-scroll { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
   .session-rail-empty { display: grid; gap: var(--sg-sys-space-3); padding: var(--sg-sys-space-5); color: var(--sg-sys-color-on-surface-variant); }
   .session-rail-empty p { margin: 0; font-size: 12px; line-height: 1.5; }

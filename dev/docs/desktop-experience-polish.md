@@ -20,6 +20,14 @@
 
 菜单 trigger 的 `aria-controls` 指向真正的 `role=menu`，菜单具有对应的可访问名称；方向键、字首导航与焦点返回仍复用现有 primitive。DOM 交互测试不替代 WebKit/VoiceOver 或原生 AX 验收。
 
+## 工作区定位与旧共享会话
+
+同名工作区只在冲名时增加 native 提供的短父级说明，菜单当前项、打开项、最近项及关闭确认使用同一可访问名称。说明最多包含父/祖父两个 basename（以 ` · ` 分隔），不返回完整路径、可执行路径、内部哈希或新 filesystem capability；根目录、控制符、非 Unicode 或超长组件不伪造定位，旧 DTO 缺字段仍显示原名称。真正相同 canonical root 仍复用原 workspace identity，标签不参与授权或 session 路由。
+
+新 realm 的目录若报告共享历史访问入口，侧栏只显示一条中性定位提示：已打开的访问工作区按 exact workspace ID 切回，已在最近列表中的访问工作区复用现有 native reopen；未列出时打开现有工作区菜单。入口只表示可查看共享历史的位置，不声明旧会话或资源属于该工作区。`unverified` 只如实说明尚未核实，不把空列表称为删除、不推断迁移，也不把观察状态变成新会话权限门禁。不同 workspace 或旧 catalog 的提示不会借用于当前导航。
+
+确认为无会话、无筛选且没有选中会话时，主区提供“开始新会话”，复用现有 create 与 busy 处理；有真实 route recovery 时，新建入口只在其 typed actions 允许 `start_new_session` 时显示，其余仅呈现已有允许的恢复操作。有历史时保留会话导航；空搜索结果提供显式“清除搜索和筛选”，不静默改变跨工作区的搜索 scope。上述源变化由组件与 native DTO/真实 recent store 回归覆盖，原生菜单视觉和 AX 仍以最终候选实测为准。
+
 ## Markdown 编辑与实时预览
 
 用户选择 Markdown 原文编辑与实时排版预览。输入区使用 CodeMirror 6 的单一原文 editor；不提供 WYSIWYG，也没有隐藏 textarea 或 HTML 正文。`格式`菜单提供粗体、斜体、行内代码、代码块、列表和链接，修改原始字符串并使用同一 transaction history。Cmd/Ctrl-B、I、K 分别插入粗体、斜体和链接；Cmd/Ctrl-Z 撤销，macOS Shift-Cmd-Z、其他平台 Ctrl-Y 重做。真实 WebView 键盘与 IME 仍以最终候选实机为准。

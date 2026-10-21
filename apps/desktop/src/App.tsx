@@ -36,6 +36,7 @@ import type {
   SessionSummary,
   WorkspaceSummary,
 } from "./types";
+import { workspaceDisplayLabel } from "./features/workspaces/workspacePresentation";
 import { useMediaQuery } from "./useMediaQuery";
 import { Button, Dialog, Drawer, IconButton, TextField, Tooltip } from "./ui/primitives";
 import { LoadingState, NotificationProvider, useNotifications } from "./ui/feedback";
@@ -139,6 +140,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
+  const [sessionRecovery, setSessionRecovery] = useState<SessionRouteRecoveryView>();
   const [failedSessionEntry, setFailedSessionEntry] = useState<CatalogEntry>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
   const [pendingSessionRename, setPendingSessionRename] = useState<PendingSessionRename>();
@@ -232,7 +234,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           const workspace = await bridge.openRecentWorkspace(mostRecentWorkspace.id);
           setWorkspaces([workspace]);
           setRecentWorkspaces((current) => [
-            { id: workspace.id, displayName: workspace.displayName, isOpen: true },
+            { id: workspace.id, displayName: workspace.displayName, locationLabel: workspace.locationLabel, isOpen: true },
             ...current.filter((candidate) => candidate.id !== workspace.id),
           ]);
           setActiveWorkspaceId(workspace.id);
@@ -341,6 +343,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     },
     [bridge, catalogRequest],
   );
+
+  useEffect(() => { setSessionRecovery(undefined); }, [activeWorkspaceId]);
 
   useEffect(() => {
     if (activeWorkspaceId === undefined) {
@@ -469,7 +473,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       workspace,
     ]);
     setRecentWorkspaces((current) => [
-      { id: workspace.id, displayName: workspace.displayName, isOpen: true },
+      { id: workspace.id, displayName: workspace.displayName, locationLabel: workspace.locationLabel, isOpen: true },
       ...current.filter((candidate) => candidate.id !== workspace.id),
     ]);
     setActiveWorkspaceId(workspace.id);
@@ -602,7 +606,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
         setPendingWorkspaceClose({
           id: workspaceId,
-          displayName: workspace?.displayName ?? t("workspace"),
+          displayName: workspace === undefined ? t("workspace") : workspaceDisplayLabel(workspace, [...workspaces, ...recentWorkspaces]),
           message: errorMessage(error) ?? t("activeRunOwnsWorkspace"),
         });
         setLoadState("ready");
@@ -623,6 +627,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
+    setSessionRecovery(undefined);
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
     try {
@@ -635,10 +640,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         t("newConversation"),
         selectedDefaultModel,
       );
+      if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
       setConversationNavigation((current) =>
         current?.kind === "creating" ? { ...current, targetSessionId: session.id } : current,
       );
-      if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
       setSelectedSession(session);
       setSelectedDurableSessionId(undefined);
       setNavigationOpen(false);
@@ -658,8 +663,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       }
       return session;
     } catch (error) {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
       setSessionActionState("error");
       const routeRecovery = sessionRouteRecoveryFromError(error);
+      setSessionRecovery(routeRecovery);
       setSessionMessage(
         routeRecovery?.code === "authority_unavailable"
             ? t("routeRecoveryAuthorityUnavailable")
@@ -684,6 +691,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
+    setSessionRecovery(undefined);
     setConversationNavigation({
       kind: "opening",
       sessionRef: entry.sessionRef,
@@ -718,6 +726,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     } catch (error) {
       if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       const routeRecovery = sessionRouteRecoveryFromError(error);
+      setSessionRecovery(routeRecovery);
       if (routeRecovery !== undefined && entry.sessionId === selectedDurableSessionId) {
         setSelectedSession((current) => current === undefined
           ? current
@@ -738,8 +747,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         return false;
       }
       setSessionActionState("error");
-      setSessionMessage(t("conversationOpenFailed"));
-      setFailedSessionEntry(entry);
+      setSessionMessage(routeRecovery?.code === "authority_unavailable"
+        ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
+      setFailedSessionEntry(routeRecovery === undefined || (routeRecovery.retryable && routeRecovery.allowedActions.includes("retry_session_attach")) ? entry : undefined);
       setConversationNavigation(undefined);
       return false;
     }
@@ -902,14 +912,45 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
+  const legacyHistory = catalog.workspaceId === activeWorkspaceId
+    && catalog.legacySharedHistory?.workspaceId !== activeWorkspaceId
+    ? catalog.legacySharedHistory : undefined;
+  const legacyWorkspace = workspaces.find((workspace) => workspace.id === legacyHistory?.workspaceId);
+  const legacyRecent = recentWorkspaces.find((workspace) => workspace.id === legacyHistory?.workspaceId);
+  const openWorkspaceMenu = () => {
+    setNavigationOpen(false);
+    window.requestAnimationFrame(() => workspaceSwitcherRef.current?.click());
+  };
+  const openLegacyHistory = () => {
+    if (legacyHistory === undefined) return;
+    setNavigationOpen(false);
+    if (legacyWorkspace !== undefined) {
+      setActiveWorkspaceId(legacyWorkspace.id);
+      navigate("conversation");
+    } else if (legacyRecent !== undefined) {
+      void openRecentWorkspace(legacyRecent);
+    } else {
+      openWorkspaceMenu();
+    }
+  };
+  const legacyIdentity = legacyWorkspace ?? legacyRecent;
+  const emptyCreationAllowed = sessionRecovery === undefined || sessionRecovery.allowedActions.includes("start_new_session");
+  const recoveryWithoutSession = selectedSession === undefined && !emptyCreationAllowed;
+  const historyFiltersApplied = searchQuery.trim() !== "" || searchDraft.trim() !== "" || providerFilter.trim() !== "" || sourceFilter !== "all" || pinnedOnly;
+  const emptyHistory = historyState === "ready" && catalog.workspaceId === activeWorkspaceId && catalog.entries.length === 0;
+  const sessionNavigationBusy = sessionActionState === "working" || conversationNavigation !== undefined;
   const navigationContent = activeWorkspace === undefined ? null : (
     <SessionRail
       historyState={historyState}
       catalog={catalog}
+      legacyHistory={legacyHistory}
+      legacyWorkspaceLabel={legacyIdentity === undefined ? undefined : workspaceDisplayLabel(legacyIdentity, [...workspaces, ...recentWorkspaces])}
+      legacyWorkspaceAvailable={legacyIdentity !== undefined}
+      onOpenLegacyHistory={openLegacyHistory}
       selectedSessionId={selectedDurableSessionId}
       navigationBusy={conversationNavigation !== undefined}
       openingSessionRef={conversationNavigation?.kind === "opening" ? conversationNavigation.sessionRef : undefined}
-      sessionErrorMessage={sessionActionState === "error" ? sessionMessage : undefined}
+      sessionErrorMessage={sessionActionState === "error" && !recoveryWithoutSession ? sessionMessage : undefined}
       searchDraft={searchDraft}
       searchInputRef={sessionSearchRef}
       providerFilter={providerFilter}
@@ -1218,11 +1259,23 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   notify({ tone: "success", message: t("providerSetupSaved") });
                 }}
               />
+            ) : recoveryWithoutSession ? (
+              <div className="conversation-empty" role="alert">
+                <h1>{t("conversationUnavailable")}</h1>
+                <p>{sessionMessage}</p>
+                {sessionRecovery?.allowedActions.includes("back_to_session_library") ? <Button type="button" onClick={() => navigate("library")}>{t("openConversationLibrary")}</Button> : null}
+                {failedSessionEntry !== undefined && sessionRecovery?.allowedActions.includes("retry_session_attach") ? <Button type="button" disabled={sessionNavigationBusy} onClick={() => void openSession(failedSessionEntry)}>{t("retryConversation")}</Button> : null}
+                {sessionRecovery?.allowedActions.some((action) => action === "repair_connection" || action === "select_replacement") ? <Button type="button" onClick={() => navigate("settings")}>{t("openSettings")}</Button> : null}
+              </div>
             ) : selectedSession === undefined ? (
               <div className="conversation-empty">
                 <p className="eyebrow">{activeWorkspace.displayName}</p>
-                <h1>{t("selectConversation")}</h1>
-                <p>{t("selectConversationDetail")}</p>
+                <h1>{t(emptyHistory && !historyFiltersApplied ? "noConversationsYet" : "selectConversation")}</h1>
+                {emptyHistory && !historyFiltersApplied ? <Button type="button" variant="primary" disabled={sessionNavigationBusy} onClick={() => void createSession()}>{t("startConversation")}</Button>
+                  : <p>{t("selectConversationDetail")}</p>}
+                {emptyHistory && historyFiltersApplied ? <Button type="button" variant="quiet" onClick={() => {
+                  setSearchDraft(""); setSearchQuery(""); setProviderFilter(""); setSourceFilter("all"); setPinnedOnly(false);
+                }}>{t("clearSearchAndFilters")}</Button> : null}
               </div>
             ) : (
             <div className="conversation-surface" inert={navigationBlocksSelectedSession || undefined}>
