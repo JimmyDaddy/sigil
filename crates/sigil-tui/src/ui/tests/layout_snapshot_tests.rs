@@ -1197,7 +1197,7 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
             &["Provider: deepseek".to_owned()],
             Rect::new(0, 0, 24, 3),
             1,
-            &[0..1],
+            std::slice::from_ref(&(0..1)),
         )
         .is_empty()
     );

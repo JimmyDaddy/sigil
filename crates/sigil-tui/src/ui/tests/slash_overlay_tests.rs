@@ -271,3 +271,39 @@ fn rendered_terminal_text(terminal: &Terminal<TestBackend>) -> String {
     }
     text
 }
+
+#[test]
+fn model_picker_shows_each_action_once_with_fill_and_switch_request_semantics() -> anyhow::Result<()>
+{
+    let _env_guard = crate::test_env::lock();
+    let _key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "model-picker-test-key");
+    let root = tempfile::tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = root.path().display().to_string();
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.set_terminal_size(80, 24);
+    app.handle_paste_text("/model");
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, 80, 24),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(text.matches("D saves default").count(), 1);
+    assert!(text.contains("current session unchanged"));
+    assert!(surface.footer.hints.contains("Tab fill"));
+    assert!(surface.footer.hints.contains("Enter request switch"));
+    assert!(!text.contains("Enter choose") && !surface.footer.hints.contains("Enter run"));
+    Ok(())
+}

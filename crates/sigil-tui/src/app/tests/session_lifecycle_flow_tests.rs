@@ -290,3 +290,263 @@ fn right_click_opens_actions_and_modal_rows_are_clickable() -> Result<()> {
     assert_eq!(app.composer.input, "/resume");
     Ok(())
 }
+
+#[test]
+fn resume_picker_moves_action_help_out_of_rows_and_does_not_offer_missing_target() -> Result<()> {
+    let (_temp, mut app, _) = app_with_resume_target()?;
+    assert!(
+        app.slash_selector_rows()
+            .iter()
+            .all(|(_, text)| !text.contains("Ctrl-O") && !text.contains("right-click"))
+    );
+    app.set_input_and_cursor("/resume NO_SUCH_SESSION".to_owned());
+    assert!(app.slash_selector_rows().is_empty());
+    let hints = crate::view_model::UiViewModel::from_app(&app).footer.hints;
+    assert!(!hints.contains("Enter restore"));
+    assert!(hints.contains("UUID"));
+    Ok(())
+}
+
+#[test]
+fn session_details_preserve_phase_draft_and_reject_business_keys_and_old_mouse_frame() -> Result<()>
+{
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    app.set_terminal_size(80, 24);
+    let Some(AppAction::InspectLocalSession { request_id, .. }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?
+    else {
+        panic!("inspection");
+    };
+    let mut entry = ready_entry(&target, true, 3);
+    entry.title = Some(format!("首部{}尾部", "长中文e\u{301}🙂".repeat(320)));
+    app.handle_worker_message(WorkerMessage::LocalSessionInspected { request_id, entry })?;
+    let screen = Rect::new(0, 0, 80, 24);
+    let old = LayoutSnapshot::from_app(screen, &app);
+    let resume_hit = *old
+        .session_modal_hit_areas
+        .as_ref()
+        .expect("actions")
+        .actions
+        .iter()
+        .find(|hit| hit.action == SessionModalAction::Resume)
+        .expect("resume");
+    let lines = app.modal_lines();
+    assert!(lines[0].starts_with("title: 首部"));
+    assert!(lines[1].contains("3 turns") && lines[1].contains("pinned"));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("file:") || line.starts_with("UUID:"))
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    assert!(app.session_actions_view().expect("details").details_open);
+    assert!(app.modal_lines().iter().any(|line| line.contains("尾部")));
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Char('f'),
+        KeyCode::Char('e'),
+        KeyCode::Char('d'),
+        KeyCode::F(4),
+    ] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))?
+                .is_none()
+        );
+        assert!(
+            app.session_actions_view()
+                .expect("details retained")
+                .details_open
+        );
+    }
+    assert!(matches!(
+        app.handle_mouse_event(
+            MouseInput {
+                kind: MouseInputKind::LeftDown,
+                column: resume_hit.area.x,
+                row: resume_hit.area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &old
+        )?,
+        AppMouseOutcome::Noop
+    ));
+    let details_frame = LayoutSnapshot::from_app(screen, &app);
+    let area = details_frame
+        .session_modal_hit_areas
+        .as_ref()
+        .expect("details hit areas")
+        .modal;
+    let details = app.session_actions_view().expect("details before wheel");
+    let (max_scroll, viewport_rows) =
+        crate::ui::session_actions_scroll_bounds(80, 24, &app.modal_lines(), &details);
+    assert!(
+        max_scroll > viewport_rows,
+        "wheel fixture must exceed one full page"
+    );
+    assert_eq!(details.scroll_rows, 0);
+    assert!(matches!(
+        app.handle_mouse_event(
+            MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                column: area.x + 1,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &details_frame
+        )?,
+        AppMouseOutcome::Redraw
+    ));
+    assert!(
+        app.session_actions_view()
+            .expect("wheel scrolled")
+            .scroll_rows
+            > 0
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    let end = app.session_actions_view().expect("details").scroll_rows;
+    assert!(end > 0);
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.session_actions_view().expect("bounded").scroll_rows,
+        end
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    assert_eq!(app.session_actions_view().expect("top").scroll_rows, 0);
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(
+        !app.session_actions_view()
+            .expect("actions retained")
+            .details_open
+    );
+    assert_eq!(app.composer.input, "/resume");
+    assert!(
+        matches!(app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))?,
+        Some(AppAction::ForkLocalSession { source_path, .. }) if source_path == target)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_actions_production_surface_prioritizes_identity_and_scrolls_delete_evidence()
+-> Result<()> {
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    app.set_terminal_size(80, 24);
+    let Some(AppAction::InspectLocalSession { request_id, .. }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?
+    else {
+        panic!("inspection");
+    };
+    app.handle_worker_message(WorkerMessage::LocalSessionInspected {
+        request_id,
+        entry: ready_entry(&target, false, 1),
+    })?;
+    let screen = Rect::new(0, 0, 80, 24);
+    let surface = crate::surface_adapter::build_surface_model(
+        screen,
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        text.find("title: target session").expect("identity")
+            < text.find("[Enter resume]").expect("action")
+    );
+    assert!(!text.contains("UUID:") && !text.contains("file:") && !text.contains("bytes"));
+    for action in &surface
+        .layout
+        .session_modal_hit_areas
+        .as_ref()
+        .expect("hits")
+        .actions
+    {
+        let row = (action.area.x..action.area.right())
+            .map(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, action.area.y))
+                    .expect("cell")
+                    .symbol()
+            })
+            .collect::<String>();
+        assert!(!row.trim().is_empty(), "hit area must have rendered text");
+    }
+    let Some(AppAction::PreviewLocalSessionDelete { request_id, .. }) =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))?
+    else {
+        panic!("delete preview");
+    };
+    let mut preview = delete_preview(&target);
+    preview.source_content_sha256 = format!("sha256:{}", "ab".repeat(32));
+    preview.resource_tree_sha256 = format!("sha256:{}", "cd".repeat(32));
+    assert!(app.apply_local_session_delete_preview(request_id, preview.clone()));
+    let evidence = app.modal_lines().join("\n");
+    assert!(evidence.contains(&target.display().to_string()));
+    assert!(evidence.contains(&preview.source_content_sha256));
+    assert!(evidence.contains(&preview.resource_tree_sha256));
+    assert!(evidence.contains(&preview.source_session_id));
+    assert!(evidence.contains("delete bytes: 128"));
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    let surface = crate::surface_adapter::build_surface_model(
+        screen,
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 2,
+            terminal_epoch: 1,
+        },
+    );
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("[Enter confirm delete]"));
+    assert!(
+        surface
+            .layout
+            .session_modal_hit_areas
+            .as_ref()
+            .expect("hits")
+            .actions
+            .iter()
+            .any(|hit| hit.action == SessionModalAction::ConfirmDelete)
+    );
+    let stale = surface.layout.clone();
+    app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    let confirm = stale
+        .session_modal_hit_areas
+        .as_ref()
+        .expect("old hits")
+        .actions
+        .iter()
+        .find(|hit| hit.action == SessionModalAction::ConfirmDelete)
+        .expect("old confirm");
+    assert!(matches!(
+        app.handle_mouse_event(
+            MouseInput {
+                kind: MouseInputKind::LeftDown,
+                column: confirm.area.x,
+                row: confirm.area.y,
+                modifiers: KeyModifiers::NONE
+            },
+            &stale
+        )?,
+        AppMouseOutcome::Noop
+    ));
+    assert!(target.exists(), "no deletion from stale preview");
+    Ok(())
+}

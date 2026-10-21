@@ -106,7 +106,23 @@ impl AppState {
         }
         let target = layout.hit_target(input.column, input.row);
         if self.session_lifecycle_modal_open() {
+            if layout
+                .session_modal_hit_areas
+                .as_ref()
+                .and_then(|areas| areas.frame_identity.as_ref())
+                != self.session_actions_frame_identity().as_ref()
+            {
+                return Ok(crate::mouse::AppMouseOutcome::Noop);
+            }
             return Ok(match (input.kind, target) {
+                (crate::mouse::MouseInputKind::ScrollUp, _) => {
+                    self.scroll_session_actions(true, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
+                (crate::mouse::MouseInputKind::ScrollDown, _) => {
+                    self.scroll_session_actions(false, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
                 (
                     crate::mouse::MouseInputKind::LeftDown,
                     crate::mouse::HitTarget::SessionModalAction { action },

@@ -663,3 +663,76 @@ fn info_details_review_omits_inapplicable_checks_but_preserves_failed_and_interr
     }
     Ok(())
 }
+
+#[test]
+fn checkpoint_empty_projection_is_neutral_but_read_failure_stays_unavailable() -> Result<()> {
+    use super::super::checkpoint_flow::CheckpointRestoreModalPhase;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let fixture = tempdir()?;
+    let path = fixture.path().join("empty-checkpoint-session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "no controlled writes",
+    )))?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = path;
+    app.set_terminal_size(80, 24);
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    let empty = app.checkpoint_restore_modal_view().expect("empty view");
+    assert_eq!(empty.phase, CheckpointRestoreModalPhase::Empty);
+    assert!(empty.error.is_none() && !empty.can_restore && !empty.can_fork);
+    for key in [KeyCode::Enter, KeyCode::Char('f')] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?
+                .is_none()
+        );
+    }
+    let surface = crate::surface_adapter::build_surface_model(
+        ratatui::layout::Rect::new(0, 0, 80, 24),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("No controlled checkpoint yet"));
+    for absent in [
+        "UNAVAILABLE",
+        "Restore target",
+        "Restore evidence",
+        "Enter restore",
+        "fork (files unchanged)",
+    ] {
+        assert!(!text.contains(absent), "unavailable empty action {absent}");
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let invalid_path = fixture.path().join("invalid-checkpoint-stream.jsonl");
+    std::fs::write(&invalid_path, b"not-json\n")?;
+    app.session_log_path = invalid_path;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    let error = app.checkpoint_restore_modal_view().expect("read failure");
+    assert_eq!(error.phase, CheckpointRestoreModalPhase::Unavailable);
+    assert!(
+        error
+            .error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("checkpoint stream unavailable"))
+    );
+    assert!(!error.can_restore && !error.can_fork);
+    Ok(())
+}

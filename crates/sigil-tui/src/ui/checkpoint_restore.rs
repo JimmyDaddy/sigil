@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 #[cfg(test)]
@@ -79,6 +79,20 @@ fn render_checkpoint_restore_modal_view(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if view.phase == CheckpointRestoreModalPhase::Empty {
+        frame.render_widget(
+            Paragraph::new("No controlled checkpoint yet.\n\nControlled file changes will appear here when a checkpoint is recorded.")
+                .style(Style::default().fg(palette.text_secondary))
+                .wrap(Wrap { trim: false }),
+            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2)),
+        );
+        frame.render_widget(
+            Paragraph::new("Ctrl-R refresh · Esc close")
+                .style(Style::default().fg(palette.text_secondary)),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
         return;
     }
 
@@ -374,6 +388,7 @@ fn phase_badge(phase: CheckpointRestoreModalPhase, palette: &ThemePalette) -> Sp
         CheckpointRestoreModalPhase::Restoring => " RESTORING ",
         CheckpointRestoreModalPhase::Forking => " FORKING ",
         CheckpointRestoreModalPhase::Unavailable => " UNAVAILABLE ",
+        CheckpointRestoreModalPhase::Empty => " NO CHECKPOINT ",
     };
     Span::styled(
         label,
@@ -392,6 +407,8 @@ fn phase_color(phase: CheckpointRestoreModalPhase, palette: &ThemePalette) -> Co
         CheckpointRestoreModalPhase::Ready => palette.accent_success,
         CheckpointRestoreModalPhase::Blocked => palette.accent_danger,
         CheckpointRestoreModalPhase::Restoring => palette.accent_warning,
-        CheckpointRestoreModalPhase::Unavailable => palette.text_muted,
+        CheckpointRestoreModalPhase::Unavailable | CheckpointRestoreModalPhase::Empty => {
+            palette.text_muted
+        }
     }
 }

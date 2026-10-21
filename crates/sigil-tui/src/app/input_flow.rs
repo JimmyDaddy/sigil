@@ -288,7 +288,7 @@ impl AppState {
         match key.code {
             KeyCode::Char('d' | 'D')
                 if self.active_pane == PaneFocus::Composer
-                    && key.modifiers.is_empty()
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
                     && self.has_slash_selector()
                     && self
                         .selected_slash_entry()

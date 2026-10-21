@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_runtime::{
     LocalSessionCatalogEntry, SessionDeleteOutput, SessionDeletePreview, SessionExportOutput,
     SessionRetentionOutput, SessionRetentionPolicy, SessionRetentionPreview,
@@ -34,6 +34,7 @@ pub(crate) enum SessionModalAction {
     ConfirmDelete,
     ApplyRetention,
     Back,
+    Details,
     Close,
 }
 
@@ -46,6 +47,14 @@ pub(crate) enum SessionActionsModalPhase {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionActionsFrameIdentity {
+    request_id: u64,
+    target_path: PathBuf,
+    phase: SessionActionsModalPhase,
+    details_open: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SessionActionsModalState {
     pub(crate) request_id: u64,
@@ -55,10 +64,18 @@ pub(crate) struct SessionActionsModalState {
     pub(crate) delete_preview: Option<SessionDeletePreview>,
     pub(crate) phase: SessionActionsModalPhase,
     pub(crate) result_message: Option<String>,
+    pub(crate) details_scroll: Option<usize>,
+    pub(crate) scroll_rows: usize,
 }
 
 impl SessionActionsModalState {
     fn action_rows(&self) -> Vec<(SessionModalAction, String)> {
+        if self.details_scroll.is_some() {
+            return vec![(
+                SessionModalAction::Back,
+                "[back] Session actions".to_owned(),
+            )];
+        }
         match &self.phase {
             SessionActionsModalPhase::Loading | SessionActionsModalPhase::Working(_) => vec![(
                 SessionModalAction::Close,
@@ -67,7 +84,7 @@ impl SessionActionsModalState {
             SessionActionsModalPhase::Ready => {
                 let mut rows = vec![(
                     SessionModalAction::Resume,
-                    "[resume] Resume selected session".to_owned(),
+                    "[Enter resume] Resume selected session".to_owned(),
                 )];
                 if self
                     .entry
@@ -76,53 +93,57 @@ impl SessionActionsModalState {
                 {
                     rows.push((
                         SessionModalAction::Fork,
-                        "[fork] Fork latest finalized turn and switch".to_owned(),
+                        "[F fork] Fork latest finalized turn and switch".to_owned(),
                     ));
                 }
                 rows.push((
                     SessionModalAction::ImportKnowledge,
-                    "[knowledge] Bring a conclusion into the current conversation".to_owned(),
+                    "[K conclusion] Bring into the current conversation".to_owned(),
                 ));
                 rows.push((
                     SessionModalAction::Export,
-                    "[export] Export safe transcript".to_owned(),
+                    "[E export] Export safe transcript".to_owned(),
                 ));
                 let pin_label = if self.entry.as_ref().is_some_and(|entry| entry.pinned) {
-                    "[unpin] Allow explicit cleanup again"
+                    "[P unpin] Allow explicit cleanup again"
                 } else {
-                    "[pin] Protect from explicit cleanup"
+                    "[P pin] Protect from explicit cleanup"
                 };
                 rows.push((SessionModalAction::TogglePin, pin_label.to_owned()));
                 if !self.is_current {
                     rows.push((
                         SessionModalAction::PreviewDelete,
-                        "[delete] Preview exact local deletion".to_owned(),
+                        "[D delete] Preview exact local deletion".to_owned(),
                     ));
                 }
                 rows.push((
+                    SessionModalAction::Details,
+                    "[I details] Full session identity".to_owned(),
+                ));
+                rows.push((
                     SessionModalAction::Close,
-                    "[close] Keep session unchanged".to_owned(),
+                    "[Esc close] Keep session unchanged".to_owned(),
                 ));
                 rows
             }
             SessionActionsModalPhase::DeleteReview => vec![
                 (
                     SessionModalAction::ConfirmDelete,
-                    "[confirm delete] Delete the exact reviewed file".to_owned(),
+                    "[Enter confirm delete] Delete the exact reviewed file".to_owned(),
                 ),
                 (
                     SessionModalAction::Back,
-                    "[back] Return to session actions".to_owned(),
+                    "[Backspace back] Return to session actions".to_owned(),
                 ),
                 (
                     SessionModalAction::Close,
-                    "[close] Keep session unchanged".to_owned(),
+                    "[Esc close] Keep session unchanged".to_owned(),
                 ),
             ],
             SessionActionsModalPhase::Error(_) if self.entry.is_some() => vec![
                 (
                     SessionModalAction::Back,
-                    "[back] Return to session actions".to_owned(),
+                    "[Backspace back] Return to session actions".to_owned(),
                 ),
                 (SessionModalAction::Close, "[close] Close".to_owned()),
             ],
@@ -133,64 +154,81 @@ impl SessionActionsModalState {
     }
 
     pub(crate) fn lines(&self) -> Vec<String> {
-        let mut lines = vec![match &self.phase {
-            SessionActionsModalPhase::Loading => {
-                "Loading exact local session details...".to_owned()
+        if self.details_scroll.is_some() {
+            let mut lines = vec!["Session identity".to_owned()];
+            if let Some(entry) = &self.entry {
+                lines.extend([
+                    format!(
+                        "title: {}",
+                        entry.title.as_deref().unwrap_or("untitled session")
+                    ),
+                    format!(
+                        "UUID: {}",
+                        entry.session_id.as_deref().unwrap_or("unavailable")
+                    ),
+                    format!("file: {}", self.target_path.display()),
+                    format!("size: {} bytes", entry.bytes),
+                    format!("modified (Unix ms): {}", entry.modified_at_unix_ms),
+                    format!("finalized turns: {}", entry.finalized_turn_count),
+                    format!("pinned: {} · current: {}", entry.pinned, self.is_current),
+                    format!("status: {:?}", entry.state),
+                ]);
+            } else {
+                lines.push(format!("file: {}", self.target_path.display()));
             }
-            SessionActionsModalPhase::Ready => {
-                "Choose an explicit action. Composer draft is preserved.".to_owned()
-            }
-            SessionActionsModalPhase::Working(action) => format!("{action} in progress..."),
-            SessionActionsModalPhase::DeleteReview => {
-                "Review the exact file binding before deletion.".to_owned()
-            }
-            SessionActionsModalPhase::Error(error) => format!("Operation failed: {error}"),
-        }];
-        lines.push(String::new());
-        lines.push(match self.phase {
-            SessionActionsModalPhase::Ready => {
-                "Enter resume  F fork  K conclusion  E export  P pin  D delete  Esc close"
-                    .to_owned()
-            }
-            SessionActionsModalPhase::DeleteReview => {
-                "Enter confirm delete  Backspace back  Esc close".to_owned()
-            }
-            SessionActionsModalPhase::Error(_) if self.entry.is_some() => {
-                "Backspace back  Esc close".to_owned()
-            }
-            SessionActionsModalPhase::Error(_) => "Esc close".to_owned(),
-            SessionActionsModalPhase::Loading | SessionActionsModalPhase::Working(_) => {
-                "Esc close; late worker responses will be ignored".to_owned()
-            }
-        });
-        lines.extend(self.action_rows().into_iter().map(|(_, line)| line));
-        lines.push(String::new());
-        lines.push(format!("file: {}", self.target_path.display()));
+            return lines;
+        }
+        let mut lines = Vec::new();
         if let Some(entry) = &self.entry {
             lines.push(format!(
                 "title: {}",
-                entry.title.as_deref().unwrap_or("untitled session")
+                super::formatting::truncate_session_view_text(
+                    entry.title.as_deref().unwrap_or("untitled session"),
+                    44
+                )
             ));
-            lines.push(format!("size: {} bytes", entry.bytes));
-            lines.push(format!("finalized turns: {}", entry.finalized_turn_count));
-            lines.push(format!("pinned: {}", entry.pinned));
             lines.push(format!(
-                "protected: {}",
-                if self.is_current {
-                    "current session"
-                } else {
-                    "no"
-                }
+                "{} · {} turns{}{}",
+                super::formatting::relative_age_label(entry.modified_at_unix_ms / 1000),
+                entry.finalized_turn_count,
+                if self.is_current { " · current" } else { "" },
+                if entry.pinned { " · pinned" } else { "" }
             ));
+            if entry.state != sigil_runtime::LocalSessionCatalogState::Ready {
+                lines.push(format!("Session status: {:?}", entry.state));
+            }
         }
+        lines.push(match &self.phase {
+            SessionActionsModalPhase::Loading => "Loading selected session…".to_owned(),
+            SessionActionsModalPhase::Ready => "Choose an action; draft is preserved.".to_owned(),
+            SessionActionsModalPhase::Working(action) => format!("{action} in progress…"),
+            SessionActionsModalPhase::DeleteReview => {
+                "Review the exact file before deletion.".to_owned()
+            }
+            SessionActionsModalPhase::Error(error) => format!("Operation failed: {error}"),
+        });
         if let Some(preview) = &self.delete_preview {
-            lines.push(format!("delete bytes: {}", preview.source_bytes));
-            lines.push(format!("content sha256: {}", preview.source_content_sha256));
-            lines.push("shell and remote side effects are not affected".to_owned());
+            lines.extend([
+                format!("file: {}", preview.source_path.display()),
+                format!("UUID: {}", preview.source_session_id),
+                format!("delete bytes: {}", preview.source_bytes),
+                format!("content sha256: {}", preview.source_content_sha256),
+                format!("resource bytes: {}", preview.resource_bytes),
+                format!("resource sha256: {}", preview.resource_tree_sha256),
+                format!("preview digest: {}", preview.preview_digest),
+                "shell and remote side effects are not affected".to_owned(),
+            ]);
         }
         if let Some(message) = &self.result_message {
             lines.push(format!("result: {message}"));
         }
+        lines.push(String::new());
+        lines.extend(
+            self.action_rows()
+                .into_iter()
+                .filter(|(action, _)| *action != SessionModalAction::Close)
+                .map(|(_, line)| line),
+        );
         lines
     }
 }
@@ -293,6 +331,52 @@ impl SessionRetentionModalState {
 }
 
 impl AppState {
+    pub(crate) fn session_actions_view(&self) -> Option<crate::surface::SessionActionsSurface> {
+        let Some(ModalState::SessionActions(state)) = self.modal_state.as_ref() else {
+            return None;
+        };
+        Some(crate::surface::SessionActionsSurface {
+            details_open: state.details_scroll.is_some(),
+            scroll_rows: state.details_scroll.unwrap_or(state.scroll_rows),
+        })
+    }
+
+    pub(super) fn scroll_session_actions(&mut self, up: bool, amount: usize) {
+        let Some(view) = self.session_actions_view() else {
+            return;
+        };
+        let (max_scroll, _) = crate::ui::session_actions_scroll_bounds(
+            self.terminal_width,
+            self.terminal_height,
+            &self.modal_lines(),
+            &view,
+        );
+        if let Some(ModalState::SessionActions(state)) = self.modal_state.as_mut() {
+            let scroll = state
+                .details_scroll
+                .as_mut()
+                .unwrap_or(&mut state.scroll_rows);
+            let current = (*scroll).min(max_scroll);
+            *scroll = if up {
+                current.saturating_sub(amount)
+            } else {
+                current.saturating_add(amount).min(max_scroll)
+            };
+        }
+    }
+
+    pub(crate) fn session_actions_frame_identity(&self) -> Option<SessionActionsFrameIdentity> {
+        let Some(ModalState::SessionActions(state)) = self.modal_state.as_ref() else {
+            return None;
+        };
+        Some(SessionActionsFrameIdentity {
+            request_id: state.request_id,
+            target_path: state.target_path.clone(),
+            phase: state.phase.clone(),
+            details_open: state.details_scroll.is_some(),
+        })
+    }
+
     pub(super) fn resume_session_selector_active(&self) -> bool {
         self.selected_slash_entry()
             .is_some_and(|entry| entry.resolved.canonical == "/resume")
@@ -319,6 +403,8 @@ impl AppState {
                 delete_preview: None,
                 phase: SessionActionsModalPhase::Loading,
                 result_message: None,
+                details_scroll: None,
+                scroll_rows: 0,
             },
         )));
         self.last_notice = Some("loading session actions".to_owned());
@@ -354,6 +440,49 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> Option<AppAction> {
+        if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            && self.session_actions_view().is_some()
+        {
+            match key.code {
+                KeyCode::Up => {
+                    self.scroll_session_actions(true, 1);
+                    return None;
+                }
+                KeyCode::Down => {
+                    self.scroll_session_actions(false, 1);
+                    return None;
+                }
+                KeyCode::PageUp => {
+                    self.scroll_session_actions(true, 8);
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_session_actions(false, 8);
+                    return None;
+                }
+                KeyCode::Home => {
+                    self.scroll_session_actions(true, usize::MAX);
+                    return None;
+                }
+                KeyCode::End => {
+                    self.scroll_session_actions(false, usize::MAX);
+                    return None;
+                }
+                _ => {}
+            }
+            if self
+                .session_actions_view()
+                .is_some_and(|view| view.details_open)
+            {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
+                    self.handle_session_modal_action(SessionModalAction::Back);
+                }
+                return None;
+            }
+        }
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+            return None;
+        }
         if key.code == KeyCode::Esc {
             self.modal_state = None;
             self.last_notice = Some("closed session maintenance".to_owned());
@@ -378,6 +507,9 @@ impl AppState {
                 }
                 (SessionActionsModalPhase::Ready, KeyCode::Char('d' | 'D')) => {
                     Some(SessionModalAction::PreviewDelete)
+                }
+                (SessionActionsModalPhase::Ready, KeyCode::Char('i' | 'I')) => {
+                    Some(SessionModalAction::Details)
                 }
                 (SessionActionsModalPhase::DeleteReview, KeyCode::Enter) => {
                     Some(SessionModalAction::ConfirmDelete)
@@ -409,6 +541,26 @@ impl AppState {
         &mut self,
         action: SessionModalAction,
     ) -> Option<AppAction> {
+        if let Some(ModalState::SessionActions(state)) = self.modal_state.as_mut() {
+            if state.details_scroll.is_some() {
+                if action == SessionModalAction::Back {
+                    state.details_scroll = None;
+                }
+                return None;
+            }
+            if !state
+                .action_rows()
+                .iter()
+                .any(|(available, _)| *available == action)
+            {
+                return None;
+            }
+            if action == SessionModalAction::Details {
+                state.details_scroll = Some(0);
+                return None;
+            }
+            state.scroll_rows = 0;
+        }
         if action == SessionModalAction::Close {
             self.modal_state = None;
             self.last_notice = Some("closed session maintenance".to_owned());

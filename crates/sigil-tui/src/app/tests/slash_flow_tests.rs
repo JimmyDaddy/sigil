@@ -1959,3 +1959,57 @@ fn exit_alias_quits_tui() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn model_picker_default_modifiers_and_paste_keep_routes_distinct() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _openai_key =
+        crate::test_env::EnvScope::set("SIGIL_OPENAI_RESPONSES_API_KEY", "openai-test-key");
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
+    let config = multi_connection_v2_config()?;
+    for (character, modifiers, saves) in [
+        ('d', KeyModifiers::NONE, true),
+        ('D', KeyModifiers::SHIFT, true),
+        ('D', KeyModifiers::NONE, true),
+        ('d', KeyModifiers::CONTROL, false),
+        ('D', KeyModifiers::CONTROL | KeyModifiers::SHIFT, false),
+        ('d', KeyModifiers::ALT, false),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        app.set_input_and_cursor("/model deepseek-team/deepseek-v4-pro".to_owned());
+        let route = app.runtime.model_route.clone();
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char(character), modifiers))?;
+        assert_eq!(
+            matches!(action, Some(AppAction::SetDefaultModel { .. })),
+            saves,
+            "key {character:?} {modifiers:?}"
+        );
+        assert_eq!(app.runtime.model_route, route);
+        if saves {
+            assert_eq!(
+                app.composer.input, "/model deepseek-team/deepseek-v4-pro",
+                "saving default must not also type its shortcut into the query"
+            );
+        }
+    }
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_input_and_cursor("/model deepseek-team/deepseek-v4-pro".to_owned());
+    let route = app.runtime.model_route.clone();
+    app.handle_paste_text("D");
+    assert!(app.composer.input.ends_with("proD"));
+    assert_eq!(app.runtime.model_route, route);
+    app.set_input_and_cursor("/model deepseek-team/deepseek-v4-pro".to_owned());
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(
+        app.runtime.model_route, route,
+        "Tab fills without requesting a route change"
+    );
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?,
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
+    ));
+    Ok(())
+}

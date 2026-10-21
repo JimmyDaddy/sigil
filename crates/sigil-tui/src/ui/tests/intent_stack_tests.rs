@@ -94,3 +94,50 @@ fn rendered_review_keeps_list_detail_and_single_action_distinct() -> anyhow::Res
     assert_eq!(rendered.matches("Preview Drop").count(), 1);
     Ok(())
 }
+
+#[test]
+fn absent_intent_states_have_one_status_full_reason_and_no_empty_action_panels()
+-> anyhow::Result<()> {
+    for phase in [
+        IntentStackModalPhase::Unavailable,
+        IntentStackModalPhase::NotCreated,
+    ] {
+        let mut state = view(0);
+        state.phase = phase;
+        state.primary_action_enabled = false;
+        state.detail_lines = vec![format!(
+            "REASON_FIRST\n{}\nREASON_MIDDLE\n{}\nREASON_LAST",
+            "真实原因e\u{301}🙂".repeat(160),
+            "完整诊断".repeat(160)
+        )];
+        state.error =
+            (phase == IntentStackModalPhase::Unavailable).then(|| state.detail_lines[0].clone());
+        let layout = intent_stack_modal_layout(Rect::new(0, 0, 80, 24), &state);
+        assert!(layout.row_areas.is_empty());
+        assert_eq!(layout.primary_action, Rect::default());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        let mut seen = String::new();
+        for scroll in 0..180 {
+            state.detail_scroll = scroll;
+            terminal.draw(|frame| {
+                render_intent_stack_modal_view(frame, &state, &theme::default_palette())
+            })?;
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for absent in ["Changes (0)", "Intent details", "Preview Drop"] {
+                assert!(!text.contains(absent), "absent state offers {absent}");
+            }
+            assert!(text.contains("R refresh") && text.contains("Esc close"));
+            seen.push_str(&text);
+        }
+        for marker in ["REASON_FIRST", "REASON_MIDDLE", "REASON_LAST"] {
+            assert!(seen.contains(marker), "full reason lost {marker}");
+        }
+    }
+    Ok(())
+}

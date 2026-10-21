@@ -162,6 +162,7 @@ fn modal_surface(app: &AppState) -> ModalSurface {
         session_modal_actions: app.session_modal_action_rows(),
         keyboard_help: app.keyboard_help_view(),
         info_details: app.info_details_view(),
+        session_actions: app.session_actions_view(),
     }
 }
 

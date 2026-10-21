@@ -156,6 +156,8 @@ pub struct ApprovalFileRowHitArea {
 pub(crate) struct SessionModalHitAreas {
     pub(crate) modal: Rect,
     pub(crate) actions: Vec<SessionModalActionHitArea>,
+    pub(crate) frame_identity:
+        Option<crate::app::session_lifecycle_flow::SessionActionsFrameIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,6 +693,23 @@ fn session_modal_hit_areas(screen: Rect, app: &AppState) -> Option<SessionModalH
     if !app.session_lifecycle_modal_open() {
         return None;
     }
+    if let Some(view) = app.session_actions_view() {
+        let layout = super::modal::session_actions_layout(
+            screen,
+            &app.modal_lines(),
+            &app.session_modal_action_rows(),
+            &view,
+        );
+        return Some(SessionModalHitAreas {
+            modal: layout.area,
+            actions: layout
+                .actions
+                .into_iter()
+                .map(|(action, area)| SessionModalActionHitArea { action, area })
+                .collect(),
+            frame_identity: app.session_actions_frame_identity(),
+        });
+    }
     let geometry = super::modal::modal_geometry(screen, app);
     let action_rows = app.session_modal_action_rows();
     let mut actions = Vec::new();
@@ -717,6 +736,7 @@ fn session_modal_hit_areas(screen: Rect, app: &AppState) -> Option<SessionModalH
     Some(SessionModalHitAreas {
         modal: geometry.area,
         actions,
+        frame_identity: None,
     })
 }
 

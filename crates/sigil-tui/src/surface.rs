@@ -77,6 +77,12 @@ pub(crate) struct InfoDetailsSurface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionActionsSurface {
+    pub scroll_rows: usize,
+    pub details_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModalSurface {
     pub visible: bool,
     pub checkpoint_restore_visible: bool,
@@ -87,6 +93,7 @@ pub(crate) struct ModalSurface {
     pub session_modal_actions: Vec<(SessionModalAction, String)>,
     pub keyboard_help: Option<KeyboardHelpSurface>,
     pub info_details: Option<InfoDetailsSurface>,
+    pub session_actions: Option<SessionActionsSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

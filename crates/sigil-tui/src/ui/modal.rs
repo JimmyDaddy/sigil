@@ -1,8 +1,11 @@
 mod info_details;
 mod keyboard_help;
+mod session_actions;
 
 pub(crate) use info_details::info_details_scroll_bounds;
 pub(crate) use keyboard_help::keyboard_help_scroll_bounds;
+pub(super) use session_actions::session_actions_layout;
+pub(crate) use session_actions::session_actions_scroll_bounds;
 
 use std::borrow::Cow;
 
@@ -30,6 +33,16 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let visual = modal_visual(app);
+    if let Some(view) = app.session_actions_view() {
+        session_actions::render_session_actions(
+            frame,
+            &app.modal_lines(),
+            &app.session_modal_action_rows(),
+            &view,
+            &visual,
+        );
+        return;
+    }
     if let Some(details) = app.info_details_view() {
         info_details::render_info_details(frame, &app.modal_lines(), &details, &visual);
         return;
@@ -130,6 +143,16 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         return;
     }
     let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
+    if let Some(view) = modal.session_actions.as_ref() {
+        session_actions::render_session_actions(
+            frame,
+            &modal.lines,
+            &modal.session_modal_actions,
+            view,
+            &visual,
+        );
+        return;
+    }
     if let Some(details) = modal.info_details.as_ref() {
         info_details::render_info_details(frame, &modal.lines, details, &visual);
         return;

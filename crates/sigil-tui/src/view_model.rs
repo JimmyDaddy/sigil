@@ -1055,6 +1055,17 @@ fn footer_hints(app: &AppState) -> String {
         if app.has_agent_mention_selector() {
             return "↑↓ choose · Tab/Enter insert · Esc close".to_owned();
         }
+        if app.slash_selector_command() == Some("/resume") {
+            return if !app.slash_selector_rows().is_empty() {
+                "↑↓ select · Tab fill · Enter restore · Ctrl-O/right-click actions · Esc close"
+                    .to_owned()
+            } else {
+                "Edit search or enter an exact session UUID · Esc close".to_owned()
+            };
+        }
+        if app.slash_selector_command() == Some("/model") {
+            return "↑↓ select · Tab fill · Enter request switch · Esc close".to_owned();
+        }
         return "↑↓ choose · Tab accept · Enter run · Esc close".to_owned();
     }
     if app.is_composer_agent_panel_focused() {

@@ -294,25 +294,13 @@ fn append_selector_notice_lines(
 
 fn selector_title_line_with_theme(title: &str, theme: &Theme) -> Line<'static> {
     let palette = &theme.palette;
-    Line::from(vec![
-        Span::styled(
-            title.to_owned(),
-            Style::default()
-                .fg(palette.selection_bg)
-                .bg(palette.overlay_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if title == "Resume session" {
-                "  Enter restore · Ctrl-O actions · right-click actions"
-            } else {
-                "  Enter choose · Up/Down choose"
-            },
-            Style::default()
-                .fg(palette.text_secondary)
-                .bg(palette.overlay_bg),
-        ),
-    ])
+    Line::from(vec![Span::styled(
+        title.to_owned(),
+        Style::default()
+            .fg(palette.selection_bg)
+            .bg(palette.overlay_bg)
+            .add_modifier(Modifier::BOLD),
+    )])
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

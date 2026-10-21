@@ -12,6 +12,7 @@ use crate::app::{IntentStackModalPhase, IntentStackModalView};
 
 use super::{
     geometry::{centered_rect, halo_rect, shadow_rect},
+    text::wrap_terminal_lines,
     theme::{self, ThemePalette},
 };
 
@@ -85,10 +86,67 @@ fn render_intent_stack_modal_view(
         .style(Style::default().bg(palette.modal_bg));
     frame.render_widget(block, area);
 
+    if compact_state(view) {
+        let mut rows = compact_status_rows(view, layout.detail.width as usize);
+        if let Some(status) = rows.first_mut() {
+            status.style = Style::default()
+                .fg(phase_color(view.phase, palette))
+                .add_modifier(Modifier::BOLD);
+        }
+        let scroll = usize::from(view.detail_scroll)
+            .min(rows.len().saturating_sub(layout.detail.height as usize));
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                rows.into_iter()
+                    .skip(scroll)
+                    .take(layout.detail.height as usize)
+                    .collect::<Vec<_>>(),
+            ))
+            .style(Style::default().fg(palette.text_secondary)),
+            layout.detail,
+        );
+        frame.render_widget(
+            Paragraph::new("R refresh · PgUp/PgDn scroll · Home/End · Esc close")
+                .style(Style::default().fg(palette.text_secondary)),
+            layout.actions,
+        );
+        return;
+    }
+
     render_summary(frame, layout.summary, view, palette);
     render_intent_list(frame, layout.list, &layout.row_areas, view, palette);
     render_detail(frame, layout.detail, view, palette);
     render_actions(frame, layout.actions, view, palette);
+}
+
+fn compact_status_rows(view: &IntentStackModalView, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::raw(phase_label(view.phase)), Line::default()];
+    if let Some(error) = &view.error {
+        lines.push(Line::from(Span::raw(error.clone())));
+    } else {
+        lines.extend(
+            view.detail_lines
+                .iter()
+                .cloned()
+                .map(|line| Line::from(Span::raw(line))),
+        );
+    }
+    // Both the input state and the renderer consume these LF/grapheme-aware visual rows.
+    wrap_terminal_lines(lines, width)
+}
+
+pub(crate) fn intent_stack_compact_scroll_bounds(
+    terminal_width: u16,
+    terminal_height: u16,
+    view: &IntentStackModalView,
+) -> Option<(usize, usize)> {
+    if !compact_state(view) {
+        return None;
+    }
+    let layout = intent_stack_modal_layout(Rect::new(0, 0, terminal_width, terminal_height), view);
+    let viewport_rows = layout.detail.height as usize;
+    let rows = compact_status_rows(view, layout.detail.width as usize);
+    Some((rows.len().saturating_sub(viewport_rows), viewport_rows))
 }
 
 pub(super) fn intent_stack_modal_layout(
@@ -112,6 +170,22 @@ pub(super) fn intent_stack_modal_layout(
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    if compact_state(view) {
+        return IntentStackModalLayout {
+            area,
+            summary: Rect::default(),
+            list: Rect::default(),
+            detail: Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(2),
+            ),
+            actions: Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            row_areas: Vec::new(),
+            primary_action: Rect::default(),
+        };
+    }
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -177,6 +251,13 @@ pub(super) fn intent_stack_modal_layout(
         row_areas,
         primary_action,
     }
+}
+
+fn compact_state(view: &IntentStackModalView) -> bool {
+    matches!(
+        view.phase,
+        IntentStackModalPhase::Unavailable | IntentStackModalPhase::NotCreated
+    )
 }
 
 fn render_summary(

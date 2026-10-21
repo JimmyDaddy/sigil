@@ -29,6 +29,7 @@ pub(super) struct CheckpointRestoreModalState {
     pub(super) operation: CheckpointModalOperation,
     pub(super) error: Option<String>,
     pub(super) scroll: u16,
+    empty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub(crate) enum CheckpointRestoreModalPhase {
     Restoring,
     Forking,
     Unavailable,
+    Empty,
 }
 
 #[derive(Debug, Clone)]
@@ -277,7 +279,20 @@ impl AppState {
             return None;
         }
         let request = match self.latest_checkpoint_request() {
-            Ok(request) => request,
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                self.review.checkpoint_restore_preview = None;
+                self.review.checkpoint_expected_request = None;
+                self.review.checkpoint_request_id = None;
+                if let Some(state) = self.checkpoint_restore_modal_state_mut() {
+                    state.empty = true;
+                    state.error = None;
+                    state.context = CheckpointDisplayContext::default();
+                    state.operation = CheckpointModalOperation::Idle;
+                    state.scroll = 0;
+                }
+                return None;
+            }
             Err(error) => {
                 self.review.checkpoint_restore_preview = None;
                 self.set_checkpoint_modal_error(&error);
@@ -293,6 +308,7 @@ impl AppState {
             state.context = CheckpointDisplayContext::default();
             state.operation = CheckpointModalOperation::Previewing;
             state.error = None;
+            state.empty = false;
             state.scroll = 0;
         }
         self.last_notice = Some(format!(
@@ -385,6 +401,7 @@ impl AppState {
             CheckpointModalOperation::Idle if state.error.is_some() => {
                 CheckpointRestoreModalPhase::Unavailable
             }
+            CheckpointModalOperation::Idle if state.empty => CheckpointRestoreModalPhase::Empty,
             CheckpointModalOperation::Idle if preview.is_some_and(|preview| preview.ready) => {
                 CheckpointRestoreModalPhase::Ready
             }
@@ -412,6 +429,7 @@ impl AppState {
             CheckpointRestoreModalPhase::Unavailable => {
                 "No exact restore preview is available".to_owned()
             }
+            CheckpointRestoreModalPhase::Empty => "No controlled checkpoint yet".to_owned(),
         };
         let mut summary_lines = Vec::new();
         if let Some(turn_index) = state.context.turn_index {
@@ -714,18 +732,19 @@ impl AppState {
         context
     }
 
-    fn latest_checkpoint_request(&self) -> Result<ControlledCheckpointRestoreRequest, String> {
+    fn latest_checkpoint_request(
+        &self,
+    ) -> Result<Option<ControlledCheckpointRestoreRequest>, String> {
         let records = JsonlSessionStore::read_event_records(&self.session_log_path)
             .map_err(|error| format!("checkpoint stream unavailable: {error:#}"))?;
         let projection = ControlledCheckpointProjection::from_records(&records)
             .map_err(|error| format!("checkpoint projection unavailable: {error:#}"))?;
-        let checkpoint = projection
+        Ok(projection
             .latest()
-            .ok_or_else(|| "no controlled checkpoint is available".to_owned())?;
-        Ok(ControlledCheckpointRestoreRequest {
-            checkpoint_id: checkpoint.checkpoint_id.clone(),
-            checkpoint_digest: checkpoint.checkpoint_digest.clone(),
-        })
+            .map(|checkpoint| ControlledCheckpointRestoreRequest {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                checkpoint_digest: checkpoint.checkpoint_digest.clone(),
+            }))
     }
 }
 

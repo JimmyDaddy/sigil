@@ -312,10 +312,7 @@ impl AppState {
             let exact_entry = SlashSelectorEntry {
                 fill: format!("/model {exact_arg}"),
                 label: format!("Use exact model ID: {}", exact_model_ref.model_id),
-                description: format!(
-                    "{}  press Enter to switch the current conversation route",
-                    exact_model_ref.connection_id
-                ),
+                description: exact_model_ref.connection_id.to_string(),
                 resolved: ResolvedSlashCommand {
                     canonical: "/model".to_owned(),
                     arg: exact_arg,
@@ -371,7 +368,7 @@ impl AppState {
                     fill: format!("/resume {ordinal}"),
                     label: ordinal.to_string(),
                     description: format!(
-                        "{}{}  {} · {} · Ctrl-O actions · right-click actions",
+                        "{}{}  {} · {}",
                         label,
                         if current { "  current" } else { "" },
                         human_file_size(entry.bytes),
@@ -941,14 +938,18 @@ impl AppState {
         hints
     }
 
+    pub(crate) fn slash_selector_command(&self) -> Option<&'static str> {
+        let (token, _) = Self::slash_query(&self.composer.input)?;
+        Self::exact_slash_command(token).map(|spec| spec.canonical)
+    }
+
     pub(crate) fn slash_selector_title(&self) -> Option<&'static str> {
         if Self::agent_mention_query(&self.composer.input).is_some() {
             return Some("Agent");
         }
-        let (token, _) = Self::slash_query(&self.composer.input)?;
-        match Self::exact_slash_command(token).map(|spec| spec.canonical) {
+        match self.slash_selector_command() {
             Some("/agent") => Some("Agent"),
-            Some("/model") => Some("Model · Enter switches current session · D sets saved default"),
+            Some("/model") => Some("Model · D saves default; current session unchanged"),
             Some("/resume") => Some("Resume session"),
             _ => None,
         }

@@ -101,6 +101,9 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> Option<AppAction> {
+        if key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::Char('r' | 'R')) {
+            return self.refresh_intent_stack_modal();
+        }
         if key.modifiers != KeyModifiers::NONE {
             return None;
         }
@@ -140,8 +143,9 @@ impl AppState {
                 None
             }
             KeyCode::End => {
+                let max_scroll = self.compact_intent_stack_max_scroll().unwrap_or(u16::MAX);
                 if let Some(state) = self.intent_stack_modal_state_mut() {
-                    state.detail_scroll = u16::MAX;
+                    state.detail_scroll = max_scroll;
                 }
                 None
             }
@@ -201,14 +205,28 @@ impl AppState {
     }
 
     pub(super) fn scroll_intent_stack_detail(&mut self, up: bool, amount: u16) {
+        let max_scroll = self.compact_intent_stack_max_scroll();
         let Some(state) = self.intent_stack_modal_state_mut() else {
             return;
         };
+        let current = max_scroll.map_or(state.detail_scroll, |max| state.detail_scroll.min(max));
         state.detail_scroll = if up {
-            state.detail_scroll.saturating_sub(amount)
+            current.saturating_sub(amount)
         } else {
-            state.detail_scroll.saturating_add(amount)
+            current
+                .saturating_add(amount)
+                .min(max_scroll.unwrap_or(u16::MAX))
         };
+    }
+
+    fn compact_intent_stack_max_scroll(&self) -> Option<u16> {
+        let view = self.intent_stack_modal_view()?;
+        crate::ui::intent_stack_compact_scroll_bounds(
+            self.terminal_width,
+            self.terminal_height,
+            &view,
+        )
+        .map(|(max, _)| max.min(u16::MAX as usize) as u16)
     }
 
     pub(super) fn apply_intent_stack_loaded(
