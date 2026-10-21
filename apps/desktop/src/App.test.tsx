@@ -65,6 +65,80 @@ const emptyCatalog: CatalogPage = {
   entries: [],
 };
 
+it.each(["owner-first", "events-first"] as const)("continues the same paused Task from actual phase facts and keeps exact pause controls at approval (%s)", async (order) => {
+  const user = userEvent.setup();
+  let listener: ((event: TimelineEvent) => void) | undefined;
+  const response = deferred<Awaited<ReturnType<DesktopBridge["continueTask"]>>>();
+  const continueTask = vi.fn<DesktopBridge["continueTask"]>(() => response.promise);
+  const pauseTask = vi.fn<DesktopBridge["pauseTask"]>(async (_workspace, sessionId, runId) => ({
+    id: runId, sessionId, status: "pause_requested", permissionMode: "manual", streamSequence: 14,
+  }));
+  const sessionId = "http-session-new";
+  const taskId = "plan-task-a530003f54a06cbebeda3c61";
+  const execution = { kind: "direct" as const, admissionId: "original-approved-admission" };
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+    continueTask, pauseTask,
+    display: async () => ({ schemaVersion: 1, requestScope: sessionId, throughSessionStreamSequence: "259",
+      items: [], totalItems: "0", hasMore: false, gapFacts: [], taskControl: {
+        schemaVersion: 1, taskId, phase: "execution", status: "paused", execution,
+        steps: [], stepsTruncated: false, checklist: [], activeChildren: 0, completedChildren: 0,
+        failedChildren: 0, lanes: [], lanesTruncated: false, canContinue: true,
+      } }),
+  })} />);
+  await screen.findByText("No matching conversation.");
+  await user.click(screen.getByRole("button", { name: "New conversation" }));
+  await screen.findByRole("button", { name: "Continue Task" });
+  await waitFor(() => expect(listener).toBeDefined());
+  const emit = (kind: TimelineEvent["kind"], runId: string, sequence: number, extra: Partial<TimelineEvent>) => listener?.({
+    workspaceId: workspace.id, sessionId, runId, kind, sequence, runSequence: String(sequence), replayable: true, ...extra,
+  });
+  act(() => {
+    emit("task_run_started", "http-run-e15-1", 1, { task: { taskId, objective: "Implement the reviewed agenda tool" }, status: "running" });
+    emit("task_execution_admitted", "http-run-e15-1", 2, { task: { taskId, execution } });
+    emit("provider_turn_recovery", "http-run-e15-1", 22, { providerTurnRecovery: {
+      phase: "paused", activeRetryCount: 0, activeMaxRetries: 2, retryCount: 0, maxTransportRetries: 2,
+      reasonCode: "provider_recovery_cancelled", userAttentionRequired: true, availableActions: ["retry_now", "cancel"],
+    } });
+    emit("task_run_finished", "http-run-e15-1", 26, { task: { taskId }, status: "paused" });
+  });
+  await waitFor(() => expect(screen.queryByText("Model recovery is paused")).toBeNull());
+  await user.click(screen.getByRole("button", { name: "Continue Task" }));
+  await waitFor(() => expect(continueTask).toHaveBeenCalledOnce());
+  const continueFacts = () => act(() => {
+    emit("run_started", "http-run-e15-2", 1, {});
+    emit("task_phase_changed", "http-run-e15-2", 3, { task: { taskId, phase: "execution" }, status: "running" });
+    emit("task_phase_changed", "http-run-e15-2", 4, { task: { taskId, phase: "execution" }, status: "started" });
+    emit("task_checklist_updated", "http-run-e15-2", 11, { task: { taskId, checklistRevision: 2,
+      checklist: [{ itemId: "implement", text: "Current model-owned implementation", status: "in_progress" }] } });
+  });
+  if (order === "events-first") continueFacts();
+  await act(async () => {
+    response.resolve({ id: "http-run-e15-2", sessionId, status: "running", permissionMode: "manual", streamSequence: 0 });
+    await response.promise;
+  });
+  if (order === "owner-first") continueFacts();
+  await screen.findByRole("button", { name: "Pause to continue later" });
+  act(() => emit("approval_requested", "http-run-e15-2", 13, {
+    itemId: "continued-exec", toolName: "exec_command", approval: {
+      callId: "continued-exec", toolName: "exec_command", approvalRequestId: "continued-request",
+      toolCallHash: "continued-frozen-hash", policyVersion: "manual", expiresAtMs: 4_102_444_800_000,
+      snapshotRequired: false, operation: "execute_unknown_command", previewBody: "Command: python3 -m unittest test_agenda.py",
+    },
+  }));
+  await screen.findByRole("button", { name: "Approve once" });
+  const panel = screen.getByRole("heading", { name: "Implement the reviewed agenda tool" }).closest(".task-control-panel")!;
+  expect(panel.getAttribute("data-task-product-status")).toBe("running");
+  expect(within(panel as HTMLElement).queryByText("Paused")).toBeNull();
+  expect(within(panel as HTMLElement).getByText("Current model-owned implementation")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Continue Task" })).toBeNull();
+  const pause = screen.getByRole("button", { name: "Pause to continue later" });
+  expect(pause.hasAttribute("disabled")).toBe(false);
+  await user.click(pause);
+  await waitFor(() => expect(pauseTask).toHaveBeenCalledWith(workspace.id, sessionId, "http-run-e15-2", { taskId, execution }));
+});
+
 it("restores the exact draft after reopening the same durable session with a new renderer id", async () => {
   const user = userEvent.setup();
   const startRun = vi.fn();

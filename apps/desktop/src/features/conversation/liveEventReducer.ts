@@ -81,6 +81,10 @@ export interface LiveEventState {
   approvalSnapshotRevisions: ReadonlyMap<string, number>;
   /** Latest typed task event for each exact task/entity slot. */
   taskEvents: ReadonlyMap<string, TimelineEvent>;
+  /** Exact foreground owner established by a typed start/continuity/attachment response. */
+  ownerRunId?: string;
+  /** Task facts may precede the response that establishes their foreground owner. */
+  pendingTaskEvents: ReadonlyMap<string, TimelineEvent>;
   /** Latest generation for each bounded persistent terminal task. */
   terminalTasks: ReadonlyMap<string, LiveTerminalTask>;
   /** Latest root Task selected by a durable task-start event. */
@@ -93,12 +97,15 @@ export interface LiveEventState {
   providerTurnRecovery?: TimelineEvent;
   /** Same-run progress/settlement frontier that retired automatic retry presentation. */
   retiredProviderRecoverySequences: ReadonlyMap<string, string>;
+  settledCancelledRecoveryRuns: ReadonlySet<string>;
+  supersededProviderRecoveryRuns: ReadonlySet<string>;
 }
 
 export type LiveEventAction =
   | { type: "session_selected"; sessionId: string }
   | { type: "anchor_received"; sessionId: string; anchor?: LiveProvisionalAnchor }
   | { type: "event_received"; sessionId: string; event: TimelineEvent }
+  | { type: "run_owner_received"; sessionId: string; runId?: string }
   | { type: "approval_snapshot_received"; sessionId: string; snapshot: RunApprovalSnapshot }
   | { type: "approval_receipt_received"; sessionId: string; receipt: ApprovalDecisionSummary }
   | {
@@ -107,7 +114,7 @@ export type LiveEventAction =
       runId: string;
       task: TimelineTerminalTask;
     }
-  | { type: "run_discarded"; sessionId: string; runId: string };
+  | { type: "run_discarded"; sessionId: string; runId: string; terminalStatus?: ConversationTerminalStatus };
 
 export function createLiveEventState(sessionId: string): LiveEventState {
   return {
@@ -122,9 +129,12 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     approvalLifecycles: new Map(),
     approvalSnapshotRevisions: new Map(),
     taskEvents: new Map(),
+    pendingTaskEvents: new Map(),
     terminalTasks: new Map(),
     terminalSignals: new Map(),
     retiredProviderRecoverySequences: new Map(),
+    settledCancelledRecoveryRuns: new Set(),
+    supersededProviderRecoveryRuns: new Set(),
   };
 }
 
@@ -144,6 +154,8 @@ export function liveEventReducer(
       return receiveAnchor(state, action.anchor);
     case "event_received":
       return receiveTimelineEvent(state, action.event);
+    case "run_owner_received":
+      return receiveRunOwner(state, action.runId);
     case "approval_snapshot_received":
       return receiveApprovalSnapshot(state, action.snapshot);
     case "approval_receipt_received":
@@ -151,7 +163,7 @@ export function liveEventReducer(
     case "terminal_task_received":
       return receiveTerminalTask(state, action.runId, action.task);
     case "run_discarded":
-      return discardRun(state, action.runId);
+      return discardRun(state, action.runId, action.terminalStatus);
   }
 }
 
@@ -511,23 +523,36 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   if (event.kind === "provider_turn_recovery" && event.providerTurnRecovery !== undefined) {
     const retiredThrough = next.retiredProviderRecoverySequences.get(event.runId) ?? "0";
     const current = next.providerTurnRecovery;
-    if ((!automaticProviderRecovery(event) || compareRunSequence(event.runSequence, retiredThrough) > 0)
+    if (!next.supersededProviderRecoveryRuns.has(event.runId)
+      && (!cancelledProviderRecovery(event) || !next.settledCancelledRecoveryRuns.has(event.runId))
+      && (!automaticProviderRecovery(event) || compareRunSequence(event.runSequence, retiredThrough) > 0)
       && (current?.runId !== event.runId
         || compareRunSequence(event.runSequence, current.runSequence) > 0)) {
       next = { ...next, providerTurnRecovery: event };
     }
   } else if (event.kind === "run_started" && next.providerTurnRecovery !== undefined
+    && !next.supersededProviderRecoveryRuns.has(event.runId)
+    && (next.ownerRunId === undefined || next.ownerRunId === event.runId)
     && compareRunSequence(event.runSequence, next.retiredProviderRecoverySequences.get(event.runId) ?? "0") > 0
     && (next.providerTurnRecovery.runId !== event.runId
       || compareRunSequence(event.runSequence, next.providerTurnRecovery.runSequence) > 0)) {
     const previous = next.providerTurnRecovery;
     next = retireProviderTurnRecovery(next, previous.runId, previous.runSequence);
-    next = { ...next, providerTurnRecovery: undefined };
+    const supersededProviderRecoveryRuns = new Set(next.supersededProviderRecoveryRuns);
+    if (previous.runId !== event.runId) supersededProviderRecoveryRuns.add(previous.runId);
+    next = { ...next, providerTurnRecovery: undefined, supersededProviderRecoveryRuns };
   }
   const terminalSignal = terminalSignalFromTimelineEvent(event);
+  const cancelledRecoverySettled = event.replayable && (
+    terminalSignal?.status === "paused" || terminalSignal?.status === "cancelled"
+    || event.kind === "task_run_finished" && event.task?.taskId === next.latestTaskId
+      && event.task?.taskId !== undefined
+      && (next.latestTaskRunId === undefined || next.latestTaskRunId === event.runId)
+      && (event.status === "paused" || event.status === "cancelled")
+  );
   if (terminalSignal !== undefined || event.replayable && (event.kind === "assistant_message"
-    || event.kind === "user_input_changed" && event.status === "requested")) {
-    next = retireProviderTurnRecovery(next, event.runId, event.runSequence);
+    || event.kind === "user_input_changed" && event.status === "requested") || cancelledRecoverySettled) {
+    next = retireProviderTurnRecovery(next, event.runId, event.runSequence, cancelledRecoverySettled);
   }
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(retirePreviewSnapshots(next, event), terminalSignal);
@@ -772,10 +797,52 @@ function terminalTaskIsActive(task: TimelineTerminalTask): boolean {
   return task.status === "starting" || task.status === "running";
 }
 
+function receiveRunOwner(state: LiveEventState, runId: string | undefined): LiveEventState {
+  const supersededProviderRecoveryRuns = new Set(state.supersededProviderRecoveryRuns);
+  const recovery = state.providerTurnRecovery;
+  if (runId !== undefined) {
+    if (state.ownerRunId !== undefined && state.ownerRunId !== runId) supersededProviderRecoveryRuns.add(state.ownerRunId);
+    if (state.latestTaskRunId !== undefined && state.latestTaskRunId !== runId) supersededProviderRecoveryRuns.add(state.latestTaskRunId);
+    if (recovery !== undefined && recovery.runId !== runId) supersededProviderRecoveryRuns.add(recovery.runId);
+  }
+  let next: LiveEventState = { ...state, ownerRunId: runId, supersededProviderRecoveryRuns,
+    providerTurnRecovery: recovery !== undefined && supersededProviderRecoveryRuns.has(recovery.runId) ? undefined : recovery };
+  if (runId !== undefined) {
+    const pending = [...next.pendingTaskEvents.values()].filter((event) => event.runId === runId).sort(compareTimelineEvents);
+    next = { ...next, pendingTaskEvents: new Map() };
+    for (const event of pending) next = updateTaskEvents(next, event);
+  }
+  return next;
+}
+
+function holdTaskEventForOwner(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  const key = taskEventKey(event);
+  if (key === undefined || !event.replayable) return state;
+  const resumesExecution = event.kind === "task_phase_changed" && event.task?.phase === "execution"
+    && (event.status === "running" || event.status === "started");
+  const pendingKey = `${event.runId}\u0000${key}${resumesExecution ? ":resume" : ""}`;
+  const previous = state.pendingTaskEvents.get(pendingKey);
+  if (previous !== undefined && compareRunSequence(previous.runSequence, event.runSequence) >= 0) return state;
+  const pendingTaskEvents = new Map(state.pendingTaskEvents);
+  pendingTaskEvents.set(pendingKey, event);
+  return { ...state, pendingTaskEvents };
+}
+
 function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEventState {
   const key = taskEventKey(event);
   if (key === undefined) return state;
   const taskId = event.task?.taskId;
+  if (state.ownerRunId !== undefined && event.runId !== state.ownerRunId) return holdTaskEventForOwner(state, event);
+  const previousTerminal = taskId === undefined ? undefined : state.taskEvents.get(`${taskId}:task_run_finished:task`);
+  const exactExecutionFact = event.kind === "task_phase_changed" && event.task?.phase === "execution"
+    && ["started", "running", "paused", "blocked", "failed", "interrupted", "completed", "cancelled"].includes(event.status ?? "");
+  const exactTerminalFact = event.kind === "task_run_finished"
+    && ["paused", "blocked", "failed", "interrupted", "completed", "cancelled"].includes(event.status ?? "");
+  const resumesTask = event.replayable && event.runId === state.ownerRunId
+    && taskId !== undefined && taskId === state.latestTaskId
+    && (exactExecutionFact || exactTerminalFact)
+    && previousTerminal !== undefined && previousTerminal.runId !== event.runId
+    && previousTerminal.status !== "completed" && previousTerminal.status !== "cancelled";
   if (
     event.kind !== "task_run_started"
     && taskId !== undefined
@@ -784,15 +851,15 @@ function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEven
       taskId !== state.latestTaskId
       || (
         state.latestTaskRunId !== undefined
-        && event.runId !== state.latestTaskRunId
+        && event.runId !== state.latestTaskRunId && !resumesTask
       )
     )
-  ) return state;
+  ) return taskId === state.latestTaskId ? holdTaskEventForOwner(state, event) : state;
   const startsNewTask = event.kind === "task_run_started"
     && taskId !== undefined
     && taskId !== state.latestTaskId;
   const taskEvents = startsNewTask ? new Map<string, TimelineEvent>() : new Map(state.taskEvents);
-  if (event.kind === "task_run_started" && taskId !== undefined) {
+  if ((event.kind === "task_run_started" || resumesTask) && taskId !== undefined) {
     taskEvents.delete(`${taskId}:task_run_finished:task`);
     taskEvents.delete(`${taskId}:task_phase_changed:task`);
   }
@@ -810,7 +877,7 @@ function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEven
     latestTaskId: event.kind === "task_run_started" && taskId !== undefined
       ? taskId
       : state.latestTaskId ?? taskId,
-    latestTaskRunId: event.kind === "task_run_started" && taskId !== undefined
+    latestTaskRunId: (event.kind === "task_run_started" || resumesTask) && taskId !== undefined
       ? event.runId
       : state.latestTaskRunId,
   };
@@ -1094,14 +1161,14 @@ function replaceApprovalLifecycle(
   return { ...state, semanticItems, controlEvents, approvalLifecycles };
 }
 
-function discardRun(state: LiveEventState, runId: string): LiveEventState {
+function discardRun(state: LiveEventState, runId: string, terminalStatus?: ConversationTerminalStatus): LiveEventState {
   // Canonical settlement may arrive before the corresponding live terminal.
   const recovery = state.providerTurnRecovery;
   let through = state.durableRunSequences.get(runId) ?? "0";
   if (recovery?.runId === runId && compareRunSequence(recovery.runSequence, through) > 0) {
     through = recovery.runSequence;
   }
-  state = retireProviderTurnRecovery(state, runId, through);
+  state = retireProviderTurnRecovery(state, runId, through, terminalStatus === "paused" || terminalStatus === "cancelled");
   const liveSnapshots = filterMap(state.liveSnapshots, (event) => event.runId !== runId);
   const semanticItems = filterMap(state.semanticItems, (item) => item.runId !== runId);
   const deltaBuffers = filterMap(state.deltaBuffers, (buffer) => buffer.runId !== runId);
@@ -1137,20 +1204,29 @@ function automaticProviderRecovery(event: TimelineEvent | undefined): boolean {
     && (recovery.phase === "waiting" || recovery.phase === "recovering");
 }
 
+function cancelledProviderRecovery(event: TimelineEvent | undefined): boolean {
+  return event?.providerTurnRecovery?.phase === "paused"
+    && event.providerTurnRecovery.reasonCode === "provider_recovery_cancelled";
+}
+
 function retireProviderTurnRecovery(
   state: LiveEventState,
   runId: string,
   through: string,
+  retireCancelled = false,
 ): LiveEventState {
   const previous = state.retiredProviderRecoverySequences.get(runId) ?? "0";
   const recovery = state.providerTurnRecovery;
-  const clear = recovery?.runId === runId && automaticProviderRecovery(recovery)
+  const clear = recovery?.runId === runId
+    && (automaticProviderRecovery(recovery) || retireCancelled && cancelledProviderRecovery(recovery))
     && compareRunSequence(recovery.runSequence, through) <= 0;
-  if (!clear && compareRunSequence(through, previous) <= 0) return state;
+  const settledCancelledRecoveryRuns = new Set(state.settledCancelledRecoveryRuns);
+  if (retireCancelled) settledCancelledRecoveryRuns.add(runId);
+  if (!clear && !retireCancelled && compareRunSequence(through, previous) <= 0) return state;
   const retiredProviderRecoverySequences = new Map(state.retiredProviderRecoverySequences);
   if (compareRunSequence(through, previous) > 0) retiredProviderRecoverySequences.set(runId, through);
   return { ...state, retiredProviderRecoverySequences,
-    providerTurnRecovery: clear ? undefined : recovery };
+    providerTurnRecovery: clear ? undefined : recovery, settledCancelledRecoveryRuns };
 }
 
 function clearRunDeltaBuffersThrough(

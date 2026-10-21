@@ -129,6 +129,16 @@ describe("Task product projection", () => {
     });
     expect(task?.planVersion).toBeUndefined();
   });
+
+  it("binds current execution to the run that supplies its real phase while retaining the original admission", () => {
+    const task = projectCurrentTask([
+      event("task_run_started", { runId: "old-run", task: { taskId: "task-1", objective: "Unchanged objective" } }),
+      event("task_execution_admitted", { runId: "old-run", task: { taskId: "task-1", execution: { kind: "direct", admissionId: "immutable-admission" } } }),
+      event("task_phase_changed", { runId: "continued-run", status: "started", task: { taskId: "task-1", phase: "execution" } }),
+    ]);
+    expect(task).toMatchObject({ executionRunId: "continued-run", status: "started", objective: "Unchanged objective",
+      execution: { kind: "direct", admissionId: "immutable-admission" } });
+  });
 });
 
 describe("Task projection merge", () => {

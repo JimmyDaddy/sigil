@@ -19,6 +19,114 @@ import {
 
 const SESSION_ID = "session-1";
 
+describe("exact Task continuation ownership", () => {
+  const durableEvent = (overrides: Partial<TimelineEvent>) => event({ replayable: true, ...overrides });
+  function pausedTask() {
+    let state = createLiveEventState(SESSION_ID);
+    for (const item of [
+      durableEvent({ kind: "task_run_started", runSequence: "1", task: { taskId: "task-1", objective: "Original objective" } }),
+      durableEvent({ kind: "task_execution_admitted", runSequence: "2", task: { taskId: "task-1", execution: { kind: "direct", admissionId: "same-admission" } } }),
+      durableEvent({ kind: "task_run_finished", runSequence: "26", status: "paused", task: { taskId: "task-1" } }),
+    ]) state = reduceLiveTimelineEvent(state, item);
+    return liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-1" });
+  }
+
+  it.each(["owner-first", "events-first"] as const)("uses actual phase/checklist facts without another TaskRunStarted (%s)", (order) => {
+    let state = pausedTask();
+    const own = () => { state = liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" }); };
+    if (order === "owner-first") own();
+    // The real continuation emits RunStarted + execution/running + execution/started;
+    // TaskRunStarted is only emitted when the Task is first created.
+    for (const item of [
+      durableEvent({ kind: "run_started", runId: "run-2", runSequence: "1" }),
+      durableEvent({ kind: "task_phase_changed", runId: "run-2", runSequence: "3", status: "running", task: { taskId: "task-1", phase: "execution" } }),
+      durableEvent({ kind: "task_phase_changed", runId: "run-2", runSequence: "4", status: "started", task: { taskId: "task-1", phase: "execution" } }),
+      durableEvent({ kind: "task_checklist_updated", runId: "run-2", runSequence: "11", task: { taskId: "task-1", checklistRevision: 2, checklist: [{ itemId: "implement", text: "Model-owned current item", status: "in_progress" }] } }),
+    ]) state = reduceLiveTimelineEvent(state, item);
+    if (order === "events-first") {
+      expect(selectTaskEvents(state).find((item) => item.kind === "task_run_finished")?.status).toBe("paused");
+      own();
+    }
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished")).toBe(false);
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_phase_changed")).toMatchObject({ runId: "run-2", status: "started" });
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_execution_admitted")?.task?.execution).toEqual({ kind: "direct", admissionId: "same-admission" });
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_checklist_updated")?.task?.checklist?.[0].text).toBe("Model-owned current item");
+    for (const item of [
+      durableEvent({ kind: "task_run_finished", runSequence: "27", status: "paused", task: { taskId: "task-1" } }),
+      durableEvent({ kind: "task_phase_changed", runId: "run-2", runSequence: "13", status: "running", task: { taskId: "another-task", phase: "execution" } }),
+    ]) state = reduceLiveTimelineEvent(state, item);
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_phase_changed")).toMatchObject({ runId: "run-2", status: "started", task: { taskId: "task-1" } });
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished")).toBe(false);
+  });
+
+  it("does not treat an unowned execution phase as a continuation or resurrect a completed Task", () => {
+    const phase = durableEvent({ kind: "task_phase_changed", runId: "run-2", runSequence: "3", status: "running", task: { taskId: "task-1", phase: "execution" } });
+    let state = reduceLiveTimelineEvent(pausedTask(), phase);
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_run_finished")?.status).toBe("paused");
+    const owned = liveEventReducer(pausedTask(), { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" });
+    const previewOnly = reduceLiveTimelineEvent(owned, { ...phase, replayable: false });
+    expect(selectTaskEvents(previewOnly).find((item) => item.kind === "task_run_finished")?.status).toBe("paused");
+    state = reduceLiveTimelineEvent(state, durableEvent({ kind: "task_run_finished", runSequence: "28", status: "completed", task: { taskId: "task-1" } }));
+    state = liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" });
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_run_finished")?.status).toBe("completed");
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_phase_changed")).toBe(false);
+  });
+
+  it.each(["task_phase_changed", "task_run_finished"] as const)("preserves a real owned continuation blocker without claiming execution (%s)", (kind) => {
+    let state = liveEventReducer(pausedTask(), { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" });
+    state = reduceLiveTimelineEvent(state, durableEvent({ kind, runId: "run-2", runSequence: "3", status: "blocked",
+      task: { taskId: "task-1", phase: "execution" } }));
+    expect(selectTaskEvents(state).find((item) => item.kind === kind)).toMatchObject({ runId: "run-2", status: "blocked" });
+    expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished" && item.runId === "run-1")).toBe(false);
+  });
+
+  it("replays an early execution proof before a later same-run terminal phase", () => {
+    let state = pausedTask();
+    for (const [sequence, kind, status] of [[3, "task_phase_changed", "running"], [20, "task_phase_changed", "paused"], [21, "task_run_finished", "paused"]] as const) {
+      state = reduceLiveTimelineEvent(state, durableEvent({ kind, runId: "run-2", runSequence: String(sequence), status,
+        task: { taskId: "task-1", phase: "execution" } }));
+    }
+    state = liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" });
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_phase_changed")).toMatchObject({ runId: "run-2", status: "paused" });
+    expect(selectTaskEvents(state).find((item) => item.kind === "task_run_finished")).toMatchObject({ runId: "run-2", status: "paused" });
+  });
+});
+
+describe("cancelled provider recovery presentation", () => {
+  const cancelled = () => event({ kind: "provider_turn_recovery", runSequence: "22", replayable: true,
+    providerTurnRecovery: { phase: "paused", activeRetryCount: 0, activeMaxRetries: 2,
+      retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_recovery_cancelled",
+      availableActions: ["retry_now", "cancel"], userAttentionRequired: true } });
+
+  it.each(["live-first", "terminal-first", "canonical-first"] as const)("retires only the exact cancelled recovery after settled pause (%s)", (order) => {
+    let state = createLiveEventState(SESSION_ID);
+    if (order === "live-first") state = reduceLiveTimelineEvent(state, cancelled());
+    if (order === "canonical-first") state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "run-1", terminalStatus: "paused" });
+    else state = reduceLiveTimelineEvent(state, event({ kind: "run_paused", runSequence: "26", replayable: true, status: "paused" }));
+    state = reduceLiveTimelineEvent(state, cancelled());
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+  });
+
+  it.each(["effect_reconciliation_required", "provider_configuration_or_capacity_required", "provider_retry_budget_exhausted"])("preserves real attention %s after the same terminal", (reasonCode) => {
+    const recovery = cancelled();
+    recovery.providerTurnRecovery = { ...recovery.providerTurnRecovery!, reasonCode };
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), recovery);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_paused", runSequence: "26", replayable: true, status: "paused" }));
+    state = liveEventReducer(state, { type: "run_discarded", sessionId: SESSION_ID, runId: "run-1", terminalStatus: "paused" });
+    expect(selectProviderTurnRecovery(state)).toEqual(recovery);
+  });
+
+  it("keeps an unsettled cancellation or a different-run pause, and rejects superseded-run replay", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), cancelled());
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_paused", runId: "other-run", runSequence: "26", replayable: true, status: "paused" }));
+    expect(selectProviderTurnRecovery(state)).toEqual(cancelled());
+    state = liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" });
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_started", runId: "run-2", runSequence: "1" }));
+    state = reduceLiveTimelineEvent(state, cancelled());
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+  });
+});
+
 function previewEvent(revision: string, text: string, overrides: Partial<TimelineEvent> = {}): TimelineEvent {
   return event({ kind: "assistant_delta", runSequence: "3", sequence: 3, replayable: false,
     text, livePreview: { attemptId: "attempt-1", slotId: "text", revision, baseSequence: "3", truncated: false },

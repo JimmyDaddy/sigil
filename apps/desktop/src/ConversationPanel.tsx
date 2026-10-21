@@ -932,6 +932,7 @@ export function ConversationPanel({
       }
       pendingPredecessorRunId.current = undefined;
       activeRunIdRef.current = undefined;
+      dispatchLiveEvent({ type: "run_owner_received", sessionId: session.id });
       setRun(undefined);
       setStreamStatus(undefined);
       setAttachmentGap(false);
@@ -964,6 +965,7 @@ export function ConversationPanel({
             pendingPredecessorRunId.current = undefined;
           }
           activeRunIdRef.current = successorRunId;
+          dispatchLiveEvent({ type: "run_owner_received", sessionId: session.id, runId: successorRunId });
           pendingContinuityOwner.current = continuity;
           setContinuityReload((value) => value + 1);
           return;
@@ -1238,6 +1240,7 @@ export function ConversationPanel({
           pendingPredecessorRunId.current = undefined;
         }
         activeRunIdRef.current = owner.runId;
+        dispatchLiveEvent({ type: "run_owner_received", sessionId: session.id, runId: owner.runId });
         dispatchContinuity({
           type: "owner_probe_resolved",
           sessionId: session.id,
@@ -1414,9 +1417,11 @@ export function ConversationPanel({
     ) {
       canonicalSettlementCandidate.current = undefined;
       retireRunTiming(workspaceId, candidate);
-      dispatchLiveEvent({ type: "run_discarded", sessionId: session.id, runId: candidate });
+      dispatchLiveEvent({ type: "run_discarded", sessionId: session.id, runId: candidate,
+        terminalStatus: continuityState.canonicalTerminal?.runId === candidate
+          ? continuityState.canonicalTerminal.status : undefined });
     }
-  }, [continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id, workspaceId]);
+  }, [continuityState.canonicalTerminal, continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id, workspaceId]);
 
   useEffect(() => {
     if (liveEventState.sessionId === session.id) observeCommittedRunTimings(workspaceId, liveEventState);
@@ -1813,6 +1818,7 @@ export function ConversationPanel({
         ...(runRequest.reviewAnnotations === undefined ? [] : [runRequest.reviewAnnotations] as const),
       );
       activeRunIdRef.current = started.id;
+      dispatchLiveEvent({ type: "run_owner_received", sessionId: session.id, runId: started.id });
       bindSubmissionRun(submissionTiming, started.id);
       startedRunProjectionExpected.current = started.id;
       setPendingPrompt((current) => current === undefined ? current : { ...current, runId: started.id });
@@ -1939,6 +1945,7 @@ export function ConversationPanel({
         guidance,
       );
       activeRunIdRef.current = started.id;
+      dispatchLiveEvent({ type: "run_owner_received", sessionId: session.id, runId: started.id });
       bindSubmissionRun(submissionTiming, started.id);
       startedRunProjectionExpected.current = started.id;
       setRun(started);
@@ -2560,8 +2567,8 @@ export function ConversationPanel({
         <TaskControlPanel
           key={taskProjection.taskId}
           task={taskProjection}
-          runActive={active}
-          disabled={submissionBlocked || submitting || pendingApproval?.approval !== undefined}
+          runActive={active && taskProjection.executionRunId === run?.id}
+          disabled={active || submissionBlocked || submitting || pendingApproval?.approval !== undefined}
           busy={taskControlBusy || taskIntegrationBusy}
           reviewReady={taskIntegrationReview !== undefined}
           reviewBusy={taskIntegrationLoading}

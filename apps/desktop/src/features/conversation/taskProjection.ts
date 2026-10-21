@@ -23,6 +23,8 @@ export interface TaskProductProjection {
   phase?: TimelineTaskPhase;
   status: string;
   execution?: TaskExecutionBinding;
+  /** Run that supplied this Task's current typed phase or terminal fact. */
+  executionRunId?: string;
   planVersion?: number;
   planStatus?: string;
   steps: TaskStepProjection[];
@@ -90,6 +92,7 @@ export function projectCurrentTask(
     phase: phase?.task?.phase,
     status,
     execution: execution?.task?.execution,
+    executionRunId: finished?.runId ?? phase?.runId ?? started?.runId,
     planVersion: plan?.task?.planVersion ?? phase?.task?.planVersion,
     planStatus: plan?.status,
     steps,
