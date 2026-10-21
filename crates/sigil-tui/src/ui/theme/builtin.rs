@@ -149,7 +149,7 @@ fn sigil_dark() -> ThemePalette {
         border_danger: c(198, 142, 150),
         text_primary: c(236, 240, 246),
         text_secondary: c(149, 158, 173),
-        text_muted: c(99, 109, 126),
+        text_muted: c(123, 133, 150),
         text_inverse: Color::Black,
         text_disabled: c(99, 109, 126),
         accent_primary: c(145, 182, 170),

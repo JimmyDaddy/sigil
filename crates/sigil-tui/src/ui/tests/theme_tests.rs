@@ -25,6 +25,24 @@ fn default_wrappers_preserve_sigil_dark_baseline() {
 }
 
 #[test]
+fn default_active_help_text_meets_normal_text_contrast() {
+    let palette = Theme::builtin(ThemeId::SigilDark).palette;
+    for (surface, background) in [
+        ("footer", palette.surface_base),
+        ("panel", palette.surface_panel),
+        ("input", palette.surface_input),
+        ("approval", palette.approval_bg),
+    ] {
+        let ratio = contrast::contrast_ratio(palette.text_muted, background)
+            .expect("default active help uses opaque RGB colors");
+        assert!(
+            ratio >= 4.5,
+            "active help on {surface} must remain readable: {ratio:.4}:1"
+        );
+    }
+}
+
+#[test]
 fn theme_resolve_applies_color_overrides() {
     let mut colors = BTreeMap::new();
     colors.insert("surface_base".to_owned(), "#010203".to_owned());

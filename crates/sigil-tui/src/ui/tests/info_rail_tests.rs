@@ -197,7 +197,10 @@ fn render_info_line_formats_labels_markers_and_plain_values() {
 
     let muted = render_info_line("◇ helper idle", 32);
     assert_eq!(muted.spans[1].content.as_ref(), "◇ ");
-    assert_eq!(muted.spans[1].style, Style::default().fg(super::dim()));
+    assert_eq!(
+        muted.spans[1].style,
+        Style::default().fg(crate::ui::theme::default_palette().status_pending)
+    );
     assert_eq!(
         muted.spans[2].style,
         Style::default().fg(crate::ui::theme::muted())
@@ -264,7 +267,10 @@ fn render_info_line_formats_labels_markers_and_plain_values() {
 
     let pending = render_info_line("◇ 2. pending overview", 32);
     assert_eq!(pending.spans[1].content.as_ref(), "◇ ");
-    assert_eq!(pending.spans[1].style, Style::default().fg(super::dim()));
+    assert_eq!(
+        pending.spans[1].style,
+        Style::default().fg(crate::ui::theme::default_palette().status_pending)
+    );
     assert_eq!(
         pending.spans[2].style,
         Style::default().fg(crate::ui::theme::muted())

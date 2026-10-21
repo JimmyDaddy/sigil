@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 
 use super::*;
-use crate::ui::theme::{Theme, accent_blue, accent_lime, accent_rose, dim, muted};
+use crate::ui::theme::{Theme, accent_blue, accent_lime, accent_rose, muted};
 
 #[test]
 fn status_indicator_maps_semantic_symbols_and_styles() {
@@ -12,7 +12,10 @@ fn status_indicator_maps_semantic_symbols_and_styles() {
     assert_eq!(status_symbol(StatusKind::Warning), "△");
     assert_eq!(status_symbol(StatusKind::Unknown), "◇");
 
-    assert_eq!(status_style(StatusKind::Idle), Style::default().fg(dim()));
+    assert_eq!(
+        status_style(StatusKind::Idle),
+        Style::default().fg(Theme::default().palette.status_pending)
+    );
     assert_eq!(
         status_style(StatusKind::Running),
         Style::default()
