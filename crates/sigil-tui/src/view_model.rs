@@ -327,9 +327,8 @@ pub(crate) struct ComposerAttachmentViewModel {
 pub(crate) struct ComposerViewModel {
     pub mode_label: String,
     pub phase: RunPhase,
-    pub provider_name: String,
+    pub permission_label: String,
     pub model_name: String,
-    pub reasoning_effort_label: String,
     pub agent_rows: Vec<SidebarAgentRow>,
     pub agent_panel_focused: bool,
     pub image_attachments: Vec<ComposerAttachmentViewModel>,
@@ -341,15 +340,18 @@ pub(crate) struct ComposerViewModel {
 impl ComposerViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
-            mode_label: format!(
-                "{} · agent: {}",
-                app.composer_mode_label(),
-                app.active_agent_label()
-            ),
+            mode_label: if app.active_agent_label() == "main" {
+                app.composer_mode_label().to_owned()
+            } else {
+                format!(
+                    "{} · {}",
+                    app.composer_mode_label(),
+                    app.active_agent_label()
+                )
+            },
             phase: app.run_phase(),
-            provider_name: app.runtime.provider_name.clone(),
+            permission_label: app.runtime.permission_mode.to_string(),
             model_name: app.runtime.model_name.clone(),
-            reasoning_effort_label: app.reasoning_effort_label().to_owned(),
             agent_rows: app.composer_agent_rows(),
             agent_panel_focused: app.is_composer_agent_panel_focused(),
             image_attachments: app
@@ -953,10 +955,9 @@ fn footer_run_label(app: &AppState) -> String {
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let agent = format!("agent: {}", app.active_agent_label());
     let queue = app.composer_queue_summary();
     if app.selected_timeline_text().is_some() {
-        return format!("{agent} · Ctrl-C copy selection · Esc clear selection");
+        return "Ctrl-C copy selection · Esc clear selection".to_owned();
     }
     if let Some(form) = app.pending_user_input() {
         if form.is_plan_revision_editor() {
@@ -966,28 +967,23 @@ fn footer_hints(app: &AppState) -> String {
                 } else {
                     "revision draft kept"
                 };
-                return format!("{agent} · {state} · Shift-Tab reopen");
+                return format!("{state} · Shift-Tab reopen");
             }
             if form.plan_revision_editor.submitting {
-                return format!(
-                    "{agent} · Plan revision submitting · waiting for confirmation · Esc back"
-                );
+                return "Plan revision submitting · waiting for confirmation · Esc back".to_owned();
             }
             let submit = if form.plan_revision_editor.error.is_some() {
                 "submission failed · Enter retry revision"
             } else {
                 "Enter submit revision"
             };
-            return format!(
-                "{agent} · Plan revision · {submit} · Shift-Enter/Ctrl-J new line · Esc back"
-            );
+            return format!("Plan revision · {submit} · Shift-Enter/Ctrl-J new line · Esc back");
         }
         if form.open {
-            return format!(
-                "{agent} · Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
-            );
+            return "Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
+                .to_owned();
         }
-        return format!("{agent} · input required · Shift-Tab reopen");
+        return "input required · Shift-Tab reopen".to_owned();
     }
     if app.pending_plan_approval().is_some() {
         if app
@@ -998,7 +994,7 @@ fn footer_hints(app: &AppState) -> String {
                 .pending_plan_approval()
                 .expect("pending Plan was checked");
             return format!(
-                "{agent} · Plan {} · {}",
+                "Plan {} · {}",
                 pending.status_label(),
                 pending.workbench_key_hint()
             );
@@ -1007,9 +1003,9 @@ fn footer_hints(app: &AppState) -> String {
             .pending_plan_approval()
             .is_some_and(|pending| pending.stale)
         {
-            return format!("{agent} · workspace notice · Enter review · Shift-Tab reopen");
+            return "workspace notice · Enter review · Shift-Tab reopen".to_owned();
         }
-        return format!("{agent} · Enter review · Shift-Tab reopen");
+        return "Enter review · Shift-Tab reopen".to_owned();
     }
     if let Some(pending) = &app.approval.pending {
         if !pending.actions_available() {
@@ -1022,7 +1018,7 @@ fn footer_hints(app: &AppState) -> String {
                     "approval delivery uncertain; waiting for authoritative state"
                 }
             };
-            return format!("{agent} · {state} · Esc input");
+            return format!("{state} · Esc input");
         }
         let session = pending.session_grant_available;
         let shortcut_hint = if session {
@@ -1030,7 +1026,7 @@ fn footer_hints(app: &AppState) -> String {
         } else {
             "Shortcuts: Y allow once · N deny"
         };
-        return format!("{agent} · {shortcut_hint} · V details");
+        return format!("{shortcut_hint} · V details");
     }
     if app.verification_card_focused() {
         let action = if app.verification_card_has_action() {
@@ -1038,42 +1034,36 @@ fn footer_hints(app: &AppState) -> String {
         } else {
             ""
         };
-        return format!("{agent} · Verification {action}I inspect · Esc input");
+        return format!("Verification {action}I inspect · Esc input");
     }
     if app.is_composer_queue_panel_focused() {
         if let Some(pending) = app.composer_queue_pending_operation_label() {
-            return format!("{agent} · {pending} · ↑↓ item · Tab/Esc input");
+            return format!("{pending} · ↑↓ item · Tab/Esc input");
         }
-        return format!(
-            "{agent} · Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input"
-        );
+        return "Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input".to_owned();
     }
     if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
         let queue = queue
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!(
-            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
-        );
+        return format!("Ctrl-C stop · {queue}Enter add follow-up · Ctrl-B background · F1 help");
     }
     if app.runtime.is_busy {
         let queue = queue
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!(
-            "{agent} · {queue}Enter add follow-up · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
-        );
+        return format!("Ctrl-C stop · {queue}Enter add follow-up · F1 help");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
-            return format!("{agent} · ↑↓ choose · Tab/Enter insert · Esc close");
+            return "↑↓ choose · Tab/Enter insert · Esc close".to_owned();
         }
-        return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
+        return "↑↓ choose · Tab accept · Enter run · Esc close".to_owned();
     }
     if app.is_composer_agent_panel_focused() {
-        let mut hints = format!("{agent} · ↑↓ agent · Enter switch");
+        let mut hints = "↑↓ agent · Enter switch".to_owned();
         if composer_agent_panel_child_selected(app) {
             hints.push_str(" · Alt-C close · Alt-M message");
         }
@@ -1081,14 +1071,14 @@ fn footer_hints(app: &AppState) -> String {
         return hints;
     }
     if let Some(queue) = queue {
-        return format!("{agent} · {queue} · Tab follow-ups");
+        return format!("{queue} · Tab follow-ups");
     }
     let newline_hint = if app.terminal_keyboard_enhancement_enabled() {
         "Shift-Enter newline"
     } else {
         "Ctrl-J newline"
     };
-    format!("{agent} · Enter send · {newline_hint} · Ctrl-L copy reply · Alt-A agent · / commands")
+    format!("Enter send · {newline_hint} · F1 help · Ctrl-L copy reply · / commands")
 }
 
 fn composer_agent_panel_child_selected(app: &AppState) -> bool {

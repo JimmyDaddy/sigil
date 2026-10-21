@@ -277,61 +277,85 @@ fn render_footer_status(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let _ = (
-        &footer.phase,
-        footer.is_busy,
-        &footer.run_label,
-        &footer.hints,
-    );
+    let _ = (&footer.phase, &footer.run_label);
     frame.render_widget(Block::default().style(styles::body(&theme.palette)), area);
     let inner = inset_rect(area, 2, 0);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let context_width = footer_context_width(footer, inner.width);
-    let workspace_width = inner
+    let hints = fitted_footer_hints(&footer.hints, inner.width as usize);
+    let hint_width = terminal_cell_width(&hints) as u16;
+    if hint_width > 0 {
+        frame.render_widget(
+            Paragraph::new(hints).style(Style::default().fg(if footer.is_busy {
+                theme.palette.text_secondary
+            } else {
+                theme.palette.text_muted
+            })),
+            Rect::new(inner.x, inner.y, hint_width, 1),
+        );
+    }
+    let remaining = inner
         .width
+        .saturating_sub(hint_width)
+        .saturating_sub(u16::from(hint_width > 0) * 2);
+    let context_width = footer_context_width(footer, remaining);
+    let workspace_width = remaining
         .saturating_sub(context_width)
         .saturating_sub(u16::from(context_width > 0));
-    if !footer.workspace_git_label.is_empty() && workspace_width >= 12 {
-        let git_label = truncate_display_width(
-            &footer.workspace_git_label,
-            workspace_width.saturating_sub(4) as usize,
+    if !footer.workspace_git_label.is_empty() && workspace_width >= FOOTER_GIT_MIN_WIDTH {
+        let label = truncate_display_width(
+            &format!("git {}", footer.workspace_git_label),
+            workspace_width as usize,
         );
         frame.render_widget(
-            Paragraph::new(Text::from(vec![Line::from(vec![
-                Span::styled(
-                    "git ",
-                    Style::default()
-                        .fg(theme.palette.accent_info)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(git_label, styles::muted(&theme.palette)),
-            ])]))
-            .style(Style::default().bg(theme.palette.surface_base))
-            .wrap(Wrap { trim: false }),
-            Rect::new(inner.x, inner.y, workspace_width, inner.height),
+            Paragraph::new(label).style(styles::muted(&theme.palette)),
+            Rect::new(
+                inner.right().saturating_sub(remaining),
+                inner.y,
+                workspace_width,
+                1,
+            ),
         );
     }
     if context_width > 0 {
-        let context_area = Rect::new(
-            inner.x + inner.width.saturating_sub(context_width),
-            inner.y,
-            context_width,
-            inner.height,
-        );
-        let context = truncate_display_width(&footer.context_label, context_width as usize);
         frame.render_widget(
-            Paragraph::new(Text::from(vec![Line::from(vec![Span::styled(
-                context,
-                styles::muted(&theme.palette),
-            )])]))
-            .style(Style::default().bg(theme.palette.surface_base))
+            Paragraph::new(truncate_display_width(
+                &footer.context_label,
+                context_width as usize,
+            ))
             .alignment(Alignment::Right)
-            .wrap(Wrap { trim: false }),
-            context_area,
+            .style(styles::muted(&theme.palette)),
+            Rect::new(
+                inner.right().saturating_sub(context_width),
+                inner.y,
+                context_width,
+                1,
+            ),
         );
     }
+}
+
+fn fitted_footer_hints(hints: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut fitted = String::new();
+    for hint in hints.split(" · ").take(3) {
+        let candidate = if fitted.is_empty() {
+            hint.to_owned()
+        } else {
+            format!("{fitted} · {hint}")
+        };
+        if terminal_cell_width(&candidate) > width {
+            if fitted.is_empty() {
+                return truncate_display_width(hint, width);
+            }
+            break;
+        }
+        fitted = candidate;
+    }
+    fitted
 }
 
 fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {

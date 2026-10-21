@@ -192,13 +192,16 @@ fn tool_card_body_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u1
         .iter()
         .find(|area| area.entry_index == entry_index)
         .expect("expected visible tool card hit area");
-    (
-        hit_area.area.x,
-        hit_area
-            .area
-            .y
-            .saturating_add(u16::from(hit_area.area.height > 1)),
-    )
+    assert!(
+        hit_area.area.height > 1,
+        "body fixture must have a visible body"
+    );
+    let point = (hit_area.area.x, hit_area.area.y.saturating_add(1));
+    assert_eq!(
+        layout.hit_target(point.0, point.1),
+        HitTarget::ToolCard { entry_index }
+    );
+    point
 }
 
 fn tool_card_hidden_preview_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
@@ -363,6 +366,36 @@ fn push_sample_tool_cards(app: &mut AppState) {
     );
 }
 
+fn push_tool_cards_with_visible_body(app: &mut AppState) {
+    app.push_timeline(
+        TimelineRole::Tool,
+        json!({
+            "call_id": "call-first",
+            "tool_name": "bash",
+            "status": "ok",
+            "preview_kind": "text",
+            "summary": "2 lines · 26 B",
+            "preview_lines": ["fixture output", "second line"],
+            "hidden_lines": 0,
+            "metadata": {"details": {"call": {"summary": "command=printf fixture"}}}
+        })
+        .to_string(),
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        json!({
+            "call_id": "call-second",
+            "tool_name": "ls",
+            "status": "ok",
+            "preview_kind": "json",
+            "preview_lines": ["[\"src/lib.rs\"]"],
+            "preview_value": ["src/lib.rs"],
+            "hidden_lines": 0
+        })
+        .to_string(),
+    );
+}
+
 fn push_long_tool_card(app: &mut AppState, call_id: &str, line_count: usize) {
     let preview_lines = (1..=line_count)
         .map(|line| format!("line {line}"))
@@ -385,9 +418,9 @@ fn push_long_tool_card(app: &mut AppState, call_id: &str, line_count: usize) {
 #[test]
 fn layout_snapshot_hits_main_regions() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
+    app.set_terminal_size(124, 20);
 
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 124, 20), &app);
 
     let (live_x, live_y) = point_in(layout.live_panel);
     assert_eq!(layout.hit_target(live_x, live_y), HitTarget::LivePanel);
@@ -726,6 +759,65 @@ fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
 }
 
 #[test]
+fn resume_selector_legacy_notice_preserves_candidate_mouse_target() -> Result<()> {
+    use sigil_runtime::{LegacySharedSessionHistory, LegacySharedSessionHistorySourceState};
+
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let restored_path = session_dir.join("session-restored.jsonl");
+    write_session_log(
+        &restored_path,
+        &restored_entries("restored-provider", "restored-model"),
+    )?;
+    for (state, height) in [
+        (LegacySharedSessionHistorySourceState::Present, 20),
+        (LegacySharedSessionHistorySourceState::Unverified, 11),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        app.set_terminal_size(140, height);
+        app.composer.input = "/resume".to_owned();
+        crate::app::tests::common::settle_session_auxiliary(&mut app);
+        app.session_browser.legacy_shared_history = Some(LegacySharedSessionHistory {
+            workspace_id: "legacy-workspace".to_owned(),
+            workspace_label: "原工作区".to_owned(),
+            source_state: state,
+        });
+        let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, height), &app);
+        let overlay = layout.slash_overlay.expect("resume selector");
+        assert_eq!(overlay.title_rows, 3);
+        for row in overlay.content.y..overlay.content.y + overlay.title_rows {
+            assert!(!matches!(
+                layout.hit_target(overlay.content.x, row),
+                HitTarget::SlashCandidate { .. }
+            ));
+        }
+        let (column, row) = slash_candidate_point(&layout, 0);
+        assert_eq!(
+            layout.hit_target(column, row),
+            HitTarget::SlashCandidate { index: 0 }
+        );
+        let first =
+            app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+        assert!(matches!(first, AppMouseOutcome::Redraw));
+        let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, height), &app);
+        let (column, row) = slash_candidate_point(&layout, 0);
+        let outcome =
+            app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+        assert!(
+            matches!(outcome, AppMouseOutcome::Action(AppAction::SwitchSession { session_log_path }) if session_log_path == restored_path)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn layout_snapshot_hits_slash_candidate_over_live_panel() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -755,6 +847,20 @@ fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
         }
     );
 
+    let compact_card = layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == first_entry_index)
+        .expect("compact tool card should remain visible");
+    assert_eq!(compact_card.area.height, 1);
+    assert!(compact_card.hidden_preview_area.is_none());
+    assert_eq!(
+        layout.hit_target(compact_card.area.x, compact_card.area.bottom()),
+        HitTarget::LivePanel
+    );
+
+    assert!(app.toggle_tool_activity_entry(first_entry_index));
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = tool_card_body_point(&layout, first_entry_index);
 
     assert_eq!(
@@ -1076,7 +1182,7 @@ fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.composer.input = "draft".to_owned();
-    push_sample_tool_cards(&mut app);
+    push_tool_cards_with_visible_body(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
     let (column, row) = tool_card_body_point(&layout, first_entry_index);
@@ -1099,7 +1205,7 @@ fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
 fn mouse_click_tool_card_body_toggles_card_on_release() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    push_sample_tool_cards(&mut app);
+    push_tool_cards_with_visible_body(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
     let (column, row) = tool_card_body_point(&layout, first_entry_index);
@@ -1128,7 +1234,7 @@ fn mouse_click_tool_card_body_toggles_card_on_release() -> Result<()> {
 fn mouse_drag_tool_card_body_does_not_toggle_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    push_sample_tool_cards(&mut app);
+    push_tool_cards_with_visible_body(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
     let (start_column, start_row) = tool_card_body_point(&layout, first_entry_index);
@@ -1219,6 +1325,13 @@ fn mouse_release_only_tool_card_header_toggles_card() -> Result<()> {
 fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(100, 20);
+    app.push_timeline(
+        TimelineRole::Assistant,
+        (1..=24)
+            .map(|line| format!("- prior row {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
     push_long_tool_card(&mut app, "call-long", 32);
     push_sample_tool_cards(&mut app);
     let long_entry_index = app.tool_activity_entry_indices()[0];
@@ -1245,12 +1358,61 @@ fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
 }
 
 #[test]
+fn mouse_expands_compact_card_when_short_transcript_grows_past_viewport() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(100, 20);
+    push_long_tool_card(&mut app, "call-compact", 32);
+    push_sample_tool_cards(&mut app);
+    let entry_index = app.tool_activity_entry_indices()[0];
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
+    let (column, row) = tool_card_header_point(&layout, entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    let expanded = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
+    let card = expanded
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expanded compact card should remain visible");
+    let header = card
+        .header_area
+        .expect("expanded header should remain visible");
+    assert_eq!(
+        expanded.hit_target(header.x, header.y),
+        HitTarget::ToolCardHeader { entry_index }
+    );
+    assert!(card.area.height > 1);
+    assert!(app.transcript_lines(40).iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.contains("line 1"))
+    }));
+    Ok(())
+}
+
+#[test]
 fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     push_sample_tool_cards(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (header_column, header_row) = tool_card_header_point(&layout, first_entry_index);
+    let expand = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, header_column, header_row),
+        &layout,
+    )?;
+    assert!(matches!(expand, AppMouseOutcome::Redraw));
+    let first_key = format!("call:call-first:entry:{first_entry_index}");
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&first_key)
+    );
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = tool_card_hidden_preview_point(&layout, first_entry_index);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
@@ -1262,9 +1424,9 @@ fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(
-        app.timeline_state
+        !app.timeline_state
             .expanded_tool_activity_keys
-            .contains(&format!("call:call-first:entry:{first_entry_index}"))
+            .contains(&first_key)
     );
     assert_eq!(
         app.mouse_hover_target,
@@ -1484,7 +1646,7 @@ fn mouse_click_tool_card_without_text_hit_clears_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.push_timeline(TimelineRole::User, "selected text");
-    push_sample_tool_cards(&mut app);
+    push_tool_cards_with_visible_body(&mut app);
     let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (text_column, text_row) = live_text_point_at_text_offset(&app, &layout, "selected text", 0);
     let (text_end_column, text_end_row) =
@@ -1729,8 +1891,8 @@ fn mouse_scroll_slash_overlay_moves_candidate_selection() -> Result<()> {
 #[test]
 fn mouse_scroll_info_rail_focuses_activity_and_moves_sidebar() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    app.set_terminal_size(124, 20);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 124, 20), &app);
     let (column, row) = point_in(layout.info_rail);
 
     let outcome =
@@ -1778,9 +1940,9 @@ fn mouse_scroll_behind_approval_modal_is_noop() -> Result<()> {
 #[test]
 fn mouse_click_infotrack_focuses_activity() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
+    app.set_terminal_size(124, 20);
     app.active_pane = PaneFocus::Composer;
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 124, 20), &app);
     let (column, row) = point_in(layout.info_rail);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
@@ -1838,14 +2000,14 @@ fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
 #[test]
 fn mouse_agent_row_left_up_and_scroll_cover_fallback_edges() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
+    app.set_terminal_size(124, 20);
     app.active_pane = PaneFocus::Composer;
     app.sync_current_session_state(child_agent_entries(
         Some("仓库审查"),
         sigil_kernel::AgentThreadStatus::Completed,
         sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
     )?);
-    let mut invalid_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let mut invalid_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 124, 20), &app);
     let unavailable_row = invalid_layout.info_rail_agent_rows[0];
     invalid_layout.info_rail_agent_rows[0].index = 99;
 
@@ -1862,7 +2024,7 @@ fn mouse_agent_row_left_up_and_scroll_cover_fallback_edges() -> Result<()> {
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert_eq!(app.last_notice(), Some("no agent selected"));
 
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 124, 20), &app);
     let main_row = layout.info_rail_agent_rows[0];
     let scrolled = app.handle_mouse_event(
         mouse(MouseInputKind::ScrollDown, main_row.area.x, main_row.area.y),

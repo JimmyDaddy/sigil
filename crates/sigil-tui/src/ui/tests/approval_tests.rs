@@ -576,7 +576,11 @@ fn approval_action_badge_marks_only_selected_action() {
 
     assert!(selected.content.contains("▶ Allow"));
     assert_eq!(selected.style.bg, Some(Color::Green));
-    assert_eq!(unselected.style.bg, Some(Color::Red));
+    assert_eq!(unselected.style.bg, None);
+    assert_eq!(
+        unselected.style.fg,
+        Some(theme::default_palette().text_primary)
+    );
     assert!(!unselected.content.contains('▶'));
 }
 
@@ -798,6 +802,7 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
     colors.insert("approval_allow_bg".to_owned(), "#214365".to_owned());
     colors.insert("approval_deny_bg".to_owned(), "#654321".to_owned());
     colors.insert("text_inverse".to_owned(), "#F1F2F3".to_owned());
+    colors.insert("text_primary".to_owned(), "#A1B2C3".to_owned());
     colors.insert("markdown_code_fg".to_owned(), "#D0E0F0".to_owned());
     colors.insert("markdown_code_bg".to_owned(), "#203040".to_owned());
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
@@ -857,15 +862,27 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
 
     assert_eq!(
         cell_colors_at_text(&terminal, "Review file changes", "Review file changes"),
-        (Color::Rgb(241, 242, 243), Color::Rgb(17, 34, 51))
+        (Color::Rgb(161, 178, 195), Color::Rgb(1, 2, 3))
     );
     assert_eq!(
         cell_colors_at_text(&terminal, "approval-code", "approval-code"),
         (Color::Rgb(208, 224, 240), Color::Rgb(32, 48, 64))
     );
+    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
     assert_eq!(
         cell_colors_at_text(&terminal, "Allow", "Allow"),
         (Color::Rgb(241, 242, 243), Color::Rgb(33, 67, 101))
+    );
+    assert_eq!(
+        cell_colors_at_text(&terminal, "Deny", "Deny"),
+        (Color::Rgb(161, 178, 195), Color::Rgb(1, 2, 3))
+    );
+
+    app.approval.selected_action = ApprovalAction::Deny;
+    terminal.draw(|frame| render_approval_modal(frame, &app))?;
+    assert_eq!(
+        cell_colors_at_text(&terminal, "Deny", "Deny"),
+        (Color::Rgb(241, 242, 243), Color::Rgb(101, 67, 33))
     );
     Ok(())
 }
@@ -922,7 +939,9 @@ fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::
     assert!(rendered.contains("Content to approve"));
     assert!(rendered.contains("Run remote_tool"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Decision"));
+    assert!(rendered.contains("Allow once"));
+    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("Enter select"));
     assert!(!rendered.contains("No file changes to review."));
     assert!(!rendered.contains("Summary"));
     assert!(!rendered.contains("No structured diff preview available."));
@@ -993,7 +1012,9 @@ fn render_shell_approval_prioritizes_command_without_internal_identity_or_empty_
     assert!(rendered.contains("cargo clippy --workspace --all-targets"));
     assert!(rendered.contains("-D warnings"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Decision"));
+    assert!(rendered.contains("Allow once"));
+    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("Enter select"));
     assert!(!rendered.contains("No file changes to review."));
     assert!(!rendered.contains("Summary"));
     assert!(!rendered.contains("call-shell-internal"));
@@ -1055,6 +1076,25 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         }),
         ..ApprovalModalView::default()
     }
+}
+
+#[test]
+fn single_file_approval_uses_full_review_width_and_keeps_decision_geometry() {
+    let mut view = modal_view("file write");
+    view.metadata_collapsed = true;
+    let body = ratatui::layout::Rect::new(2, 4, 100, 12);
+    assert_eq!(approval_file_list_width(body, &view), 0);
+    view.file_rows.push(ApprovalFileRow {
+        path: "other.rs".to_owned(),
+        selected: false,
+        diagnostics: None,
+        action: None,
+    });
+    assert_eq!(approval_file_list_width(body, &view), 24);
+    assert_eq!(
+        approval_file_list_width(ratatui::layout::Rect::new(2, 4, 72, 12), &view),
+        0
+    );
 }
 
 fn multi_file_preview() -> ToolPreview {

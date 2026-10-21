@@ -60,7 +60,10 @@ fn restored_metadata_and_error_kind_prefer_execution_state() {
         "error": { "kind": "timeout" }
     });
 
-    assert_eq!(restored_execution_status_label(&execution), Some("error"));
+    assert_eq!(
+        restored_execution_status_label(&execution),
+        Some("cancelled")
+    );
     assert_eq!(
         restored_tool_metadata(Some(&envelope), Some(&execution), None)
             .and_then(|metadata| metadata.bytes),

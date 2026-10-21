@@ -12,7 +12,8 @@ use crate::surface::SlashSelectorSurface;
 
 use super::{
     geometry::{selector_window_range, shadow_rect},
-    layout_snapshot::slash_selector_overlay_rect,
+    layout_snapshot::{slash_selector_header_row_count, slash_selector_overlay_rect},
+    text::truncate_display_width,
     theme::Theme,
 };
 
@@ -93,6 +94,12 @@ pub(crate) fn render_slash_selector_overlay_with_theme(
         .map(|title| selector_title_line_with_theme(title, theme))
         .into_iter()
         .collect::<Vec<_>>();
+    append_selector_notice_lines(
+        &mut lines,
+        &app.slash_selector_notice_lines(),
+        content,
+        theme,
+    );
     let row_capacity = (content.height as usize).saturating_sub(lines.len());
     if row_capacity == 0 {
         // The title is more useful than a clipped first row when the terminal is tiny.
@@ -213,6 +220,7 @@ pub(crate) fn render_slash_selector_overlay_surface(
         .map(|title| selector_title_line_with_theme(title, theme))
         .into_iter()
         .collect::<Vec<_>>();
+    append_selector_notice_lines(&mut lines, &selector.notice_lines, content, theme);
     let row_capacity = (content.height as usize).saturating_sub(lines.len());
     if row_capacity == 0 {
         // Keep the title visible on a tiny terminal.
@@ -263,6 +271,25 @@ pub(crate) fn render_slash_selector_overlay_surface(
             .wrap(Wrap { trim: false }),
         content,
     );
+}
+
+fn append_selector_notice_lines(
+    lines: &mut Vec<Line<'_>>,
+    notice_lines: &[String],
+    content: Rect,
+    theme: &Theme,
+) {
+    let header_rows =
+        slash_selector_header_row_count(content.height, !lines.is_empty(), notice_lines.len());
+    let notice_budget = usize::from(header_rows).saturating_sub(lines.len());
+    lines.extend(notice_lines.iter().take(notice_budget).map(|notice| {
+        Line::styled(
+            truncate_display_width(notice, content.width as usize),
+            Style::default()
+                .fg(theme.palette.text_secondary)
+                .bg(theme.palette.overlay_bg),
+        )
+    }));
 }
 
 fn selector_title_line_with_theme(title: &str, theme: &Theme) -> Line<'static> {

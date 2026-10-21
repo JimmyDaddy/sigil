@@ -22,8 +22,7 @@ use super::{
 use crate::setup::{SETUP_PROVIDER_ORDER, SetupCredentialSource};
 use crate::token_units::{
     MAX_OUTPUT_TOKEN_PRESETS, cycle_context_window_preset, cycle_token_preset,
-    is_token_count_character, max_output_token_display, parse_optional_token_count,
-    token_count_display,
+    is_token_count_character, parse_optional_token_count, token_count_display,
 };
 
 impl AppState {
@@ -155,33 +154,13 @@ impl AppState {
         lines.extend([
             String::new(),
             "[review]".to_owned(),
-            format!(
-                "connection: {} · {}",
-                state.provider_label(),
-                state.protocol.label()
-            ),
-            format!("authentication: {}", state.auth_summary()),
+            format!("provider: {}", state.provider_label()),
             format!("model: {}", state.model),
-            format!(
-                "context window: {}",
-                if state.context_window_tokens.trim().is_empty() {
-                    "automatic (provider metadata or fallback)".to_owned()
-                } else {
-                    token_count_display(&state.context_window_tokens, "automatic")
-                }
-            ),
-            format!(
-                "max output tokens: {}",
-                max_output_token_display(&state.max_output_tokens, "automatic")
-            ),
-            format!(
-                "orchestration: {} / {} ({})",
-                state.orchestration_rollout.routing_policy.as_str(),
-                state.orchestration_rollout.multi_agent_mode.as_str(),
-                state.orchestration_rollout.status.as_str()
-            ),
-            "current session: starts with this route · saved default: this route".to_owned(),
+            format!("authentication: {}", state.auth_summary()),
         ]);
+        if state.is_custom() {
+            lines.push(format!("protocol: {}", state.protocol.label()));
+        }
 
         if state.credential_source == SetupCredentialSource::SecureStore {
             lines.push(format!("staged credential: {}", state.masked_api_key()));

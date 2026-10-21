@@ -17,8 +17,9 @@ fn builtin_themes_resolve_for_all_theme_ids() {
 
 #[test]
 fn default_wrappers_preserve_sigil_dark_baseline() {
-    assert_eq!(shell_bg(), Color::Rgb(7, 8, 10));
-    assert_eq!(composer_bg(), Color::Rgb(27, 30, 37));
+    assert_eq!(shell_bg(), Color::Rgb(13, 15, 20));
+    assert_eq!(composer_bg(), Color::Rgb(20, 23, 30));
+    assert_eq!(composer_input_bg(), Color::Rgb(25, 29, 37));
     assert_eq!(ink(), Color::Rgb(236, 240, 246));
     assert_eq!(config_selected_bg(), Color::Rgb(23, 34, 36));
 }

@@ -28,6 +28,7 @@ mod user_input_form;
 pub use shell::render;
 pub(crate) use shell::render_surface;
 
+pub(crate) use geometry::sidebar_width_for_terminal;
 pub(crate) use layout_snapshot::live_transcript_rows_for_app;
 pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 

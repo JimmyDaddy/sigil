@@ -968,8 +968,16 @@ fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> 
         .into_iter()
         .filter_map(|entry_index| {
             let range = app.timeline_entry_render_range(entry_index)?;
+            let mut content_end = range.end;
+            while content_end > range.start
+                && app
+                    .timeline_plain_line(content_end - 1)
+                    .is_some_and(|line| line.trim().is_empty())
+            {
+                content_end -= 1;
+            }
             let start = range.start.max(rows.visible_start);
-            let end = range.end.min(rows.visible_end);
+            let end = content_end.min(rows.visible_end);
             (start < end).then(|| {
                 let header_area =
                     (range.start >= rows.visible_start && range.start < end).then(|| {
@@ -1200,7 +1208,11 @@ pub(super) fn approval_modal_area(screen: Rect, view: &ApprovalModalView) -> Rec
         .max()
         .unwrap_or(0);
     let inner_width = [
-        72usize,
+        if view.file_rows.len() > 1 {
+            100usize
+        } else {
+            72usize
+        },
         diff_width.saturating_add(12),
         view.preview_title.chars().count().saturating_add(10),
         view.preview_summary
@@ -1404,14 +1416,11 @@ fn approval_file_row_hit_areas(
     body_area: Rect,
     view: &ApprovalModalView,
 ) -> Vec<ApprovalFileRowHitArea> {
-    if view.file_rows.is_empty() || body_area.width == 0 || body_area.height == 0 {
+    let file_width = approval_file_list_width(body_area, view);
+    if file_width == 0 || body_area.height == 0 {
         return Vec::new();
     }
 
-    let file_width = if body_area.width >= 92 { 28 } else { 22 }
-        .min(body_area.width.saturating_sub(18))
-        .max(16)
-        .min(body_area.width);
     let file_inner = inset_rect(
         Rect::new(body_area.x, body_area.y, file_width, body_area.height),
         1,
@@ -1437,18 +1446,18 @@ fn approval_file_row_hit_areas(
         .collect()
 }
 
+pub(super) fn approval_file_list_width(body_area: Rect, view: &ApprovalModalView) -> u16 {
+    if view.file_rows.len() < 2 || body_area.width < 80 {
+        return 0;
+    }
+    24
+}
+
 fn approval_diff_area(body_area: Rect, view: &ApprovalModalView) -> Rect {
     if body_area.width == 0 || body_area.height == 0 {
         return Rect::default();
     }
-    if view.file_rows.is_empty() {
-        return body_area;
-    }
-
-    let file_width = if body_area.width >= 92 { 28 } else { 22 }
-        .min(body_area.width.saturating_sub(18))
-        .max(16)
-        .min(body_area.width);
+    let file_width = approval_file_list_width(body_area, view);
     let diff_x = body_area.x.saturating_add(file_width);
     Rect::new(
         diff_x,
@@ -1690,7 +1699,11 @@ fn slash_overlay_hit_areas(
         return None;
     }
 
-    let title_rows = u16::from(app.slash_selector_title().is_some());
+    let title_rows = slash_selector_header_row_count(
+        content.height,
+        app.slash_selector_title().is_some(),
+        app.slash_selector_notice_lines().len(),
+    );
     let row_capacity = (content.height as usize).saturating_sub(title_rows as usize);
     let selector_rows = app.slash_selector_rows();
     let selected_index = app.slash_selector_selected_index().unwrap_or(0);
@@ -1707,6 +1720,16 @@ fn slash_overlay_hit_areas(
         window_end,
         title_rows,
     })
+}
+
+pub(super) fn slash_selector_header_row_count(
+    content_height: u16,
+    has_title: bool,
+    notice_line_count: usize,
+) -> u16 {
+    let title_rows = u16::from(has_title).min(content_height);
+    let notice_budget = content_height.saturating_sub(title_rows.saturating_add(1));
+    title_rows.saturating_add(notice_line_count.min(usize::from(notice_budget)) as u16)
 }
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {

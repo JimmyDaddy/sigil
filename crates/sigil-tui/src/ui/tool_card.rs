@@ -92,6 +92,55 @@ pub(crate) fn render_tool_entry_lines(
         options.max_content_width,
         palette,
     )];
+    if !expanded
+        && activity.is_inspection
+        && !command_tool(&summary)
+        && display.status.kind == StatusKind::Success
+    {
+        if let Some(summary_line) = &display.summary {
+            let used = lines[0]
+                .spans
+                .iter()
+                .map(|span| terminal_cell_width(span.content.as_ref()))
+                .sum::<usize>();
+            let remaining = if options.max_content_width == 0 {
+                160
+            } else {
+                options.max_content_width
+            }
+            .saturating_sub(used.saturating_add(3));
+            if remaining > 0 {
+                lines[0].spans.push(Span::styled(
+                    format!(" · {}", truncate_display_width(summary_line, remaining)),
+                    Style::default().fg(palette.text_muted),
+                ));
+            }
+        }
+        if selected {
+            lines.push(timeline_content_line(
+                accent,
+                vec![Span::styled(
+                    "Ctrl-O details",
+                    Style::default().fg(palette.text_secondary),
+                )],
+            ));
+        }
+        if summary.artifact.as_ref().is_some_and(|artifact| {
+            artifact.availability != "available"
+                || artifact.persisted_bytes < artifact.observed_bytes
+        }) && let Some(line) = tool_artifact_status_line(&summary, palette)
+        {
+            lines.push(line);
+        }
+        return tool_card_frame_lines(
+            lines,
+            None,
+            selected,
+            options.max_content_width,
+            activity_marker_style,
+            palette,
+        );
+    }
     if let Some(summary_line) = display.summary.clone() {
         lines.push(timeline_content_line(
             accent,
@@ -546,7 +595,11 @@ impl ToolPreviewKind {
 }
 
 fn tool_status_style(kind: StatusKind, palette: &ThemePalette) -> Style {
-    StatusIndicator::static_kind(kind).badge_style_with_palette(palette)
+    if matches!(kind, StatusKind::Success | StatusKind::Idle) {
+        Style::default().fg(palette.text_muted)
+    } else {
+        StatusIndicator::static_kind(kind).badge_style_with_palette(palette)
+    }
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

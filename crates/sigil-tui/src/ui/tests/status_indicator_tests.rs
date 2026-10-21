@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 
 use super::*;
-use crate::ui::theme::{Theme, accent_blue, accent_gold, accent_lime, accent_rose, dim, muted};
+use crate::ui::theme::{Theme, accent_blue, accent_lime, accent_rose, dim, muted};
 
 #[test]
 fn status_indicator_maps_semantic_symbols_and_styles() {
@@ -16,7 +16,7 @@ fn status_indicator_maps_semantic_symbols_and_styles() {
     assert_eq!(
         status_style(StatusKind::Running),
         Style::default()
-            .fg(accent_gold())
+            .fg(Theme::default().palette.status_thinking)
             .add_modifier(Modifier::BOLD)
     );
     assert_eq!(

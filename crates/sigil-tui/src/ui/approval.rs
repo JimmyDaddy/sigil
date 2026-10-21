@@ -24,10 +24,9 @@ use super::{
         DiffLineKind, diff_line_number_text, diff_line_number_width, diff_line_style_for_palette,
         number_unified_diff_lines,
     },
-    geometry::{halo_rect, shadow_rect},
     layout_snapshot::{
-        approval_diff_view_control_label, approval_metadata_control_label, approval_modal_area,
-        approval_modal_sections,
+        approval_diff_view_control_label, approval_file_list_width,
+        approval_metadata_control_label, approval_modal_area, approval_modal_sections,
     },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
     theme::{self, ThemePalette},
@@ -67,32 +66,12 @@ fn render_approval_modal_view(
 ) {
     let palette = &current_theme.palette;
     let area = approval_modal_area(frame.area(), view);
-    let backdrop = halo_rect(area, frame.area(), 5, 2);
-    if backdrop.width > 0 && backdrop.height > 0 {
-        frame.render_widget(Clear, backdrop);
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(palette.approval_border))
-                .style(Style::default().bg(palette.approval_backdrop_bg)),
-            backdrop,
-        );
-    }
-    let shadow = shadow_rect(area, frame.area());
-    if shadow.width > 0 && shadow.height > 0 {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(palette.approval_shadow)),
-            shadow,
-        );
-    }
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(approval_block_title(view))
         .title_style(
             Style::default()
-                .fg(palette.text_inverse)
-                .bg(palette.approval_selected_bg)
+                .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
         )
         .border_type(BorderType::Rounded)
@@ -116,11 +95,7 @@ fn render_approval_modal_view(
 
     frame.render_widget(
         Paragraph::new(Text::from(header_lines))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border_subtle)),
-            )
+            .block(Block::default().padding(Padding::uniform(1)))
             .wrap(Wrap { trim: false }),
         sections.header,
     );
@@ -142,11 +117,8 @@ fn render_approval_modal_view(
         return;
     }
 
-    let body_chunks = if !view.file_rows.is_empty() {
-        let file_width = if sections.body.width >= 92 { 28 } else { 22 }
-            .min(sections.body.width.saturating_sub(18))
-            .max(16)
-            .min(sections.body.width);
+    let file_width = approval_file_list_width(sections.body, view);
+    let body_chunks = if file_width > 0 {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(file_width), Constraint::Min(12)])
@@ -158,7 +130,7 @@ fn render_approval_modal_view(
             .split(sections.body)
     };
 
-    if !view.file_rows.is_empty() {
+    if file_width > 0 {
         let file_lines = view
             .file_rows
             .iter()
@@ -179,7 +151,8 @@ fn render_approval_modal_view(
                             "Files {selected_file_index}/{}",
                             view.file_rows.len()
                         ))
-                        .borders(Borders::ALL)
+                        .borders(Borders::TOP)
+                        .padding(Padding::new(1, 1, 0, 1))
                         .border_style(Style::default().fg(palette.border_subtle)),
                 )
                 .wrap(Wrap { trim: false }),
@@ -195,7 +168,8 @@ fn render_approval_modal_view(
     };
     let diff_block = Block::default()
         .title(diff_title)
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
+        .padding(Padding::new(1, 1, 0, 1))
         .border_style(Style::default().fg(palette.border_subtle));
     let diff_inner = diff_block.inner(diff_area);
     frame.render_widget(diff_block, diff_area);
@@ -281,9 +255,9 @@ fn render_approval_review_content(
                     .title(title)
                     .title_style(Style::default().fg(risk_color).add_modifier(Modifier::BOLD))
                     .padding(Padding::horizontal(1))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(risk_color))
+                    .borders(Borders::TOP)
+                    .padding(Padding::new(2, 2, 0, 1))
+                    .border_style(Style::default().fg(palette.border_subtle))
                     .style(Style::default().bg(palette.surface_code)),
             )
             .style(Style::default().bg(palette.surface_code))
@@ -326,8 +300,8 @@ fn render_approval_footer(
         Paragraph::new(Text::from(lines))
             .block(
                 Block::default()
-                    .title("Decision")
-                    .borders(Borders::ALL)
+                    .borders(Borders::TOP)
+                    .padding(Padding::new(1, 1, 0, 1))
                     .border_style(Style::default().fg(palette.border_subtle)),
             )
             .wrap(Wrap { trim: false }),
@@ -920,7 +894,10 @@ fn approval_action_badge_with_palette(
                 .add_modifier(Modifier::BOLD),
         );
     }
-    approval_badge_with_palette(label, color, palette)
+    Span::styled(
+        format!(" {label} "),
+        Style::default().fg(palette.text_primary),
+    )
 }
 
 #[cfg(test)]

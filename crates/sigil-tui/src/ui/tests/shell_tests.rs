@@ -950,7 +950,6 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.set_terminal_size(160, 36);
-    app.composer.input = "composer-visible".to_owned();
     app.handle(RunEvent::TextDelta("assistant `inline-code`".to_owned()))?;
     let call = ToolCall {
         id: "call-themed-read".to_owned(),
@@ -972,6 +971,8 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
         meta,
     )))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    app.composer.input = "composer-visible".to_owned();
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1772,7 +1773,8 @@ fn queue_disappearance_reclaims_short_terminal_space_without_stale_composer_rows
     let layout =
         crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 79, 11), &app);
     assert!(!rendered.contains("Follow-ups"));
-    assert!(rendered.contains("Build · agent: main"));
+    assert!(rendered.contains("Build"));
+    assert!(!rendered.contains("agent: main"));
     assert!(rendered.contains("deepseek-v4-flash"));
     assert_eq!(layout.composer.height, 3);
     assert_eq!(layout.composer_input.height, 1);
@@ -2325,7 +2327,7 @@ fn cell_fg_at_text(terminal: &Terminal<TestBackend>, row_needle: &str, text: &st
     let row_index = rows
         .iter()
         .position(|row| row.contains(row_needle))
-        .expect("row should render");
+        .unwrap_or_else(|| panic!("row {row_needle:?} should render; rows={rows:?}"));
     let column_index = char_index_of(&rows[row_index], text).expect("text should render in row");
     terminal
         .backend()
@@ -2340,7 +2342,7 @@ fn cell_bg_at_text(terminal: &Terminal<TestBackend>, row_needle: &str, text: &st
     let row_index = rows
         .iter()
         .position(|row| row.contains(row_needle))
-        .expect("row should render");
+        .unwrap_or_else(|| panic!("row {row_needle:?} should render; rows={rows:?}"));
     let column_index = char_index_of(&rows[row_index], text).expect("text should render in row");
     terminal
         .backend()
@@ -2499,10 +2501,9 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
     terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer, &theme))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("git"));
-    assert!(rendered.contains("feature"));
+    assert!(rendered.contains("Enter send"));
+    assert!(!rendered.contains("feature"));
     assert!(!rendered.contains("ready"));
-    assert!(!rendered.contains("Enter send"));
     assert!(!rendered.contains("ctx"));
     Ok(())
 }
@@ -2527,6 +2528,41 @@ fn render_footer_status_uses_empty_workspace_space_for_context() -> anyhow::Resu
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains(&context_label));
+    Ok(())
+}
+
+#[test]
+fn footer_keeps_whole_primary_actions_before_secondary_context() {
+    assert_eq!(
+        fitted_footer_hints("Enter send · Ctrl-J newline · F1 help", 40),
+        "Enter send · Ctrl-J newline · F1 help"
+    );
+    assert_eq!(
+        fitted_footer_hints("Ctrl-C stop · Enter add follow-up · F1 help", 24),
+        "Ctrl-C stop"
+    );
+    assert_eq!(
+        fitted_footer_hints("Enter send · F1 help", 10),
+        "Enter send"
+    );
+    assert_eq!(fitted_footer_hints("Enter send", 0), "");
+}
+
+#[test]
+fn narrow_footer_keeps_busy_cancellation_action_visible() -> anyhow::Result<()> {
+    let footer = FooterViewModel {
+        phase: RunPhase::Preparing,
+        is_busy: true,
+        run_label: "preparing".to_owned(),
+        hints: "Ctrl-C stop · Enter add follow-up · F1 help".to_owned(),
+        workspace_git_label: "a-very-long-feature-branch".to_owned(),
+        context_label: "ctx: 10%".to_owned(),
+    };
+    let mut terminal = Terminal::new(TestBackend::new(32, 1))?;
+    terminal.draw(|frame| render_footer_status(frame, frame.area(), &footer, &Theme::default()))?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Ctrl-C stop"));
+    assert!(!rendered.contains("feature-branch"));
     Ok(())
 }
 

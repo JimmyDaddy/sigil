@@ -52,6 +52,7 @@ pub(crate) struct ConfigSurface {
 pub(crate) struct SlashSelectorSurface {
     pub visible: bool,
     pub title: Option<String>,
+    pub notice_lines: Vec<String>,
     pub rows: Vec<(String, String)>,
     pub selected_index: Option<usize>,
     pub visible_rows: u16,

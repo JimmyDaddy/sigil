@@ -37,7 +37,9 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
     {
         return agent_tool_display_status(&status);
     }
-    let (label, kind) = if summary.is_error {
+    let (label, kind) = if summary.status == "cancelled" {
+        ("CANCELLED", StatusKind::Idle)
+    } else if summary.is_error {
         (
             match summary.error_kind.as_deref() {
                 Some("approval_denied") | Some("permission_denied") => "DENIED",
@@ -53,8 +55,6 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         ("PENDING", StatusKind::Pending)
     } else if summary.status == "denied" {
         ("DENIED", StatusKind::Error)
-    } else if summary.status == "cancelled" {
-        ("CANCELLED", StatusKind::Error)
     } else if summary.status == "interrupted" {
         ("INTERRUPTED", StatusKind::Error)
     } else if summary.status == "failed" {
@@ -113,7 +113,7 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         label,
         detail,
         kind,
-        is_error: summary.is_error,
+        is_error: summary.is_error && summary.status != "cancelled",
     }
 }
 
@@ -331,12 +331,8 @@ pub(super) fn tool_title_spans_with_palette(
     max_chars: usize,
     palette: &ThemePalette,
 ) -> Vec<Span<'static>> {
-    let action_style = Style::default()
-        .fg(palette.accent_warning)
-        .add_modifier(Modifier::BOLD);
-    let subject_style = Style::default()
-        .fg(palette.accent_info)
-        .add_modifier(Modifier::BOLD);
+    let action_style = Style::default().fg(palette.text_secondary);
+    let subject_style = Style::default().fg(palette.text_primary);
     let args_style = Style::default().fg(palette.text_primary);
     let segments = title_segments(title, action_style, subject_style, args_style);
     let plain_len = title.plain().chars().count();

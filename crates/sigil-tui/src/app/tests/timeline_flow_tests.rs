@@ -1357,7 +1357,7 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
 #[test]
 fn info_rail_visibility_rebuilds_the_timeline_for_the_actual_content_width() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
+    app.set_terminal_size(124, 20);
     app.timeline = vec![TimelineEntry {
         role: TimelineRole::Assistant,
         text: "a long response row ".repeat(20),
@@ -1376,17 +1376,13 @@ fn info_rail_visibility_rebuilds_the_timeline_for_the_actual_content_width() {
 #[test]
 fn info_rail_visibility_preserves_the_main_history_anchor() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 12);
+    app.set_terminal_size(124, 12);
     let text = (0..240)
         .map(|index| format!("rail-token-{index:03}"))
         .collect::<Vec<_>>()
         .join(" ");
     app.push_timeline(TimelineRole::Assistant, text);
-    let target_line = app
-        .timeline_plain_lines()
-        .iter()
-        .position(|line| line.contains("rail-token-120"))
-        .expect("visible-rail render should contain the marker");
+    let target_line = app.timeline_render_line_count() / 2;
     let viewport = app.timeline_viewport_rows();
     app.timeline_scroll_back = app
         .effective_timeline_render_len()
@@ -1396,17 +1392,38 @@ fn info_rail_visibility_preserves_the_main_history_anchor() {
         target_line
     );
 
-    app.toggle_info_rail_visibility();
-
-    let visible = app.visible_timeline_render_range(app.timeline_viewport_rows());
-    let top_after = app
-        .timeline_plain_line(visible.start)
-        .expect("reflowed top line after hiding the rail");
-    assert!(!app.info_rail_visible());
-    assert!(
-        top_after.contains("rail-token-120"),
-        "rail reflow must preserve the logical top marker: {top_after:?}"
-    );
+    // The renderer may wrap inside a token. Preserve the actual visible logical text,
+    // allowing its first fragment to span two rows after reflow.
+    for width in [None, None, Some(123), Some(124)] {
+        let before = app.visible_timeline_render_range(app.timeline_viewport_rows());
+        let anchor = app
+            .timeline_plain_line(before.start)
+            .expect("visible top row")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .take(24)
+            .collect::<String>();
+        assert_eq!(anchor.chars().count(), 24);
+        let previous_count = app.timeline_render_line_count();
+        if let Some(width) = width {
+            app.set_terminal_size(width, 12);
+        } else {
+            app.toggle_info_rail_visibility();
+        }
+        let visible = app.visible_timeline_render_range(app.timeline_viewport_rows());
+        let top_text = (visible.start..visible.end.min(visible.start + 2))
+            .filter_map(|line| app.timeline_plain_line(line))
+            .flat_map(|line| line.chars())
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(
+            top_text.contains(&anchor),
+            "logical top fragment {anchor:?} must survive reflow in the first two rows: {top_text:?}"
+        );
+        assert_ne!(app.timeline_render_line_count(), previous_count);
+        assert!(app.timeline_scroll_back > 0);
+    }
+    assert!(app.info_rail_visible());
 }
 
 #[test]
@@ -1531,7 +1548,7 @@ fn history_anchor_maps_a_long_entry_by_logical_content_across_width_reflow() {
 #[test]
 fn info_rail_visibility_rerenders_the_active_child_transcript() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(120, 20);
+    app.set_terminal_size(124, 20);
     sync_child_agent_for_transcript_tests(&mut app)?;
     let timeline_entries = vec![TimelineEntry {
         role: TimelineRole::Assistant,

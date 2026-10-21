@@ -21,6 +21,56 @@ use sigil_kernel::{
     ToolResultMeta, UsageStats, WorkspaceConfig,
 };
 
+#[test]
+fn restored_v3_error_kind_survives_without_tool_execution_record() -> Result<()> {
+    for (kind, expected) in [
+        (ToolErrorKind::Interrupted, "INTERRUPTED"),
+        (ToolErrorKind::Internal, "ERROR"),
+    ] {
+        let result = sigil_kernel::ToolResult::error(
+            "approval-result",
+            "write_file",
+            kind,
+            "precise failure detail",
+        );
+        let SessionLogEntry::ToolResultV3(recorded) =
+            crate::app::tests::common::v2_tool_result_from_result(&result)
+        else {
+            panic!("fixture must capture current result schema");
+        };
+        let envelope = render_tool_result_v2_content_with_store(&recorded, None);
+        let block = format_tool_content_block_redacted_for_restore(
+            Some("approval-result"),
+            &envelope,
+            None,
+            None,
+            None,
+            &sigil_kernel::SecretRedactor::empty(),
+        );
+        let payload: serde_json::Value = serde_json::from_str(&block)?;
+        assert_eq!(payload["error_kind"], kind.as_str());
+        let lines = crate::ui::render_timeline_entry_lines_with_options(
+            &crate::timeline::TimelineEntry {
+                role: crate::timeline::TimelineRole::Tool,
+                text: block,
+            },
+            &crate::ui::TimelineRenderOptions {
+                max_content_width: 80,
+                ..Default::default()
+            },
+            0,
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains(expected));
+        assert!(text.contains("precise failure detail"));
+    }
+    Ok(())
+}
+
 fn audit_integration_verification_receipt() -> sigil_kernel::VerificationReceipt {
     sigil_kernel::VerificationReceipt {
         receipt: sigil_kernel::EvidenceReceipt {

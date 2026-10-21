@@ -346,6 +346,7 @@ impl ApprovalState {
 #[derive(Debug)]
 pub(crate) struct SessionBrowserState {
     pub(crate) history: Vec<SessionHistoryEntry>,
+    pub(crate) legacy_shared_history: Option<sigil_runtime::LegacySharedSessionHistory>,
     pub(crate) history_visible_limit: usize,
     pub(crate) history_selected: usize,
     pub(crate) history_filter: String,
@@ -369,6 +370,7 @@ impl Default for SessionBrowserState {
     fn default() -> Self {
         Self {
             history: Vec::new(),
+            legacy_shared_history: None,
             history_visible_limit: 9,
             history_selected: 0,
             history_filter: String::new(),

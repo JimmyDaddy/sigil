@@ -158,3 +158,82 @@ fn render_slash_selector_overlay_keeps_title_when_no_candidate_space() -> anyhow
     assert!(!rendered.contains("up-to-date"));
     Ok(())
 }
+
+#[test]
+fn resume_selector_shows_typed_legacy_navigation_without_hiding_current_candidates()
+-> anyhow::Result<()> {
+    use sigil_runtime::{LegacySharedSessionHistory, LegacySharedSessionHistorySourceState};
+
+    for state in [
+        LegacySharedSessionHistorySourceState::Present,
+        LegacySharedSessionHistorySourceState::Unverified,
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.set_terminal_size(140, 24);
+        app.composer.input = "/resume".to_owned();
+        app.session_browser.history.clear();
+        app.session_browser.legacy_shared_history = Some(LegacySharedSessionHistory {
+            workspace_id: "original-workspace-id".to_owned(),
+            workspace_label: "原工作区".to_owned(),
+            source_state: state,
+        });
+        assert_eq!(app.slash_selector_notice_lines().len(), 2);
+        let mut terminal = Terminal::new(TestBackend::new(140, 24))?;
+        terminal.draw(|frame| {
+            render_slash_selector_overlay(
+                frame,
+                Rect::new(0, 0, 140, 18),
+                Rect::new(0, 18, 140, 6),
+                &app,
+            )
+        })?;
+        let rendered = rendered_terminal_text(&terminal);
+        assert!(
+            rendered.contains("原工作区"),
+            "rendered buffer: {rendered:?}"
+        );
+        assert!(rendered.contains("no saved sessions"));
+        assert!(!rendered.contains("original-workspace-id"));
+        match state {
+            LegacySharedSessionHistorySourceState::Present => {
+                assert!(rendered.contains("打开该工作区查看"))
+            }
+            LegacySharedSessionHistorySourceState::Unverified => {
+                assert!(rendered.contains("待核实"))
+            }
+        }
+        app.composer.input = "/model".to_owned();
+        assert!(app.slash_selector_notice_lines().is_empty());
+        app.composer.input = "/resume".to_owned();
+        app.session_browser.legacy_shared_history = None;
+        assert!(app.slash_selector_notice_lines().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_selector_notice_preserves_one_candidate_row_on_short_terminals() {
+    assert_eq!(slash_selector_header_row_count(4, true, 2), 3);
+    assert_eq!(slash_selector_header_row_count(3, true, 2), 2);
+    assert_eq!(slash_selector_header_row_count(2, true, 2), 1);
+    assert_eq!(slash_selector_header_row_count(1, true, 2), 1);
+    assert_eq!(slash_selector_header_row_count(0, true, 2), 0);
+}
+
+fn rendered_terminal_text(terminal: &Terminal<TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for row in buffer.area.y..buffer.area.bottom() {
+        let mut column = buffer.area.x;
+        while column < buffer.area.right() {
+            let cell = buffer.cell((column, row)).expect("terminal cell in bounds");
+            text.push_str(cell.symbol());
+            // A wide grapheme occupies its following buffer cells; those placeholders
+            // are not literal spaces inserted into the visible text.
+            column =
+                column.saturating_add(crate::ui::terminal_cell_width(cell.symbol()).max(1) as u16);
+        }
+        text.push('\n');
+    }
+    text
+}

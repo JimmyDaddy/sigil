@@ -8,13 +8,62 @@ use crate::{
 use super::*;
 
 #[test]
+fn composer_header_prioritizes_mode_and_permission_on_narrow_screen() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        permission_label: "manual".to_owned(),
+        phase: RunPhase::Idle,
+        model_name: "very-long-model-name-that-must-not-hide-permission".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        image_attachments: Vec::new(),
+        input: "你好".to_owned(),
+        input_rows: 1,
+        cursor_position: (4, 0),
+    };
+    let mut terminal = Terminal::new(TestBackend::new(32, 5))?;
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Build · manual"));
+    assert!(!rendered.contains("agent: main"));
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((3, 3))
+            .expect("input cell")
+            .symbol(),
+        "你"
+    );
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((5, 3))
+            .expect("input cell")
+            .symbol(),
+        "好"
+    );
+    assert_eq!(
+        composer_cursor_position(Rect::new(0, 0, 32, 5), &view_model),
+        Some((7, 3))
+    );
+    Ok(())
+}
+
+#[test]
 fn composer_highlights_known_slash_command_token() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -73,9 +122,8 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -94,7 +142,9 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     assert!(rendered.contains("Build"));
     assert!(rendered.contains("deepseek-v4-pro"));
     assert!(rendered.contains("deepseek"));
-    assert!(rendered.contains("max"));
+    assert!(rendered.contains("manual"));
+    assert!(!rendered.contains(" ·  deepseek"));
+    assert!(!rendered.contains("max"));
     assert!(!rendered.contains("Composer"));
     assert_eq!(content[0].symbol(), " ");
     assert_eq!(content[1].symbol(), "▌");
@@ -110,9 +160,8 @@ fn composer_renders_selected_attachment_above_the_input() -> anyhow::Result<()> 
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "openai".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "gpt-5".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: vec![crate::view_model::ComposerAttachmentViewModel {
@@ -150,9 +199,8 @@ fn compact_composer_windows_attachments_around_selection_and_keeps_input_visible
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "openai".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "gpt-5".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: (0..4)
@@ -214,9 +262,8 @@ fn composer_cursor_origin_scrolls_with_multiline_input() {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -236,9 +283,8 @@ fn composer_cursor_origin_returns_none_when_input_area_disappears() {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -258,9 +304,8 @@ fn composer_cursor_position_clamps_to_the_visible_input_width() {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -280,9 +325,8 @@ fn render_input_with_insufficient_height_skips_render_and_keeps_empty_area() -> 
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -311,9 +355,8 @@ fn render_input_pads_unused_input_rows_with_input_background() -> anyhow::Result
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
         image_attachments: Vec::new(),
@@ -350,9 +393,8 @@ fn render_composer_gutter_with_zero_height_does_not_panic() -> anyhow::Result<()
             &ComposerViewModel {
                 mode_label: "Build".to_owned(),
                 phase: RunPhase::Idle,
-                provider_name: "deepseek".to_owned(),
+                permission_label: "manual".to_owned(),
                 model_name: "deepseek-v4-pro".to_owned(),
-                reasoning_effort_label: "max".to_owned(),
                 agent_rows: Vec::new(),
                 agent_panel_focused: false,
                 image_attachments: Vec::new(),
@@ -373,9 +415,8 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: vec![SidebarAgentRow {
             label: "main".to_owned(),
             detail: "idle in current session".to_owned(),
@@ -440,9 +481,8 @@ fn render_agent_panel_shows_agent_rows() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: repo audit".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: vec![
             SidebarAgentRow {
                 label: "main".to_owned(),
@@ -497,9 +537,8 @@ fn render_agent_panel_omits_queue_rows_from_agent_surface() -> anyhow::Result<()
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: main".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: vec![
             SidebarAgentRow {
                 label: "main".to_owned(),
@@ -549,9 +588,8 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: main".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: vec![
             SidebarAgentRow {
                 label: "main".to_owned(),
@@ -611,9 +649,8 @@ fn render_agent_panel_keeps_each_logical_row_single_line_at_24_columns() -> anyh
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: repo audit worker".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: vec![
             SidebarAgentRow {
                 label: "main".to_owned(),
@@ -664,9 +701,8 @@ fn compact_agent_panel_windows_late_selection_and_keeps_actions_visible() -> any
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: child 4".to_owned(),
         phase: RunPhase::Idle,
-        provider_name: "deepseek".to_owned(),
+        permission_label: "manual".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-        reasoning_effort_label: "max".to_owned(),
         agent_rows: (0..5)
             .map(|index| SidebarAgentRow {
                 label: if index == 0 {

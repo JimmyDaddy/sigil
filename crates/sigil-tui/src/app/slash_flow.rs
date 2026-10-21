@@ -873,10 +873,34 @@ impl AppState {
 
     pub(crate) fn slash_selector_visible_rows(&self) -> u16 {
         if self.has_slash_selector() {
-            let title_rows = u16::from(self.slash_selector_title().is_some());
+            let title_rows = u16::from(self.slash_selector_title().is_some())
+                .saturating_add(self.slash_selector_notice_lines().len() as u16);
             title_rows.saturating_add(self.slash_selector_rows().len().clamp(1, 8) as u16)
         } else {
             0
+        }
+    }
+
+    pub(crate) fn slash_selector_notice_lines(&self) -> Vec<String> {
+        let command = Self::slash_query(&self.composer.input)
+            .and_then(|(token, _)| Self::exact_slash_command(token));
+        if !self.slash_selector_context_allows_popup()
+            || command.is_none_or(|spec| spec.canonical != "/resume")
+        {
+            return Vec::new();
+        }
+        let Some(history) = &self.session_browser.legacy_shared_history else {
+            return Vec::new();
+        };
+        match history.source_state {
+            sigil_runtime::LegacySharedSessionHistorySourceState::Present => vec![
+                format!("旧共享会话可从「{}」查看", history.workspace_label),
+                "打开该工作区查看。".to_owned(),
+            ],
+            sigil_runtime::LegacySharedSessionHistorySourceState::Unverified => vec![
+                format!("旧共享会话位置待核实：「{}」", history.workspace_label),
+                "请打开该工作区核实。".to_owned(),
+            ],
         }
     }
 

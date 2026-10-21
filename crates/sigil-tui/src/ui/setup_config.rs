@@ -70,13 +70,12 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
                 .title(title)
                 .title_style(
                     Style::default()
-                        .fg(palette.button_selected_fg)
-                        .bg(palette.button_selected_bg)
+                        .fg(palette.text_primary)
                         .add_modifier(Modifier::BOLD),
                 )
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.config_warning))
+                .border_style(Style::default().fg(palette.border_subtle))
                 .style(Style::default().bg(panel_bg)),
         )
         .style(Style::default().bg(panel_bg))
@@ -189,13 +188,12 @@ pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
                 .title(title)
                 .title_style(
                     Style::default()
-                        .fg(palette.button_selected_fg)
-                        .bg(palette.button_selected_bg)
+                        .fg(palette.text_primary)
                         .add_modifier(Modifier::BOLD),
                 )
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.config_warning))
+                .border_style(Style::default().fg(palette.border_subtle))
                 .style(Style::default().bg(palette.setup_bg)),
         )
         .style(Style::default().bg(palette.setup_bg))

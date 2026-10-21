@@ -1228,6 +1228,9 @@ pub(super) fn render_tool_result_v2_content_with_store(
     };
     serde_json::json!({
         "status": result.facts.status,
+        "error": result.facts.error.as_ref().map(|error| serde_json::json!({
+            "kind": error.kind.as_str()
+        })),
         "content": display.preview,
         "artifact": {
             "artifact_ref": artifact_ref,

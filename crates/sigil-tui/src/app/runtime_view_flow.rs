@@ -336,10 +336,6 @@ impl AppState {
         self.composer.mode.label()
     }
 
-    pub(crate) fn reasoning_effort_label(&self) -> &'static str {
-        self.runtime.reasoning_effort.as_str()
-    }
-
     pub(crate) fn info_rail_detail_enabled(&self) -> bool {
         self.info_rail_detail
     }

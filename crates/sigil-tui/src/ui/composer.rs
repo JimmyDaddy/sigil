@@ -84,33 +84,35 @@ pub(crate) fn render_input_with_theme(
         view_model.image_attachments.len(),
     );
 
-    let header = Line::from(vec![
-        Span::styled(
-            view_model.mode_label.clone(),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  ·  "),
-        Span::styled(
-            view_model.model_name.clone(),
-            Style::default().fg(palette.text_primary),
-        ),
-        Span::raw("  ·  "),
-        Span::styled(
-            view_model.provider_name.clone(),
-            Style::default().fg(palette.text_secondary),
-        ),
-        Span::raw("  ·  "),
-        Span::styled(
-            view_model.reasoning_effort_label.clone(),
-            Style::default().fg(palette.accent_warning),
-        ),
-    ]);
+    let permission = sanitize_terminal_text(&view_model.permission_label);
+    let mode_budget =
+        (inner.width as usize).saturating_sub(terminal_cell_width(&permission).saturating_add(3));
+    let mode = format!(
+        "{} · {permission}",
+        truncate_display_width(&sanitize_terminal_text(&view_model.mode_label), mode_budget)
+    );
+    let mode_width = terminal_cell_width(&mode).min(inner.width as usize);
     frame.render_widget(
-        Paragraph::new(Text::from(vec![header]))
-            .style(Style::default().bg(panel_bg))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(truncate_display_width(&mode, inner.width as usize))
+            .style(Style::default().fg(palette.text_secondary).bg(panel_bg)),
         header_area,
     );
+    let model_width = (inner.width as usize).saturating_sub(mode_width.saturating_add(3));
+    if model_width >= 8 {
+        let model =
+            truncate_display_width(&sanitize_terminal_text(&view_model.model_name), model_width);
+        frame.render_widget(
+            Paragraph::new(model)
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::default().fg(palette.text_secondary).bg(panel_bg)),
+            Rect::new(
+                inner.x + mode_width as u16 + 3,
+                inner.y,
+                model_width as u16,
+                1,
+            ),
+        );
+    }
 
     render_image_attachments(frame, area, view_model, theme);
 

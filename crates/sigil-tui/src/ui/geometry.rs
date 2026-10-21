@@ -1,13 +1,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 pub(crate) fn sidebar_width_for_terminal(total_width: usize) -> usize {
-    if total_width < 96 {
+    if total_width < 124 {
         return 0;
     }
-    if total_width < 132 {
-        return 24;
-    }
-    ((total_width * 28) / 100).clamp(28, 42)
+    32
 }
 
 pub(crate) fn selector_window_range(

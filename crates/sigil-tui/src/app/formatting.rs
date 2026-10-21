@@ -97,13 +97,7 @@ pub(super) fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
 }
 
 pub(super) fn sidebar_width_for_terminal(total_width: usize) -> usize {
-    if total_width < 96 {
-        return 0;
-    }
-    if total_width < 132 {
-        return 24;
-    }
-    ((total_width * 28) / 100).clamp(28, 42)
+    crate::ui::sidebar_width_for_terminal(total_width)
 }
 
 pub(super) fn normalize_command_prefix_character(character: char) -> Option<char> {
@@ -422,16 +416,23 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
     preview: Option<&ToolPreviewSnapshot>,
     redactor: &SecretRedactor,
 ) -> String {
+    let execution =
+        execution.filter(|entry| call_id.is_none_or(|call_id| entry.call_id == call_id));
     let envelope = parse_restored_tool_result_envelope(content);
     let display_content = envelope
         .as_ref()
         .and_then(|value| value.get("content"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or(content);
-    let status = envelope
-        .as_ref()
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
+    let status = execution
+        .filter(|entry| entry.status == ToolExecutionStatus::Cancelled)
+        .map(|_| "cancelled")
+        .or_else(|| {
+            envelope
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(serde_json::Value::as_str)
+        })
         .or_else(|| execution.and_then(restored_execution_status_label))
         .unwrap_or("ok");
     let preview = if status == "ok" { preview } else { None };
@@ -772,9 +773,8 @@ fn previous_char_boundary(value: &str, max_index: usize) -> usize {
 fn restored_execution_status_label(execution: &ToolExecutionEntry) -> Option<&'static str> {
     match execution.status {
         ToolExecutionStatus::Completed => Some("ok"),
-        ToolExecutionStatus::Failed
-        | ToolExecutionStatus::Cancelled
-        | ToolExecutionStatus::Interrupted => Some("error"),
+        ToolExecutionStatus::Cancelled => Some("cancelled"),
+        ToolExecutionStatus::Failed | ToolExecutionStatus::Interrupted => Some("error"),
         ToolExecutionStatus::Started => None,
     }
 }

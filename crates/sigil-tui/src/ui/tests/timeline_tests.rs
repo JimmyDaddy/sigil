@@ -617,10 +617,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
 
     let default_palette = TimelineRenderOptions::default().theme.palette;
     assert_eq!(lines[0].spans[0].content.as_ref(), "●");
-    assert_eq!(
-        lines[0].spans[0].style.fg,
-        Some(default_palette.status_thinking)
-    );
+    assert_eq!(lines[0].spans[0].style.fg, Some(default_palette.text_muted));
     assert_only_one_visible_line(&lines);
     assert!(
         lines[0]
@@ -744,7 +741,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
         .expect("expected hovered thinking header span");
     assert_eq!(
         hovered[0].spans[0].style.fg,
-        Some(default_palette.accent_warning)
+        Some(default_palette.accent_info)
     );
     assert!(
         header_span
@@ -774,9 +771,9 @@ fn thinking_trace_marker_and_branch_use_configured_theme_palette() {
     );
 
     assert_eq!(lines[0].spans[0].content.as_ref(), "●");
-    assert_eq!(lines[0].spans[0].style.fg, Some(palette.status_thinking));
+    assert_eq!(lines[0].spans[0].style.fg, Some(palette.text_muted));
     assert_eq!(lines[1].spans[0].content.as_ref(), "└ ");
-    assert_eq!(lines[1].spans[0].style.fg, Some(palette.status_thinking));
+    assert_eq!(lines[1].spans[0].style.fg, Some(palette.text_muted));
     assert!(
         lines
             .iter()
@@ -1492,10 +1489,13 @@ fn render_timeline_entry_lines_styles_tool_header_segments() {
         .find(|span| span.content.as_ref().contains("--workspace"))
         .expect("expected args span");
 
-    assert_eq!(action.style.fg, Some(accent_gold()));
-    assert!(action.style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(subject.style.fg, Some(accent_blue()));
-    assert!(subject.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(
+        action.style.fg,
+        Some(theme::default_palette().text_secondary)
+    );
+    assert!(!action.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(subject.style.fg, Some(ink()));
+    assert!(!subject.style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(args.style.fg, Some(ink()));
     assert!(!args.style.add_modifier.contains(Modifier::BOLD));
 }
@@ -1734,7 +1734,7 @@ fn render_timeline_entry_lines_renders_generic_json_tree_preview() {
 }
 
 #[test]
-fn render_timeline_entry_lines_show_short_tool_preview_by_default() {
+fn render_timeline_entry_lines_keeps_successful_read_compact_until_expanded() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
         text: r##"{
@@ -1743,13 +1743,32 @@ fn render_timeline_entry_lines_show_short_tool_preview_by_default() {
   "preview_kind": "markdown",
   "summary": "first 2/2 lines · 18 B",
   "preview_lines": ["# Title", "- item"],
+  "metadata": {"details": {"call": {"summary": "path=notes.md"}}},
   "hidden_lines": 0
 }"##
         .to_owned(),
     };
 
-    let lines = render_timeline_entry_lines(&entry);
+    let collapsed = render_timeline_entry_lines(&entry);
+    assert_only_one_visible_line(&collapsed);
+    assert!(
+        rendered_plain_lines(&collapsed)
+            .last()
+            .is_some_and(|line| line.trim().is_empty())
+    );
+    let collapsed_text = rendered_plain_lines(&collapsed).join("\n");
+    assert!(collapsed_text.contains("notes.md"));
+    assert!(!collapsed_text.contains("Title"));
+    assert!(!collapsed_text.contains("item"));
 
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()

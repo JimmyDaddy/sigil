@@ -1834,16 +1834,20 @@ fn composer_up_inside_wrapped_input_moves_cursor_before_history() -> Result<()> 
     app.runtime.is_busy = false;
 
     app.active_pane = PaneFocus::Composer;
-    app.set_terminal_size(96, 20);
-    app.composer.input = "draft".repeat(20);
-    app.composer.input_cursor = 70;
-    assert!(app.input_cursor_visual_position().1 > 0);
+    for width in [96, 124] {
+        app.set_terminal_size(width, 20);
+        app.composer.input = "draft".repeat(40);
+        let layout =
+            crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, width, 20), &app);
+        app.composer.input_cursor = usize::from(layout.composer_input.width) + 5;
+        assert_eq!(app.input_cursor_visual_position(), (5, 1));
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
-    assert_eq!(app.composer.input, "draft".repeat(20));
-    assert_eq!(app.input_cursor_visual_position().1, 0);
-    assert_eq!(app.composer.input_history_index, None);
+        assert_eq!(app.composer.input, "draft".repeat(40));
+        assert_eq!(app.input_cursor_visual_position(), (5, 0));
+        assert_eq!(app.composer.input_history_index, None);
+    }
     Ok(())
 }
 

@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn info_rail_preserves_reading_width_at_responsive_breakpoint() {
+    for width in [32, 80, 96, 100, 123] {
+        assert_eq!(sidebar_width_for_terminal(width), 0);
+    }
+    for width in [124, 140, 220] {
+        assert_eq!(sidebar_width_for_terminal(width), 32);
+        assert!(width - sidebar_width_for_terminal(width) >= 88);
+    }
+}
+
+#[test]
 fn shadow_rect_offsets_and_stays_within_bounds() {
     let bounds = Rect::new(0, 0, 40, 20);
     let area = Rect::new(10, 4, 20, 6);

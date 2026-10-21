@@ -10,14 +10,13 @@ use crate::{view_model::InfoRailViewModel, workspace_git::WorkspaceGitStatus};
 
 use super::{
     geometry::inset_rect,
-    primitives::section_badge_with_palette,
     status_indicator::{indicator_styles_with_palette, render_marker_symbol},
     text::{terminal_cell_width, truncate_display_width},
     theme::Theme,
 };
 
 #[cfg(test)]
-use super::theme::{accent_blue, accent_gold, accent_lime, accent_rose, dim, ink};
+use super::theme::{accent_blue, accent_lime, accent_rose, dim, ink};
 
 #[cfg(test)]
 pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoRailViewModel) {
@@ -44,7 +43,7 @@ pub(crate) fn render_info_rail_with_theme(
         Span::styled(
             "info",
             Style::default()
-                .fg(palette.accent_info)
+                .fg(palette.text_secondary)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -255,11 +254,13 @@ fn push_info_section<I>(
     if values.peek().is_none() {
         return;
     }
-    lines.push(Line::from(vec![section_badge_with_palette(
-        title,
-        accent,
-        &theme.palette,
-    )]));
+    let _ = accent;
+    lines.push(Line::from(Span::styled(
+        title.to_owned(),
+        Style::default()
+            .fg(theme.palette.text_secondary)
+            .add_modifier(Modifier::BOLD),
+    )));
     for value in values {
         lines.push(render_info_line_with_theme(&value, width, theme));
     }

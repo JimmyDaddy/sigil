@@ -125,7 +125,7 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
             .iter()
             .any(|span| span.content.as_ref().contains(".git"))
     }));
-    assert!(lines.iter().any(|line| {
+    assert!(!lines.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("src/lib.rs"))
@@ -140,6 +140,19 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     );
 
     app.composer.input.clear();
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&first_key)
+    );
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&second_key)
+    );
+    assert!(full_plain_timeline(&app).contains("src/lib.rs"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.timeline_state.selected_tool_activity_key, None);
     assert_eq!(app.last_notice(), Some("activity focus cleared"));

@@ -1091,6 +1091,7 @@ impl AppState {
         composition: std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>,
     ) {
         self.managed_history_writer = Some(std::sync::Arc::clone(&composition.storage_writer));
+        self.session_browser.legacy_shared_history = composition.legacy_shared_history.clone();
         self.authority_composition = Some(composition);
         // RFC-0071 R71.6: route the session writer and input history to the authority-declared
         // managed leaves (the worker/store read and write the same leaves; no dual write).

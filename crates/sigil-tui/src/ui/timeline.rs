@@ -26,7 +26,7 @@ use super::{
 };
 
 #[cfg(test)]
-use super::theme::{accent_blue, accent_gold, ink};
+use super::theme::{accent_gold, ink};
 
 #[cfg(test)]
 use super::theme::user_message_bg;
@@ -237,9 +237,7 @@ fn user_bubble_body_spans(
     bubble_bg: Color,
     palette: &ThemePalette,
 ) -> Vec<Span<'static>> {
-    let body_style = Style::default()
-        .fg(palette.text_primary)
-        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(palette.text_primary);
     let Some(command) = known_slash_command_token(padded) else {
         return spans_with_background(
             render_inline_markdown_spans_with_palette(
@@ -376,16 +374,16 @@ fn render_thinking_entry_lines(
     if entry.text.trim().is_empty() {
         return Vec::new();
     }
-    let accent = if hovered {
-        palette.accent_warning
+    let accent = if active || hovered {
+        palette.accent_info
     } else {
-        palette.status_thinking
+        palette.text_muted
     };
     let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let header_modifier = if hovered {
-        Modifier::ITALIC | Modifier::BOLD | Modifier::UNDERLINED
+        Modifier::UNDERLINED
     } else {
-        Modifier::ITALIC | Modifier::BOLD
+        Modifier::empty()
     };
     let body_style = Style::default()
         .fg(palette.text_secondary)

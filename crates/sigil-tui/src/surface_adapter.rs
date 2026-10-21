@@ -161,6 +161,7 @@ fn slash_selector_surface(app: &AppState) -> SlashSelectorSurface {
     SlashSelectorSurface {
         visible: app.has_slash_selector(),
         title: app.slash_selector_title().map(str::to_owned),
+        notice_lines: app.slash_selector_notice_lines(),
         rows: app.slash_selector_rows(),
         selected_index: app.slash_selector_selected_index(),
         visible_rows: app.slash_selector_visible_rows(),

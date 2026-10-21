@@ -73,9 +73,12 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
         .selected_field = SetupField::Save;
     let lines = app.setup_lines().join("\n");
     assert!(lines.contains("> [review, trust folder, save and start]"));
-    assert!(lines.contains("orchestration: manual / explicit_request_only"));
-    assert!(lines.contains("current session: starts with this route"));
-    assert!(lines.contains("max output tokens: automatic"));
+    assert!(lines.contains("provider: DeepSeek"));
+    assert!(lines.contains("model: deepseek-v4-flash"));
+    assert!(lines.contains("authentication:"));
+    assert!(!lines.contains("orchestration:"));
+    assert!(!lines.contains("manifest_unavailable"));
+    assert!(!lines.contains("saved default: this route"));
 }
 
 #[test]

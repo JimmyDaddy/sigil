@@ -85,6 +85,59 @@ fn base_summary(tool_name: &str) -> ToolCardRender {
 }
 
 #[test]
+fn successful_inspection_is_compact_and_keeps_full_details_reachable() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "read-compact",
+            "tool_name": "read_file",
+            "status": "ok",
+            "summary": "2 lines · 17 B",
+            "preview_kind": "code",
+            "preview_lines": ["secret-free-first", "precise-tail"],
+            "metadata": {"details": {"call": {"summary": "path=README.md"}}}
+        })
+        .to_string(),
+    };
+    let options = TimelineRenderOptions {
+        max_content_width: 80,
+        ..Default::default()
+    };
+    let collapsed = render_tool_entry_lines(&entry, &options, 0);
+    assert_eq!(collapsed.len(), 1);
+    assert!(plain_text(&collapsed).contains("README.md"));
+    assert!(!plain_text(&collapsed).contains("precise-tail"));
+    let expanded = render_tool_entry_lines(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..options
+        },
+        0,
+    );
+    assert!(plain_text(&expanded).contains("precise-tail"));
+}
+
+#[test]
+fn typed_cancellation_is_neutral_but_internal_errors_are_not_guessed() {
+    let cancelled = parsed_summary(
+        json!({"tool_name":"apply_changeset", "status":"cancelled", "error_kind":"internal"}),
+    );
+    let status = tool_display_status(&cancelled);
+    assert_eq!(status.label, "CANCELLED");
+    assert_eq!(status.kind, StatusKind::Idle);
+    assert!(!status.is_error);
+    let unknown = parsed_summary(
+        json!({"tool_name":"apply_changeset", "status":"error", "error_kind":"internal", "preview_lines":["run cancelled by user"]}),
+    );
+    assert_eq!(tool_display_status(&unknown).label, "ERROR");
+    let interrupted = parsed_summary(
+        json!({"tool_name":"apply_changeset", "status":"error", "error_kind":"interrupted"}),
+    );
+    assert_eq!(tool_display_status(&interrupted).kind, StatusKind::Error);
+}
+
+#[test]
 fn tool_card_classifies_shell_search_variants_and_rejects_complex_commands() {
     let rg = classify_simple_shell_search("rg --glob '*.rs' needle src")
         .expect("rg search should classify");
@@ -193,7 +246,8 @@ fn tool_card_collapsed_preview_and_title_truncation_cover_edge_cases() {
     assert!(!collapsed_text.contains("line 5"));
 
     assert!(title_text.ends_with("..."));
-    assert!(title_spans[0].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(title_spans[0].style.fg, Some(test_palette().text_secondary));
+    assert!(!title_spans[0].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -712,6 +766,7 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
+        expand_tool_previews: true,
         selected_tool_activity_key: Some("call:call-read:entry:0".to_owned()),
         max_content_width: 72,
         ..TimelineRenderOptions::default()
@@ -872,6 +927,7 @@ fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
+        expand_tool_previews: true,
         selected_tool_activity_key: Some("call:call-frame:entry:0".to_owned()),
         max_content_width: 72,
         ..TimelineRenderOptions::default()
@@ -906,6 +962,7 @@ fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
     let unselected = render_tool_entry_lines(
         &entry,
         &TimelineRenderOptions {
+            expand_tool_previews: true,
             max_content_width: 72,
             ..TimelineRenderOptions::default()
         },
@@ -1010,6 +1067,7 @@ fn tool_card_render_entry_lines_use_configured_theme_palette() {
         .to_string(),
     };
     let options = TimelineRenderOptions {
+        expand_tool_previews: true,
         hovered_tool_activity_key: Some("call:call-themed:entry:0".to_owned()),
         max_content_width: 72,
         theme,

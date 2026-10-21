@@ -211,13 +211,13 @@ fn render_info_line_formats_labels_markers_and_plain_values() {
     assert_eq!(
         running.spans[1].style,
         Style::default()
-            .fg(super::accent_gold())
+            .fg(crate::ui::theme::default_palette().status_thinking)
             .add_modifier(Modifier::BOLD)
     );
     assert_eq!(
         running.spans[2].style,
         Style::default()
-            .fg(super::accent_gold())
+            .fg(crate::ui::theme::default_palette().status_thinking)
             .add_modifier(Modifier::BOLD)
     );
 

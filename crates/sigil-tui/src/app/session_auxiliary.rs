@@ -98,6 +98,7 @@ impl AppState {
         self.session_browser.history = query_session_history(
             self.sigil_paths.clone(),
             self.managed_history_writer.clone(),
+            self.session_browser.legacy_shared_history.clone(),
             &SessionReadBudget::default(),
         )?;
         Ok(())
@@ -378,6 +379,7 @@ impl AppState {
         let workspace = self.workspace_root.clone();
         let paths = self.sigil_paths.clone();
         let writer = self.managed_history_writer.clone();
+        let legacy_shared_history = self.session_browser.legacy_shared_history.clone();
         let history_requested = std::mem::take(&mut self.session_auxiliary.history_requested);
         let child_live_revision = self.session_auxiliary.child_live_revision;
         let child_view = self.agent_panel.active_view.clone();
@@ -413,7 +415,7 @@ impl AppState {
                 };
                 work_budget.check()?;
                 let history = if history_requested {
-                    match query_session_history(paths, writer, &work_budget) {
+                    match query_session_history(paths, writer, legacy_shared_history, &work_budget) {
                         Ok(history) => Some(history),
                         Err(error) => { notices.push(format!("session history unavailable: {error}")); None }
                     }
@@ -510,6 +512,7 @@ fn read_review(
 fn query_session_history(
     paths: sigil_runtime::paths::SigilPaths,
     writer: Option<Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>>,
+    legacy_shared_history: Option<sigil_runtime::LegacySharedSessionHistory>,
     work_budget: &SessionReadBudget,
 ) -> Result<Vec<SessionHistoryEntry>> {
     let mut lifecycle = sigil_runtime::LocalSessionLifecycleService::new(
@@ -517,7 +520,8 @@ fn query_session_history(
         paths.session_log_dir.clone(),
         paths.session_exports_root,
     )
-    .with_lifecycle_journal_path(paths.session_lifecycle_journal);
+    .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+    .with_legacy_shared_history(legacy_shared_history);
     if let Some(writer) = &writer {
         let root = writer.managed_leaf_path(
             sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,

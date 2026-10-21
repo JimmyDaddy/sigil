@@ -157,8 +157,11 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let view_model = UiViewModel::from_app(&app);
 
-    assert_eq!(view_model.composer.mode_label, "Build · agent: main");
-    assert_eq!(view_model.composer.provider_name, "deepseek");
+    assert_eq!(view_model.composer.mode_label, "Build");
+    assert_eq!(
+        view_model.composer.permission_label,
+        app.runtime.permission_mode.to_string()
+    );
     assert_eq!(view_model.composer.model_name, "deepseek-v4-flash");
     assert_eq!(view_model.composer.input_rows, 1);
     assert_eq!(view_model.footer.run_label, "ready");
@@ -167,7 +170,10 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert!(view_model.footer.hints.contains("Ctrl-J newline"));
     assert!(!view_model.footer.hints.contains("Shift-Enter newline"));
     assert!(!view_model.info_rail.workspace_label.is_empty());
-    assert_eq!(view_model.composer.reasoning_effort_label, "max");
+    assert_eq!(
+        view_model.composer.permission_label,
+        app.runtime.permission_mode.to_string()
+    );
     assert_eq!(view_model.info_rail.session_lines, ["state: ready"]);
     assert!(!view_model.info_rail.permission_lines.is_empty());
     assert!(view_model.info_rail.code_lines.is_empty());
@@ -337,13 +343,14 @@ fn info_rail_visibility_uses_config_default_and_f2_runtime_override() -> anyhow:
     config.appearance.info_rail = false;
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
 
+    app.set_terminal_size(140, 24);
     assert!(!app.info_rail_visible());
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
     assert!(app.info_rail_visible());
     assert_eq!(app.last_notice(), Some("info rail: shown"));
     let wide_layout =
-        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 120, 24), &app);
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 140, 24), &app);
     assert!(wide_layout.info_rail.width > 0);
 
     app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
@@ -1506,10 +1513,13 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Enter add follow-up · Ctrl-C stop · Ctrl-L copy reply · Ctrl-T details"
+        "Ctrl-C stop · Enter add follow-up · F1 help"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Preparing);
-    assert_eq!(view_model.composer.reasoning_effort_label, "max");
+    assert_eq!(
+        view_model.composer.permission_label,
+        app.runtime.permission_mode.to_string()
+    );
     Ok(())
 }
 
@@ -1566,7 +1576,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Shortcuts: Y allow once · N deny · V details"
+        "Shortcuts: Y allow once · N deny · V details"
     );
     Ok(())
 }

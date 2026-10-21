@@ -69,7 +69,7 @@ fn catalog_history_preserves_direct_source_alias_for_current_and_resume_selectio
     }
     app.session_log_path = current.clone();
     app.session_browser.history =
-        query_session_history(paths, None, &SessionReadBudget::default())?;
+        query_session_history(paths, None, None, &SessionReadBudget::default())?;
     assert!(
         app.session_browser
             .history
@@ -127,6 +127,7 @@ fn catalog_history_uses_owner_paths_for_direct_and_managed_sessions() -> Result<
     let history = query_session_history(
         paths.clone(),
         Some(Arc::clone(&writer)),
+        None,
         &SessionReadBudget::default(),
     )?;
     assert_eq!(history.len(), 2);

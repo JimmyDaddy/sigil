@@ -47,8 +47,8 @@ fn formatting_helpers_cover_normalization_and_layout() {
     assert_eq!(parse_reasoning_effort("unknown"), None);
 
     assert_eq!(sidebar_width_for_terminal(95), 0);
-    assert_eq!(sidebar_width_for_terminal(120), 24);
-    assert_eq!(sidebar_width_for_terminal(220), 42);
+    assert_eq!(sidebar_width_for_terminal(120), 0);
+    assert_eq!(sidebar_width_for_terminal(220), 32);
 
     assert_eq!(normalize_command_prefix_character('/'), Some('/'));
     assert_eq!(normalize_command_prefix_character('、'), Some('/'));
@@ -234,6 +234,48 @@ fn formatted_tool_restore_handles_large_error_payloads() -> Result<()> {
             .as_str()
             .is_some_and(|summary| summary.contains("display truncated"))
     );
+    Ok(())
+}
+
+#[test]
+fn restored_cancellation_uses_same_call_durable_status_without_guessing_messages() -> Result<()> {
+    let envelope = ToolResult::error(
+        "cancelled-call",
+        "apply_changeset",
+        ToolErrorKind::Internal,
+        "approval route stopped",
+    )
+    .to_model_content();
+    let mut execution = ToolExecutionEntry {
+        call_id: "cancelled-call".to_owned(),
+        tool_name: "apply_changeset".to_owned(),
+        status: ToolExecutionStatus::Cancelled,
+        duration_ms: None,
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta::default(),
+        error: None,
+        model_content_hash: None,
+    };
+    let project = |execution: Option<&ToolExecutionEntry>| -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(
+            &format_tool_content_block_redacted_for_restore(
+                Some("cancelled-call"),
+                &envelope,
+                execution,
+                None,
+                None,
+                &SecretRedactor::empty(),
+            ),
+        )?)
+    };
+    assert_eq!(project(Some(&execution))?["status"], "cancelled");
+    execution.status = ToolExecutionStatus::Interrupted;
+    assert_eq!(project(Some(&execution))?["status"], "error");
+    execution.status = ToolExecutionStatus::Cancelled;
+    execution.call_id = "another-call".to_owned();
+    assert_eq!(project(Some(&execution))?["status"], "error");
+    assert_eq!(project(None)?["status"], "error");
     Ok(())
 }
 
@@ -531,8 +573,8 @@ fn build_model_picker_options_uses_only_the_active_provider_catalog() {
 #[test]
 fn utility_formatters_cover_threshold_and_unicode_edges() {
     assert_eq!(sidebar_width_for_terminal(95), 0);
-    assert_eq!(sidebar_width_for_terminal(96), 24);
-    assert_eq!(sidebar_width_for_terminal(160), 42);
+    assert_eq!(sidebar_width_for_terminal(96), 0);
+    assert_eq!(sidebar_width_for_terminal(160), 32);
     assert_eq!(normalize_command_prefix_character('、'), Some('/'));
     assert_eq!(normalize_command_prefix_character('x'), None);
     assert_eq!(char_to_byte_index("a中b", 2), "a中".len());
