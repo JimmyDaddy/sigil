@@ -51,10 +51,10 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 | `tauri` / `tauri-build` | `2.11.5` / `2.6.3`；桌面默认 runtime | `apps/desktop/src-tauri` | 提供system-WebView native shell、local IPC和bundle build；capability仅向`main`window开放Sigil自有command，不启用generic HTTP、shell、filesystem、process、opener或remote URL permission | MIT OR Apache-2.0；tauri-apps/tauri | renderer不能取得bearer、child、loopback address或absolute state/session path；Linux CI安装官方WebKitGTK 4.1 prerequisites |
 | `tauri-plugin-dialog` | `2.7.2`；Rust backend API only | `apps/desktop/src-tauri/commands` | 由Rust backend发起native folder picker；选择结果直接进入native manager，不向renderer开放dialog plugin command或filesystem scope | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`dialog:*`；transitive fs helper没有renderer permission，不能被frontend调用 |
 | `tauri-plugin-opener` | `2.5.4`；Rust backend API only，JS link interception disabled | `apps/desktop/src-tauri/commands` | 仅由Sigil自有`desktop_open_external_url`命令打开native校验后的credential-free `https:` URL；不开放path、program selector、generic scheme或plugin command | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`opener:*`；默认JS link injection明确关闭，renderer只能调用2 KiB上限的typed HTTPS route，失败回退copy |
-| React / Vite / TypeScript | `19.2.7` / `8.1.5` / `5.9.3` | `apps/desktop` renderer | 构建stateful desktop view；production CSP禁止remote content、object/frame/base/form，renderer只调用窄Tauri IPC bridge | React MIT；Vite MIT；TypeScript Apache-2.0；各官方项目维护 | npm lockfile提交；Node 24 + pnpm 10.30.3在CI执行typecheck/test/build与high-severity audit |
+| React / Vite / TypeScript | `19.2.7` / `8.1.6` / `5.9.3` | `apps/desktop` renderer | 构建stateful desktop view；production CSP禁止remote content、object/frame/base/form，renderer只调用窄Tauri IPC bridge | React MIT；Vite MIT；TypeScript Apache-2.0；各官方项目维护 | npm lockfile提交；Node 24 + pnpm 10.30.3在CI执行typecheck/test/build与high-severity audit |
 | `react-markdown` / `remark-gfm` / `rehype-highlight` | `10.1.0` / `4.0.1` / `7.0.2`；ESM runtime | `apps/desktop/SafeMarkdown` | CommonMark+GFM AST渲染与随bundle的37种常用language grammar；不开启raw-HTML插件、remote grammar、auto-detect、remote CSS/font/script或image element | MIT；remarkjs/react-markdown、remarkjs/remark-gfm、rehypejs/rehype-highlight | 第三方API只存在于Sigil-owned renderer；URL二次限制为credential-free HTTPS，其他scheme降级为文本；lockfile、high-severity audit与bundle差异是R48.2 gate |
 | `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
-| Vitest / Testing Library / jsdom | `4.1.10` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
+| Vitest / Testing Library / jsdom | `4.1.11` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
 
 ### Markdown 原文编辑（Desktop polish B3，2026-10-21）
 
@@ -88,10 +88,10 @@ warning 仍存在，未调高 warning 阈值。未增加网络资源、remote la
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
-| `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.1` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
+| `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.2` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
 | `rehype-sanitize` | `6.0.0` | `apps/desktop/src/markdown` | 在 React 渲染前执行显式 Markdown schema，只允许 Sigil 使用的结构、class 与受限属性；不启用 `rehype-raw` | MIT；rehypejs/rehype-sanitize | 模型、历史 session 和 provider 内容均视为不可信；raw HTML、script、iframe、object 与不受控 URL 不进入 DOM |
 | `mermaid` | `11.16.1` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
-| `dompurify` | `3.4.13` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
+| `dompurify` | `3.4.16` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
 
 RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也不启动额外进程、不创建临时文件、
 不访问网络。Desktop CSP 保持 `default-src 'self'`、`img-src 'self' data:`、`object-src 'none'`、
@@ -100,7 +100,8 @@ RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也�
 依赖引入前后的 production build 对比：主 JS 从 `770.44 kB / 229.53 kB gzip` 增至
 `818.91 kB / 247.35 kB gzip`；KaTeX 与 Mermaid 保持异步 chunk，其中 KaTeX core 为
 `259.63 kB / 77.62 kB gzip`，Mermaid core 为 `36.27 kB / 12.07 kB gzip`，各图种实现继续由
-Vite 拆分。`pnpm audit --audit-level high` 当前无 high-severity 漏洞；`openapi-typescript` 传递图中的
+Vite 拆分。以下是 RFC-0054 引入时的历史验证；当前补丁版本及审计结果见下一节。
+当时 `pnpm audit --audit-level high` 无 high-severity 漏洞；`openapi-typescript` 传递图中的
 `js-yaml` 通过 workspace override 固定为 `4.3.1`；其
 `@redocly/openapi-core -> minimatch` 路径中的 `brace-expansion` 也固定为 `5.0.9`，以覆盖
 `GHSA-mh99-v99m-4gvg` 与后续 expansion-array DoS 修复，直到上游约束自然覆盖对应版本。
@@ -144,6 +145,25 @@ R44.3没有引入新版本或来源。`apps/desktop/src-tauri`新增直接复用
 可以丢失/重建，不含token、session body或provider credential；其中的absolute workspace path永不序列化到renderer，
 reopen仍由launcher/server重新验证。`tempfile`的`rustix`许可已由R44.2加入的
 `Apache-2.0 WITH LLVM-exception`显式allowlist覆盖。
+
+
+### Desktop 依赖安全补丁（2026-10-21）
+
+B3 的 28 条既有告警（8 high / 12 moderate / 8 low）已在独立批次处理，不通过提高审计阈值或忽略 advisory 消除。更新后的完整依赖图与 production-only 图均已实际运行 `pnpm audit --json` 并得到零告警；这是该日期的依赖数据库结果，不代表未来不会出现新的 advisory。
+
+| 范围 | 当前锁定 | 原因及边界 |
+| --- | --- | --- |
+| 直接 renderer | `dompurify 3.4.16`、`katex 0.18.2` | 修复 SVG 净化与 KaTeX trust 相关 advisory，保留原 sanitize、URL、CSP 与本地资源策略 |
+| 开发构建 | `vite 8.1.6`、`vitest 4.1.11` | 同代补丁，保留现有构建与测试接口，不升级大版本 |
+| YAML / source maps / TOML | `js-yaml 4.3.2`、`source-map-js 1.2.2`、`smol-toml 1.9.0` | 精确 override 覆盖对应传递图；没有增加运行期服务或能力 |
+| HTTP 开发依赖 | `cheerio>undici 7.29.1`、`jsdom>undici 7.29.1`、`webdriver>undici 6.28.1` | 分别保留上游当前代际；不把 webdriver 的 6.x 强制升到 7.x |
+| brace expansion | `brace-expansion 5.0.12` | 保留已有 CJS callable/default 与 ESM default 导出适配，仅追加 exports，不改上游限额与 expansion 算法；patch 随 lockfile 提交 |
+| 数学传递图 | 全图 `katex 0.18.2` | Mermaid、rehype-katex、micromark-extension-math 的 0.16.x 范围仍含已知漏洞，因此统一 pin。消费者使用公开 render/renderToString API；已检查 Mermaid 两种输出模式、继承 trust 拒绝和 Markdown 数学回归，完整前端与构建另有记录 |
+
+brace 补丁从 npm 官方精确 tarball 生成前核对 registry SHA-512 integrity；三个 minimatch 版本的 CJS 匹配及对应 brace CJS/ESM 调用已实际验证。安装使用 `--ignore-scripts`，未执行下载包的生命周期脚本。若上游自然采用兼容的修复版本，移除对应 override/export patch，并重跑完整审计、契约生成、Markdown/编辑器/安全语料与构建检查；不得只删 override 后以 lockfile 能解析作为完成。
+
+官方依据：[KaTeX trust advisory](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7)、[js-yaml merge budget](https://github.com/nodeca/js-yaml/security/advisories/GHSA-2883-xcg3-v3hh)、[undici WebSocket](https://github.com/nodejs/undici/security/advisories/GHSA-3wwx-pv8p-q78v)、[brace-expansion bounds](https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-q2hr-2g5m-vwhr)。advisory 与版本是本轮访问时状态；审计原文、补丁来源与失败历史在 repo-local 验证台账保留。
+
 
 ## Desktop launcher supervisor（RFC-0044 R44.1）
 

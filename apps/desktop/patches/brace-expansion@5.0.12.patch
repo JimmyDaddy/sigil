@@ -1,7 +1,7 @@
 diff --git a/dist/commonjs/index.js b/dist/commonjs/index.js
 --- a/dist/commonjs/index.js
 +++ b/dist/commonjs/index.js
-@@ -278,4 +278,10 @@ function expand_(str, max, maxLength, isTop) {
+@@ -330,4 +330,10 @@
      }
      return acc;
  }
@@ -15,8 +15,8 @@ diff --git a/dist/commonjs/index.js b/dist/commonjs/index.js
 diff --git a/dist/esm/index.d.ts b/dist/esm/index.d.ts
 --- a/dist/esm/index.d.ts
 +++ b/dist/esm/index.d.ts
-@@ -5,4 +5,5 @@ export type BraceExpansionOptions = {
-     maxLength?: number;
+@@ -9,4 +9,5 @@
+     maxRewrites?: number;
  };
  export declare function expand(str: string, options?: BraceExpansionOptions): string[];
 +export default expand;
@@ -24,7 +24,7 @@ diff --git a/dist/esm/index.d.ts b/dist/esm/index.d.ts
 diff --git a/dist/esm/index.js b/dist/esm/index.js
 --- a/dist/esm/index.js
 +++ b/dist/esm/index.js
-@@ -274,4 +274,5 @@ function expand_(str, max, maxLength, isTop) {
+@@ -326,4 +326,5 @@
      }
      return acc;
  }

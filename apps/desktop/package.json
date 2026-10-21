@@ -29,8 +29,8 @@
     "@codemirror/state": "6.7.6",
     "@codemirror/view": "6.43.15",
     "@tauri-apps/api": "2.11.1",
-    "dompurify": "3.4.13",
-    "katex": "0.18.1",
+    "dompurify": "3.4.16",
+    "katex": "0.18.2",
     "mermaid": "11.16.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -59,25 +59,29 @@
     "jsdom": "29.1.1",
     "openapi-typescript": "7.13.0",
     "typescript": "5.9.3",
-    "vite": "8.1.5",
-    "vitest": "4.1.10"
+    "vite": "8.1.6",
+    "vitest": "4.1.11"
   },
   "pnpm": {
     "overrides": {
       "@cucumber/messages>uuid": "11.1.1",
       "@puppeteer/browsers": "3.2.1",
       "@wdio/native-utils": "2.5.0",
-      "brace-expansion": "5.0.9",
-      "cheerio>undici": "7.29.0",
-      "js-yaml": "4.3.1",
-      "jsdom>undici": "7.29.0",
+      "brace-expansion": "5.0.12",
+      "cheerio>undici": "7.29.1",
+      "js-yaml": "4.3.2",
+      "jsdom>undici": "7.29.1",
       "deepmerge-ts": "8.0.0",
       "postcss": "8.5.23",
       "postcss>nanoid": "3.3.18",
-      "tmp": "0.2.7"
+      "tmp": "0.2.7",
+      "webdriver>undici": "6.28.1",
+      "source-map-js": "1.2.2",
+      "smol-toml": "1.9.0",
+      "katex": "0.18.2"
     },
     "patchedDependencies": {
-      "brace-expansion@5.0.9": "patches/brace-expansion@5.0.9.patch"
+      "brace-expansion@5.0.12": "patches/brace-expansion@5.0.12.patch"
     }
   }
 }
