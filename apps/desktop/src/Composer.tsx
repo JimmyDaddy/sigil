@@ -1,4 +1,5 @@
 import {
+  useDeferredValue,
   useEffect,
   useId,
   useLayoutEffect,
@@ -10,6 +11,9 @@ import {
   type RefObject,
 } from "react";
 
+import { SafeMarkdown } from "./SafeMarkdown";
+import { MarkdownEditor, type MarkdownEditorHandle } from "./ui/editor/MarkdownEditor";
+import type { MarkdownFormat } from "./ui/editor/markdownEditing";
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
@@ -29,10 +33,9 @@ import type {
 } from "./types";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
-import { Button, Dialog, IconButton, Popover, Select, TextArea, Tooltip } from "./ui/primitives";
+import { Button, Dialog, IconButton, Popover, Select, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
-const MAX_COMPOSER_HEIGHT = 176;
 
 export function Composer({
   draftKey,
@@ -40,6 +43,7 @@ export function Composer({
   active,
   submissionBlocked,
   stopControlBlocked = false,
+  reviewActive = false,
   submitting,
   controlBusy,
   composerRef,
@@ -81,9 +85,10 @@ export function Composer({
   active: boolean;
   submissionBlocked: boolean;
   stopControlBlocked?: boolean;
+  reviewActive?: boolean;
   submitting: boolean;
   controlBusy: boolean;
-  composerRef: RefObject<HTMLTextAreaElement | null>;
+  composerRef: RefObject<HTMLElement | null>;
   runContext?: RunContext;
   runContextBusy: boolean;
   providerConnections?: ProviderConnection[];
@@ -122,14 +127,23 @@ export function Composer({
   const storageKeyRef = useRef(storageKey);
   storageKeyRef.current = storageKey;
   const [prompt, setPrompt] = useState(() => readDraft(storageKey));
+  const [draftUnsaved, setDraftUnsaved] = useState(false);
+  const editorRef = useRef<MarkdownEditorHandle>(null);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [editorExpanded, setEditorExpanded] = useState(false);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const previewText = useDeferredValue(prompt);
   const previousStorageKey = useRef(storageKey);
   useLayoutEffect(() => {
     if (previousStorageKey.current === storageKey) return;
     // Catalog identity can arrive after a new conversation's input is already mounted.
     // Move only its local text; changing persistence must not remount the editor or images.
-    writeDraft(storageKey, prompt);
-    writeDraft(previousStorageKey.current, "");
-    previousStorageKey.current = storageKey;
+    const saved = writeDraft(storageKey, prompt);
+    setDraftUnsaved(!saved);
+    if (saved) {
+      writeDraft(previousStorageKey.current, "");
+      previousStorageKey.current = storageKey;
+    }
   }, [prompt, storageKey]);
   const draftRevision = useRef(0);
   const [images, setImages] = useState<DraftImage[]>([]);
@@ -177,6 +191,7 @@ export function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const suggestionListId = `${useId()}-suggestions`;
+  const previewId = `${useId()}-preview`;
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
@@ -202,26 +217,19 @@ export function Composer({
     suggestionQuery !== undefined &&
     suggestions.length > 0 &&
     suggestionsDismissedFor !== suggestionQuery.token;
-  useLayoutEffect(() => {
-    const input = composerRef.current;
-    if (input === null) return;
-    input.style.height = "0px";
-    const nextHeight = Math.min(input.scrollHeight, MAX_COMPOSER_HEIGHT);
-    input.style.height = `${nextHeight}px`;
-    input.style.overflowY = input.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
-  }, [composerRef, prompt]);
+
 
   const submit = async () => {
     const submittedRevision = draftRevision.current;
-    let nextPrompt = prompt.trim();
+    let nextPrompt = prompt;
     if (
-      (nextPrompt === "" && images.length === 0)
+      (nextPrompt.trim() === "" && images.length === 0)
       || (!active && submissionBlocked)
       || submitting
       || imagePending.current
       || (active && queueBusy)
     ) return;
-    const command = resolveCommand(runContext, nextPrompt);
+    const command = resolveCommand(runContext, nextPrompt.trim());
     if (images.length > 0 && (active || selectedAgent !== undefined)) {
       onNotice(t("imageForegroundOnly"), true); return;
     }
@@ -230,12 +238,12 @@ export function Composer({
       return;
     }
     const directSkill = selectedSkill === undefined && selectedAgent === undefined
-      ? resolveSkill(runContext, nextPrompt)
+      ? resolveSkill(runContext, nextPrompt.trim())
       : undefined;
     const skill = selectedSkill ?? directSkill?.skill;
     if (directSkill !== undefined) nextPrompt = directSkill.prompt;
     const directAgent = selectedAgent === undefined && skill === undefined
-      ? resolveAgent(runContext, nextPrompt)
+      ? resolveAgent(runContext, nextPrompt.trim())
       : undefined;
     const agent = selectedAgent ?? directAgent?.agent;
     if (directAgent !== undefined) nextPrompt = directAgent.prompt;
@@ -247,7 +255,7 @@ export function Composer({
       onNotice(skill.unavailableReason ?? t("extensionUnavailable"), true);
       return;
     }
-    if (nextPrompt.startsWith("@") && agent === undefined) {
+    if (nextPrompt.trimStart().startsWith("@") && agent === undefined) {
       onNotice(t("agentExecutionUnavailable"), true);
       return;
     }
@@ -277,7 +285,7 @@ export function Composer({
     if (handles.length > 0) void onReleaseImages?.(handles).catch(() => {});
     setSelectedSkill(undefined);
     setSelectedAgent(undefined);
-    writeDraft(storageKeyRef.current, "");
+    setDraftUnsaved(!writeDraft(storageKeyRef.current, ""));
   };
   const selectSuggestion = (suggestion: ComposerSuggestion) => {
     if (!suggestion.available) {
@@ -397,7 +405,7 @@ export function Composer({
   const replacePrompt = (value: string) => {
     draftRevision.current += 1;
     setPrompt(value);
-    writeDraft(storageKey, value);
+    setDraftUnsaved(!writeDraft(storageKeyRef.current, value));
     setSuggestionsDismissedFor(undefined);
     setActiveSuggestion(0);
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
@@ -526,79 +534,83 @@ export function Composer({
             ) : null}
           </div>
         ) : null}
-        <TextArea
-          id="desktop-prompt"
-          className="composer-input"
-          containerClassName="composer-input-field"
-          label={t("messageSigil")}
-          labelHidden
-          ref={composerRef}
-          value={prompt}
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={suggestionsOpen}
-          aria-controls={suggestionsOpen ? suggestionListId : undefined}
-          aria-activedescendant={suggestionsOpen
-            ? `${suggestionListId}-option-${Math.min(activeSuggestion, suggestions.length - 1)}`
-            : undefined}
-          onPointerDown={(event) => {
-            if (document.activeElement !== event.currentTarget) {
+        {draftUnsaved ? <small role="status" className="composer-draft-warning">{t("draftNotSaved")}</small> : null}
+        <div className="composer-editing-tools">
+          <Popover label={t("markdownFormat")} accessibleLabel={t("markdownFormat")} className="composer-format" open={formatOpen} onOpenChange={setFormatOpen} align="start">
+            <div className="composer-format-actions">
+              {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => (
+                <Button type="button" variant="quiet" key={format} onClick={() => {
+                  setFormatOpen(false);
+                  editorRef.current?.format(format);
+                  setPreviewVisible(true);
+                }}>{t(formatLabels[format])}</Button>
+              ))}
+            </div>
+          </Popover>
+          <Button type="button" variant="quiet" aria-pressed={previewVisible} aria-controls={previewVisible ? previewId : undefined} onClick={() => setPreviewVisible((visible) => !visible)}>{t("markdownPreview")}</Button>
+          <Button type="button" variant="quiet" aria-expanded={editorExpanded} onClick={() => {
+            setEditorExpanded((expanded) => !expanded);
+            editorRef.current?.focus();
+          }}>{t(editorExpanded ? "collapseEditor" : "expandEditor")}</Button>
+          <small className="composer-editing-hint">{t("markdownSendHint")}</small>
+        </div>
+        <div className="composer-document" data-preview={previewVisible} data-expanded={editorExpanded} data-review-active={reviewActive}>
+          <MarkdownEditor
+            ref={editorRef}
+            value={prompt}
+            inputRef={composerRef}
+            label={t("messageSigil")}
+            expanded={editorExpanded}
+            reviewActive={reviewActive}
+            suggestionsOpen={suggestionsOpen}
+            suggestionListId={suggestionsOpen ? suggestionListId : undefined}
+            activeSuggestionId={suggestionsOpen ? `${suggestionListId}-option-${Math.min(activeSuggestion, suggestions.length - 1)}` : undefined}
+            onCompositionStart={() => { draftRevision.current += 1; }}
+            onPaste={(event) => {
+              const file = Array.from(event.clipboardData?.files ?? []).find((candidate) => candidate.type.startsWith("image/"));
+              if (file === undefined || onIngestImage === undefined) return;
               event.preventDefault();
-              event.currentTarget.focus({ preventScroll: true });
-            }
-          }}
-          onMouseDown={(event) => {
-            if (document.activeElement !== event.currentTarget) {
+              if (file.size > 8 * 1024 * 1024) { onNotice(t("imageSizeLimit"), true); return; }
+              void addImage(async () => onIngestImage(Array.from(new Uint8Array(await file.arrayBuffer()))));
+            }}
+            onChange={(value) => {
+              draftRevision.current += 1;
+              setPrompt(value);
+              setSuggestionsDismissedFor(undefined);
+              setActiveSuggestion(0);
+              setDraftUnsaved(!writeDraft(storageKeyRef.current, value));
+            }}
+            placeholder={active ? t("activePrompt") : submissionBlocked ? t("readOnlyRecoveryPrompt") : t("prompt")}
+            onKeyDown={(event, composing) => {
+              if (composing) return;
+              if (suggestionsOpen) {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  event.preventDefault();
+                  const delta = event.key === "ArrowDown" ? 1 : -1;
+                  setActiveSuggestion((current) => (current + delta + suggestions.length) % suggestions.length);
+                  return;
+                }
+                if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+                  event.preventDefault();
+                  selectSuggestion(suggestions[Math.min(activeSuggestion, suggestions.length - 1)]);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setSuggestionsDismissedFor(suggestionQuery?.token);
+                  return;
+                }
+              }
+              if (event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();
-              event.currentTarget.focus({ preventScroll: true });
-            }
-          }}
-          onPaste={(event) => {
-            const file = Array.from(event.clipboardData.files).find((candidate) => candidate.type.startsWith("image/"));
-            if (file === undefined || onIngestImage === undefined) return;
-            event.preventDefault();
-            if (file.size > 8 * 1024 * 1024) { onNotice(t("imageSizeLimit"), true); return; }
-            void addImage(async () => onIngestImage(Array.from(new Uint8Array(await file.arrayBuffer()))));
-          }}
-          onChange={(event) => {
-            draftRevision.current += 1;
-            setPrompt(event.target.value);
-            setSuggestionsDismissedFor(undefined);
-            setActiveSuggestion(0);
-            writeDraft(storageKey, event.target.value);
-          }}
-          placeholder={
-            active
-              ? t("activePrompt")
-              : submissionBlocked ? t("readOnlyRecoveryPrompt") : t("prompt")
-          }
-          rows={1}
-          onKeyDown={(event) => {
-            if (suggestionsOpen) {
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault();
-                const delta = event.key === "ArrowDown" ? 1 : -1;
-                setActiveSuggestion((current) =>
-                  (current + delta + suggestions.length) % suggestions.length,
-                );
-                return;
-              }
-              if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-                event.preventDefault();
-                selectSuggestion(suggestions[Math.min(activeSuggestion, suggestions.length - 1)]);
-                return;
-              }
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setSuggestionsDismissedFor(suggestionQuery?.token);
-                return;
-              }
-            }
-            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-            event.preventDefault();
-            void submit();
-          }}
-        />
+              void submit();
+            }}
+          />
+          {previewVisible ? <section id={previewId} className="composer-preview" aria-label={t("markdownPreview")} tabIndex={0}>
+            {previewText === "" ? <p className="composer-preview-empty">{t("markdownPreviewEmpty")}</p>
+              : <SafeMarkdown text={previewText} contentId={`composer-preview:${draftKey}`} codeBlockVariant="embedded" />}
+          </section> : null}
+        </div>
         <div className="composer-toolbar">
           <div className="composer-options">
             <Tooltip label={modelTooltip}>
@@ -931,6 +943,11 @@ function CacheUsage({ context, loading }: { context?: RunContext; loading: boole
   );
 }
 
+const formatLabels = {
+  bold: "markdownBold", italic: "markdownItalic", code: "markdownCode",
+  code_block: "markdownCodeBlock", list: "markdownList", link: "markdownLink",
+} as const satisfies Record<MarkdownFormat, Parameters<ReturnType<typeof useLocale>["t"]>[0]>;
+
 function permissionModeLabel(mode: PermissionMode, t: ReturnType<typeof useLocale>["t"]): string {
   switch (mode) {
     case "read-only": return t("readOnly");
@@ -970,15 +987,15 @@ function readDraft(key: string): string {
   }
 }
 
-function writeDraft(key: string, value: string): void {
+function writeDraft(key: string, value: string): boolean {
   try {
     if (new TextEncoder().encode(value).byteLength > MAX_DRAFT_BYTES) {
-      window.localStorage.removeItem(key);
-      return;
+      return false;
     }
     if (value === "") window.localStorage.removeItem(key);
     else window.localStorage.setItem(key, value);
+    return true;
   } catch {
-    // Draft persistence is best-effort; the controlled input remains usable.
+    return false;
   }
 }

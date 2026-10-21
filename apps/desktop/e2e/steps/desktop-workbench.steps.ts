@@ -67,10 +67,10 @@ async function waitForComposerEnabled(
   await browser.waitUntil(
     async () => await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>(".conversation-panel");
-      const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const input = panel?.querySelector<HTMLElement>("#desktop-prompt");
       const lifecycle = panel?.dataset.continuityLifecycle;
       return input !== null && input !== undefined
-        && !input.disabled
+        && input.isContentEditable
         && (lifecycle === "idle" || lifecycle === "live");
     }),
     { timeout, timeoutMsg },
@@ -78,27 +78,20 @@ async function waitForComposerEnabled(
 }
 
 async function setComposerPrompt(value: string): Promise<void> {
-  await browser.execute((nextValue) => {
-    const panel = document.querySelector<HTMLElement>(".conversation-panel");
-    const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
-    if (input === null || input === undefined) throw new Error("the desktop composer disappeared before input");
-    input.focus({ preventScroll: true });
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter === undefined) throw new Error("the desktop composer value setter is unavailable");
-    setter.call(input, nextValue);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, value);
+  const input = await $("#desktop-prompt");
+  await input.click();
+  await input.setValue(value);
   try {
     await browser.waitUntil(
       async () => await browser.execute(
         (nextValue) => {
           const panel = document.querySelector<HTMLElement>(".conversation-panel");
-          const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+          const input = panel?.querySelector<HTMLElement>("#desktop-prompt");
           const submit = panel?.querySelector<HTMLButtonElement>(
             ".composer-submit:not(.composer-stop)",
           );
-          return input?.value === nextValue
-            && input.disabled === false
+          return input?.textContent === nextValue
+            && input.isContentEditable
             && submit?.disabled === false;
         },
         value,
@@ -111,15 +104,15 @@ async function setComposerPrompt(value: string): Promise<void> {
   } catch (error) {
     const state = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>(".conversation-panel");
-      const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const input = panel?.querySelector<HTMLElement>("#desktop-prompt");
       const submit = panel?.querySelector<HTMLButtonElement>(
         ".composer-submit:not(.composer-stop)",
       );
       return {
         sessionId: panel?.dataset.sessionId,
         lifecycle: panel?.dataset.continuityLifecycle,
-        value: input?.value,
-        inputDisabled: input?.disabled,
+        value: input?.textContent,
+        inputDisabled: input?.getAttribute("contenteditable") !== "true",
         submitDisabled: submit?.disabled,
       };
     });
@@ -178,9 +171,9 @@ When("I create a new desktop conversation", async () => {
           const lifecycle = await $(".conversation-panel").getAttribute("data-continuity-lifecycle");
           const composerReady = await browser.execute(() => {
             const panel = document.querySelector<HTMLElement>(".conversation-panel");
-            const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+            const input = panel?.querySelector<HTMLElement>("#desktop-prompt");
             return input !== null && input !== undefined
-              && !input.disabled;
+              && input.isContentEditable;
           });
           const navigationSettled = await browser.execute(() =>
             document.querySelector(".conversation-loading-overlay") === null,
@@ -203,7 +196,7 @@ When("I create a new desktop conversation", async () => {
     const state = await browser.execute(() => Array.from(document.querySelectorAll<HTMLElement>(".conversation-panel")).map((panel) => ({
       sessionId: panel.dataset.sessionId,
       lifecycle: panel.dataset.continuityLifecycle,
-      inputDisabled: panel.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.disabled,
+      inputDisabled: panel.querySelector<HTMLElement>("#desktop-prompt")?.getAttribute("contenteditable") !== "true",
       submitDisabled: panel.querySelector<HTMLButtonElement>(".composer-submit:not(.composer-stop)")?.disabled,
       text: panel.textContent?.slice(-400),
     })));
@@ -213,8 +206,7 @@ When("I create a new desktop conversation", async () => {
     async () => {
       try {
         return await browser.execute(() =>
-          document.querySelector<HTMLElement>(".conversation-panel")
-            ?.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value === "",
+          document.querySelector(".conversation-panel #desktop-prompt .cm-placeholder") !== null,
         );
       } catch {
         return false;
@@ -413,11 +405,11 @@ Then("the follow-up is recorded in the durable queue", async () => {
     },
   );
   await browser.waitUntil(
-    async () => (await $("#desktop-prompt").getValue()) === "",
+    async () => await browser.execute(() => document.querySelector("#desktop-prompt .cm-placeholder") !== null),
     {
       timeout: 5_000,
       timeoutMsg: `the queued follow-up remained in the composer draft: ${JSON.stringify(await browser.execute(() => ({
-        value: document.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value ?? null,
+        value: document.querySelector<HTMLElement>("#desktop-prompt")?.textContent ?? null,
         draft: window.localStorage.getItem("sigil:conversation-draft:v1:"),
         body: (document.body.innerText ?? "").slice(-2_000),
         errors: (globalThis as typeof globalThis & { __sigilE2eErrors?: string[] }).__sigilE2eErrors ?? [],
@@ -530,7 +522,7 @@ Then("terminal completion releases continuity and history controls", async () =>
       return {
         continuity: document.querySelector(".conversation-continuity-loading")?.textContent ?? null,
         historyError: document.querySelector(".session-rail .error-card")?.textContent ?? null,
-        composerDisabled: (document.querySelector("#desktop-prompt") as HTMLTextAreaElement | null)?.disabled ?? null,
+        composerDisabled: document.querySelector<HTMLElement>("#desktop-prompt")?.getAttribute("contenteditable") !== "true",
         continuityLifecycle: panel?.dataset.continuityLifecycle ?? null,
         continuityRefreshState: panel?.dataset.continuityRefreshState ?? null,
         continuityOwnerRunId: panel?.dataset.continuityOwnerRunId ?? null,
@@ -937,22 +929,7 @@ Then("Desktop disables artifact retrieval while retaining the auditable card", a
 
 When("I run a failing artifact-backed shell command", async () => {
   await browser.pause(1_000);
-  await browser.execute((value) => {
-    const input = document.querySelector<HTMLTextAreaElement>("#desktop-prompt");
-    if (input === null) throw new Error("the desktop composer disappeared before input");
-    input.focus({ preventScroll: true });
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter === undefined) throw new Error("the desktop composer value setter is unavailable");
-    setter.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, desktopProviderCanaries.shellErrorPrompt);
-  await browser.waitUntil(
-    async () => await browser.execute(
-      (value) => document.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value === value,
-      desktopProviderCanaries.shellErrorPrompt,
-    ),
-    { timeout: 5_000, timeoutMsg: "the failing shell prompt was not retained by the composer" },
-  );
+  await setComposerPrompt(desktopProviderCanaries.shellErrorPrompt);
   await browser.waitUntil(
     async () => await $(".composer-submit:not(.composer-stop)").isEnabled(),
     { timeout: 5_000, timeoutMsg: "the failing shell prompt did not enable the send action" },
@@ -966,7 +943,7 @@ When("I run a failing artifact-backed shell command", async () => {
   } catch (error) {
     const diagnostic = await browser.execute(async () => {
       const panel = document.querySelector<HTMLElement>(".conversation-panel");
-      const prompt = document.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const prompt = document.querySelector<HTMLElement>("#desktop-prompt");
       const send = document.querySelector<HTMLButtonElement>(".composer-submit:not(.composer-stop)");
       const invoke = (
         globalThis as typeof globalThis & {
@@ -994,8 +971,8 @@ When("I run a failing artifact-backed shell command", async () => {
           ownerRunId: panel.dataset.continuityOwnerRunId,
         },
         prompt: prompt === null ? undefined : {
-          value: prompt.value,
-          disabled: prompt.disabled,
+          value: prompt.textContent,
+          disabled: !prompt.isContentEditable,
         },
         send: send === null ? undefined : {
           disabled: send.disabled,

@@ -344,7 +344,7 @@ export function ConversationPanel({
   const pendingPredecessorRunId = useRef<string | undefined>(undefined);
   const successorByRunId = useRef(new Map<string, string>());
   const predecessorByRunId = useRef(new Map<string, string>());
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<HTMLElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const taskIntegrationTriggerRef = useRef<HTMLButtonElement>(null);
   const intentStackTriggerRef = useRef<HTMLButtonElement>(null);
@@ -2945,6 +2945,7 @@ export function ConversationPanel({
         draftKey={draftStorageKey(workspaceId, session.id)}
         persistentDraftKey={draftSessionId === undefined ? undefined : draftStorageKey(workspaceId, draftSessionId)}
         active={active}
+        reviewActive={approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live"}
         submissionBlocked={submissionBlocked}
         stopControlBlocked={stopControlBlocked}
         submitting={submitting}

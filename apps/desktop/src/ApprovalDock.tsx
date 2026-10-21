@@ -23,7 +23,7 @@ export function ApprovalDock({
   approval: TimelineApproval;
   phase: "pending" | "accepted" | "delivery_uncertain";
   busy: boolean;
-  composerRef: RefObject<HTMLTextAreaElement | null>;
+  composerRef: RefObject<HTMLElement | null>;
   onDecision: (decision: ApprovalAction) => void;
   onOpenSettings: () => void;
   onOpenSupport: () => void;

@@ -56,6 +56,34 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 | `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
 | Vitest / Testing Library / jsdom | `4.1.10` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
 
+### Markdown 原文编辑（Desktop polish B3，2026-10-21）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `@codemirror/state` / `@codemirror/view` / `@codemirror/commands` | `6.7.6` / `6.43.15` / `6.11.1`，精确 npm 版本 | `apps/desktop/src/ui/editor` | 一个 Markdown source document、DOM editor 与 transaction history；格式操作和撤销/重做使用同一引擎，不复制隐藏 textarea、DOM/HTML 正文或第二条发送路径 | MIT；CodeMirror 官方维护，npm registry 与随包 LICENSE | 不启用远程服务、语言服务器、第三方插件或额外 IPC；预览仍复用现有 SafeMarkdown。lockfile 同步，升级时重跑 source/IME/history、草稿与安全预览回归、high-severity audit、构建体积比较和 native WebView 键盘验收 |
+
+直接依赖只加入这三个包，既有直接依赖与 package manager 声明不升级。`commands` 的官方传递图包含
+`@codemirror/language` 等本地模块；本批不装配语法语言服务、自动补全或协同编辑。编辑器历史属于同一
+mounted input 的内存状态，durable 草稿仍是原有受限 localStorage Markdown string；不持久化 editor state
+或 rendered HTML。预览可关闭，切换和展开不重建 editor。组合输入先于建议、发送和格式快捷键；浏览器
+完成 IME，host 不把 composing Enter 解释为发送。
+
+官方依据：[CodeMirror system guide](https://codemirror.net/docs/guide/)、
+[transaction API](https://codemirror.net/docs/ref/#state.Transaction)、
+[history](https://codemirror.net/docs/ref/#commands.history)、
+[compositionStarted](https://codemirror.net/docs/ref/#view.EditorView.compositionStarted)，访问日期 2026-10-21。
+2026-10-21 本批 `pnpm audit --audit-level high` 实际发现既有 dev/build graph 的 8 条 high
+advisory（`js-yaml`、`undici`、`brace-expansion`、`source-map-js`、`vite`）；未出现 CodeMirror 路径。
+原始审计结果保留在本轮 repo-local validation ledger，不能把本批记录解释为 high-severity audit 已通过。
+既有版本修复由独立供应链批次处理，本 editor 批次不顺带升级其他直接依赖。
+
+本批最终 production 主 chunk 为 `1,339.25 kB / 402.85 kB gzip`，相对 B2 的
+`1,062.65 kB / 312.70 kB gzip` 增加 `276.60 kB / 90.15 kB gzip`；已有 500 kB chunk
+warning 仍存在，未调高 warning 阈值。未增加网络资源、remote language service 或运行进程。
+
+本地引擎测试证明 transaction 与 keyboard binding 行为；macOS WebKit 的真实 Cmd-Z / Shift-Cmd-Z、
+中文 IME 和 840×560 窗口仍需最终候选的 native 资格化，不能由 jsdom 的空布局测量替代。
+
 ### Conversation Markdown、数学公式与图表（RFC-0054）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

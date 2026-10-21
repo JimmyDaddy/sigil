@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { editorText, editorView, setEditorText, typeEditorText } from "./test/editor";
 import { Composer } from "./Composer";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
 import { LocaleProvider, translateEnglish } from "./i18n";
@@ -268,6 +269,7 @@ const context: RunContext = {
 function renderComposer(overrides: {
   persistentDraftKey?: string;
   active?: boolean;
+  reviewActive?: boolean;
   submissionBlocked?: boolean;
   queueCount?: number;
   queuePaused?: boolean;
@@ -324,6 +326,7 @@ function renderComposer(overrides: {
         draftKey="composer-test"
         persistentDraftKey={persistentDraftKey}
         active={overrides.active ?? false}
+        reviewActive={overrides.reviewActive}
         submissionBlocked={overrides.submissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
@@ -576,16 +579,16 @@ describe("structured composer", () => {
     const pending = new Promise<boolean>((resolve) => { settle = resolve; });
     const onSubmit = vi.fn(() => pending);
     renderComposer({ onSubmit });
-    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
-    await user.type(input, "First request");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLElement;
+    typeEditorText(input, "First request");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(onSubmit).toHaveBeenCalledWith("First request", undefined, undefined);
 
-    await user.clear(input);
-    await user.type(input, "Next request written while waiting");
+    setEditorText(input, "");
+    typeEditorText(input, "Next request written while waiting");
     await act(async () => { settle(accepted); await pending; });
 
-    expect(input.value).toBe("Next request written while waiting");
+    expect(editorText(input)).toBe("Next request written while waiting");
     expect(window.localStorage.getItem("composer-test")).toBe("Next request written while waiting");
   });
 
@@ -620,7 +623,7 @@ describe("structured composer", () => {
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     expect(input.getAttribute("aria-expanded")).toBe("false");
-    await user.type(input, "/");
+    typeEditorText(input, "/");
 
     const listbox = screen.getByRole("listbox", { name: "Composer suggestions" });
     const firstOption = screen.getAllByRole("option")[0];
@@ -645,10 +648,10 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer({ submissionBlocked: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "Keep this draft");
+    typeEditorText(input, "Keep this draft");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(editorText(input)).toBe("Keep this draft");
     expect(onSubmit).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     for (const select of screen.getAllByRole("combobox").filter((control) => control.tagName === "SELECT")) {
@@ -661,10 +664,10 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "$rev");
+    typeEditorText(input, "$rev");
     await user.click(screen.getByRole("option", { name: /Review/ }));
     expect(screen.getByText("$review")).toBeTruthy();
-    await user.type(input, "inspect src/lib.rs");
+    typeEditorText(input, "inspect src/lib.rs");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("inspect src/lib.rs", {
@@ -679,9 +682,9 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/继续写");
+    typeEditorText(input, "/继续写");
     expect(screen.getByRole("option", { name: /Continue drafting/ })).toBeTruthy();
-    await user.type(input, " 下一章");
+    typeEditorText(input, " 下一章");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("下一章", {
@@ -696,9 +699,9 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "@expl");
+    typeEditorText(input, "@expl");
     await user.click(screen.getByRole("option", { name: /explore/ }));
-    await user.type(input, "inspect src/lib.rs");
+    typeEditorText(input, "inspect src/lib.rs");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("inspect src/lib.rs", undefined, {
@@ -712,7 +715,7 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "@正典提升员 检查本章");
+    typeEditorText(input, "@正典提升员 检查本章");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("检查本章", undefined, {
@@ -726,7 +729,7 @@ describe("structured composer", () => {
     const { onSubmit, onReasoningEffortChange } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/effort high");
+    typeEditorText(input, "/effort high");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onReasoningEffortChange).toHaveBeenCalledWith("high");
@@ -738,12 +741,12 @@ describe("structured composer", () => {
     const { onSubmit, onOpenAgentWorkbench } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/agent plan");
+    typeEditorText(input, "/agent plan");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenAgentWorkbench).toHaveBeenCalledWith("plan");
     expect(onSubmit).not.toHaveBeenCalled();
-    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    await waitFor(() => expect(editorText(input)).toBe(""));
   });
 
   it("binds the supervised plan agent from /plan", async () => {
@@ -751,7 +754,7 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/plan inspect the runtime");
+    typeEditorText(input, "/plan inspect the runtime");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("inspect the runtime", undefined, {
@@ -765,10 +768,10 @@ describe("structured composer", () => {
     const { onOpenSessionPicker } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/");
+    typeEditorText(input, "/");
     expect(screen.getByRole("option", { name: /Compact context/ })).not.toBeNull();
-    await user.clear(input);
-    await user.type(input, "/resume typo");
+    setEditorText(input, "");
+    typeEditorText(input, "/resume typo");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenSessionPicker).toHaveBeenCalledWith("typo");
@@ -779,7 +782,7 @@ describe("structured composer", () => {
     const { onCompact, onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/compact");
+    typeEditorText(input, "/compact");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onCompact).toHaveBeenCalledOnce();
@@ -791,7 +794,7 @@ describe("structured composer", () => {
     const { onOpenIntentStack, onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/intents");
+    typeEditorText(input, "/intents");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenIntentStack).toHaveBeenCalledOnce();
@@ -803,7 +806,7 @@ describe("structured composer", () => {
     const { onOpenSettings, onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "/config");
+    typeEditorText(input, "/config");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenSettings).toHaveBeenCalledOnce();
@@ -815,7 +818,7 @@ describe("structured composer", () => {
     const { onOpenSupport, onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, command);
+    typeEditorText(input, command);
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onOpenSupport).toHaveBeenCalledOnce();
@@ -827,7 +830,7 @@ describe("structured composer", () => {
     const { onSubmit, onNotice } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "@dis");
+    typeEditorText(input, "@dis");
     await user.click(screen.getByRole("option", { name: /disabled/ }));
 
     expect(onNotice).toHaveBeenCalledWith(
@@ -842,11 +845,11 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer({ active: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "Run this after the current task");
+    typeEditorText(input, "Run this after the current task");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("Run this after the current task", undefined, undefined);
-    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    await waitFor(() => expect(editorText(input)).toBe(""));
   });
 
   it("keeps the durable queue available while live controls are recovering", async () => {
@@ -854,7 +857,7 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer({ active: true, submissionBlocked: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "Keep working after the current task");
+    typeEditorText(input, "Keep working after the current task");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith(
@@ -862,7 +865,7 @@ describe("structured composer", () => {
       undefined,
       undefined,
     );
-    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    await waitFor(() => expect(editorText(input)).toBe(""));
   });
 
   it("retains the draft when queue admission fails", async () => {
@@ -875,11 +878,11 @@ describe("structured composer", () => {
     });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "Do not lose this draft");
+    typeEditorText(input, "Do not lose this draft");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledOnce();
-    expect((input as HTMLTextAreaElement).value).toBe("Do not lose this draft");
+    expect(editorText(input)).toBe("Do not lose this draft");
   });
 
   it("does not queue an IME composition Enter", async () => {
@@ -887,11 +890,11 @@ describe("structured composer", () => {
     const { onSubmit } = renderComposer({ active: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "继续执行");
+    typeEditorText(input, "继续执行");
     fireEvent.keyDown(input, { key: "Enter", isComposing: true });
 
     expect(onSubmit).not.toHaveBeenCalled();
-    expect((input as HTMLTextAreaElement).value).toBe("继续执行");
+    expect(editorText(input)).toBe("继续执行");
   });
 
   it("opens the durable queue without changing the draft", async () => {
@@ -903,13 +906,13 @@ describe("structured composer", () => {
     });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
-    await user.type(input, "Keep this draft");
+    typeEditorText(input, "Keep this draft");
     await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
 
     expect(onOpenQueue).toHaveBeenCalledOnce();
     expect(screen.getByRole("dialog", { name: "Open follow-up queue, 2 messages" })).toBeTruthy();
     expect(screen.getByText("Queued prompt controls")).toBeTruthy();
-    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(editorText(input)).toBe("Keep this draft");
   });
 });
 
@@ -926,7 +929,7 @@ describe("image attachments", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Attach image" }));
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    await user.type(input, "/comp");
+    typeEditorText(input, "/comp");
     await user.click(screen.getByRole("option", { name: /Compact context/ }));
     expect(onCompact).not.toHaveBeenCalled();
     expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
@@ -939,7 +942,7 @@ describe("image attachments", () => {
     renderComposer({ onPickImage: async () => draftImage, onSubmit: submit, onReleaseImages: release });
     const user = userEvent.setup();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    await user.type(input, "$rev");
+    typeEditorText(input, "$rev");
     await user.click(screen.getByRole("option", { name: /Review/ }));
     await user.click(screen.getByRole("button", { name: "Attach image" }));
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -993,17 +996,17 @@ describe("image attachments", () => {
     renderComposer({ onPickImage: async () => draftImage, onSubmit: submit, onReleaseImages: release });
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Attach image" }));
-    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
-    await user.type(input, "Describe this diagram");
+    const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLElement;
+    typeEditorText(input, "Describe this diagram");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(submit).toHaveBeenCalledWith("Describe this diagram", undefined, undefined, [draftImage]);
-    expect(input.value).toBe("Describe this diagram");
+    expect(editorText(input)).toBe("Describe this diagram");
     expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
     await act(async () => { settle(false); await pending; });
-    expect(input.value).toBe("Describe this diagram");
+    expect(editorText(input)).toBe("Describe this diagram");
     expect(release).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(input.value).toBe("");
+    expect(editorText(input)).toBe("");
     expect(screen.queryByRole("img")).toBeNull();
     expect(release).toHaveBeenCalledWith([draftImage.attachmentId]);
   });
@@ -1024,19 +1027,140 @@ it.each([true, false])("settles the current draft key when durable identity arri
   let settle: ((value: boolean) => void) | undefined;
   const submit = vi.fn(() => new Promise<boolean>((resolve) => { settle = resolve; }));
   const view = renderComposer({ onSubmit: submit });
-  const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement;
+  const input = screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLElement;
   const draft = "保留中文草稿，金额 198.01。\n参与者：小林|小周。";
-  fireEvent.change(input, { target: { value: draft } });
+  setEditorText(input, draft);
   await userEvent.click(screen.getByRole("button", { name: "Send message" }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   act(() => view.bindPersistentDraftKey("stable-durable-draft"));
   expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(input);
   expect(window.localStorage.getItem("stable-durable-draft")).toBe(draft);
   await act(async () => settle?.(accepted));
-  await waitFor(() => expect(input.value).toBe(accepted ? "" : draft));
+  await waitFor(() => expect(editorText(input)).toBe(accepted ? "" : draft));
   expect(window.localStorage.getItem("stable-durable-draft")).toBe(accepted ? null : draft);
   view.unmount();
   renderComposer({ persistentDraftKey: "stable-durable-draft", onSubmit: submit });
-  expect((screen.getByRole("combobox", { name: "Message Sigil" }) as HTMLTextAreaElement).value).toBe(accepted ? "" : draft);
+  expect(editorText(screen.getByRole("combobox", { name: "Message Sigil" }))).toBe(accepted ? "" : draft);
   expect(submit).toHaveBeenCalledOnce();
+});
+
+describe("Markdown writing", () => {
+  it("edits source and renders a live safe preview without remounting the editor or losing history", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "中文 *emphasis*");
+    const view = editorView(input);
+    act(() => view.dispatch({ selection: { anchor: 0, head: 2 } }));
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("button", { name: /Bold/ }));
+    expect(editorText(input)).toBe("**中文** *emphasis*");
+    expect(document.activeElement).toBe(input);
+    const preview = screen.getByRole("region", { name: "Preview" });
+    expect(preview.querySelector("strong")?.textContent).toBe("中文");
+    expect(preview.querySelector("em")?.textContent).toBe("emphasis");
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(editorView(screen.getByRole("combobox", { name: "Message Sigil" }))).toBe(view);
+    input.focus();
+    fireEvent.keyDown(input, { key: "z", code: "KeyZ", ctrlKey: true });
+    expect(editorText(input)).toBe("中文 *emphasis*");
+    await waitFor(() => expect(screen.getByRole("region", { name: "Preview" }).querySelector("strong")).toBeNull());
+    fireEvent.keyDown(input, { key: "y", code: "KeyY", ctrlKey: true });
+    expect(editorText(input)).toBe("**中文** *emphasis*");
+  });
+
+  it("retains untrusted Markdown source while the preview cannot create active HTML or remote images", async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = '<script>alert(1)</script>\n<img src="https://remote.invalid/pixel" onerror="alert(2)">\n![remote](https://remote.invalid/image.png)\n[bad](javascript:alert(3))\n\n**safe**';
+    setEditorText(input, source);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    const preview = screen.getByRole("region", { name: "Preview" });
+    expect(preview.querySelector("script,img,iframe,object,[onerror]" )).toBeNull();
+    expect(preview.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(preview.querySelector("strong")?.textContent).toBe("safe");
+    expect(editorText(input)).toBe(source);
+  });
+
+  it("sends the exact Markdown source, including whitespace and code fences, from expanded editing", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "  中文🙂  \r\n```sh\nprintf 'hello'\n```\n  ";
+    setEditorText(input, source);
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    expect(screen.getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith(source, undefined, undefined);
+  });
+
+  it("guards composition before an open suggestion can consume Enter or Tab", () => {
+    const { onOpenSettings, onSubmit } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "/config");
+    expect(screen.getByRole("listbox", { name: "Composer suggestions" })).toBeTruthy();
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Tab", code: "Tab", isComposing: true });
+    expect(onOpenSettings).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(editorText(input)).toBe("/config");
+    fireEvent.compositionEnd(input);
+  });
+
+  it("does not clear an accepted submission when a new composition has started", async () => {
+    let settle!: (accepted: boolean) => void;
+    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
+    const { onSubmit } = renderComposer({ onSubmit: vi.fn(() => pending) });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "submitted draft");
+    fireEvent.submit(input.closest("form")!);
+    expect(onSubmit).toHaveBeenCalledOnce();
+    fireEvent.compositionStart(input);
+    setEditorText(input, "submitted draft新的中文");
+    await act(async () => { settle(true); await pending; });
+    expect(editorText(input)).toBe("submitted draft新的中文");
+    fireEvent.compositionEnd(input);
+  });
+
+  it("keeps the current approval space bounded even when source and preview are expanded", async () => {
+    const user = userEvent.setup();
+    renderComposer({ active: true, reviewActive: true });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "A long follow-up\n".repeat(30));
+    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(editorView(input).scrollDOM.style.maxHeight).toBe("88px");
+    expect(input.closest(".composer-document")?.getAttribute("data-review-active")).toBe("true");
+    expect(screen.getByRole("region", { name: "Preview" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel work" })).toBeTruthy();
+  });
+
+  it("keeps the last persisted draft when a larger edit exceeds the storage budget", () => {
+    window.localStorage.setItem("composer-test", "saved draft");
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const large = "中".repeat(90_000);
+    setEditorText(input, large);
+    expect(editorText(input)).toBe(large);
+    expect(window.localStorage.getItem("composer-test")).toBe("saved draft");
+    expect(screen.getByText(/These edits are only in this window/)).toBeTruthy();
+  });
+
+  it("retains the previous storage key when late durable identity cannot be persisted", () => {
+    window.localStorage.setItem("composer-test", "saved draft");
+    const { bindPersistentDraftKey } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => { throw new DOMException("full", "QuotaExceededError"); });
+    bindPersistentDraftKey("durable-key");
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(input);
+    expect(editorText(input)).toBe("saved draft");
+    expect(window.localStorage.getItem("composer-test")).toBe("saved draft");
+    expect(window.localStorage.getItem("durable-key")).toBeNull();
+    expect(screen.getByText(/These edits are only in this window/)).toBeTruthy();
+    setItem.mockRestore();
+  });
 });

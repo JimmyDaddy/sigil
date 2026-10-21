@@ -16,3 +16,12 @@ Object.defineProperty(window, "localStorage", {
   configurable: true,
   value: storage,
 });
+
+// jsdom has no layout engine. These missing Range APIs let the real editor measure
+// an empty test viewport; geometry is qualified separately in the native WebView.
+if (Range.prototype.getClientRects === undefined) {
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+}
+if (Range.prototype.getBoundingClientRect === undefined) {
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+}
