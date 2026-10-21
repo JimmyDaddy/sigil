@@ -1345,12 +1345,56 @@ impl LocalSessionLifecycleService {
         &self,
         session_ref: &SessionRef,
         expected_session_id: &str,
-        mut roots: ToolArtifactGcRootsV1,
+        roots: ToolArtifactGcRootsV1,
         now_unix_ms: u64,
     ) -> Result<ToolArtifactGcReportV1> {
+        self.garbage_collect_session_artifacts_inner(
+            session_ref,
+            expected_session_id,
+            roots,
+            now_unix_ms,
+            None,
+        )
+    }
+
+    /// Maintains the current interactive session without admitting its held namespace twice.
+    /// The physical host lease must match the service writer, source, session and namespace.
+    ///
+    /// # Errors
+    ///
+    /// Rejects mismatched or closed leases and the same invalid roots, source, durable-disable
+    /// and physical retirement failures as the independent-admission GC entry point.
+    pub fn garbage_collect_session_artifacts_with_lease(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        roots: ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        lease: &crate::managed_artifact_store::ManagedArtifactStoreLeaseV1,
+    ) -> Result<ToolArtifactGcReportV1> {
+        self.garbage_collect_session_artifacts_inner(
+            session_ref,
+            expected_session_id,
+            roots,
+            now_unix_ms,
+            Some(lease),
+        )
+    }
+
+    fn garbage_collect_session_artifacts_inner(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        mut roots: ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        held_lease: Option<&crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+    ) -> Result<ToolArtifactGcReportV1> {
         let _maintenance = self.acquire_maintenance_lease()?;
-        let (store, _artifact_lease) =
-            self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
+        let (store, _artifact_lease) = self.resolve_artifact_store_without_jsonl(
+            session_ref,
+            expected_session_id,
+            held_lease,
+        )?;
         let session_log_path = store.session_log_path().to_path_buf();
         if self.is_session_pinned(session_ref, expected_session_id)? {
             roots.explicit_holds.extend(
@@ -1380,6 +1424,9 @@ impl LocalSessionLifecycleService {
                     session_log_path.display()
                 )
             })?;
+        if session.session_scope_id() != expected_session_id {
+            bail!("artifact GC durable session identity changed");
+        }
         let disabled = store.grace_expired_artifact_refs(
             &roots,
             now_unix_ms,
@@ -1981,6 +2028,7 @@ impl LocalSessionLifecycleService {
         &self,
         session_ref: &SessionRef,
         expected_session_id: &str,
+        held_lease: Option<&crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
     ) -> Result<(
         ToolArtifactStore,
         Option<crate::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
@@ -2028,8 +2076,40 @@ impl LocalSessionLifecycleService {
                 bail!("managed artifact GC source must be one session key below the root");
             }
         }
-        let (store, lease) =
-            self.artifact_store_for_source_path(&path, expected_session_id, managed_source)?;
+        let (store, lease) = if let Some(held_lease) = held_lease {
+            let writer = self
+                .managed_writer
+                .as_ref()
+                .context("held artifact maintenance requires its managed writer")?;
+            let key = if managed_source {
+                path.parent().and_then(Path::file_name)
+            } else {
+                path.file_stem()
+            }
+            .and_then(|value| value.to_str())
+            .context("managed artifact session key is unavailable")?;
+            let mut namespace_keys = vec![key];
+            if managed_source {
+                // Existing interactive hosts used the source file stem for a held lease;
+                // independent managed lifecycle admission uses the parent namespace key.
+                namespace_keys.push(
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .context("held artifact session key is unavailable")?,
+                );
+            }
+            (
+                held_lease.store_for_maintenance(
+                    writer,
+                    &path,
+                    expected_session_id,
+                    &namespace_keys,
+                )?,
+                None,
+            )
+        } else {
+            self.artifact_store_for_source_path(&path, expected_session_id, managed_source)?
+        };
         if store.session_scope_id() != expected_session_id {
             bail!("artifact GC session identity changed");
         }

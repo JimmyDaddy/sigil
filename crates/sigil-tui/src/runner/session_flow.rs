@@ -27,7 +27,7 @@ impl CapturedSessionRuntimeAttachments {
 /// Authority-admitted ArtifactStaging + ArtifactStore roots held for one interactive session.
 /// The lease is retained by the worker across runs and finalized when the worker/session ends.
 pub(super) struct ManagedTuiArtifactStoreLease {
-    inner: sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1,
+    inner: Arc<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
 }
 
 impl ManagedTuiArtifactStoreLease {
@@ -47,7 +47,9 @@ impl ManagedTuiArtifactStoreLease {
             session_scope_id,
             session_path.to_path_buf(),
         )?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     pub(super) fn store(&self) -> sigil_kernel::ToolArtifactStore {
@@ -58,6 +60,12 @@ impl ManagedTuiArtifactStoreLease {
         &self,
     ) -> Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1> {
         self.inner.writer()
+    }
+
+    pub(super) fn maintenance_lease(
+        &self,
+    ) -> Arc<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1> {
+        Arc::clone(&self.inner)
     }
 }
 

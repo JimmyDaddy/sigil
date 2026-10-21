@@ -97,6 +97,56 @@ impl ManagedArtifactStoreLeaseV1 {
         Arc::clone(&self.backend.writer)
     }
 
+    pub(crate) fn store_for_maintenance(
+        &self,
+        writer: &Arc<ManagedStorageWriterAdapterV1>,
+        source_path: &Path,
+        session_scope_id: &str,
+        namespace_keys: &[&str],
+    ) -> Result<ToolArtifactStore> {
+        if !Arc::ptr_eq(writer, &self.backend.writer)
+            || self.store.session_scope_id() != session_scope_id
+            || self.store.session_log_path().as_os_str().is_empty()
+            || fs::canonicalize(self.store.session_log_path())? != source_path
+        {
+            bail!("held artifact lease does not match the maintenance session source");
+        }
+        let staging = self
+            .backend
+            .staging_lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("held artifact staging lease is poisoned"))?;
+        let staging = staging
+            .as_ref()
+            .context("held artifact staging lease is closed")?;
+        let store = self
+            .backend
+            .store_lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("held artifact store lease is poisoned"))?;
+        let store = store
+            .as_ref()
+            .context("held artifact store lease is closed")?;
+        if staging.channel() != StorageWriterChannelV1::ArtifactStaging
+            || store.channel() != StorageWriterChannelV1::ArtifactStore
+            || !namespace_keys.iter().any(|key| {
+                staging.namespace_digest()
+                    == ManagedStorageWriterAdapterV1::named_namespace_digest(
+                        StorageWriterChannelV1::ArtifactStaging,
+                        key,
+                    )
+                    && store.namespace_digest()
+                        == ManagedStorageWriterAdapterV1::named_namespace_digest(
+                            StorageWriterChannelV1::ArtifactStore,
+                            key,
+                        )
+            })
+        {
+            bail!("held artifact lease does not match the maintenance namespace");
+        }
+        Ok(self.store())
+    }
+
     pub fn finalize(self) -> Result<()> {
         self.backend.finalize()
     }

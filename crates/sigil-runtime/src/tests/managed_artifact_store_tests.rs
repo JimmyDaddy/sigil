@@ -60,6 +60,16 @@ fn configured_writer_with_validation_gate(
         .register(staging_grant.clone())
         .expect("staging grant");
     table.register(store_grant.clone()).expect("store grant");
+    table
+        .register(
+            crate::managed_storage_writer::grant_for_channel_with_context(
+                StorageWriterChannelV1::SessionLifecycleLog,
+                0x83,
+                generation,
+                cutover_manifest_hash,
+            ),
+        )
+        .expect("lifecycle grant");
     let service: Arc<dyn ManagedStorageServiceV1> = if durable {
         Arc::new(
             AuthorityManagedStorageServiceV1::new_with_state_root(table, generation, root)
@@ -825,4 +835,233 @@ fn managed_capture_rechecks_authority_health_when_existing_capacity_covers_write
         "the rejected write prevents complete capture"
     );
     assert_eq!(durable_quota_usage(root.path()), 0);
+}
+
+fn held_artifact_gc_fixture(
+    root: &Path,
+) -> Result<(
+    crate::LocalSessionLifecycleService,
+    PathBuf,
+    String,
+    ManagedArtifactStoreLeaseV1,
+)> {
+    let source = root.join("sessions/session-held.jsonl");
+    let mut session = sigil_kernel::Session::load_from_store(
+        "fixture",
+        "fixture-model",
+        sigil_kernel::JsonlSessionStore::new(&source)?,
+    )?;
+    session.append_user_message(sigil_kernel::ModelMessage::user(
+        "held artifact maintenance",
+    ))?;
+    let scope = session.session_scope_id().to_owned();
+    let state = root.join("state");
+    fs::create_dir(&state)?;
+    let writer = writer(&state);
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "session-held",
+        &scope,
+        source.clone(),
+    )?;
+    let lifecycle = crate::LocalSessionLifecycleService::new(
+        "held-workspace",
+        source.parent().expect("session directory"),
+        root.join("exports"),
+    )
+    .with_managed_writer(writer, "held-workspace")?;
+    Ok((lifecycle, source, scope, lease))
+}
+
+#[test]
+fn held_artifact_gc_reuses_live_namespace_and_preserves_other_active_calls() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, source, scope, lease) = held_artifact_gc_fixture(temp.path())?;
+    let store = lease.store();
+    let keep = store.capture_text(
+        "active-read",
+        "read_file",
+        "retained complete output",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let retire = store.capture_text(
+        "finished-old-call",
+        "read_file",
+        "expired old output",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert!(
+        ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+            lease.writer(),
+            "session-held",
+            &scope,
+            source.clone(),
+        )
+        .is_err(),
+        "a live namespace cannot be independently admitted again"
+    );
+    let roots = ToolArtifactGcRootsV1 {
+        active_result_refs: [keep.artifact_ref.clone()].into_iter().collect(),
+        ..ToolArtifactGcRootsV1::default()
+    };
+    for pass in 0..2 {
+        let report = lifecycle.garbage_collect_session_artifacts_with_lease(
+            &sigil_kernel::SessionRef::new_relative("session-held.jsonl")?,
+            &scope,
+            roots.clone(),
+            u64::MAX,
+            &lease,
+        )?;
+        assert_eq!(report.tombstoned_manifests, usize::from(pass == 0));
+        assert_eq!(store.resolve(&keep.artifact_ref)?, keep);
+        assert!(store.resolve(&retire.artifact_ref).is_err());
+    }
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(&source)?;
+    let retired = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::ToolArtifactAvailabilityChanged(change),
+            ) => Some(change),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retired.len(),
+        2,
+        "durable disable and expiry remain required"
+    );
+    assert!(
+        retired
+            .iter()
+            .all(|change| change.artifact_ref == retire.artifact_ref)
+    );
+    Ok(())
+}
+
+#[test]
+fn held_artifact_gc_rejects_foreign_source_and_session_without_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, source, scope, lease) = held_artifact_gc_fixture(temp.path())?;
+    let other_path = source.with_file_name("session-other.jsonl");
+    let mut other = sigil_kernel::Session::load_from_store(
+        "fixture",
+        "fixture-model",
+        sigil_kernel::JsonlSessionStore::new(&other_path)?,
+    )?;
+    other.append_user_message(sigil_kernel::ModelMessage::user("other session"))?;
+    let before = fs::read(&source)?;
+    let other_before = fs::read(&other_path)?;
+    for (source_ref, expected_scope) in [
+        ("session-other.jsonl", other.session_scope_id()),
+        ("session-held.jsonl", other.session_scope_id()),
+    ] {
+        assert!(
+            lifecycle
+                .garbage_collect_session_artifacts_with_lease(
+                    &sigil_kernel::SessionRef::new_relative(source_ref)?,
+                    expected_scope,
+                    ToolArtifactGcRootsV1::default(),
+                    u64::MAX,
+                    &lease,
+                )
+                .is_err()
+        );
+    }
+    assert_ne!(scope, other.session_scope_id());
+    assert_eq!(fs::read(&source)?, before);
+    assert_eq!(fs::read(&other_path)?, other_before);
+    Ok(())
+}
+
+#[test]
+fn held_artifact_gc_rejects_wrong_namespace_and_writer_without_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, source, scope, lease) = held_artifact_gc_fixture(temp.path())?;
+    let wrong_key = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        lease.writer(),
+        "different-namespace",
+        &scope,
+        source.clone(),
+    )?;
+    let other_state = temp.path().join("other-state");
+    fs::create_dir(&other_state)?;
+    let wrong_writer = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        writer(&other_state),
+        "session-held",
+        &scope,
+        source.clone(),
+    )?;
+    let before = fs::read(&source)?;
+    for invalid_lease in [&wrong_key, &wrong_writer] {
+        assert!(
+            lifecycle
+                .garbage_collect_session_artifacts_with_lease(
+                    &sigil_kernel::SessionRef::new_relative("session-held.jsonl")?,
+                    &scope,
+                    ToolArtifactGcRootsV1::default(),
+                    u64::MAX,
+                    invalid_lease,
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(fs::read(&source)?, before);
+    Ok(())
+}
+
+#[test]
+fn held_artifact_gc_preserves_managed_session_file_stem_namespace_binding() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (_legacy_lifecycle, _legacy_source, _legacy_scope, legacy_lease) =
+        held_artifact_gc_fixture(temp.path())?;
+    let writer = legacy_lease.writer();
+    let state = temp.path().join("state");
+    let managed_root = state.join("managed/session-log");
+    let source = managed_root.join("session-managed/records.jsonl");
+    let mut session = sigil_kernel::Session::load_from_store(
+        "fixture",
+        "fixture-model",
+        sigil_kernel::JsonlSessionStore::new(&source)?,
+    )?;
+    session.append_user_message(sigil_kernel::ModelMessage::user("managed held maintenance"))?;
+    let scope = session.session_scope_id().to_owned();
+    // This is the real existing interactive host mapping for records.jsonl, not a new alias.
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "records",
+        &scope,
+        source,
+    )?;
+    let store = lease.store();
+    let descriptor = store.capture_text(
+        "managed-call",
+        "read_file",
+        "existing managed namespace output",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let lifecycle = crate::LocalSessionLifecycleService::new(
+        "held-workspace",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    )
+    .with_managed_writer(writer, "held-workspace")?
+    .with_managed_session_log_root(managed_root)?
+    .with_managed_artifact_roots(
+        state.join("managed/artifact-store"),
+        state.join("managed/artifact-staging"),
+    )?;
+    let report = lifecycle.garbage_collect_session_artifacts_with_lease(
+        &sigil_kernel::SessionRef::new_relative("session-managed.jsonl")?,
+        &scope,
+        ToolArtifactGcRootsV1 {
+            active_result_refs: [descriptor.artifact_ref.clone()].into_iter().collect(),
+            ..ToolArtifactGcRootsV1::default()
+        },
+        u64::MAX,
+        &lease,
+    )?;
+    assert_eq!(report.retained_manifests, 1);
+    assert_eq!(store.resolve(&descriptor.artifact_ref)?, descriptor);
+    Ok(())
 }

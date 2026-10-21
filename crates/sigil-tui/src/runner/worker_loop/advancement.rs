@@ -1387,6 +1387,10 @@ where
         lifecycle,
         session_ref,
         roots,
+        state
+            .managed_artifact_store
+            .as_ref()
+            .map(|lease| lease.maintenance_lease()),
     );
     WorkerAdvancementControl::SkipCommandPoll
 }

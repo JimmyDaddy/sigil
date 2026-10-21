@@ -79,6 +79,9 @@ impl ArtifactGcTaskManager {
         lifecycle: LocalSessionLifecycleService,
         session_ref: SessionRef,
         roots: ToolArtifactGcRootsV1,
+        held_artifact_lease: Option<
+            Arc<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1>,
+        >,
     ) {
         debug_assert!(self.active.is_none());
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -91,14 +94,22 @@ impl ArtifactGcTaskManager {
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
-            let result = lifecycle
-                .garbage_collect_session_artifacts(
+            let result = match held_artifact_lease.as_ref() {
+                Some(lease) => lifecycle.garbage_collect_session_artifacts_with_lease(
                     &session_ref,
                     &result_session_scope_id,
                     roots,
                     current_unix_time_ms(),
-                )
-                .map_err(|error| format!("{error:#}"));
+                    lease,
+                ),
+                None => lifecycle.garbage_collect_session_artifacts(
+                    &session_ref,
+                    &result_session_scope_id,
+                    roots,
+                    current_unix_time_ms(),
+                ),
+            }
+            .map_err(|error| format!("{error:#}"));
             ARTIFACT_GC_TASK_COMPLETED_TOTAL.fetch_add(1, Ordering::Relaxed);
             if task_cancelled.load(Ordering::Acquire) {
                 return;
