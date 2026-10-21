@@ -112,7 +112,15 @@ pub(in crate::runner) fn cancel_active_run(
         .session
         .current
         .as_ref()
-        .and_then(Session::tool_artifact_store);
+        .and_then(Session::tool_artifact_store)
+        .or_else(|| {
+            // The active task owns the Session while it runs. The worker retains this
+            // authority-issued lease across runs; reload still checks the exact session scope.
+            state
+                .managed_artifact_store
+                .as_ref()
+                .map(|lease| lease.store())
+        });
     let background_runs = state.agent.background_runs.clone();
     elicitation_handler.set_audit_buffer(None);
     if !active_run.cancellation_owner.reserve_cancel()

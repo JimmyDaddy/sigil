@@ -18,7 +18,99 @@ use super::super::{
         prepare_run_cancellation,
     },
 };
-use super::common::test_root_config;
+use super::common::{test_authority_composition, test_root_config};
+
+#[test]
+fn cancelled_run_reconnects_managed_output_store_when_the_task_owned_its_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut fixture = CancellationFixture::new(temp.path())?;
+    let (composition, _authority_root) = test_authority_composition(temp.path())?;
+    let scope = fixture
+        .state
+        .session
+        .current
+        .as_ref()
+        .expect("fixture session")
+        .session_scope_id()
+        .to_owned();
+    fixture.state.managed_artifact_store =
+        Some(super::super::ManagedTuiArtifactStoreLease::acquire(
+            Arc::clone(&composition.storage_writer),
+            &fixture.state.session.log_path,
+            &scope,
+        )?);
+    let (active, _cancellation, release) = fixture.active(false, false);
+    let owned_session = fixture
+        .state
+        .session
+        .current
+        .take()
+        .expect("active task owns session");
+    assert!(fixture.state.session.current.is_none());
+    release.send(()).expect("release owned cleanup");
+    fixture.settle(active);
+    let restored = fixture
+        .state
+        .session
+        .current
+        .as_ref()
+        .expect("cancelled session restored");
+    let store = restored
+        .tool_artifact_store()
+        .expect("managed output store must survive cancellation");
+    assert_eq!(store.session_scope_id(), restored.session_scope_id());
+    let descriptor = store.capture_text(
+        "follow-up-read",
+        "read_file",
+        "报名人数：2 和 1",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert_eq!(store.resolve(&descriptor.artifact_ref)?, descriptor);
+    assert_eq!(descriptor.persisted_bytes, "报名人数：2 和 1".len() as u64);
+    drop(owned_session);
+    Ok(())
+}
+
+#[test]
+fn cancelled_run_does_not_reconnect_a_different_sessions_managed_output_store() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut fixture = CancellationFixture::new(temp.path())?;
+    let (composition, _authority_root) = test_authority_composition(temp.path())?;
+    let other_path = temp.path().join("other.jsonl");
+    let other = Session::load_from_store(
+        "planned",
+        "planned-model",
+        JsonlSessionStore::new(&other_path)?,
+    )?;
+    fixture.state.managed_artifact_store =
+        Some(super::super::ManagedTuiArtifactStoreLease::acquire(
+            Arc::clone(&composition.storage_writer),
+            &other_path,
+            other.session_scope_id(),
+        )?);
+    let (active, _cancellation, release) = fixture.active(false, false);
+    let owned_session = fixture
+        .state
+        .session
+        .current
+        .take()
+        .expect("active task owns session");
+    release.send(()).expect("release owned cleanup");
+    fixture.settle(active);
+    let restored = fixture
+        .state
+        .session
+        .current
+        .as_ref()
+        .expect("cancelled session restored");
+    assert_ne!(restored.session_scope_id(), other.session_scope_id());
+    assert!(
+        restored.tool_artifact_store().is_none(),
+        "another session's store must not cross the scope boundary"
+    );
+    drop(owned_session);
+    Ok(())
+}
 
 struct FixtureImageResolver;
 
