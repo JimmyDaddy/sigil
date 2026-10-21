@@ -2002,7 +2002,7 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText(
       "New conversation default: DeepSeek V4 Flash · deepseek-v4-flash",
     )).toBeTruthy();
-    expect(screen.getByText(/Connection DeepSeek · Provider DeepSeek/)).toBeTruthy();
+    expect(screen.getByText(/Connection DeepSeek\. Existing conversations/)).toBeTruthy();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Default model for new conversations" }),
       "deepseek-default/deepseek-v4-pro",

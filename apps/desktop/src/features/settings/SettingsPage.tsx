@@ -7,6 +7,7 @@ import { type Locale, useLocale } from "../../i18n";
 import { readReopenLastWorkspace, writeReopenLastWorkspace } from "../../preferences";
 import { modelOptionIsSelectable } from "../../types";
 import type {
+  ModelOption,
   ProviderConnectionInventory,
   ProviderConnectionReadiness,
   ProviderCredentialSource,
@@ -22,6 +23,11 @@ import { PluginReviewCard } from "./PluginReviewCard";
 import { McpImportCard } from "./McpImportCard";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
 import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
+import {
+  connectionMatchesProvider,
+  providerConnectionDetail,
+  providerConnectionLabel,
+} from "./providerPresentation";
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -74,6 +80,10 @@ export function SettingsPage({
   const defaultModelConnection = providerInventory?.connections.find(
     (connection) => connection.id === (effectiveDefaultModel?.connectionId ?? modelContext?.modelRef.connectionId),
   );
+  const defaultConnectionIdentity = {
+    label: defaultModelConnection?.label ?? modelContext?.modelRef.connectionId ?? "",
+    providerLabel: defaultModelConnection?.providerLabel ?? modelContext?.providerName ?? "",
+  };
   const [contextWindowTokens, setContextWindowTokens] = useState("");
   const contextWindowValue = contextWindowTokens.trim();
   const contextWindowValid = contextWindowValue === ""
@@ -102,6 +112,21 @@ export function SettingsPage({
     );
     if (option === undefined || option.displayName === option.modelName) return modelRef.modelId;
     return `${option.displayName} · ${option.modelName}`;
+  };
+  const modelOptionLabel = (option: ModelOption) => {
+    const connection = providerInventory?.connections.find(
+      (candidate) => candidate.id === option.modelRef.connectionId,
+    );
+    const connectionLabel = providerConnectionLabel(connection ?? {
+      label: option.modelRef.connectionId,
+      providerLabel: option.modelRef.connectionId,
+    });
+    const modelLabel = option.displayName === option.modelName
+      ? option.modelName
+      : `${option.displayName} · ${option.modelName}`;
+    return `${connectionLabel} · ${modelLabel}${option.availability === "configured_unavailable"
+      ? ` · ${t("modelNotListed")}`
+      : ""}`;
   };
   const updateDefaultModel = async (selection: string) => {
     const selected = modelContext?.modelOptions.find(
@@ -225,11 +250,12 @@ export function SettingsPage({
                   <ul className="provider-connection-list">
                     {providerInventory.connections.map((connection) => {
                       const isDefaultConnection = effectiveDefaultModel?.connectionId === connection.id;
+                      const connectionDetail = providerConnectionDetail(connection);
                       return (
                         <li key={connection.id}>
                           <div>
                             <strong>{connection.label}</strong>
-                            <span>{connection.providerLabel} · {connection.protocolLabel}</span>
+                            {connectionDetail === "" ? null : <span>{connectionDetail}</span>}
                             <span>
                               {providerCredentialSourceLabel(connection.credentialSource, t)}
                               {" · "}
@@ -338,10 +364,12 @@ export function SettingsPage({
             ) : (
               <Select
                 label={t("defaultModel")}
-                description={t("defaultModelProvider", {
-                  connection: defaultModelConnection?.label ?? modelContext.modelRef.connectionId,
-                  provider: defaultModelConnection?.providerLabel ?? modelContext.providerName,
-                })}
+                description={connectionMatchesProvider(defaultConnectionIdentity)
+                  ? t("defaultModelConnection", { connection: defaultConnectionIdentity.label.trim() })
+                  : t("defaultModelProvider", {
+                    connection: defaultConnectionIdentity.label,
+                    provider: defaultConnectionIdentity.providerLabel,
+                  })}
                 value={
                   effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
                 }
@@ -359,20 +387,7 @@ export function SettingsPage({
                       )
                     }
                   >
-                    {providerInventory?.connections.find(
-                      (connection) => connection.id === option.modelRef.connectionId,
-                    )?.providerLabel ?? option.modelRef.connectionId}
-                    {" · "}
-                    {providerInventory?.connections.find(
-                      (connection) => connection.id === option.modelRef.connectionId,
-                    )?.label ?? option.modelRef.connectionId}
-                    {" · "}
-                    {option.displayName === option.modelName
-                      ? option.modelName
-                      : `${option.displayName} · ${option.modelName}`}
-                    {option.availability === "configured_unavailable"
-                      ? ` · ${t("modelNotListed")}`
-                      : ""}
+                    {modelOptionLabel(option)}
                   </option>
                 ))}
               </Select>

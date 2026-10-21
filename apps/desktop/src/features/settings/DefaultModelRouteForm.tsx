@@ -3,6 +3,7 @@ import { useEffect, useId, useState } from "react";
 import { useLocale } from "../../i18n";
 import type { ProviderConnectionInventory, ProviderModelRef } from "../../types";
 import { Button, Select, TextField } from "../../ui/primitives";
+import { providerConnectionLabel } from "./providerPresentation";
 
 /** Edits a configured route without depending on a conversation or its runtime context. */
 export function DefaultModelRouteForm({
@@ -48,7 +49,7 @@ export function DefaultModelRouteForm({
         <option value="" disabled>{t("configuredConnection")}</option>
         {inventory.connections.map((candidate) => (
           <option key={candidate.id} value={candidate.id}>
-            {candidate.providerLabel} · {candidate.label}
+            {providerConnectionLabel(candidate)}
           </option>
         ))}
       </Select>
