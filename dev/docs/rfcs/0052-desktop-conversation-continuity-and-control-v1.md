@@ -241,6 +241,22 @@ React continuity reducer + recovery/queue/checkpoint UI
 7. Theme/navigation/drawer 不 remount active conversation，不丢 draft、IME、scroll anchor 或 focus。
 8. 正常 progress 不弹 toast；只有需要用户处理的 failure、高影响 action receipt 或后台完成提醒进入通知中心。
 
+### 5.1 新建会话的草稿与恢复位置（2026-10-21）
+
+- 新建会话时，Tauri 从既有 HTTP snapshot 的 `durable_session_scope_id` 投影
+  `durableSessionId`；它与 catalog `sessionId` 同域，仅作为界面身份，不授予读写权限。
+  process-local `id` 继续用于当前 IPC，不能成为可恢复草稿唯一的保存键。
+- 新会话的 Markdown 原文立即按 workspace id 与返回的 durable id 保存；绑定身份不依赖
+  搜索词、provider、pin 或 source-state 筛选，保留用户原有筛选条件。
+- 记住恢复位置时，使用当前工作区无筛选 catalog，每页最多 100 项、最多 10 页，
+  只匹配 typed create 返回的 exact durable id。不能从新出现的行、标题或数组位置猜身份。
+  找到可恢复 source 的 exact `sessionRef` 后，才更新上次会话偏好。
+- catalog 查找或本地偏好保存失败时，保留当前可编辑会话及稳定键下的草稿，原位说明
+  尚未记住恢复位置并提供重试。晚到的查找不得覆盖之后选择的会话或其恢复偏好。
+- 回归覆盖：在 active title/provider/pinned 筛选下新建未发送会话，保存含公式、中文、emoji
+  与首尾空白的 Markdown，重启后恢复同一会话及完整原文；同时检查分页、失败重试、
+  过期选择和跨工作区返回。结构化测试与真实原生退出/重开分别保留证据。
+
 ## 6. Execution slices and commit boundaries
 
 | Slice | Scope | Suggested commit | Completion evidence |

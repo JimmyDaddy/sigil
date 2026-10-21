@@ -291,18 +291,20 @@ fn catalog_query_validation_bounds_renderer_controlled_values() {
 }
 
 #[test]
-fn session_projection_drops_server_private_durable_fields() {
+fn session_projection_preserves_opaque_catalog_identity_without_private_run_fields() {
     let summary = DesktopSessionSummary::from(DesktopSessionSnapshot {
         id: "http-session-1".to_owned(),
         label: Some("Conversation".to_owned()),
         run_ids: vec!["run-1".to_owned()],
-        durable_session_scope_id: "durable-secret-scope".to_owned(),
+        durable_session_scope_id: "durable-catalog-session-1".to_owned(),
         foreground_run_id: None,
         route_transition: None,
         route_recovery: None,
     });
     let projection = serde_json::to_string(&summary).expect("summary should serialize");
-    assert!(!projection.contains("durable-secret-scope"));
+    assert!(projection.contains("\"durableSessionId\":\"durable-catalog-session-1\""));
+    assert!(!projection.contains("run_ids"));
+    assert!(!projection.contains("session_log_path"));
     assert_eq!(summary.run_count, 1);
 }
 

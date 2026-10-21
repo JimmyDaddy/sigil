@@ -196,11 +196,18 @@ export interface CatalogPage {
 
 export interface SessionSummary {
   id: string;
+  /** Stable catalog identity, when supplied by the native session projection. */
+  durableSessionId?: string;
   label?: string;
   runCount: number;
   foregroundRunId?: string;
   routeTransition?: TimelineRouteTransition;
   routeRecovery?: SessionRouteRecoveryView;
+}
+
+export interface CreatedSessionSummary extends SessionSummary {
+  /** Creating a conversation always establishes its recoverable draft identity. */
+  durableSessionId: string;
 }
 
 export interface ForegroundRunOwner {

@@ -4,11 +4,11 @@ import type { DesktopBridge } from "../../bridge";
 import type {
   CatalogPage,
   ConversationDisplayPage,
+  CreatedSessionSummary,
   ProviderConnectionInventory,
   ProviderModelRef,
   RunAttachment,
   RunContext,
-  SessionSummary,
   TranscriptPage,
   VerificationSummary,
   WorkspaceSummary,
@@ -21,8 +21,9 @@ const workspace: WorkspaceSummary = {
   state: "ready",
 };
 
-const session: SessionSummary = {
+const session: CreatedSessionSummary = {
   id: "catalog-session-complete",
+  durableSessionId: "catalog-durable-session-complete",
   label: "Review parser recovery and verification",
   runCount: 4,
   foregroundRunId: "catalog-run-active",
@@ -38,7 +39,7 @@ const catalog: CatalogPage = {
   entries: [
     {
       sessionRef: "catalog-session-complete.jsonl",
-      sessionId: session.id,
+      sessionId: session.durableSessionId,
       sourceState: "ready",
       sourceBytes: 1024,
       sourceModifiedAtUnixMs: 1_784_419_180_000,

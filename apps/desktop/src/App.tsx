@@ -8,6 +8,7 @@ import { LocaleProvider, useLocale } from "./i18n";
 import { type HistoryState } from "./HistoryPanel";
 import { SessionRail } from "./features/sessions/SessionRail";
 import { ConversationLibrary } from "./features/sessions/ConversationLibrary";
+import { findCreatedSessionEntry } from "./features/sessions/createdSessionIdentity";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ProviderSetup } from "./features/settings/ProviderSetup";
 import { SupportPage } from "./features/support/SupportPage";
@@ -27,6 +28,7 @@ import type {
   CatalogPage,
   CatalogRequest,
   CatalogSourceState,
+  CreatedSessionSummary,
   DesktopBootstrap,
   ProviderConnectionInventory,
   ProviderModelRef,
@@ -140,6 +142,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
+  const [sessionReopenIssue, setSessionReopenIssue] = useState<CreatedSessionSummary>();
+  const [sessionReopenBusy, setSessionReopenBusy] = useState(false);
   const [sessionRecovery, setSessionRecovery] = useState<SessionRouteRecoveryView>();
   const [failedSessionEntry, setFailedSessionEntry] = useState<CatalogEntry>();
   const [pendingWorkspaceClose, setPendingWorkspaceClose] = useState<PendingWorkspaceClose>();
@@ -431,6 +435,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     const selectionEpoch = ++sessionSelectionEpoch.current;
     setSelectedSession(undefined);
     setSelectedDurableSessionId(undefined);
+    setSessionReopenIssue(undefined);
+    setSessionReopenBusy(false);
     setSessionActionState("idle");
     setConversationNavigation(undefined);
     setSessionMessage(undefined);
@@ -667,17 +673,43 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
+  const rememberCreatedSession = async (
+    workspaceId: string,
+    session: CreatedSessionSummary,
+    selectionEpoch: number,
+  ) => {
+    const isCurrent = () => sessionSelectionEpoch.current === selectionEpoch
+      && activeWorkspaceIdRef.current === workspaceId;
+    if (!isCurrent()) return;
+    setSessionReopenBusy(true);
+    try {
+      const entry = await findCreatedSessionEntry(bridge, workspaceId, session.durableSessionId, isCurrent);
+      if (!isCurrent()) return;
+      const saved = entry !== undefined && writeLastSession(workspaceId, {
+        sessionRef: entry.sessionRef,
+        sessionId: session.durableSessionId,
+        label: entry.title ?? session.label,
+      });
+      setSessionReopenIssue(saved ? undefined : session);
+    } catch {
+      if (isCurrent()) setSessionReopenIssue(session);
+    } finally {
+      if (isCurrent()) setSessionReopenBusy(false);
+    }
+  };
+
   const createSession = async (
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
     const selectionEpoch = ++sessionSelectionEpoch.current;
-    const previousSessionRefs = new Set(catalog.entries.map((entry) => entry.sessionRef));
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
     setSessionRecovery(undefined);
     setConversationNavigation({ kind: "creating" });
     setSessionMessage(undefined);
+    setSessionReopenIssue(undefined);
+    setSessionReopenBusy(false);
     try {
       const selectedDefaultModel = requestedModel
         ?? (readyProviderInventory === undefined
@@ -689,26 +721,17 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         selectedDefaultModel,
       );
       if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
+      if (session.durableSessionId.trim() === "") throw new Error("created conversation has no durable identity");
       setConversationNavigation((current) =>
         current?.kind === "creating" ? { ...current, targetSessionId: session.id } : current,
       );
       setSelectedSession(session);
-      setSelectedDurableSessionId(undefined);
+      setSelectedDurableSessionId(session.durableSessionId);
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
-      const page = await loadHistory(activeWorkspaceId);
-      const createdEntry = page?.entries.find(
-        (entry) => entry.sessionId !== undefined && !previousSessionRefs.has(entry.sessionRef),
-      );
-      if (createdEntry?.sessionId !== undefined && sessionSelectionEpoch.current === selectionEpoch) {
-        setSelectedDurableSessionId(createdEntry.sessionId);
-        writeLastSession(activeWorkspaceId, {
-          sessionRef: createdEntry.sessionRef,
-          sessionId: createdEntry.sessionId,
-          label: createdEntry.title ?? session.label,
-        });
-      }
+      void loadHistory(activeWorkspaceId);
+      await rememberCreatedSession(activeWorkspaceId, session, selectionEpoch);
       return session;
     } catch (error) {
       if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
@@ -761,6 +784,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       );
       setSelectedSession(session);
       setSelectedDurableSessionId(entry.sessionId);
+      setSessionReopenIssue(undefined);
+      setSessionReopenBusy(false);
       setNavigationOpen(false);
       setSessionActionState("idle");
       setSessionMessage(undefined);
@@ -1325,6 +1350,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               </div>
             ) : (
             <div className="conversation-surface" inert={navigationBlocksSelectedSession || undefined}>
+              {sessionReopenIssue !== undefined && sessionReopenIssue.durableSessionId === selectedDurableSessionId ? (
+                <div role="status" className="conversation-inventory-notice">
+                  <span>{t("conversationReopenUnavailable")}</span>
+                  <Button type="button" disabled={sessionReopenBusy} onClick={() => {
+                    if (sessionReopenIssue !== undefined) {
+                      void rememberCreatedSession(activeWorkspace.id, sessionReopenIssue, sessionSelectionEpoch.current);
+                    }
+                  }}>{t("retry")}</Button>
+                </div>
+              ) : null}
               {providerInventoryState === "error" ? (
                 <div role="status" className="conversation-inventory-notice">
                   <span>{t("providerConnectionsUnavailable")}</span>

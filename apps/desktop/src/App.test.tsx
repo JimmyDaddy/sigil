@@ -13,7 +13,9 @@ import { MessageContent } from "./MessageContent";
 import { presentTool, ToolCard } from "./ToolCard";
 import type { DesktopBridge } from "./bridge";
 import type {
+  CatalogEntry,
   CatalogPage,
+  CreatedSessionSummary,
   ConversationDisplayPage,
   ConversationContinuity,
   ConversationQueueCommandInput,
@@ -454,6 +456,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     catalog: async () => emptyCatalog,
     createSession: async () => ({
       id: "http-session-new",
+      durableSessionId: "durable-session-new",
       label: "New conversation",
       runCount: 0,
     }),
@@ -1235,6 +1238,166 @@ describe("desktop coding-agent components", () => {
   });
 });
 
+describe("new conversation persistence", () => {
+  const oldEntry: CatalogEntry = {
+    sessionRef: "old-agenda.jsonl", sessionId: "durable-old-agenda", sourceState: "ready",
+    sourceBytes: 512, sourceModifiedAtUnixMs: 1_784_419_200_000, title: "Old agenda",
+    providerName: "existing-provider", userMessageCount: 1, assistantMessageCount: 1,
+    toolResultCount: 0, pinned: true,
+  };
+  const created: CreatedSessionSummary = {
+    id: "http-created-before-restart", durableSessionId: "durable-created-draft", label: "New conversation", runCount: 0,
+  };
+  const createdEntry: CatalogEntry = {
+    ...oldEntry, sessionRef: "created-empty.jsonl", sessionId: created.durableSessionId,
+    title: undefined, userMessageCount: 0, assistantMessageCount: 0, pinned: false, providerName: "other-provider",
+  };
+  const draft = "  # 数学草稿 🌿\n\n**保留原文**与 $a^2+b^2=c^2$。\n\n$$\n\\frac{1}{2} + x\n$$\n\n末尾两个空格。  \n";
+  const rememberOld = () => writeLastSession(workspace.id, {
+    sessionRef: oldEntry.sessionRef, sessionId: oldEntry.sessionId!, label: oldEntry.title,
+  });
+
+  it.each(["title", "provider", "pinned"] as const)(
+    "restores a new Markdown draft and exact last session after creating under an active %s filter",
+    async (filter) => {
+      const user = userEvent.setup();
+      rememberOld();
+      let wasCreated = false;
+      let openGeneration = 0;
+      const createSession = vi.fn(async () => { wasCreated = true; return created; });
+      const openSession = vi.fn<DesktopBridge["openSession"]>(async (_workspaceId, input) => ({
+        id: `http-reopened-${++openGeneration}`, label: input.label, runCount: 0,
+      }));
+      const catalog = vi.fn<DesktopBridge["catalog"]>(async (_workspaceId, request) => {
+        if (request.limit === 100) {
+          if (request.cursor === undefined) return {
+            ...emptyCatalog,
+            entries: [{ ...createdEntry, sessionRef: "different-new.jsonl", sessionId: "another-concurrent-session" }],
+            nextCursor: "created-next-page",
+          };
+          return { ...emptyCatalog, entries: [createdEntry] };
+        }
+        const filtered = request.query !== undefined || request.provider !== undefined || request.pinned !== undefined;
+        return { ...emptyCatalog, entries: wasCreated && !filtered ? [createdEntry, oldEntry] : [oldEntry] };
+      });
+      const bridge = bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        createSession, openSession, catalog,
+      });
+      const view = render(<App bridge={bridge} />);
+      await readyComposer();
+      if (filter === "title") {
+        await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "agenda");
+        await user.click(screen.getByRole("button", { name: "Search" }));
+        await waitFor(() => expect(catalog.mock.calls.some(([, request]) => request.query === "agenda")).toBe(true));
+      } else {
+        await user.click(screen.getByRole("button", { name: "Filters" }));
+        if (filter === "provider") await user.type(screen.getByRole("textbox", { name: "Provider" }), "existing-provider");
+        else await user.click(screen.getByRole("checkbox", { name: "Pinned only" }));
+        await user.keyboard("{Escape}");
+        await waitFor(() => expect(catalog.mock.calls.some(([, request]) => filter === "provider"
+          ? request.provider === "existing-provider" : request.pinned === true)).toBe(true));
+      }
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await screen.findByRole("heading", { name: "New conversation" });
+      setEditorText(await readyComposer(), draft);
+      await waitFor(() => expect(readLastSession(workspace.id)?.sessionId).toBe(created.durableSessionId));
+      expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${created.durableSessionId}`)).toBe(draft);
+      expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${created.id}`)).toBeNull();
+      expect(readLastSession(workspace.id)?.sessionRef).toBe(createdEntry.sessionRef);
+      const identityRequests = catalog.mock.calls.filter(([, request]) => request.limit === 100);
+      expect(identityRequests.map(([, request]) => request)).toEqual([
+        { limit: 100, cursor: undefined }, { limit: 100, cursor: "created-next-page" },
+      ]);
+      expect(screen.getByRole("textbox", { name: "Search conversations" }).getAttribute("value")).toBe(filter === "title" ? "agenda" : "");
+      if (filter !== "title") expect(screen.getByRole("button", { name: "1 active filters" })).toBeTruthy();
+      view.unmount();
+      render(<App bridge={bridge} />);
+      await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+      expect(openSession).toHaveBeenLastCalledWith(workspace.id, {
+        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId, label: created.label,
+      });
+      expect(editorText(await readyComposer())).toBe(draft);
+    },
+  );
+
+  it.each(["catalog", "not-found", "preference"] as const)(
+    "keeps a stable draft and reports a recoverable reopen failure when %s persistence fails",
+    async (failure) => {
+      const user = userEvent.setup();
+      rememberOld();
+      let retrySucceeded = false;
+      const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+      vi.spyOn(window.localStorage, "setItem").mockImplementation((key, value) => {
+        if (!retrySucceeded && failure === "preference" && key === "sigil.desktop.last-sessions.v1") throw new DOMException("full", "QuotaExceededError");
+        originalSetItem(key, value);
+      });
+      const catalog = vi.fn<DesktopBridge["catalog"]>(async (_workspaceId, request) => {
+        if (request.limit !== 100) return { ...emptyCatalog, entries: [oldEntry] };
+        if (!retrySucceeded && failure === "catalog") throw new Error("catalog unavailable");
+        return { ...emptyCatalog, entries: !retrySucceeded && failure === "not-found" ? [] : [createdEntry] };
+      });
+      const openSession = vi.fn<DesktopBridge["openSession"]>(async (_workspaceId, input) => ({
+        id: "http-reopened-with-stable-key", label: input.label, runCount: 0,
+      }));
+      const bridge = bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        createSession: async () => created, catalog, openSession,
+      });
+      const view = render(<App bridge={bridge} />);
+      await readyComposer();
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await screen.findByRole("heading", { name: "New conversation" });
+      setEditorText(await readyComposer(), draft);
+      const notice = await screen.findByText("This conversation could not be remembered for reopening. Retry before leaving.");
+      expect(readLastSession(workspace.id)?.sessionId).toBe(oldEntry.sessionId);
+      expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${created.durableSessionId}`)).toBe(draft);
+      expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${created.id}`)).toBeNull();
+      retrySucceeded = true;
+      await user.click(within(notice.parentElement!).getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(readLastSession(workspace.id)?.sessionRef).toBe(createdEntry.sessionRef));
+      expect(screen.queryByText("This conversation could not be remembered for reopening. Retry before leaving.")).toBeNull();
+      expect(editorText(await readyComposer())).toBe(draft);
+      view.unmount();
+      render(<App bridge={bridge} />);
+      await waitFor(() => expect(openSession).toHaveBeenLastCalledWith(workspace.id, {
+        sessionRef: createdEntry.sessionRef, sessionId: created.durableSessionId, label: created.label,
+      }));
+      expect(editorText(await readyComposer())).toBe(draft);
+    },
+  );
+
+  it("does not let a delayed new-session lookup overwrite the next conversation or either draft", async () => {
+    const user = userEvent.setup();
+    const firstLookup = deferred<CatalogPage>();
+    const second = { ...created, id: "http-second-created", durableSessionId: "durable-second-created" };
+    const secondEntry = { ...createdEntry, sessionRef: "second-created.jsonl", sessionId: second.durableSessionId };
+    let createCount = 0;
+    const createSession = vi.fn(async () => ++createCount === 1 ? created : second);
+    const catalog = vi.fn<DesktopBridge["catalog"]>(async (_workspaceId, request) => {
+      if (request.limit !== 100) return emptyCatalog;
+      if (createCount === 1) return firstLookup.promise;
+      return { ...emptyCatalog, entries: [secondEntry] };
+    });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      createSession, catalog,
+    })} />);
+    await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+    setEditorText(await readyComposer(), draft);
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    setEditorText(await readyComposer(), "Second conversation stays selected");
+    await waitFor(() => expect(readLastSession(workspace.id)?.sessionId).toBe(second.durableSessionId));
+    await act(async () => { firstLookup.resolve({ ...emptyCatalog, entries: [createdEntry] }); await firstLookup.promise; });
+    expect(readLastSession(workspace.id)?.sessionId).toBe(second.durableSessionId);
+    expect(editorText(await readyComposer())).toBe("Second conversation stays selected");
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${created.durableSessionId}`)).toBe(draft);
+    expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:${second.durableSessionId}`)).toBe("Second conversation stays selected");
+    expect(screen.queryByText("This conversation could not be remembered for reopening. Retry before leaving.")).toBeNull();
+  });
+});
+
 describe("desktop workspace and history shell", () => {
   it("persists a theme switch and preserves the active conversation draft", async () => {
     const user = userEvent.setup();
@@ -1961,7 +2124,7 @@ describe("desktop workspace and history shell", () => {
     };
     const createSession = vi.fn()
       .mockRejectedValueOnce(new Error("configured route credential unavailable"))
-      .mockResolvedValue({ id: "new-repaired-session", label: "New conversation", runCount: 0 });
+      .mockResolvedValue({ id: "new-repaired-session", durableSessionId: "durable-repaired-session", label: "New conversation", runCount: 0 });
     const openSession = vi.fn();
     const runContext = vi.fn(async () => defaultRunContext);
     const saveProviderSetup = vi.fn();
@@ -2052,6 +2215,7 @@ describe("desktop workspace and history shell", () => {
     let sequence = 0;
     const createSession = vi.fn(async () => ({
       id: `http-session-${++sequence}`,
+      durableSessionId: `durable-session-${sequence}`,
       label: "New conversation",
       runCount: 0,
     }));
@@ -2134,6 +2298,7 @@ describe("desktop workspace and history shell", () => {
       const user = userEvent.setup();
       const createSession = vi.fn(async () => ({
         id: `created-with-${inventoryState}-inventory`,
+        durableSessionId: `durable-with-${inventoryState}-inventory`,
         label: "New conversation",
         runCount: 0,
       }));
@@ -2165,7 +2330,7 @@ describe("desktop workspace and history shell", () => {
     const user = userEvent.setup();
     const createSession = vi.fn()
       .mockRejectedValueOnce(new Error("route temporarily unavailable"))
-      .mockResolvedValue({ id: "recovered-session", label: "New conversation", runCount: 0 });
+      .mockResolvedValue({ id: "recovered-session", durableSessionId: "durable-recovered-session", label: "New conversation", runCount: 0 });
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       providerConnections: async () => { throw new Error("inventory unavailable"); },
@@ -2195,7 +2360,7 @@ describe("desktop workspace and history shell", () => {
       }
       return bridgeWith().providerConnections(workspaceId);
     });
-    const createSession = vi.fn(async () => ({ id: "beta-session", label: "New conversation", runCount: 0 }));
+    const createSession = vi.fn(async () => ({ id: "beta-session", durableSessionId: "durable-beta-session", label: "New conversation", runCount: 0 }));
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2, workspaces: [workspace, betaWorkspace], recentWorkspaces: [],
@@ -5810,7 +5975,7 @@ describe("desktop workspace and history shell", () => {
 
   it("shows new-conversation progress while native creation is pending", async () => {
     const user = userEvent.setup();
-    const request = deferred<SessionSummary>();
+    const request = deferred<CreatedSessionSummary>();
     const createSession = vi.fn(() => request.promise);
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
@@ -5823,7 +5988,7 @@ describe("desktop workspace and history shell", () => {
     expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByText("Sigil is working")).toBeNull();
     await act(async () => {
-      request.resolve({ id: "http-session-new", label: "New conversation", runCount: 0 });
+      request.resolve({ id: "http-session-new", durableSessionId: "durable-session-new", label: "New conversation", runCount: 0 });
       await request.promise;
     });
     await readyComposer();
@@ -6519,6 +6684,7 @@ describe("desktop workspace and history shell", () => {
         selectedModels.push(undefined);
         return {
           id: `http-session-${selectedModels.length}`,
+          durableSessionId: `durable-session-${selectedModels.length}`,
           label: "New conversation",
           runCount: 0,
         };
@@ -6697,7 +6863,7 @@ describe("desktop workspace and history shell", () => {
     await waitFor(() => expect(prompts).toEqual(["Run this after Shift+Enter\n"]));
     await waitFor(() => expect(composer.getAttribute("aria-disabled")).not.toBe("true"));
     typeEditorText(composer, "Follow-up draft");
-    expect(draftValues.get(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Follow-up draft");
+    expect(draftValues.get(`sigil:conversation-draft:v1:${workspace.id}:durable-session-new`)).toBe("Follow-up draft");
 
     first.unmount();
     render(<App bridge={bridge} />);
@@ -8591,7 +8757,7 @@ it("branches beside a finalized message without checkpoints, keeps failed select
   const draft = await readyComposer();
   expect(editorText(draft)).toBe("");
   typeEditorText(draft, "Try a different parser");
-  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:http-session-new`)).toBe("Keep this parent draft");
+  expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:durable-session-new`)).toBe("Keep this parent draft");
   expect(window.localStorage.getItem(`sigil:conversation-draft:v1:${workspace.id}:branch-durable`)).toBe("Try a different parser");
   expect(commandConversationRecovery.mock.calls[1][1].action).toEqual({ kind: "fork_conversation", sourceTurnDigest: "exact-finalized-turn", modelRef: defaultRunContext.modelRef });
   expect(startRun).not.toHaveBeenCalled();
@@ -8879,7 +9045,7 @@ describe("shared conversation history navigation", () => {
 describe("empty workspace guidance", () => {
   it("starts from the main empty workspace action through the existing create handler", async () => {
     const user = userEvent.setup();
-    const createSession = vi.fn(async (_workspaceId: string) => ({ id: "empty-workspace-created", label: "New conversation", runCount: 0 }));
+    const createSession = vi.fn(async (_workspaceId: string) => ({ id: "empty-workspace-created", durableSessionId: "durable-empty-workspace-created", label: "New conversation", runCount: 0 }));
     render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), createSession })} />);
     expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Start a conversation" }));
@@ -8941,10 +9107,10 @@ it.each([false, true])("qualifies the empty workspace create action from typed r
 it("ignores a deferred empty workspace create rejection after switching to another workspace", async () => {
   const user = userEvent.setup();
   const other = { ...workspace, id: "workspace-create-scope-other", displayName: "Other" };
-  const first = deferred<SessionSummary>();
+  const first = deferred<CreatedSessionSummary>();
   const createSession = vi.fn()
     .mockImplementationOnce(() => first.promise)
-    .mockResolvedValueOnce({ id: "http-create-scope-other", label: "Other conversation", runCount: 0 });
+    .mockResolvedValueOnce({ id: "http-create-scope-other", durableSessionId: "durable-create-scope-other", label: "Other conversation", runCount: 0 });
   render(<App bridge={bridgeWith({
     bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace, other], recentWorkspaces: [] }),
     catalog: async (workspaceId) => ({ ...emptyCatalog, workspaceId }), createSession,

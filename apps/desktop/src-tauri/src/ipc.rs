@@ -851,6 +851,8 @@ pub(crate) struct DesktopSessionInvalidSourceDeleteSummary {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionSummary {
     pub(crate) id: String,
+    /// Opaque catalog identity used to retain drafts across process-local handles.
+    pub(crate) durable_session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) label: Option<String>,
     pub(crate) run_count: usize,
@@ -2516,6 +2518,7 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
     fn from(value: DesktopSessionSnapshot) -> Self {
         Self {
             id: value.id,
+            durable_session_id: value.durable_session_scope_id,
             label: value.label,
             run_count: value.run_ids.len(),
             foreground_run_id: value.foreground_run_id,

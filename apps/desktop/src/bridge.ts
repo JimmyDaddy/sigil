@@ -38,6 +38,7 @@ import type {
   SessionQuarantineInput,
   SessionQuarantineSummary,
   SessionRenameInput,
+  CreatedSessionSummary,
   SessionSummary,
   RunAttachInput,
   RunApprovalSnapshot,
@@ -126,7 +127,7 @@ export interface DesktopBridge {
     workspaceId: string,
     label?: string,
     modelRef?: ProviderModelRef,
-  ): Promise<SessionSummary>;
+  ): Promise<CreatedSessionSummary>;
   openSession(
     workspaceId: string,
     input: SessionOpenInput,
@@ -386,7 +387,7 @@ export const desktopBridge: DesktopBridge = {
   catalog: (workspaceId, request) =>
     invoke<CatalogPage>("desktop_catalog", { workspaceId, request }),
   createSession: (workspaceId, label, modelRef) =>
-    invoke<SessionSummary>("desktop_create_session", {
+    invoke<CreatedSessionSummary>("desktop_create_session", {
       workspaceId,
       input: { label, modelRef },
     }),
