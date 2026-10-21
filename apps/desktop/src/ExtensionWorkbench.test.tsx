@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -6,7 +6,7 @@ import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { LocaleProvider } from "./i18n";
 import type { ExtensionCatalog } from "./types";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); window.localStorage.clear(); });
 
 const catalog: ExtensionCatalog = {
   commands: [],
@@ -78,7 +78,7 @@ describe("extension workbench", () => {
 
     await user.click(screen.getByRole("tab", { name: "Agents 1" }));
     expect(screen.getByText("A supervised owner is required.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start agent" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Select agent" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("opens directly on a filtered agent requested by the composer", () => {
@@ -121,7 +121,51 @@ describe("extension workbench", () => {
       </LocaleProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "Start agent" }));
+    await user.click(screen.getByRole("button", { name: "Select agent" }));
     expect(onUseAgent).toHaveBeenCalledWith(availableAgent);
+  });
+});
+
+describe("extension presentation", () => {
+  it("distinguishes an empty catalog from a search with no matches and removes the nonexistent selection pane", async () => {
+    const user = userEvent.setup();
+    const props = { runActive: false, onUseSkill: vi.fn(), onUseAgent: vi.fn() };
+    const { rerender } = render(<ExtensionWorkbench {...props} catalog={{ commands: [], skills: [], agents: [] }} />);
+    expect(screen.getByRole("status").textContent).toContain("No skills or agents are available");
+    expect(screen.queryByText(/Select an item/)).toBeNull();
+    expect(screen.queryByText("No matching extensions.")).toBeNull();
+    rerender(<ExtensionWorkbench {...props} catalog={catalog} />);
+    await user.type(screen.getByRole("textbox"), "does-not-exist");
+    expect(screen.getByRole("status").textContent).toContain("No matching extensions.");
+    expect(screen.queryByRole("button", { name: "Use in composer" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(await screen.findByRole("button", { name: "Use in composer" })).toBeTruthy();
+    expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("");
+  });
+
+  it("distinguishes an empty kind while keeping the other catalog accessible", async () => {
+    const user = userEvent.setup();
+    render(<ExtensionWorkbench catalog={{ ...catalog, skills: [] }} runActive={false} onUseSkill={vi.fn()} onUseAgent={vi.fn()} />);
+    expect(screen.getByRole("status").textContent).toContain("No skills are available");
+    await user.click(screen.getByRole("tab", { name: "Agents 1" }));
+    expect(screen.getByText("A supervised owner is required.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Select agent" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("localizes known values, retains original details, and does not reinterpret future values", async () => {
+    window.localStorage.setItem("sigil.desktop.locale.v1", "zh-CN");
+    const available = { ...catalog.agents[0], available: true, kind: "primary", binding: { profileId: "explore", snapshotId: "snapshot" } };
+    const props = { runActive: false, initialKind: "agents" as const, onUseSkill: vi.fn(), onUseAgent: vi.fn() };
+    const { rerender } = render(<LocaleProvider><ExtensionWorkbench {...props} catalog={{ ...catalog, agents: [available] }} /></LocaleProvider>);
+    const article = screen.getByRole("article");
+    const facts = within(article.querySelector(":scope > dl")! as HTMLElement);
+    expect(facts.getByText("内置")).toBeTruthy();
+    expect(facts.getByText("已信任")).toBeTruthy();
+    expect(facts.getByText("主 Agent")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "选择 Agent" })).toBeTruthy();
+    expect(article.querySelector("details")?.textContent).toContain("system");
+    rerender(<LocaleProvider><ExtensionWorkbench {...props} catalog={{ ...catalog, agents: [{ ...available, source: "future/source", trust: "future-trust", kind: "future-kind" }] }} /></LocaleProvider>);
+    const futureFacts = within(screen.getByRole("article").querySelector(":scope > dl")! as HTMLElement);
+    for (const value of ["future/source", "future-trust", "future-kind"]) expect(futureFacts.getByText(value)).toBeTruthy();
   });
 });

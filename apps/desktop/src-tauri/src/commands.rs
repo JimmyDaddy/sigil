@@ -90,7 +90,7 @@ pub(crate) async fn desktop_recover_control_log(
     client
         .recover_control_log(&session_id, &action)
         .await
-        .map_err(project_client_error)
+        .map_err(project_control_log_recovery_client_error)
 }
 
 #[derive(Debug, Error, Serialize)]
@@ -3071,6 +3071,37 @@ fn project_session_open_client_error(error: DesktopClientError) -> DesktopComman
         )
         .with_route_recovery(recovery),
         other => project_client_error(other),
+    }
+}
+
+fn project_control_log_recovery_client_error(error: DesktopClientError) -> DesktopCommandError {
+    match error {
+        DesktopClientError::Rejected { status: 503, .. } => DesktopCommandError::new(
+            "control_log_recovery_unavailable",
+            "Command history recovery is currently unavailable.",
+        ),
+        DesktopClientError::Rejected { status: 409, .. } => DesktopCommandError::new(
+            "control_log_recovery_repreview_required",
+            "Review a new recovery preview before confirming.",
+        ),
+        DesktopClientError::Rejected { status: 400, .. } => DesktopCommandError::new(
+            "control_log_recovery_invalid",
+            "The command history recovery request is invalid.",
+        ),
+        DesktopClientError::Rejected { status: 404, .. } => DesktopCommandError::new(
+            "control_log_recovery_missing",
+            "The selected conversation or command history was not found.",
+        ),
+        DesktopClientError::Rejected {
+            status: 401 | 403, ..
+        } => DesktopCommandError::new(
+            "control_log_recovery_denied",
+            "Command history recovery was not authorized.",
+        ),
+        _ => DesktopCommandError::new(
+            "control_log_recovery_failed",
+            "Command history recovery did not complete; its cause is unavailable.",
+        ),
     }
 }
 

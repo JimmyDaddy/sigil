@@ -33,6 +33,8 @@ export function ExtensionWorkbench({
     if (!items.some((item) => item.id === selectedId)) setSelectedId(items[0]?.id);
   }, [items, selectedId]);
   const selected = items.find((item) => item.id === selectedId);
+  const catalogEmpty = catalog.skills.length === 0 && catalog.agents.length === 0;
+  const kindEmpty = (kind === "skills" ? catalog.skills : catalog.agents).length === 0;
 
   return (
     <div className="extension-workbench">
@@ -61,35 +63,45 @@ export function ExtensionWorkbench({
         onChange={(event) => setQuery(event.target.value)}
         placeholder={kind === "skills" ? t("searchSkills") : t("searchAgents")}
       />
-      <div className="extension-workbench-body">
-        <div className="extension-list" role="listbox" aria-label={kind === "skills" ? t("skills") : t("agents")}>
-          {items.map((item) => (
-            <Button
-              key={item.id}
-              className="extension-row"
-              variant="quiet"
-              role="option"
-              aria-selected={item.id === selectedId}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <span>
-                <strong>{item.name}</strong>
-                <small>{item.description || t("noDescription")}</small>
-              </span>
-              <span className={`extension-status${item.available ? " is-available" : ""}`}>
-                {item.available ? t("available") : t("unavailable")}
-              </span>
-            </Button>
-          ))}
-          {items.length === 0 ? <p className="extension-empty">{t("noExtensionsFound")}</p> : null}
-        </div>
-        <ExtensionDetail
-          kind={kind}
-          item={selected}
-          runActive={runActive}
-          onUseSkill={onUseSkill}
-          onUseAgent={onUseAgent}
-        />
+      <div className={`extension-workbench-body${items.length === 0 ? " is-empty" : ""}`}>
+        {items.length === 0 ? (
+          <div className="extension-workbench-empty" role="status">
+            <strong>{catalogEmpty ? t("noExtensionsAvailable") : kindEmpty
+              ? t(kind === "skills" ? "noSkillsAvailable" : "noAgentsAvailable") : t("noExtensionsFound")}</strong>
+            <p>{catalogEmpty || kindEmpty ? t("extensionsEmptyDetail") : t("extensionsSearchEmptyDetail")}</p>
+            {query === "" ? null : <Button type="button" variant="quiet" onClick={() => setQuery("")}>{t("clearSearch")}</Button>}
+          </div>
+        ) : (
+          <>
+            <div className="extension-list" role="listbox" aria-label={kind === "skills" ? t("skills") : t("agents")}>
+              {items.map((item) => (
+                <Button
+                  key={item.id}
+                  className="extension-row"
+                  variant="quiet"
+                  role="option"
+                  aria-selected={item.id === selectedId}
+                  onClick={() => setSelectedId(item.id)}
+                >
+                  <span>
+                    <strong>{item.name}</strong>
+                    <small>{item.description || t("noDescription")}</small>
+                  </span>
+                  <span className={`extension-status${item.available ? " is-available" : ""}`}>
+                    {item.available ? t("available") : t("unavailable")}
+                  </span>
+                </Button>
+              ))}
+            </div>
+            <ExtensionDetail
+              kind={kind}
+              item={selected}
+              runActive={runActive}
+              onUseSkill={onUseSkill}
+              onUseAgent={onUseAgent}
+            />
+          </>
+        )}
       </div>
     </div>
   );
@@ -123,11 +135,20 @@ function ExtensionDetail({
       <h3>{item.name}</h3>
       <p>{item.description || t("noDescription")}</p>
       <dl>
-        <div><dt>{t("source")}</dt><dd>{item.source}</dd></div>
-        <div><dt>{t("trust")}</dt><dd>{item.trust}</dd></div>
-        {skill === undefined ? null : <div><dt>{t("execution")}</dt><dd>{skill.runMode}</dd></div>}
-        {agent === undefined ? null : <div><dt>{t("agentKind")}</dt><dd>{agent.kind}</dd></div>}
+        <div><dt>{t("source")}</dt><dd>{extensionLabel("source", item.source, t)}</dd></div>
+        <div><dt>{t("trust")}</dt><dd>{extensionLabel("trust", item.trust, t)}</dd></div>
+        {skill === undefined ? null : <div><dt>{t("execution")}</dt><dd>{extensionLabel("execution", skill.runMode, t)}</dd></div>}
+        {agent === undefined ? null : <div><dt>{t("agentKind")}</dt><dd>{extensionLabel("kind", agent.kind, t)}</dd></div>}
       </dl>
+      <details>
+        <summary>{t("showDetails")}</summary>
+        <dl>
+          <div><dt>{t("source")}</dt><dd><code>{item.source}</code></dd></div>
+          <div><dt>{t("trust")}</dt><dd><code>{item.trust}</code></dd></div>
+          {skill === undefined ? null : <div><dt>{t("execution")}</dt><dd><code>{skill.runMode}</code></dd></div>}
+          {agent === undefined ? null : <div><dt>{t("agentKind")}</dt><dd><code>{agent.kind}</code></dd></div>}
+        </dl>
+      </details>
       {item.available ? null : (
         <p className="extension-unavailable-reason">{item.unavailableReason ?? t("extensionUnavailable")}</p>
       )}
@@ -138,7 +159,7 @@ function ExtensionDetail({
           disabled={agent === undefined || !agent.available || agent.binding === undefined || runActive}
           onClick={() => agent !== undefined && onUseAgent(agent)}
         >
-          {runActive ? t("waitForRun") : t("startAgent")}
+          {runActive ? t("waitForRun") : t("selectAgent")}
         </Button>
       ) : (
         <Button
@@ -163,4 +184,23 @@ function filterExtensions(
   return items.filter((item) =>
     `${item.id}\n${item.name}\n${item.description}\n${item.source}`.toLocaleLowerCase().includes(normalized),
   );
+}
+
+function extensionLabel(field: "source" | "trust" | "execution" | "kind", value: string, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (`${field}:${value}`) {
+    case "source:workspace": return t("extensionSourceWorkspace");
+    case "source:user": return t("extensionSourceUser");
+    case "source:plugin": return t("extensionSourcePlugin");
+    case "source:compatibility": return t("extensionSourceCompatibility");
+    case "source:system": return t("extensionSourceSystem");
+    case "trust:trusted": return t("extensionTrustTrusted");
+    case "trust:needs_review": return t("extensionTrustNeedsReview");
+    case "trust:disabled": return t("extensionTrustDisabled");
+    case "execution:inline": return t("extensionExecutionInline");
+    case "execution:child_session": return t("extensionExecutionChildSession");
+    case "kind:primary": return t("extensionKindPrimary");
+    case "kind:subagent": return t("extensionKindSubagent");
+    case "kind:system": return t("extensionKindSystem");
+    default: return value;
+  }
 }

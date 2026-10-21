@@ -23,6 +23,42 @@ use sigil_desktop::{
 };
 
 #[test]
+fn control_log_recovery_errors_use_only_typed_status_and_preserve_generic_projection() {
+    for (status, expected) in [
+        (503, "control_log_recovery_unavailable"),
+        (409, "control_log_recovery_repreview_required"),
+        (400, "control_log_recovery_invalid"),
+        (404, "control_log_recovery_missing"),
+        (401, "control_log_recovery_denied"),
+        (403, "control_log_recovery_denied"),
+        (500, "control_log_recovery_failed"),
+    ] {
+        let projected = project_control_log_recovery_client_error(DesktopClientError::Rejected {
+            status,
+            code: Some("untrusted-server-code-with-private-data".to_owned()),
+            route_recovery: None,
+        });
+        assert_eq!(projected.code, expected);
+        assert!(!projected.message.contains("private-data"));
+        assert!(!projected.message.contains("storage"));
+        assert!(projected.route_recovery.is_none());
+    }
+    assert_eq!(
+        project_control_log_recovery_client_error(DesktopClientError::RequestFailed).code,
+        "control_log_recovery_failed"
+    );
+    assert_eq!(
+        project_client_error(DesktopClientError::Rejected {
+            status: 503,
+            code: None,
+            route_recovery: None,
+        })
+        .code,
+        "workspace_request_rejected"
+    );
+}
+
+#[test]
 fn workspace_identity_validation_is_strict_and_path_free() {
     assert!(valid_workspace_id("workspace-0123456789ab"));
     assert!(!valid_workspace_id("../workspace"));

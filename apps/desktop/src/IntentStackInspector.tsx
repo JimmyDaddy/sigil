@@ -78,7 +78,11 @@ export function IntentStackInspector({
     return (
       <section className="intent-stack-empty">
         <strong>{t("noIntentsRecorded")}</strong>
-        <p>{state.safeMessage}</p>
+        <p>{t("noIntentsRecordedDetail")}</p>
+        {state.safeMessage === "" ? null : <details>
+          <summary>{t("showDetails")}</summary>
+          <p>{state.safeMessage}</p>
+        </details>}
         <Button type="button" variant="quiet" disabled={busy} onClick={onRefresh}>
           {t("refreshIntentStack")}
         </Button>

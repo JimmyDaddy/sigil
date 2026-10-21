@@ -8971,6 +8971,9 @@ it("reviews outdated recorded lines through the normal run and preserves comment
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await readyComposer();
   await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  const checkpointsHeading = await screen.findByRole("heading", { name: "Checkpoints" });
+  const branchHeading = screen.getByRole("heading", { name: "Branches and conclusions" });
+  expect(checkpointsHeading.compareDocumentPosition(branchHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   await user.click(await screen.findByRole("button", { name: "Review changes" }));
   const drawer = screen.getByRole("dialog", { name: "Review changes" });
   await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));

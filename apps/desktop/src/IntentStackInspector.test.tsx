@@ -11,7 +11,7 @@ import type {
   IntentVersionRef,
 } from "./types";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); window.localStorage.clear(); });
 
 const firstIntentRef: IntentVersionRef = { intentId: "intent-core", version: 2 };
 const secondIntentRef: IntentVersionRef = { intentId: "intent-docs", version: 1 };
@@ -194,5 +194,22 @@ describe("Intent Stack inspector", () => {
     expect((screen.getByRole("button", {
       name: "Confirm drop of “Implement exact drop”",
     }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("typed intent empty state", () => {
+  it.each(["en", "zh-CN"] as const)("shows a single localized not-created explanation in %s with original technical details", (locale) => {
+    window.localStorage.setItem("sigil.desktop.locale.v1", locale);
+    render(<LocaleProvider><IntentStackInspector
+      state={{ status: "not_created", schemaVersion: 1, safeMessage: "Future technical diagnostic: not created" }}
+      loading={false} busy={false} error={false} runActive={false}
+      onPreview={vi.fn()} onConfirm={vi.fn()} onRefresh={vi.fn()}
+    /></LocaleProvider>);
+    expect(screen.getByText(locale === "en" ? "No intents recorded yet" : "尚未记录意图")).toBeTruthy();
+    const details = screen.getByText("Future technical diagnostic: not created").closest("details");
+    expect(details).toBeTruthy();
+    expect(details?.open).toBe(false);
+    expect(screen.queryByRole("button", { name: "Preview exact drop" })).toBeNull();
+    expect(screen.getByRole("button", { name: locale === "en" ? "Refresh Intent Stack" : "刷新意图栈" })).toBeTruthy();
   });
 });

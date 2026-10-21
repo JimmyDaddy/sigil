@@ -3149,12 +3149,6 @@ export function ConversationPanel({
         returnFocusRef={recoveryTriggerRef}
         onOpenChange={setConversationRecoveryOpen}
       >
-        {conversationRecoveryOpen && <BranchKnowledgePanel
-          key={`${workspaceId}:${session.id}`}
-          bridge={bridge} workspaceId={workspaceId} sessionId={session.id}
-          onOpen={onOpenFork}
-          onImported={(receipt) => { setConversationRecovery(receipt.recovery); setRunContextReload((value) => value + 1); }}
-        />}
         <ConversationRecoveryPanel
           recovery={conversationRecovery}
           preview={checkpointRestorePreview}
@@ -3167,6 +3161,12 @@ export function ConversationPanel({
           onRestore={restoreCheckpoint}
           onFork={forkConversation}
         />
+        {conversationRecoveryOpen && <BranchKnowledgePanel
+          key={`${workspaceId}:${session.id}`}
+          bridge={bridge} workspaceId={workspaceId} sessionId={session.id}
+          onOpen={onOpenFork}
+          onImported={(receipt) => { setConversationRecovery(receipt.recovery); setRunContextReload((value) => value + 1); }}
+        />}
       </Drawer>
       <Drawer
         id="agent-activity-inspector"

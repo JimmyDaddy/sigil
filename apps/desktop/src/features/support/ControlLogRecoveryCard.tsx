@@ -1,39 +1,60 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
 import type { ControlLogRecoveryAction, ControlLogRecoveryPreview, SessionSummary } from "../../types";
 import { Button } from "../../ui/primitives";
 
-export function ControlLogRecoveryCard({ bridge, workspaceId, session }: {
+interface ControlLogRecoveryCardProps {
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
   readonly session?: SessionSummary;
-}) {
+}
+
+export function ControlLogRecoveryCard(props: ControlLogRecoveryCardProps) {
+  return <ControlLogRecoveryScope key={JSON.stringify([props.workspaceId, props.session?.id])} {...props} />;
+}
+
+function ControlLogRecoveryScope({ bridge, workspaceId, session }: ControlLogRecoveryCardProps) {
   const { t } = useLocale();
   const [preview, setPreview] = useState<ControlLogRecoveryPreview>();
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<string>();
+  const [previewInvalidated, setPreviewInvalidated] = useState(false);
+  const active = useRef(true);
+  const working = useRef(false);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const [activatedGeneration, setActivatedGeneration] = useState<number>();
 
   const recover = async (action: ControlLogRecoveryAction) => {
-    if (session === undefined || busy) return;
+    if (session === undefined || working.current || (action !== "Preview" && previewInvalidated)) return;
+    working.current = true;
     setBusy(true);
-    setFailed(false);
+    setFailure(undefined);
     try {
       const result = await bridge.recoverControlLog(workspaceId, session.id, action);
+      if (!active.current) return;
       if ("Preview" in result) {
         setPreview(result.Preview);
+        setPreviewInvalidated(false);
         setActivatedGeneration(undefined);
       } else {
         setActivatedGeneration(result.Activated.command_generation);
         setPreview(undefined);
       }
-    } catch {
-      // Preserve the exact preview when confirmation fails: a retry must resume this operation.
-      setFailed(true);
+    } catch (error) {
+      // Keep the frozen preview: a failed confirmation must never invent a new operation.
+      if (active.current) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "unknown";
+        setFailure(code);
+        if (code === "control_log_recovery_repreview_required") setPreviewInvalidated(true);
+      }
     } finally {
-      setBusy(false);
+      working.current = false;
+      if (active.current) setBusy(false);
     }
   };
 
@@ -67,16 +88,27 @@ export function ControlLogRecoveryCard({ bridge, workspaceId, session }: {
       {preview.impact.commands_truncated ? <p>{t("controlLogRecoveryCommandsTruncated")}</p> : null}
       <p>{t("controlLogRecoveryConfirmation")}</p>
     </>}
-    {failed ? <p role="alert">{t("controlLogRecoveryFailed")}</p> : null}
+    {failure === undefined ? null : <p role="alert">{recoveryFailure(failure, t)}</p>}
     {activatedGeneration === undefined ? null : <p role="status">{t("controlLogRecoveryActivated", { generation: activatedGeneration })}</p>}
     <div className="support-header-actions">
       <Button type="button" disabled={busy || session === undefined} onClick={() => void recover("Preview")}>
         {busy ? t("controlLogRecoveryWorking") : t("controlLogRecoveryPreview")}
       </Button>
-      {preview === undefined ? null : <Button type="button" variant="primary" disabled={busy}
+      {preview === undefined ? null : <Button type="button" variant="primary" disabled={busy || previewInvalidated}
         onClick={() => void recover({ SealAndRotate: { preview } })}>
         {t("controlLogRecoveryConfirm")}
       </Button>}
     </div>
   </section>;
+}
+
+function recoveryFailure(code: string, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (code) {
+    case "control_log_recovery_unavailable": return t("controlLogRecoveryUnavailable");
+    case "control_log_recovery_repreview_required": return t("controlLogRecoveryRepreview");
+    case "control_log_recovery_invalid": return t("controlLogRecoveryInvalid");
+    case "control_log_recovery_missing": return t("controlLogRecoveryMissing");
+    case "control_log_recovery_denied": return t("controlLogRecoveryDenied");
+    default: return t("controlLogRecoveryFailed");
+  }
 }

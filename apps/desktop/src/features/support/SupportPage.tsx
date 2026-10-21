@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
 import type { SessionSummary, SupportDoctorReport, SupportStatus } from "../../types";
 import { LoadingState, useNotifications } from "../../ui/feedback";
 import { Icon, type IconName } from "../../ui/icons";
-import { Button } from "../../ui/primitives";
+import { Button, Collapsible } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ControlLogRecoveryCard } from "./ControlLogRecoveryCard";
 import { rendererRunTimings } from "./runTimings";
@@ -29,21 +29,27 @@ export function SupportPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [saving, setSaving] = useState(false);
+  const request = useRef(0);
 
   const load = useCallback(async () => {
+    const current = ++request.current;
     setLoading(true);
+    setReport(undefined);
     setError(false);
     try {
-      setReport(await bridge.supportDoctor(workspaceId));
+      const next = await bridge.supportDoctor(workspaceId);
+      if (current === request.current) setReport(next);
     } catch {
-      setReport(undefined);
-      setError(true);
+      if (current === request.current) setError(true);
     } finally {
-      setLoading(false);
+      if (current === request.current) setLoading(false);
     }
   }, [bridge, workspaceId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => { request.current += 1; };
+  }, [load]);
 
   const saveReport = async () => {
     setSaving(true);
@@ -95,8 +101,6 @@ export function SupportPage({
         </div>}
     >
 
-      <ControlLogRecoveryCard key={`${workspaceId}/${session?.id ?? "none"}`} bridge={bridge} workspaceId={workspaceId} session={session} />
-
       {loading ? (
         <div className="application-page-loading">
           <LoadingState label={t("runningDiagnostics")} detail={t("runningDiagnosticsDetail")} />
@@ -138,24 +142,18 @@ export function SupportPage({
               </div>
               <span>{new Date(report.generatedAtUnixMs).toLocaleString()}</span>
             </div>
-            <ul>
-              {report.checks.map((check, index) => (
-                <li key={`${check.name}-${index}`} className={`support-check support-${check.status}`}>
-                  <span className="support-check-icon" aria-hidden="true"><Icon name={statusIcon(check.status)} /></span>
-                  <div>
-                    <div className="support-check-title"><strong>{check.name}</strong><span>{statusTitle(check.status, t)}</span></div>
-                    <p>{check.summary}</p>
-                    {check.remediation === undefined ? null : <small>{check.remediation}</small>}
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <SupportChecks checks={report.checks.filter((check) => check.status !== "ok")
+              .sort((a, b) => (a.status === "error" ? 0 : 1) - (b.status === "error" ? 0 : 1))} />
+            {report.checks.some((check) => check.status === "ok") ? (
+              <Collapsible label={t("diagnosticPassedChecks", { count: report.checks.filter((check) => check.status === "ok").length })}>
+                <SupportChecks checks={report.checks.filter((check) => check.status === "ok")} />
+              </Collapsible>
+            ) : null}
           </section>
 
-          <section className="support-checks" aria-labelledby="support-cutover-title">
+          <Collapsible className="support-checks" label={t("cutoverAuthority")} summary={t("cutoverBlockerCount", { count: report.cutover.blockers.length })}>
             <div className="support-section-heading">
               <div>
-                <h2 id="support-cutover-title">{t("cutoverAuthority")}</h2>
                 <p>{t("cutoverStatus", { epoch: report.cutover.epoch, authority: report.cutover.authority })}</p>
               </div>
               <span>{t("cutoverBlockerCount", { count: report.cutover.blockers.length })}</span>
@@ -171,7 +169,7 @@ export function SupportPage({
                 ))}
               </ul>
             )}
-          </section>
+          </Collapsible>
 
           <section className="support-privacy" aria-labelledby="support-privacy-title">
             <div className="support-section-heading">
@@ -189,6 +187,9 @@ export function SupportPage({
           </section>
         </>
       )}
+      <Collapsible key={workspaceId} className="support-recovery" label={t("controlLogRecoveryTitle")}>
+        <ControlLogRecoveryCard bridge={bridge} workspaceId={workspaceId} session={session} />
+      </Collapsible>
     </ApplicationPage>
   );
 }
@@ -203,4 +204,21 @@ function statusTitle(status: SupportStatus, t: ReturnType<typeof useLocale>["t"]
     case "warn": return t("diagnosticNeedsAttention");
     case "error": return t("diagnosticHasErrors");
   }
+}
+
+function SupportChecks({ checks }: { readonly checks: SupportDoctorReport["checks"] }) {
+  const { t } = useLocale();
+  if (checks.length === 0) return null;
+  return <ul className="support-check-list">
+    {checks.map((check, index) => (
+      <li key={`${check.name}-${index}`} className={`support-check support-${check.status}`}>
+        <span className="support-check-icon" aria-hidden="true"><Icon name={statusIcon(check.status)} /></span>
+        <div>
+          <div className="support-check-title"><strong>{check.name}</strong><span>{statusTitle(check.status, t)}</span></div>
+          <p>{check.summary}</p>
+          {check.remediation === undefined ? null : <small>{check.remediation}</small>}
+        </div>
+      </li>
+    ))}
+  </ul>;
 }
