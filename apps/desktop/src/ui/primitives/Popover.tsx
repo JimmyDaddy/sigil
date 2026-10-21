@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useId,
@@ -14,6 +15,9 @@ import {
 import { createPortal } from "react-dom";
 
 import { focusInitial } from "./focus";
+import { canRestoreOverlayFocus, isActiveModalOwner, ModalOverlayContext, registerOwnedPopover } from "./modalIsolation";
+
+const popoverPanels: HTMLElement[] = [];
 
 export interface PopoverProps {
   readonly label: ReactNode;
@@ -43,6 +47,7 @@ export function Popover({
   controlsId,
 }: PopoverProps) {
   const [internalOpen, setInternalOpen] = useState(false);
+  const modalOwner = useContext(ModalOverlayContext);
   const open = controlledOpen ?? internalOpen;
   const rootRef = useRef<HTMLDivElement>(null);
   const localTriggerRef = useRef<HTMLButtonElement>(null);
@@ -51,14 +56,36 @@ export function Popover({
   const [panelStyle, setPanelStyle] = useState<CSSProperties>();
   const panelId = useId();
   const panelLabel = accessibleLabel ?? (typeof label === "string" ? label : "Popover");
-  const updateOpen = (next: boolean) => {
-    if (controlledOpen === undefined) setInternalOpen(next);
-    onOpenChange?.(next);
-  };
+  const changeRef = useRef(onOpenChange);
+  changeRef.current = onOpenChange;
+  const controlled = controlledOpen !== undefined;
+  const updateOpen = useCallback((next: boolean) => {
+    if (!controlled) setInternalOpen(next);
+    changeRef.current?.(next);
+  }, [controlled]);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!open || panel === null) return;
+    popoverPanels.push(panel);
+    const unregister = modalOwner === undefined || modalOwner === null
+      ? undefined : registerOwnedPopover(modalOwner, panel);
+    if (modalOwner !== undefined && isActiveModalOwner(modalOwner)) focusInitial(panel);
+    return () => {
+      const index = popoverPanels.lastIndexOf(panel);
+      if (index >= 0) popoverPanels.splice(index, 1);
+      unregister?.();
+      const trigger = triggerRef.current;
+      if (canRestoreOverlayFocus(trigger)) trigger.focus({ preventScroll: true });
+    };
+  }, [modalOwner, open, triggerRef]);
 
   useEffect(() => {
     if (!open) return;
+    const ownsInteraction = () => isActiveModalOwner(modalOwner)
+      && popoverPanels[popoverPanels.length - 1] === panelRef.current;
     const handlePointer = (event: PointerEvent) => {
+      if (!ownsInteraction()) return;
       if (
         event.target instanceof Node
         && !rootRef.current?.contains(event.target)
@@ -68,11 +95,10 @@ export function Popover({
       }
     };
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || !ownsInteraction()) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       updateOpen(false);
-      triggerRef.current?.focus({ preventScroll: true });
     };
     document.addEventListener("pointerdown", handlePointer);
     document.addEventListener("keydown", handleKey, true);
@@ -80,7 +106,7 @@ export function Popover({
       document.removeEventListener("pointerdown", handlePointer);
       document.removeEventListener("keydown", handleKey, true);
     };
-  });
+  }, [modalOwner, open, updateOpen]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -149,12 +175,14 @@ export function Popover({
           if (event.key !== "ArrowDown" || open) return;
           event.preventDefault();
           updateOpen(true);
-          window.requestAnimationFrame(() => panelRef.current && focusInitial(panelRef.current));
+          window.requestAnimationFrame(() => {
+            if (canRestoreOverlayFocus(panelRef.current)) focusInitial(panelRef.current);
+          });
         }}
       >
         {label}
       </button>
-      {open ? createPortal(
+      {open && modalOwner !== null ? createPortal(
         <div
           className={panelClassName}
           id={panelId}
@@ -166,7 +194,7 @@ export function Popover({
         >
           {children}
         </div>,
-        document.body,
+        modalOwner ?? document.body,
       ) : null}
     </div>
   );
@@ -179,7 +207,9 @@ export function Menu({ label, accessibleLabel, children }: { readonly label: Rea
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dismiss = () => {
     setOpen(false);
-    window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+    window.requestAnimationFrame(() => {
+      if (canRestoreOverlayFocus(triggerRef.current)) triggerRef.current.focus({ preventScroll: true });
+    });
   };
   return (
     <Popover

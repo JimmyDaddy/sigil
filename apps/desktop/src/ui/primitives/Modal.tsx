@@ -1,6 +1,8 @@
 import {
-  useEffect,
+  useContext,
+  useLayoutEffect,
   useRef,
+  useState,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -9,39 +11,7 @@ import { createPortal } from "react-dom";
 import { useLocale } from "../../i18n";
 import { Icon } from "../icons";
 import { focusableElements, focusInitial } from "./focus";
-
-const modalStack: HTMLElement[] = [];
-const isolatedBodyChildren = new Map<HTMLElement, { inert: boolean; ariaHidden: string | null }>();
-
-function restoreIsolation(element: HTMLElement, state: { inert: boolean; ariaHidden: string | null }) {
-  element.inert = state.inert;
-  if (state.ariaHidden === null) element.removeAttribute("aria-hidden");
-  else element.setAttribute("aria-hidden", state.ariaHidden);
-}
-
-function updateModalIsolation() {
-  const topSurface = modalStack[modalStack.length - 1];
-  const topRoot = topSurface?.closest<HTMLElement>("[data-sigil-overlay-root]");
-  for (const element of [...document.body.children]) {
-    if (!(element instanceof HTMLElement)) continue;
-    if (!isolatedBodyChildren.has(element)) {
-      isolatedBodyChildren.set(element, {
-        inert: element.inert,
-        ariaHidden: element.getAttribute("aria-hidden"),
-      });
-    }
-    const original = isolatedBodyChildren.get(element);
-    if (original === undefined) continue;
-    if (topRoot === element) restoreIsolation(element, original);
-    else {
-      element.inert = true;
-      element.setAttribute("aria-hidden", "true");
-    }
-  }
-  if (topSurface !== undefined) return;
-  for (const [element, original] of isolatedBodyChildren) restoreIsolation(element, original);
-  isolatedBodyChildren.clear();
-}
+import { canRestoreOverlayFocus, isActiveModalOwner, ModalOverlayContext, registerModalLayer } from "./modalIsolation";
 
 interface ModalProps {
   readonly id?: string;
@@ -71,32 +41,35 @@ export function Modal({
   destructive = false,
 }: ModalProps) {
   const { t } = useLocale();
+  const parentOverlay = useContext(ModalOverlayContext);
+  const [overlayRoot, setOverlayRoot] = useState<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLElement>(null);
   const onOpenChangeRef = useRef(onOpenChange);
   onOpenChangeRef.current = onOpenChange;
   const titleId = `${kind}-${useStableId()}`;
   const descriptionId = `${titleId}-description`;
 
-  useEffect(() => {
-    if (!open) return;
+  useLayoutEffect(() => {
+    if (!open || overlayRoot === null) return;
     const surface = surfaceRef.current;
     if (surface === null) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    modalStack.push(surface);
-    updateModalIsolation();
+    const unregister = registerModalLayer(overlayRoot, parentOverlay);
     const focusTarget = initialFocusRef?.current;
-    if (focusTarget !== undefined && focusTarget !== null) focusTarget.focus();
-    else focusInitial(surface);
+    if (isActiveModalOwner(overlayRoot)) {
+      if (focusTarget !== undefined && focusTarget !== null) focusTarget.focus();
+      else focusInitial(surface);
+    }
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (modalStack[modalStack.length - 1] !== surface) return;
+      if (!isActiveModalOwner(overlayRoot) || event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
         onOpenChangeRef.current(false);
         return;
       }
       if (event.key !== "Tab") return;
-      const focusable = focusableElements(surface);
+      const focusable = focusableElements(overlayRoot);
       if (focusable.length === 0) {
         event.preventDefault();
         surface.focus();
@@ -104,10 +77,10 @@ export function Modal({
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1] ?? first;
-      if (event.shiftKey && document.activeElement === first) {
+      if (event.shiftKey && (document.activeElement === first || !overlayRoot.contains(document.activeElement))) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (document.activeElement === last || !overlayRoot.contains(document.activeElement))) {
         event.preventDefault();
         first.focus();
       }
@@ -115,43 +88,43 @@ export function Modal({
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
-      const index = modalStack.lastIndexOf(surface);
-      if (index >= 0) modalStack.splice(index, 1);
-      updateModalIsolation();
+      unregister();
       const target = returnFocusRef?.current ?? previous;
-      if (target !== undefined && document.contains(target)) target.focus();
+      if (canRestoreOverlayFocus(target)) target.focus();
     };
-  }, [initialFocusRef, open, returnFocusRef]);
+  }, [initialFocusRef, open, overlayRoot, parentOverlay, returnFocusRef]);
 
   if (!open) return null;
   return createPortal(
-    <div className={`sg-modal-backdrop sg-modal-${kind}`} data-sigil-overlay-root>
-      <div
-        className="sg-modal-scrim"
-        role="presentation"
-        onPointerDown={destructive ? undefined : () => onOpenChange(false)}
-      />
-      <section
-        id={id}
-        className={`sg-modal-surface sg-modal-surface-${kind}${kind === "drawer" ? ` sg-modal-side-${side}` : ""}`}
-        ref={surfaceRef}
-        tabIndex={-1}
-        role={destructive ? "alertdialog" : "dialog"}
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description === undefined ? undefined : descriptionId}
-      >
-        <header className="sg-modal-header">
-          <div>
-            <h2 id={titleId}>{title}</h2>
-            {description === undefined ? null : <p id={descriptionId}>{description}</p>}
-          </div>
-          {destructive ? null : (
-            <button className="sg-icon-button" type="button" aria-label={t("closeDialog", { title })} onClick={() => onOpenChange(false)}><Icon name="close" /></button>
-          )}
-        </header>
-        <div className="sg-modal-content">{children}</div>
-      </section>
+    <div className={`sg-modal-backdrop sg-modal-${kind}`} data-sigil-overlay-root ref={setOverlayRoot}>
+      <ModalOverlayContext.Provider value={overlayRoot}>
+        <div
+          className="sg-modal-scrim"
+          role="presentation"
+          onPointerDown={destructive ? undefined : () => onOpenChange(false)}
+        />
+        <section
+          id={id}
+          className={`sg-modal-surface sg-modal-surface-${kind}${kind === "drawer" ? ` sg-modal-side-${side}` : ""}`}
+          ref={surfaceRef}
+          tabIndex={-1}
+          role={destructive ? "alertdialog" : "dialog"}
+          aria-modal="true"
+          aria-labelledby={titleId}
+          aria-describedby={description === undefined ? undefined : descriptionId}
+        >
+          <header className="sg-modal-header">
+            <div>
+              <h2 id={titleId}>{title}</h2>
+              {description === undefined ? null : <p id={descriptionId}>{description}</p>}
+            </div>
+            {destructive ? null : (
+              <button className="sg-icon-button" type="button" aria-label={t("closeDialog", { title })} onClick={() => onOpenChange(false)}><Icon name="close" /></button>
+            )}
+          </header>
+          <div className="sg-modal-content">{children}</div>
+        </section>
+      </ModalOverlayContext.Provider>
     </div>,
     document.body,
   );
