@@ -228,8 +228,17 @@ it("shows one exact pending review instead of its canonical requested stub and n
       events: [approvalEvent], streamState: "live", hasGap: false }),
   })} />);
   await user.click(await screen.findByRole("button", { name: /^Review once/ }));
-  expect(await screen.findByRole("heading", { name: "Execute a shell command" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Run command" })).toBeTruthy();
   expect(screen.getAllByRole("region", { name: "Requested action" })).toHaveLength(1);
+  const review = screen.getByRole("region", { name: "Requested action" });
+  const command = within(review).getByRole("textbox", { name: "Complete command" });
+  expect(command.getAttribute("aria-readonly")).toBe("true");
+  expect(command.getAttribute("aria-multiline")).toBe("true");
+  expect(command.textContent?.startsWith("python3 - <<'PY'\n")).toBe(true);
+  expect(command.textContent?.endsWith("\nPY")).toBe(true);
+  const context = review.querySelector(".approval-execution-context pre")!;
+  expect(`${context.textContent}\n\nCommand:\n${command.textContent}`)
+    .toBe(nativeCanonicalApproval.pending.display.preview.body);
   const timeline = screen.getByRole("log", { name: "Conversation timeline" });
   expect(within(timeline).queryByText("Needs approval")).toBeNull();
   expect(within(timeline).queryByText("Command")).toBeNull();

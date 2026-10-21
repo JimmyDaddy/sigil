@@ -645,6 +645,9 @@
 .approval-review > * { min-width: 0; }
 .approval-review > p, .approval-review > small { color: var(--sg-sys-color-on-surface-variant); line-height: 1.5; }
 .approval-review > pre { margin: 0; padding: 10px; background: var(--sg-sys-color-surface-input); }
+.approval-exact-command { color: var(--sg-sys-color-on-surface); }
+.approval-execution-context pre { margin: 0; color: var(--sg-sys-color-on-surface-variant); }
+.approval-external-boundary { border-left: 3px solid var(--sg-domain-color-on-warning); }
 .approval-risk-notice { font-weight: 650; }
 .approval-technical-details { font-size: 11px; }
 .approval-dock > header { display: flex; justify-content: space-between; gap: var(--sg-sys-space-4); align-items: flex-start; }

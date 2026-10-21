@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRef } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ApprovalDock } from "./ApprovalDock";
@@ -216,6 +216,105 @@ it("shows one frozen command review before and after canonical reconciliation", 
   expect(review.querySelector("pre")?.textContent).toBe(command);
   expect(screen.getByRole("alert").textContent).toContain("The complete command is unavailable");
   expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("puts the complete frozen command first and keeps its exact environment expandable across canonical updates", () => {
+  const command = "  python3 -m unittest -v test_agenda.py\n" + "# 保留全部原文与尾空格  \n".repeat(90) + "printf 'C7 EXACT TAIL'  \n";
+  const context = "Working directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: no explicit deadline";
+  const approval: TimelineApproval = {
+    callId: "c7-command", toolName: "exec_command", approvalRequestId: "c7-request",
+    toolCallHash: "e".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+    snapshotRequired: false, operation: "execute_unknown_command", risk: "high",
+    analysisStatus: "conservative", previewTitle: "Execute a shell command",
+    previewSummary: "Review the complete command and its execution context.",
+    previewBody: `${context}\n\nCommand:\n${command}`, toolInput: "UNTRUSTED RAW INPUT",
+  };
+  const onDecision = vi.fn();
+  const props = { phase: "pending" as const, busy: false, composerRef: createRef<HTMLTextAreaElement>(),
+    onDecision, onOpenSettings: vi.fn(), onOpenSupport: vi.fn() };
+  const rendered = render(<LocaleProvider><ApprovalDock {...props} approval={approval} /></LocaleProvider>);
+  const review = screen.getByRole("region", { name: "Requested action" });
+  const exactCommand = screen.getByRole("textbox", { name: "Complete command" });
+  expect(review.firstElementChild).toBe(exactCommand);
+  expect(exactCommand.textContent).toBe(command);
+  expect(exactCommand.getAttribute("aria-readonly")).toBe("true");
+  expect(exactCommand.getAttribute("aria-multiline")).toBe("true");
+  expect(exactCommand.querySelector("code")?.textContent).toBe(command);
+  expect(document.activeElement).toBe(review);
+  expect(screen.getByRole("heading", { name: "Run command" })).toBeTruthy();
+  expect(review.querySelector("p")?.textContent).toBe(approval.previewSummary);
+  const environment = screen.getByText("Execution environment").closest("details")!;
+  expect(environment.open).toBe(false);
+  expect(environment.querySelector("pre")?.textContent).toBe(context);
+  expect(screen.queryByText("UNTRUSTED RAW INPUT")).toBeNull();
+  expect(screen.getByText("Some effects could not be identified. Check the exact action and its targets before approving.")).toBeTruthy();
+  fireEvent.click(within(environment).getByText("Execution environment"));
+  expect(environment.open).toBe(true);
+  const deny = screen.getByRole("button", { name: "Deny" });
+  deny.focus();
+  rendered.rerender(<LocaleProvider><ApprovalDock {...props} approval={{ ...approval, toolInput: undefined }} /></LocaleProvider>);
+  expect(screen.getByRole("textbox", { name: "Complete command" })).toBe(exactCommand);
+  expect(exactCommand.textContent).toBe(command);
+  expect(environment.open).toBe(true);
+  expect(document.activeElement).toBe(deny);
+  expect(onDecision).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+  expect(onDecision).toHaveBeenCalledExactlyOnceWith("approve_once");
+});
+
+it("keeps frozen external targets visible separately from the command environment", () => {
+  const boundary = "External directory access for exec_command\n/approved external/project\n/approved external/second\n\n";
+  const context = "Working directory (relative to workspace unless absolute): /approved external/project\nShell: /bin/sh (posix)\nTerminal I/O: pty\nMaximum runtime: 120 seconds";
+  const command = "printf 'outside workspace'\n";
+  const approval: TimelineApproval = { callId: "external-command", toolName: "exec_command",
+    approvalRequestId: "external-request", toolCallHash: "a".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false, operation: "execute_unknown_command",
+    risk: "high", previewBody: `${boundary}${context}\n\nCommand:\n${command}` };
+  render(<LocaleProvider><ApprovalDock approval={approval} phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={vi.fn()}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} /></LocaleProvider>);
+  const review = screen.getByRole("region", { name: "Requested action" });
+  const targets = review.querySelector(".approval-external-boundary")!;
+  expect(targets.textContent).toBe(boundary);
+  expect(targets.closest("details")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Complete command" }).textContent).toBe(command);
+  expect(screen.getByText("Execution environment").closest("details")?.querySelector("pre")?.textContent).toBe(context);
+});
+
+it.each([
+  "Working directory: .\nShell: sh (posix)\n\nCommand:\nprintf legacy",
+  "Working directory (relative to workspace unless absolute): .\ninjected\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: no explicit deadline\n\nCommand:\nprintf multiline-path",
+  "Working directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: no explicit deadline\n\nCommand:\nprintf here\nCommand:\nsecond marker",
+  "Unknown risk prefix\n\nWorking directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: no explicit deadline\n\nCommand:\nprintf unknown",
+])("retains an unrecognized or ambiguous frozen command in full before secondary explanations", (body) => {
+  const approval: TimelineApproval = { callId: "fallback-command", toolName: "exec_command",
+    approvalRequestId: "fallback-request", toolCallHash: "a".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false, operation: "execute_unknown_command",
+    previewBody: body, previewSummary: "Important unknown risk remains visible", toolInput: "NOT REVIEW EVIDENCE" };
+  render(<LocaleProvider><ApprovalDock approval={approval} phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={vi.fn()}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} /></LocaleProvider>);
+  const review = screen.getByRole("region", { name: "Requested action" });
+  expect(review.firstElementChild?.tagName).toBe("PRE");
+  expect(review.firstElementChild?.textContent).toBe(body);
+  expect(screen.queryByRole("textbox", { name: "Complete command" })).toBeNull();
+  expect(review.querySelector("details.approval-execution-context")).toBeNull();
+  expect(screen.getByText("Important unknown risk remains visible").closest("details")).toBeNull();
+  expect(screen.queryByText("NOT REVIEW EVIDENCE")).toBeNull();
+});
+
+it("preserves another tool's complete frozen review and title even when its display resembles the built-in format", () => {
+  const body = "Working directory (relative to workspace unless absolute): .\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: no explicit deadline\n\nCommand:\nprintf custom";
+  const approval: TimelineApproval = { callId: "custom-command", toolName: "custom_executor",
+    approvalRequestId: "custom-request", toolCallHash: "a".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false, operation: "execute_unknown_command",
+    previewTitle: "Custom execution boundary", previewBody: body };
+  render(<LocaleProvider><ApprovalDock approval={approval} phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={vi.fn()}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} /></LocaleProvider>);
+  expect(screen.getByRole("heading", { name: "Custom execution boundary" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Requested action" }).firstElementChild?.textContent).toBe(body);
+  expect(screen.queryByRole("textbox", { name: "Complete command" })).toBeNull();
 });
 
 it("keeps complete plain and diff reviews in one keyboard-focusable scroll region outside the actions", () => {

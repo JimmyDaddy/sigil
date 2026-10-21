@@ -64,6 +64,7 @@ export function ApprovalDock({
     || approval.analysisReasonCodes?.some((code) =>
       code === "unsupported_syntax" || code === "invalid_syntax"
     ) === true;
+  const commandReview = frozenCommandReview(approval);
   const deliveryPresentation = presentDeliveryStatus(phase, t);
   if (phase === "accepted") {
     return (
@@ -124,24 +125,31 @@ export function ApprovalDock({
       }}
     >
       <header>
-        <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
+        <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{commandReview ? t("approvalCommandTitle") : approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
         <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
       </header>
       <div ref={reviewRef} className="approval-review" role="region" aria-label={t("requestedAction")} tabIndex={0}>
-      <p>{approval.previewSummary ?? approval.safeSummaryDetail ?? t("reviewExactToolAction")}</p>
-      {approval.analysisStatus === "conservative" ? (
-        <p className="approval-risk-notice" role="note">{t("approvalConservativeNotice")}</p>
-      ) : null}
       {approval.toolInput && !approval.previewBody?.trim() ? (
         <div className="approval-command">
           <strong>{t("requestedAction")}</strong>
           <pre>{approval.toolInput}</pre>
         </div>
       ) : null}
-      {approval.previewBody ? (
+      {commandReview ? <>
+        {commandReview.boundary ? <pre className="approval-external-boundary">{commandReview.boundary}</pre> : null}
+        <pre className="approval-exact-command" role="textbox" aria-label={t("approvalCompleteCommand")}
+          aria-readonly="true" aria-multiline="true" tabIndex={0}><code>{commandReview.command}</code></pre>
+        <Collapsible key={approval.approvalRequestId} label={t("approvalExecutionContext")} className="approval-execution-context">
+          <pre>{commandReview.context}</pre>
+        </Collapsible>
+      </> : approval.previewBody ? (
         isUnifiedDiff(approval.previewBody)
           ? <DiffViewer diff={approval.previewBody} />
           : <pre>{approval.previewBody}</pre>
+      ) : null}
+      <p>{approval.previewSummary ?? approval.safeSummaryDetail ?? t("reviewExactToolAction")}</p>
+      {approval.analysisStatus === "conservative" && !unsupportedShellAnalysis ? (
+        <p className="approval-risk-notice" role="note">{t("approvalConservativeNotice")}</p>
       ) : null}
       <Collapsible label={t("technicalDetailsLabel")} className="approval-technical-details">
       <dl>
@@ -204,6 +212,41 @@ export function ApprovalDock({
       </div>
     </section>
   );
+}
+
+function frozenCommandReview(approval: TimelineApproval): {
+  command: string;
+  context: string;
+  boundary?: string;
+} | undefined {
+  if (approval.toolName !== "exec_command" || !requiresCommandReview(approval)) return undefined;
+  const body = approval.previewBody;
+  if (!body || body.includes("\r")) return undefined;
+  // This only rearranges the built-in frozen display format. Unknown/ambiguous
+  // formats retain the entire review; raw arguments never supply review evidence.
+  const separator = "\n\nCommand:\n";
+  const commandStart = body.indexOf(separator);
+  if (commandStart < 0 || body.indexOf("\nCommand:\n") !== commandStart + 1
+    || body.indexOf("\nCommand:\n", commandStart + 2) >= 0) return undefined;
+  const prefix = body.slice(0, commandStart);
+  const cwdLabel = "Working directory (relative to workspace unless absolute): ";
+  const contextStart = prefix.indexOf(cwdLabel);
+  if (contextStart < 0 || prefix.indexOf(cwdLabel, contextStart + cwdLabel.length) >= 0) return undefined;
+  const context = prefix.slice(contextStart);
+  const lines = context.split("\n");
+  if (lines.length !== 4 || !lines[0]!.startsWith(cwdLabel) || lines[0]!.length === cwdLabel.length
+    || !/^Shell: .+ \((posix|powershell|cmd)\)$/.test(lines[1]!)
+    || !/^Terminal I\/O: (pipe|pty)$/.test(lines[2]!)
+    || !/^Maximum runtime: (no explicit deadline|[1-9]\d{0,4} seconds)$/.test(lines[3]!)
+    || /[\u0000-\u0009\u000b-\u001f\u007f]/.test(context)) return undefined;
+  const runtimeSeconds = lines[3]!.match(/^Maximum runtime: (\d+) seconds$/)?.[1];
+  if (runtimeSeconds && Number(runtimeSeconds) > 86_400) return undefined;
+  const boundary = prefix.slice(0, contextStart);
+  if (boundary && (!boundary.startsWith("External directory access for exec_command\n")
+    || !boundary.endsWith("\n\n") || /\n(?:Shell:|Terminal I\/O:|Maximum runtime:)/.test(boundary))) return undefined;
+  const command = body.slice(commandStart + separator.length);
+  if (!command.trim()) return undefined;
+  return { command, context, boundary: boundary || undefined };
 }
 
 function requiresFileReview(approval: TimelineApproval): boolean {
