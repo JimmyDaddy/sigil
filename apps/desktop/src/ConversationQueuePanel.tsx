@@ -172,6 +172,7 @@ export function ConversationQueuePanel({
                     className="conversation-queue-edit"
                     onSubmit={(event) => {
                       event.preventDefault();
+                      event.stopPropagation();
                       void finishEdit(item.entryId);
                     }}
                   >

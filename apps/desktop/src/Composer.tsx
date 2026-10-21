@@ -462,7 +462,11 @@ export function Composer({
         ? ""
         : ` has-activity${activityState === undefined ? "" : ` activity-${activityState}`}`}`}
       data-composer-product-status={activity?.status}
-      onSubmit={(event) => { event.preventDefault(); void submit(); }}
+      onSubmit={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        void submit();
+      }}
     >
       {suggestionsOpen ? (
         <ComposerSuggestions

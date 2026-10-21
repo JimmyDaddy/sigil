@@ -7,11 +7,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { editorText, editorView, setEditorText, typeEditorText } from "./test/editor";
 import { Composer } from "./Composer";
+import { ConversationQueuePanel } from "./ConversationQueuePanel";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
 import { LocaleProvider, translateEnglish } from "./i18n";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import type {
   AgentBinding,
+  ConversationQueueCommandAction,
+  ConversationQueueView,
   DraftImage,
   ProviderConnection,
   ProviderModelRef,
@@ -915,6 +918,68 @@ describe("structured composer", () => {
     expect(screen.getByRole("dialog", { name: "Open follow-up queue, 2 messages" })).toBeTruthy();
     expect(screen.getByText("Queued prompt controls")).toBeTruthy();
     expect(editorText(input)).toBe("Keep this draft");
+  });
+
+  it.each([
+    { active: true, accepted: true }, { active: true, accepted: false },
+    { active: false, accepted: true }, { active: false, accepted: false },
+  ])("isolates a portal queue edit from the main draft (active=$active, accepted=$accepted)", async ({ active, accepted }) => {
+    const user = userEvent.setup();
+    let finishCommand: ((accepted: boolean) => void) | undefined;
+    const onCommand = vi.fn((_action: ConversationQueueCommandAction) => new Promise<boolean>((resolve) => { finishCommand = resolve; }));
+    const onSubmit = vi.fn(async () => false);
+    const queue: ConversationQueueView = {
+      schemaVersion: 1, sessionId: "queue-portal-session", generation: "queue-v1:before-edit",
+      paused: false, totalItems: 2, truncated: false,
+      items: ["first", "second"].map((entryId, order) => ({ entryId, order, kind: "chat", status: "queued",
+        promptPreview: `${entryId} queued prompt`, promptPreviewTruncated: false, promptMaterial: "persisted_safe",
+        dispatchable: false, blockedReason: "foreground_run_active" })),
+    };
+    renderComposer({ active, reviewActive: active, queueCount: 2, onSubmit,
+      queuePanel: <ConversationQueuePanel queue={queue} busy={false} error={false}
+        onRefresh={() => undefined} onCommand={onCommand} />,
+    });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const editor = editorView(input);
+    const draft = "  # Preserve the independent main draft\n\n" + "- [ ] 保留中文与未知语法 {{raw}}。  \n".repeat(120) + "\nTail  ";
+    setEditorText(input, draft);
+    await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
+    await user.click(screen.getAllByRole("button", { name: "Replace queued message" })[0]!);
+    const replacement = screen.getByRole("textbox", { name: "Replacement prompt" }) as HTMLTextAreaElement;
+    expect(input.closest("form")!.contains(replacement.closest("form"))).toBe(false);
+    const edited = "  Edited queued prompt\nKeep its own whitespace.  \n";
+    fireEvent.change(replacement, { target: { value: edited } });
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    expect(onCommand).toHaveBeenCalledExactlyOnceWith({ action: "edit", entryId: "first", prompt: edited, reasoningEffort: undefined });
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => finishCommand?.(accepted));
+    if (accepted) {
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Replacement prompt" })).toBeNull());
+    } else {
+      expect(screen.getByRole("textbox", { name: "Replacement prompt" })).toBe(replacement);
+      expect(replacement.value).toBe(edited);
+    }
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(editorText(input)).toBe(draft);
+    expect(editorView(input)).toBe(editor);
+    await user.click(screen.getByRole("button", { name: "Open follow-up queue, 2 messages" }));
+    await user.click(screen.getByRole("button", { name: active ? "Queue message" : "Send message" }));
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(draft, undefined, undefined);
+  });
+
+  it("handles only its own form submit when another portal form does not stop propagation", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ active: true, queueCount: 1,
+      queuePanel: <form aria-label="Independent portal form" onSubmit={(event) => event.preventDefault()}><button type="submit">Save independent form</button></form>,
+    });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(input, "Preserve this draft for an explicit main submit");
+    await user.click(screen.getByRole("button", { name: "Open follow-up queue, 1 messages" }));
+    await user.click(screen.getByRole("button", { name: "Save independent form" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(editorText(input)).toBe("Preserve this draft for an explicit main submit");
+    fireEvent.submit(input.closest("form")!);
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith("Preserve this draft for an explicit main submit", undefined, undefined);
   });
 });
 
