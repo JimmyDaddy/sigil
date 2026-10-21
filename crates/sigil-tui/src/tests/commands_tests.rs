@@ -141,14 +141,14 @@ fn command_metadata_generates_help_and_control_hints() {
     }));
     assert!(
         help.iter()
-            .any(|line| line == "Enter while busy: Add a visible follow-up for the next safe turn.")
+            .any(|line| line == "Enter while busy: Queue a follow-up after the current reply.")
     );
     assert!(help.iter().any(|line| {
         line == "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt."
     }));
     assert!(
         help.iter()
-            .any(|line| line == "Y/N: Allow or deny the pending tool call.")
+            .any(|line| line == "Y/N: Allow once or deny while the approval review is open.")
     );
     assert!(
         help.iter()
@@ -246,4 +246,17 @@ fn composer_selection_help_describes_replacement_and_preserves_readline_controls
             .iter()
             .all(|line| !line.starts_with("Shift-Left/Right/Up/Down"))
     );
+}
+
+#[test]
+fn keyboard_help_keeps_approval_scope_and_queue_timing_without_internal_jargon() {
+    let help = keyboard_help_lines(true).join("\n");
+    assert!(help.contains("while the approval review is open"));
+    assert!(help.contains("Shift-Tab reopens tool approval"));
+    assert!(help.contains("save its permission rule"));
+    assert!(help.contains("shell and remote effects are never undone"));
+    assert!(help.contains("after the current reply"));
+    assert!(!help.contains("admitted standalone"));
+    assert!(!help.contains("exact restore preview"));
+    assert!(!help.contains("durable intent ownership"));
 }

@@ -36,21 +36,19 @@ pub(super) fn render_config_detail_header(config_state: &ConfigState) -> Vec<Str
 
 pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     let Some(field) = config_state.selected_field else {
-        let mut lines = vec![String::new(), "[details]".to_owned()];
-        if config_state.selected_section == ConfigSection::Mcp {
-            lines.push("mcp: no configured server to inspect".to_owned());
-            lines.push("Ctrl-N import servers".to_owned());
-            return lines;
+        if matches!(
+            config_state.selected_section,
+            ConfigSection::Mcp
+                | ConfigSection::Agents
+                | ConfigSection::Skills
+                | ConfigSection::Plugins
+        ) {
+            return Vec::new();
         }
-        match config_state.selected_section {
-            ConfigSection::Agents => lines.push("agents: no agent selected".to_owned()),
-            ConfigSection::Skills => lines.push("skills: no skill selected".to_owned()),
-            ConfigSection::Plugins => lines.push("plugins: no plugin selected".to_owned()),
-            _ if config_state.show_advanced => {
-                lines.push(CONFIG_CONTROLS_HINT.to_owned());
-                lines.push(CONFIG_ACTIONS_HINT.to_owned());
-            }
-            _ => {}
+        let mut lines = vec![String::new(), "[details]".to_owned()];
+        if config_state.show_advanced {
+            lines.push(CONFIG_CONTROLS_HINT.to_owned());
+            lines.push(CONFIG_ACTIONS_HINT.to_owned());
         }
         return lines;
     };

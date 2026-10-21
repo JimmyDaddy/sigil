@@ -3566,3 +3566,84 @@ fn render_info_details_keeps_enabled_lsp_and_its_observed_server_state() -> anyh
     assert!(rendered.contains("Usage"));
     Ok(())
 }
+
+#[test]
+fn render_config_empty_catalogs_omit_blank_context_and_preserve_raw_footer_hit_ids()
+-> anyhow::Result<()> {
+    for width in [80, 160] {
+        for (section, raw_ids, empty) in [
+            (ConfigSection::Mcp, [1, 2], "No MCP servers configured"),
+            (
+                ConfigSection::Plugins,
+                [2, 3],
+                "No plugin manifests discovered",
+            ),
+        ] {
+            let root = tempfile::tempdir()?;
+            let mut config = test_config();
+            config.workspace.root = root.path().display().to_string();
+            let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+            app.set_terminal_size(width, 24);
+            open_config_panel_for_test(&mut app)?;
+            app.select_config_section_for_test(section);
+            let screen = ratatui::layout::Rect::new(0, 0, width, 24);
+            let surface = crate::surface_adapter::build_surface_model(
+                screen,
+                &app,
+                crate::surface::SurfaceState {
+                    frame_generation: 1,
+                    terminal_epoch: 1,
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+            terminal.draw(|frame| super::super::render_surface(frame, &surface))?;
+            let rendered = rendered_content(&terminal);
+            assert!(rendered.contains(empty));
+            assert!(
+                !rendered.contains("Details"),
+                "empty collections must not reserve a second panel"
+            );
+            assert!(!rendered.contains("[activate]"));
+            assert!(!rendered.contains("[approve]"));
+            assert!(!rendered.contains("[deny]"));
+            let layout = crate::ui::LayoutSnapshot::from_app(screen, &app);
+            let hits = &layout
+                .config_hit_areas
+                .as_ref()
+                .expect("geometry")
+                .footer_actions;
+            assert_eq!(
+                hits.iter().map(|hit| hit.index).collect::<Vec<_>>(),
+                raw_ids
+            );
+            for (hit, label) in hits.iter().zip(["F3 save+close", "Esc close"]) {
+                let visible = (hit.area.x..hit.area.right())
+                    .map(|x| terminal.backend().buffer()[(x, hit.area.y)].symbol())
+                    .collect::<String>();
+                assert!(
+                    visible.contains(label),
+                    "visible action must match its exact raw index: {visible}"
+                );
+                assert_eq!(
+                    layout.hit_target(hit.area.x, hit.area.y),
+                    crate::mouse::HitTarget::ConfigFooterAction { index: hit.index }
+                );
+            }
+            let close = hits.last().expect("close").area;
+            app.handle_mouse_event(
+                crate::mouse::MouseInput {
+                    kind: crate::mouse::MouseInputKind::LeftDown,
+                    column: close.x,
+                    row: close.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &layout,
+            )?;
+            assert!(
+                !app.is_config_mode(),
+                "original Close action must dispatch, not a filtered-array object action"
+            );
+        }
+    }
+    Ok(())
+}

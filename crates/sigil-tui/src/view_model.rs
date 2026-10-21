@@ -220,11 +220,23 @@ pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
 
 pub(crate) fn info_rail_detail_lines(app: &AppState) -> Vec<String> {
     let model = InfoRailViewModel::build(app, true);
-    let mut lines = vec![
+    let mut attention = Vec::new();
+    if let Some(error) = app.config_save_error() {
+        attention.push(format!("save failed: {error}"));
+    }
+    attention.extend(app.mcp_attention_sidebar_lines());
+    attention.extend(app.code_intelligence_attention_lines());
+    let mut lines = Vec::new();
+    if !attention.is_empty() {
+        lines.push("Attention".to_owned());
+        lines.extend(attention.iter().cloned());
+        lines.push(String::new());
+    }
+    lines.extend([
         "Workspace".to_owned(),
         model.workspace_label,
         format!("title: {}", model.session_title),
-    ];
+    ]);
     if let Some(status) = model.workspace_git_status {
         lines.push(format!(
             "git: {} · {}",
@@ -241,25 +253,22 @@ pub(crate) fn info_rail_detail_lines(app: &AppState) -> Vec<String> {
             status.behind,
         ));
     }
-    for (title, values) in [
+    for (title, mut values) in [
         ("Session", model.session_lines),
         ("Permissions", model.permission_lines),
-        ("Agents", model.agent_lines),
+        ("Usage", model.usage_lines),
         ("Task", model.task_lines),
+        ("Agents", model.agent_lines),
         ("MCP", model.mcp_lines),
         ("LSP", model.code_lines),
-        ("Usage", model.usage_lines),
     ] {
+        values.retain(|line| !attention.contains(line));
         if values.is_empty() {
             continue;
         }
         lines.push(String::new());
         lines.push(title.to_owned());
         lines.extend(values);
-    }
-    if let Some(error) = app.config_save_error() {
-        lines.push(String::new());
-        lines.push(format!("save failed: {error}"));
     }
     lines
 }

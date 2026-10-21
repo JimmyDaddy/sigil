@@ -144,14 +144,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::OpenCheckpointRestore,
         keys: &[KeyBinding { label: "Ctrl-R" }],
         slash: None,
-        help: "Open the latest controlled checkpoint in an exact restore preview dialog.",
+        help: "Review the latest checkpoint before restoring files.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
         command: UiCommand::OpenIntentStack,
         keys: &[KeyBinding { label: "Alt-S" }],
         slash: Some("/intents"),
-        help: "Review durable intent ownership, verification, retention, conflicts, and exact Drop previews.",
+        help: "Inspect saved work and preview its removal.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -165,7 +165,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CompactContext,
         keys: &[],
         slash: Some("/compact"),
-        help: "Generate, validate, and activate one recoverable semantic checkpoint.",
+        help: "Compact conversation context while keeping a recovery checkpoint.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -186,7 +186,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::CheckForUpdate,
         keys: &[],
         slash: Some("/update"),
-        help: "Check for a new Sigil release or install an admitted standalone update.",
+        help: "Check for updates or install an available standalone release.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -458,7 +458,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Ctrl-J: Insert a newline in the composer.".to_owned(),
         "Shift-Enter or Alt-Enter: Insert a newline when terminal keyboard enhancement is active and reports modifiers.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
-        "Enter while busy: Add a visible follow-up for the next safe turn.".to_owned(),
+        "Enter while busy: Queue a follow-up after the current reply.".to_owned(),
         String::new(),
         "Review".to_owned(),
     ]);
@@ -469,7 +469,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::OpenIntentStack,
     ]));
     lines.push(
-        "Review dialogs require an exact preview before file changes; shell and remote effects are never undone."
+        "Review the file preview before restoring; shell and remote effects are never undone."
             .to_owned(),
     );
     if include_tool_cards {
@@ -487,11 +487,11 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     lines.extend([
         String::new(),
         "Approval".to_owned(),
-        "Y/N: Allow or deny the pending tool call.".to_owned(),
-        "Tab/Enter: Cycle and select Allow session or Allow family when offered.".to_owned(),
-        "F: Allow this command family and persist a matching permission.commands rule.".to_owned(),
+        "Y/N: Allow once or deny while the approval review is open.".to_owned(),
+        "Tab/Enter: Choose the displayed approval action.".to_owned(),
+        "F: Allow this command family and save its permission rule.".to_owned(),
         "V: Inspect the pending diff or preview when available.".to_owned(),
-        "Esc: Dismiss plan approval or return to the active run when allowed.".to_owned(),
+        "Esc: Return to input without deciding; Shift-Tab reopens tool approval.".to_owned(),
         String::new(),
         "Agents".to_owned(),
     ]);

@@ -1,6 +1,7 @@
 mod info_details;
 mod keyboard_help;
 mod session_actions;
+mod text_rows;
 
 pub(crate) use info_details::info_details_scroll_bounds;
 pub(crate) use keyboard_help::keyboard_help_scroll_bounds;

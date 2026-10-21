@@ -185,18 +185,20 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.selected_section = ConfigSection::Mcp;
     state.selected_field = None;
     let mcp_details = render_config_selection_details(&state).join("\n");
-    assert!(mcp_details.contains("Ctrl-N import servers"));
-    assert!(mcp_details.contains("mcp: no configured server to inspect"));
+    assert!(
+        mcp_details.is_empty(),
+        "empty server selection must not duplicate the main empty state"
+    );
 
     state.selected_section = ConfigSection::Agents;
     state.selected_field = None;
     let agent_details = render_config_selection_details(&state).join("\n");
-    assert!(agent_details.contains("agents: no agent selected"));
+    assert!(agent_details.is_empty());
 
     state.selected_section = ConfigSection::Skills;
     state.selected_field = None;
     let skill_details = render_config_selection_details(&state).join("\n");
-    assert!(skill_details.contains("skills: no skill selected"));
+    assert!(skill_details.is_empty());
 
     assert_eq!(cycle_approval_mode(ApprovalMode::Allow), ApprovalMode::Ask);
     assert_eq!(cycle_approval_mode(ApprovalMode::Ask), ApprovalMode::Deny);

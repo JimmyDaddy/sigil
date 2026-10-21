@@ -360,13 +360,18 @@ impl ConfigState {
 
     pub(crate) fn move_footer_action(&mut self, forward: bool) {
         self.footer_selected = true;
-        self.selected_footer_action = if forward {
-            self.selected_footer_action
-                .next_for_section(self.selected_section)
-        } else {
-            self.selected_footer_action
-                .previous_for_section(self.selected_section)
-        };
+        let mut candidate = self.selected_footer_action;
+        for _ in ConfigFooterAction::actions_for_section(self.selected_section) {
+            candidate = if forward {
+                candidate.next_for_section(self.selected_section)
+            } else {
+                candidate.previous_for_section(self.selected_section)
+            };
+            if candidate.is_available(self) {
+                self.selected_footer_action = candidate;
+                break;
+            }
+        }
     }
 }
 

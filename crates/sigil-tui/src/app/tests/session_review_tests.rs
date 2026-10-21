@@ -581,7 +581,15 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
         app.checkpoint_restore_modal_view().map(|view| view.phase),
         Some(super::super::checkpoint_flow::CheckpointRestoreModalPhase::Loading)
     );
-    assert!(app.apply_checkpoint_operation_failed(latest_request_id, "preview failed"));
+    let error = format!(
+        "ERROR_HEAD\n\n{}\nERROR_TAIL\n",
+        (0..90)
+            .map(|index| format!("ROW_{index:03} complete diagnostic context"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    app.set_terminal_size(80, 24);
+    assert!(app.apply_checkpoint_operation_failed(latest_request_id, &error));
     let failed = app
         .checkpoint_restore_modal_view()
         .expect("failed preview should stay in the modal");
@@ -589,7 +597,68 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
         failed.phase,
         super::super::checkpoint_flow::CheckpointRestoreModalPhase::Unavailable
     );
-    assert_eq!(failed.error.as_deref(), Some("preview failed"));
+    assert_eq!(failed.error.as_deref(), Some(error.as_str()));
+    assert!(!failed.can_restore && !failed.can_fork);
+    let max_scroll = crate::ui::checkpoint_restore_max_scroll(80, 24, &failed);
+    assert!(
+        max_scroll > 70,
+        "explicit error lines must count as separate visual rows, not be joined by a Line constructor"
+    );
+    let render = |app: &AppState| -> Result<String> {
+        let surface = crate::surface_adapter::build_surface_model(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))?;
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        Ok(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect())
+    };
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::End,
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
+    assert_eq!(
+        app.checkpoint_restore_modal_view().expect("end").scroll as usize,
+        max_scroll
+    );
+    let tail = render(&app)?;
+    assert!(tail.contains("ERROR_TAIL"));
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::PageUp,
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
+    assert_eq!(
+        app.checkpoint_restore_modal_view().expect("page up").scroll as usize,
+        max_scroll - 8
+    );
+    assert_ne!(
+        render(&app)?,
+        tail,
+        "one PageUp must move the actual visible error rows"
+    );
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Home,
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
+    assert_eq!(app.checkpoint_restore_modal_view().expect("home").scroll, 0);
+    assert!(render(&app)?.contains("ERROR_HEAD"));
+    assert!(
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE
+        ))?
+        .is_none()
+    );
     assert_eq!(app.composer.input, "keep this draft");
     app.clear_checkpoint_interaction();
     Ok(())

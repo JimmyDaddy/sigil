@@ -2,10 +2,12 @@ use super::*;
 
 pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
     lines.push("[servers]".to_owned());
-    lines.push(render_config_readonly_row(
-        "Configured",
-        &format!("{} servers", config_state.draft.mcp_servers.len()),
-    ));
+    if !config_state.draft.mcp_servers.is_empty() {
+        lines.push(render_config_readonly_row(
+            "Configured",
+            &format!("{} servers", config_state.draft.mcp_servers.len()),
+        ));
+    }
     if config_state.draft.mcp_servers.is_empty() {
         lines.push(render_config_hint_row("No MCP servers configured"));
         lines.push(render_config_hint_row(

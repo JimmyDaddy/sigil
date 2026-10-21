@@ -6,8 +6,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
+use super::text_rows::word_wrap_rows;
 use super::{ModalVisual, centered_rect, shadow_rect};
-use crate::ui::text::{terminal_cell_width, wrap_terminal_lines};
+use crate::ui::text::terminal_cell_width;
 use crate::{commands::KeyboardHelpPage, surface::KeyboardHelpSurface};
 
 const FOOTER: &str = "Tab/Shift-Tab sections · ↑/↓ scroll · PgUp/Dn page · Esc/Enter close";
@@ -43,7 +44,7 @@ fn help_geometry(screen: Rect, lines: &[String]) -> HelpGeometry {
         .saturating_add(2)
         .clamp(24.min(max_width), max_width);
     let body_rows = help_rows(lines, width, None).len();
-    let footer_rows = wrap_terminal_lines(vec![Line::raw(FOOTER)], width).len();
+    let footer_rows = word_wrap_rows(vec![Line::raw(FOOTER)], width).len();
     let desired_height = body_rows.saturating_add(footer_rows).saturating_add(3);
     let area = centered_rect(
         width.saturating_add(2).min(u16::MAX as usize) as u16,
@@ -92,19 +93,19 @@ fn help_rows(lines: &[String], width: usize, visual: Option<&ModalVisual>) -> Ve
             if let Some((key, description)) = line.split_once(':') {
                 Line::from(vec![
                     Span::styled(key.to_owned(), key_style),
-                    Span::styled(": ", muted_style),
-                    Span::styled(description.trim_start().to_owned(), text_style),
+                    Span::styled(":", muted_style),
+                    Span::styled(description.to_owned(), text_style),
                 ])
             } else {
-                Line::styled(
+                Line::from(Span::styled(
                     line.clone(),
                     if index == 0 { key_style } else { muted_style },
-                )
+                ))
             }
         })
         .collect();
     // Count and draw these same visual rows; Paragraph must not wrap them a second time.
-    wrap_terminal_lines(lines, width)
+    word_wrap_rows(lines, width)
 }
 
 pub(super) fn render_keyboard_help(
@@ -178,7 +179,7 @@ pub(super) fn render_keyboard_help(
         geometry.body,
     );
     frame.render_widget(
-        Paragraph::new(Text::from(wrap_terminal_lines(
+        Paragraph::new(Text::from(word_wrap_rows(
             vec![Line::styled(FOOTER, other)],
             geometry.footer.width as usize,
         ))),

@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
 #[cfg(test)]
@@ -16,6 +16,7 @@ use super::{
         number_unified_diff_lines,
     },
     geometry::{centered_rect, halo_rect, inset_rect, shadow_rect},
+    text::wrap_terminal_lines,
     theme::{self, ThemePalette},
 };
 
@@ -45,7 +46,7 @@ fn render_checkpoint_restore_modal_view(
     let modal_layout = checkpoint_restore_layout(frame.area(), view);
     let area = modal_layout.area;
     let backdrop = halo_rect(area, frame.area(), 5, 2);
-    if backdrop.width > 0 && backdrop.height > 0 {
+    if !compact_state(view) && backdrop.width > 0 && backdrop.height > 0 {
         frame.render_widget(Clear, backdrop);
         frame.render_widget(
             Block::default()
@@ -81,17 +82,33 @@ fn render_checkpoint_restore_modal_view(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    if view.phase == CheckpointRestoreModalPhase::Empty {
-        frame.render_widget(
-            Paragraph::new("No controlled checkpoint yet.\n\nControlled file changes will appear here when a checkpoint is recorded.")
-                .style(Style::default().fg(palette.text_secondary))
-                .wrap(Wrap { trim: false }),
-            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2)),
+    if compact_state(view) {
+        let rows = compact_status_rows(view, inner.width as usize);
+        let scroll = usize::from(view.scroll).min(
+            rows.len()
+                .saturating_sub(modal_layout.body_content.height as usize),
         );
         frame.render_widget(
-            Paragraph::new("Ctrl-R refresh · Esc close")
-                .style(Style::default().fg(palette.text_secondary)),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            Paragraph::new(Text::from(
+                rows.into_iter()
+                    .skip(scroll)
+                    .take(modal_layout.body_content.height as usize)
+                    .collect::<Vec<_>>(),
+            ))
+            .style(Style::default().fg(if view.error.is_some() {
+                palette.accent_danger
+            } else {
+                palette.text_secondary
+            })),
+            modal_layout.body_content,
+        );
+        frame.render_widget(
+            Paragraph::new(Text::from(wrap_terminal_lines(
+                vec![Line::raw(compact_footer(view))],
+                modal_layout.actions.width as usize,
+            )))
+            .style(Style::default().fg(palette.text_secondary)),
+            modal_layout.actions,
         );
         return;
     }
@@ -162,6 +179,43 @@ fn checkpoint_restore_layout(
     screen: Rect,
     view: &CheckpointRestoreModalView,
 ) -> CheckpointRestoreLayout {
+    if compact_state(view) {
+        let width = screen
+            .width
+            .saturating_sub(8)
+            .max(screen.width.min(24))
+            .min(118);
+        let inner_width = width.saturating_sub(2) as usize;
+        let rows = compact_status_rows(view, inner_width).len();
+        let footer_rows =
+            wrap_terminal_lines(vec![Line::raw(compact_footer(view))], inner_width).len();
+        let height = rows
+            .saturating_add(footer_rows)
+            .saturating_add(2)
+            .min(screen.height.saturating_sub(2).max(screen.height.min(3)) as usize)
+            as u16;
+        let area = centered_rect(width, height, screen);
+        let inner = inset_rect(area, 1, 1);
+        let footer_height = (footer_rows as u16).min(inner.height.saturating_sub(1));
+        return CheckpointRestoreLayout {
+            area,
+            target: Rect::default(),
+            body: Rect::default(),
+            body_status: Rect::default(),
+            body_content: Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(footer_height),
+            ),
+            actions: Rect::new(
+                inner.x,
+                inner.bottom().saturating_sub(footer_height),
+                inner.width,
+                footer_height,
+            ),
+        };
+    }
     let area = checkpoint_restore_modal_area(screen);
     let inner = inset_rect(area, 1, 1);
     let footer_rows = 4u16.min(inner.height);
@@ -204,7 +258,72 @@ pub(crate) fn checkpoint_restore_max_scroll(
     view: &CheckpointRestoreModalView,
 ) -> usize {
     let layout = checkpoint_restore_layout(Rect::new(0, 0, terminal_width, terminal_height), view);
-    checkpoint_body_line_count(view).saturating_sub(usize::from(layout.body_content.height).max(1))
+    let rows = if compact_state(view) {
+        compact_status_rows(view, layout.body_content.width as usize).len()
+    } else {
+        checkpoint_body_line_count(view)
+    };
+    rows.saturating_sub(usize::from(layout.body_content.height).max(1))
+}
+
+fn compact_state(view: &CheckpointRestoreModalView) -> bool {
+    matches!(
+        view.phase,
+        CheckpointRestoreModalPhase::Empty | CheckpointRestoreModalPhase::Unavailable
+    )
+}
+
+fn compact_footer(view: &CheckpointRestoreModalView) -> &'static str {
+    if view.phase == CheckpointRestoreModalPhase::Empty {
+        "Ctrl-R refresh · Esc close"
+    } else {
+        "Ctrl-R refresh · PgUp/PgDn scroll · Home/End · Esc close"
+    }
+}
+
+fn compact_status_rows(view: &CheckpointRestoreModalView, width: usize) -> Vec<Line<'static>> {
+    let mut lines = if view.phase == CheckpointRestoreModalPhase::Empty {
+        vec![
+            Line::raw("No controlled checkpoint yet."),
+            Line::default(),
+            Line::raw("Controlled file changes appear here after a checkpoint is recorded."),
+        ]
+    } else {
+        vec![
+            Line::raw("Checkpoint unavailable"),
+            Line::default(),
+            Line::from(Span::raw(
+                view.error
+                    .clone()
+                    .unwrap_or_else(|| view.phase_detail.clone()),
+            )),
+        ]
+    };
+    // A failed restore can still carry a real target or file evidence; keep those facts reachable.
+    if view.phase == CheckpointRestoreModalPhase::Unavailable {
+        lines.extend(
+            view.summary_lines
+                .iter()
+                .cloned()
+                .map(|line| Line::from(Span::raw(line))),
+        );
+        lines.extend(
+            view.body_notice_lines
+                .iter()
+                .cloned()
+                .map(|line| Line::from(Span::raw(line))),
+        );
+        if view.body_is_diff || !view.summary_lines.is_empty() || !view.body_notice_lines.is_empty()
+        {
+            lines.extend(
+                view.body_lines
+                    .iter()
+                    .cloned()
+                    .map(|line| Line::from(Span::raw(line))),
+            );
+        }
+    }
+    wrap_terminal_lines(lines, width)
 }
 
 fn checkpoint_restore_modal_area(screen: ratatui::layout::Rect) -> ratatui::layout::Rect {
@@ -412,3 +531,7 @@ fn phase_color(phase: CheckpointRestoreModalPhase, palette: &ThemePalette) -> Co
         }
     }
 }
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/checkpoint_restore_tests.rs"]
+mod tests;

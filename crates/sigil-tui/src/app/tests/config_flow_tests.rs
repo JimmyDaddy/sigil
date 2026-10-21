@@ -749,10 +749,8 @@ fn config_empty_mcp_reports_no_selection_and_preserves_explicit_footer_navigatio
     assert_eq!(app.config_selected_field_label(), None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
-    assert_eq!(app.last_notice(), Some("action activate_mcp"));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    assert_eq!(app.last_notice(), Some("action save_and_close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
@@ -2045,12 +2043,13 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     let detail = app.config_detail_lines().join("\n");
 
     assert!(detail.contains("[servers]"));
-    assert!(detail.contains("- Configured"));
-    assert!(detail.contains("0 servers"));
+    assert!(!detail.contains("- Configured"));
+    assert!(!detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
     assert!(detail.contains("i Ctrl-N imports selected servers"));
-    assert!(detail.contains("Ctrl-N import servers"));
-    assert!(detail.contains("mcp: no configured server to inspect"));
+    assert!(!detail.contains("Ctrl-N import servers"));
+    assert!(!detail.contains("mcp: no configured server to inspect"));
+    assert!(!detail.contains("[details]"));
     assert!(!detail.contains("servers:"));
     assert!(!detail.contains("args_csv:"));
 
@@ -2073,7 +2072,8 @@ fn config_compaction_step_shows_effective_context_window_source() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("[context]"));
+    assert!(detail.contains("[configuration preference]"));
+    assert!(detail.contains("[current session]"));
     assert!(detail.contains("- Effective window"));
     assert!(detail.contains("1,000,000 tokens  source=provider"));
     assert!(detail.contains("Fallback window"));
@@ -2767,7 +2767,7 @@ slash_names = ["review-agent"]
     assert!(detail.contains("Agents 10/13 · agent profiles"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 5 agents"));
-    assert!(detail.contains("- Compatibility: 0 agents"));
+    assert!(!detail.contains("- Compatibility: 0 agents"));
     assert!(detail.contains("- Selected: agent 4/5 · review"));
     assert!(detail.contains("[agents]"));
     assert!(detail.contains(
@@ -2800,7 +2800,7 @@ slash_names = ["review-agent"]
     assert!(nav.contains("Agents: footer trust/disable"));
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["trust", "disable", "save+close"]
+        vec!["trust", "disable", "save+close", "close"]
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
@@ -3209,14 +3209,15 @@ fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("- Configured: 0 skills"));
-    assert!(detail.contains("- Agents: 0 agents"));
+    assert!(!detail.contains("- Configured: 0 skills"));
+    assert!(!detail.contains("- Agents: 0 agents"));
     assert!(detail.contains("- Warnings: 5 warnings"));
     assert!(detail.contains("i No skills discovered"));
     assert!(detail.contains("Reusable inline skills are discovered"));
     assert!(detail.contains("[warnings]"));
     assert!(detail.contains("... 1 more warnings"));
-    assert!(detail.contains("skills: no skill selected"));
+    assert!(!detail.contains("skills: no skill selected"));
+    assert!(!detail.contains("[details]"));
     assert!(!detail.contains("footer use"));
     assert!(!app.config_footer_action_available(0));
     Ok(())
@@ -3572,7 +3573,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(nav.contains("Plugins: footer approve/deny"));
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["approve", "deny", "save+close"]
+        vec!["approve", "deny", "save+close", "close"]
     );
     Ok(())
 }
@@ -3595,7 +3596,7 @@ fn config_plugins_step_renders_empty_discovery_and_warning_overflow() -> Result<
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("- Configured: 0 plugins"));
+    assert!(!detail.contains("- Configured: 0 plugins"));
     assert!(detail.contains("- Warnings: 5 warnings"));
     assert!(detail.contains("No plugin manifests discovered"));
     assert!(detail.contains("Workspace plugins live under .sigil/plugins/<id>/plugin.toml"));
@@ -5574,8 +5575,8 @@ fn config_mcp_paging_without_servers_reports_empty_state() -> Result<()> {
     assert_eq!(app.last_notice(), Some("no MCP server to select"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
-    assert_eq!(app.last_notice(), Some("action activate_mcp"));
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    assert_eq!(app.last_notice(), Some("action save_and_close"));
     Ok(())
 }
 
@@ -5881,5 +5882,112 @@ fn f3_config_dirty_cancel_preserves_multiline_draft_and_slash_config_stays_compa
     assert!(slash_app.is_config_mode());
     assert!(slash_app.composer.input.is_empty());
     assert_eq!(slash_app.last_notice(), Some("opened config"));
+    Ok(())
+}
+
+#[test]
+fn config_empty_catalogs_show_one_state_and_only_available_footer_navigation() -> Result<()> {
+    for (section, empty) in [
+        (ConfigSection::Mcp, "No MCP servers configured"),
+        (ConfigSection::Skills, "No skills discovered"),
+        (ConfigSection::Agents, "No agents discovered"),
+        (ConfigSection::Plugins, "No plugin manifests discovered"),
+    ] {
+        let root = tempdir()?;
+        let config = config_for_workspace(root.path());
+        let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+        app.open_config_panel();
+        let state = app.config_state.as_mut().expect("config");
+        state.agent_profiles.clear();
+        state.skill_descriptors.clear();
+        state.plugin_manifests.clear();
+        state.agent_warnings.clear();
+        state.skill_warnings.clear();
+        state.plugin_warnings.clear();
+        state.set_section(section);
+        let lines = app.config_detail_lines();
+        assert_eq!(
+            lines.iter().filter(|line| line.contains(empty)).count(),
+            1,
+            "one empty state for {section:?}"
+        );
+        assert!(!lines.iter().any(|line| line == "[details]"));
+        for zero in [
+            "Configured: 0",
+            "Warnings: 0",
+            "Agents: 0",
+            "Compatibility: 0",
+        ] {
+            assert!(
+                !lines.iter().any(|line| line.contains(zero)),
+                "empty counter {zero}"
+            );
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+        assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+        assert_eq!(app.config_selected_field_label(), Some("close"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+        assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(!app.is_config_mode(), "visible Close must really close");
+    }
+    Ok(())
+}
+
+#[test]
+fn config_empty_skills_keep_disabled_discovery_and_real_warning_sources() -> Result<()> {
+    let root = tempdir()?;
+    let mut config = config_for_workspace(root.path());
+    config.skills.enabled = false;
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app.config_state.as_mut().expect("config");
+    state.skill_descriptors.clear();
+    state.skill_warnings =
+        vec!["UNKNOWN_SOURCE_CODE: configured directory could not be inspected".to_owned()];
+    state.set_section(ConfigSection::Skills);
+    let lines = app.config_detail_lines().join("\n");
+    assert!(lines.contains("Skills discovery is disabled"));
+    assert!(!lines.contains("No skills discovered"));
+    assert!(lines.contains("configured skills directories"));
+    assert!(lines.contains("Warnings: 1 warnings"));
+    assert!(lines.contains("UNKNOWN_SOURCE_CODE: configured directory could not be inspected"));
+    assert!(!lines.contains("[details]"));
+    assert!(!app.config_footer_action_available(0));
+    Ok(())
+}
+
+#[test]
+fn config_compaction_labels_distinguish_draft_preference_from_current_session_status() -> Result<()>
+{
+    let root = tempdir()?;
+    let config = config_for_workspace(root.path());
+    let mut app = AppState::from_root_config(&root.path().join("sigil.toml"), &config);
+    app.runtime.compaction_status = "off".to_owned();
+    app.open_config_panel();
+    let state = app.config_state.as_mut().expect("config");
+    state.set_section(ConfigSection::Compaction);
+    state.draft.compaction_enabled = true;
+    let lines = app.config_detail_lines();
+    let preference = lines
+        .iter()
+        .position(|line| line == "[configuration preference]")
+        .expect("draft preference");
+    let session = lines
+        .iter()
+        .position(|line| line == "[current session]")
+        .expect("current session");
+    let field = lines
+        .iter()
+        .position(|line| line.contains("Auto compact: yes"))
+        .expect("unchanged draft choice");
+    let status = lines
+        .iter()
+        .position(|line| line == "- Compaction status: off")
+        .expect("real effective status");
+    assert!(preference < field && field < session && session < status);
+    assert_eq!(app.runtime.compaction_status, "off");
     Ok(())
 }

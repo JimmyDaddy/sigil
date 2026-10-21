@@ -3,24 +3,35 @@ use super::*;
 pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
     let (skill_count, agent_count) = skill_config_counts(config_state);
     lines.push("[discovery]".to_owned());
-    lines.push(render_config_readonly_row(
-        "Enabled",
-        bool_summary(config_state.draft.base_root_config.skills.enabled),
-    ));
-    lines.push(render_config_readonly_row(
-        "Configured",
-        &format!("{} {}", skill_count, pluralize("skill", skill_count)),
-    ));
-    lines.push(render_config_readonly_row(
-        "Agents",
-        &format!("{} {}", agent_count, pluralize("agent", agent_count)),
-    ));
-    lines.push(render_config_readonly_row(
-        "Warnings",
-        &format!("{} warnings", config_state.skill_warnings.len()),
-    ));
+    if skill_count > 0 && !config_state.draft.base_root_config.skills.enabled {
+        lines.push(render_config_readonly_row("Discovery", "disabled"));
+    }
+    if skill_count > 0 {
+        lines.push(render_config_readonly_row(
+            "Configured",
+            &format!("{} {}", skill_count, pluralize("skill", skill_count)),
+        ));
+    }
+    if agent_count > 0 {
+        lines.push(render_config_readonly_row(
+            "Agents",
+            &format!("{} {}", agent_count, pluralize("agent", agent_count)),
+        ));
+    }
+    if !config_state.skill_warnings.is_empty() {
+        lines.push(render_config_readonly_row(
+            "Warnings",
+            &format!("{} warnings", config_state.skill_warnings.len()),
+        ));
+    }
     if skill_count == 0 {
-        lines.push(render_config_hint_row("No skills discovered"));
+        lines.push(render_config_hint_row(
+            if config_state.draft.base_root_config.skills.enabled {
+                "No skills discovered"
+            } else {
+                "Skills discovery is disabled"
+            },
+        ));
         lines.push(render_config_hint_row(
             "Reusable inline skills are discovered from configured skills directories",
         ));

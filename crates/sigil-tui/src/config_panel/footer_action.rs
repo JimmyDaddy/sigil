@@ -45,9 +45,19 @@ impl ConfigFooterAction {
     ];
     const PERMISSIONS_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
     const MCP_ORDER: [Self; 3] = [Self::ActivateMcp, Self::SaveAndClose, Self::Close];
-    const AGENTS_ORDER: [Self; 3] = [Self::TrustAgent, Self::BlockAgent, Self::SaveAndClose];
+    const AGENTS_ORDER: [Self; 4] = [
+        Self::TrustAgent,
+        Self::BlockAgent,
+        Self::SaveAndClose,
+        Self::Close,
+    ];
     const SKILLS_ORDER: [Self; 3] = [Self::UseSkill, Self::SaveAndClose, Self::Close];
-    const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::SaveAndClose];
+    const PLUGINS_ORDER: [Self; 4] = [
+        Self::ApprovePlugin,
+        Self::DenyPlugin,
+        Self::SaveAndClose,
+        Self::Close,
+    ];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {

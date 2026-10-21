@@ -236,3 +236,31 @@ fn info_details_f4_is_visible_and_opens_the_same_surface_without_a_rail_at_80x24
     assert!(last_page.contains("balance:"));
     Ok(())
 }
+
+#[test]
+fn info_details_word_rows_preserve_explicit_line_breaks_and_recovery_text() {
+    let lines = vec![
+        "Attention".to_owned(),
+        "reason:  Retry the connection\n\nRetain the current session.".to_owned(),
+    ];
+    let rows = details_rows(&lines, 80, None);
+    assert_eq!(
+        rows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "Attention",
+            "reason:  Retry the connection",
+            "",
+            "Retain the current session.",
+        ]
+    );
+}
+
+#[test]
+fn info_details_unlabelled_multiline_rows_preserve_blank_lines_and_real_spaces() {
+    let lines = vec!["Recovery guidance\n\nKeep  both spaces e\u{301}🙂\n".to_owned()];
+    let rows = details_rows(&lines, 80, None);
+    assert_eq!(
+        rows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Recovery guidance", "", "Keep  both spaces e\u{301}🙂", ""]
+    );
+}

@@ -6,11 +6,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use super::ModalVisual;
-use crate::{
-    surface::InfoDetailsSurface,
-    ui::text::{sanitize_terminal_text, wrap_terminal_lines},
-};
+use super::{ModalVisual, text_rows::word_wrap_rows};
+use crate::{surface::InfoDetailsSurface, ui::text::sanitize_terminal_text};
 
 const FOOTER: &str = "↑/↓ scroll · PgUp/Dn page · Home/End · Esc/Enter close";
 
@@ -41,7 +38,7 @@ fn details_geometry(screen: Rect, lines: &[String]) -> DetailsGeometry {
         .min(112);
     let inner_width = width.saturating_sub(2) as usize;
     let body_rows = details_rows(lines, inner_width, None).len();
-    let footer_rows = wrap_terminal_lines(vec![Line::raw(FOOTER)], inner_width).len();
+    let footer_rows = word_wrap_rows(vec![Line::raw(FOOTER)], inner_width).len();
     let height = body_rows
         .saturating_add(footer_rows)
         .saturating_add(2)
@@ -87,7 +84,11 @@ fn details_rows(
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let line = sanitize_terminal_text(line);
+            let line = line
+                .split('\n')
+                .map(sanitize_terminal_text)
+                .collect::<Vec<_>>()
+                .join("\n");
             if let Some((key, value)) = line.split_once(':') {
                 Line::from(vec![
                     Span::styled(format!("{key}:"), label),
@@ -99,12 +100,12 @@ fn details_rows(
                 } else {
                     text
                 };
-                Line::styled(line, style)
+                Line::from(Span::styled(line, style))
             }
         })
         .collect();
     // Scroll bounds and pixels consume these same rows without Paragraph wrapping again.
-    wrap_terminal_lines(rows, width)
+    word_wrap_rows(rows, width)
 }
 
 pub(super) fn render_info_details(
@@ -143,7 +144,7 @@ pub(super) fn render_info_details(
         geometry.body,
     );
     frame.render_widget(
-        Paragraph::new(Text::from(wrap_terminal_lines(
+        Paragraph::new(Text::from(word_wrap_rows(
             vec![Line::styled(FOOTER, Style::default().fg(visual.muted))],
             geometry.footer.width as usize,
         ))),

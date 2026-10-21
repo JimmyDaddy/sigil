@@ -254,7 +254,8 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
     render_config_header(frame, header_area, app, panel_bg, palette);
 
     let (mut main_lines, context_lines) = split_config_context_lines(app.config_detail_lines());
-    let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    let show_context_panel =
+        content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH && !context_lines.is_empty();
     if !show_context_panel && !context_lines.is_empty() {
         main_lines.push(String::new());
         main_lines.push("[details]".to_owned());
@@ -391,7 +392,8 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
     render_config_header_surface(frame, header_area, config, panel_bg, palette);
 
     let (mut main_lines, context_lines) = split_config_context_lines(config.detail_lines.clone());
-    let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    let show_context_panel =
+        content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH && !context_lines.is_empty();
     if !show_context_panel && !context_lines.is_empty() {
         main_lines.push(String::new());
         main_lines.push("[details]".to_owned());
@@ -634,7 +636,12 @@ fn render_config_footer_surface(
     let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
     let mut action_spans = Vec::new();
     let mut actions_width = 0usize;
-    for (index, action) in config.footer_actions.iter().enumerate() {
+    for (index, action) in config
+        .footer_actions
+        .iter()
+        .filter(|action| action.enabled)
+        .enumerate()
+    {
         let label = &action.label;
         if index > 0 {
             action_spans.push(Span::raw(" "));
@@ -773,7 +780,7 @@ pub(super) fn config_panel_height(
     max_height: u16,
 ) -> u16 {
     let palette = theme::default_palette();
-    let split = width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    let split = width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH && !context_lines.is_empty();
     let main_width = if split {
         width.saturating_sub(CONFIG_DETAIL_PANEL_WIDTH + 2)
     } else {
@@ -1030,7 +1037,10 @@ fn render_config_footer(
     let mut action_spans = Vec::new();
     let mut actions_width = 0usize;
     for (index, label) in action_labels.iter().copied().enumerate() {
-        if index > 0 {
+        if !app.config_footer_action_available(index) {
+            continue;
+        }
+        if !action_spans.is_empty() {
             action_spans.push(Span::raw(" "));
             actions_width += 1;
         }

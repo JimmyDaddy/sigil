@@ -804,7 +804,10 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
     }
 
     let (main_lines, panel_area, footer_area) = config_layout_parts(content_area, app);
-    let main_panel_area = if content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH {
+    let (_, context) = split_config_context_lines(app.config_detail_lines());
+    let show_context_panel =
+        content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH && !context.is_empty();
+    let main_panel_area = if show_context_panel {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -824,8 +827,7 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
         &super::theme::default_palette(),
     );
     let selected = visual.selected_rows(&main_lines);
-    let context_rows = if content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH {
-        let (_, context) = split_config_context_lines(app.config_detail_lines());
+    let context_rows = if show_context_panel {
         config_visual_rows(
             &context,
             CONFIG_DETAIL_PANEL_WIDTH.saturating_sub(2) as usize,
@@ -885,7 +887,8 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
 
 fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect, Option<Rect>) {
     let (mut main_lines, context_lines) = split_config_context_lines(app.config_detail_lines());
-    let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    let show_context_panel =
+        content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH && !context_lines.is_empty();
     if !show_context_panel && !context_lines.is_empty() {
         main_lines.push(String::new());
         main_lines.push("[details]".to_owned());
@@ -996,14 +999,19 @@ fn config_footer_action_hit_areas(area: Rect, app: &AppState) -> Vec<ConfigFoote
     let selected = app.config_selected_footer_action_label();
     let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
     let mut cursor = area.x;
+    let mut visible = 0;
     let end = area.x.saturating_add(area.width);
     app.config_footer_action_labels()
         .into_iter()
         .enumerate()
         .filter_map(|(index, label)| {
-            if index > 0 {
+            if !app.config_footer_action_available(index) {
+                return None;
+            }
+            if visible > 0 {
                 cursor = cursor.saturating_add(1);
             }
+            visible += 1;
             if cursor >= end {
                 return None;
             }

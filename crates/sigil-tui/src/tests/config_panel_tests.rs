@@ -1509,3 +1509,34 @@ fn config_display_helpers_cover_permission_and_verification_labels() {
     );
     assert_eq!(state.display_value(ConfigField::VerificationAutoRun), "off");
 }
+
+#[test]
+fn config_footer_skips_unavailable_objects_without_reordering_raw_action_ids() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+    for section in [
+        ConfigSection::Mcp,
+        ConfigSection::Agents,
+        ConfigSection::Skills,
+        ConfigSection::Plugins,
+    ] {
+        state.agent_profiles.clear();
+        state.skill_descriptors.clear();
+        state.plugin_manifests.clear();
+        state.set_section(section);
+        let actions = ConfigFooterAction::actions_for_section(section);
+        assert_eq!(actions.last(), Some(&ConfigFooterAction::Close));
+        state.focus_footer(ConfigFooterAction::SaveAndClose);
+        state.move_footer_action(true);
+        assert_eq!(state.selected_footer_action, ConfigFooterAction::Close);
+        state.move_footer_action(false);
+        assert_eq!(
+            state.selected_footer_action,
+            ConfigFooterAction::SaveAndClose
+        );
+        state.move_footer_action(false);
+        assert_eq!(state.selected_footer_action, ConfigFooterAction::Close);
+        let original_object_action =
+            ConfigFooterAction::action_for_section_index(section, 0).expect("original action");
+        assert!(!original_object_action.is_available(&state));
+    }
+}

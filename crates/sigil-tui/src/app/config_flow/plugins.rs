@@ -2,14 +2,18 @@ use super::*;
 
 pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
     lines.push("[discovery]".to_owned());
-    lines.push(render_config_readonly_row(
-        "Configured",
-        &format!("{} plugins", config_state.plugin_manifests.len()),
-    ));
-    lines.push(render_config_readonly_row(
-        "Warnings",
-        &format!("{} warnings", config_state.plugin_warnings.len()),
-    ));
+    if !config_state.plugin_manifests.is_empty() {
+        lines.push(render_config_readonly_row(
+            "Configured",
+            &format!("{} plugins", config_state.plugin_manifests.len()),
+        ));
+    }
+    if !config_state.plugin_warnings.is_empty() {
+        lines.push(render_config_readonly_row(
+            "Warnings",
+            &format!("{} warnings", config_state.plugin_warnings.len()),
+        ));
+    }
     if config_state.plugin_manifests.is_empty() {
         lines.push(render_config_hint_row("No plugin manifests discovered"));
         lines.push(render_config_hint_row(

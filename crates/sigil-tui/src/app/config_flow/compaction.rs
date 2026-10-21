@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
-    lines.push("[context]".to_owned());
+    lines.push("[configuration preference]".to_owned());
     lines.push(render_config_value_row(
         config_state,
         ConfigField::CompactionEnabled,
@@ -18,6 +18,11 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         config_state,
         ConfigField::CompactionContextWindowTokens,
     ));
-    lines.push(format!("status: {}", app.runtime.compaction_status));
+    lines.push(String::new());
+    lines.push("[current session]".to_owned());
+    lines.push(render_config_readonly_row(
+        "Compaction status",
+        &app.runtime.compaction_status,
+    ));
     lines.extend(render_config_selection_details(config_state));
 }

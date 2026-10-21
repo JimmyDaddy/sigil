@@ -141,3 +141,61 @@ fn absent_intent_states_have_one_status_full_reason_and_no_empty_action_panels()
     }
     Ok(())
 }
+
+#[test]
+fn compact_intent_short_state_sizes_to_content_and_long_reason_keeps_fixed_footer()
+-> anyhow::Result<()> {
+    for phase in [
+        IntentStackModalPhase::Unavailable,
+        IntentStackModalPhase::NotCreated,
+    ] {
+        let mut state = view(0);
+        state.phase = phase;
+        state.detail_lines = vec!["No saved intents in this session.".to_owned()];
+        state.error = None;
+        let screen = Rect::new(0, 0, 80, 24);
+        let short = intent_stack_modal_layout(screen, &state);
+        assert!(
+            short.area.height <= 8,
+            "a short empty state must not fill the terminal"
+        );
+        assert_eq!(short.list, Rect::default());
+        assert!(short.row_areas.is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        terminal.draw(|frame| {
+            render_intent_stack_modal_view(frame, &state, &theme::default_palette())
+        })?;
+        let corners = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "╭")
+            .count();
+        assert_eq!(corners, 1, "compact state has one outer border");
+        state.detail_lines = vec![format!(
+            "HEAD\n{}\nTAIL",
+            "完整原因 e\u{301}🙂 ".repeat(600)
+        )];
+        let long = intent_stack_modal_layout(screen, &state);
+        let (max, page) =
+            super::intent_stack_compact_scroll_bounds(80, 24, &state).expect("compact bounds");
+        assert!(max > page);
+        state.detail_scroll = max.min(u16::MAX as usize) as u16;
+        terminal.draw(|frame| {
+            render_intent_stack_modal_view(frame, &state, &theme::default_palette())
+        })?;
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("TAIL"));
+        assert!(text.contains("Esc close"));
+        assert!(long.detail.bottom() <= long.actions.y);
+        assert_eq!(long.actions.bottom(), long.area.bottom() - 1);
+    }
+    Ok(())
+}

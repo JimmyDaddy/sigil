@@ -161,3 +161,28 @@ fn keyboard_help_wraps_wide_characters_once_and_reaches_the_exact_tail() -> Resu
     assert!(rendered.contains("Esc/Enter close"));
     Ok(())
 }
+
+#[test]
+fn keyboard_help_words_preserve_real_spacing_and_do_not_split_short_words() {
+    let source = "Key:  Review the selected file before continuing.";
+    let rows = help_rows(&[source.to_owned()], 18, None);
+    assert_eq!(
+        rows.iter().map(ToString::to_string).collect::<String>(),
+        source
+    );
+    assert!(rows.iter().any(|row| row.to_string().contains("selected")));
+    assert!(
+        rows.iter()
+            .all(|row| crate::ui::text::terminal_cell_width(&row.to_string()) <= 18)
+    );
+}
+
+#[test]
+fn keyboard_help_unlabelled_multiline_rows_preserve_blank_lines_and_real_spaces() {
+    let lines = vec!["Read this first\n\nKeep  both spaces e\u{301}🙂\n".to_owned()];
+    let rows = help_rows(&lines, 80, None);
+    assert_eq!(
+        rows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Read this first", "", "Keep  both spaces e\u{301}🙂", ""]
+    );
+}

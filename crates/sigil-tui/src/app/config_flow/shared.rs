@@ -74,8 +74,9 @@ pub(super) fn focus_first_config_footer_action(
     config_state: &mut ConfigState,
 ) -> ConfigFooterAction {
     let action = ConfigFooterAction::actions_for_section(config_state.selected_section)
-        .first()
+        .iter()
         .copied()
+        .find(|action| action.is_available(config_state))
         .unwrap_or(ConfigFooterAction::Close);
     config_state.focus_footer(action);
     action

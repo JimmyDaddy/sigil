@@ -16,6 +16,8 @@ use super::{
     theme::{self, ThemePalette},
 };
 
+const COMPACT_FOOTER: &str = "R refresh · PgUp/PgDn scroll · Home/End · Esc close";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IntentStackModalLayout {
     pub(super) area: Rect,
@@ -53,7 +55,7 @@ fn render_intent_stack_modal_view(
     let layout = intent_stack_modal_layout(frame.area(), view);
     let area = layout.area;
     let backdrop = halo_rect(area, frame.area(), 5, 2);
-    if backdrop.width > 0 && backdrop.height > 0 {
+    if !compact_state(view) && backdrop.width > 0 && backdrop.height > 0 {
         frame.render_widget(Clear, backdrop);
         frame.render_widget(
             Block::default()
@@ -106,8 +108,11 @@ fn render_intent_stack_modal_view(
             layout.detail,
         );
         frame.render_widget(
-            Paragraph::new("R refresh · PgUp/PgDn scroll · Home/End · Esc close")
-                .style(Style::default().fg(palette.text_secondary)),
+            Paragraph::new(Text::from(wrap_terminal_lines(
+                vec![Line::raw(COMPACT_FOOTER)],
+                layout.actions.width as usize,
+            )))
+            .style(Style::default().fg(palette.text_secondary)),
             layout.actions,
         );
         return;
@@ -158,11 +163,20 @@ pub(super) fn intent_stack_modal_layout(
         .saturating_sub(4)
         .clamp(20, 116)
         .min(screen.width);
-    let height = screen
-        .height
-        .saturating_sub(2)
-        .clamp(8, 38)
-        .min(screen.height);
+    let height = if compact_state(view) {
+        let inner_width = width.saturating_sub(2) as usize;
+        let rows = compact_status_rows(view, inner_width).len();
+        let footer = wrap_terminal_lines(vec![Line::raw(COMPACT_FOOTER)], inner_width).len();
+        rows.saturating_add(footer)
+            .saturating_add(2)
+            .min(screen.height.saturating_sub(2).max(screen.height.min(3)) as usize) as u16
+    } else {
+        screen
+            .height
+            .saturating_sub(2)
+            .clamp(8, 38)
+            .min(screen.height)
+    };
     let area = centered_rect(width, height, screen);
     let inner = Rect::new(
         area.x.saturating_add(1),
@@ -171,6 +185,9 @@ pub(super) fn intent_stack_modal_layout(
         area.height.saturating_sub(2),
     );
     if compact_state(view) {
+        let footer_rows =
+            wrap_terminal_lines(vec![Line::raw(COMPACT_FOOTER)], inner.width as usize).len();
+        let footer_height = (footer_rows as u16).min(inner.height.saturating_sub(1));
         return IntentStackModalLayout {
             area,
             summary: Rect::default(),
@@ -179,9 +196,14 @@ pub(super) fn intent_stack_modal_layout(
                 inner.x,
                 inner.y,
                 inner.width,
-                inner.height.saturating_sub(2),
+                inner.height.saturating_sub(footer_height),
             ),
-            actions: Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            actions: Rect::new(
+                inner.x,
+                inner.bottom().saturating_sub(footer_height),
+                inner.width,
+                footer_height,
+            ),
             row_areas: Vec::new(),
             primary_action: Rect::default(),
         };

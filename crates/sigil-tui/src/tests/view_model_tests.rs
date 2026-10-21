@@ -1550,3 +1550,72 @@ fn live_progress_titles_cover_known_custom_and_phase_labels() {
         "Working"
     );
 }
+
+#[test]
+fn info_details_prioritize_typed_attention_and_complete_usage_before_optional_modules() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.runtime.code_intelligence_diagnostics_by_path.insert(
+        "src/broken.rs".to_owned(),
+        crate::approval::ApprovalDiagnosticSummary {
+            errors: 1,
+            warnings: 0,
+        },
+    );
+    let lines = info_rail_detail_lines(&app);
+    assert_eq!(lines.first().map(String::as_str), Some("Attention"));
+    assert!(
+        lines
+            .iter()
+            .position(|line| line == "src/broken.rs: 1 error")
+            .expect("real error")
+            < lines
+                .iter()
+                .position(|line| line == "Workspace")
+                .expect("workspace")
+    );
+    let usage = lines
+        .iter()
+        .position(|line| line == "Usage")
+        .expect("usage");
+    for module in ["Task", "Agents", "MCP", "LSP"] {
+        if let Some(index) = lines.iter().position(|line| line == module) {
+            assert!(usage < index);
+        }
+    }
+    for fact in app.usage_detail_lines() {
+        assert!(lines.contains(&fact), "usage fact lost: {fact}");
+    }
+}
+
+#[test]
+fn info_details_keep_known_zero_unknown_partial_and_unreported_usage_distinct() {
+    for (estimated, unknown, cache_reported, cost, cache) in [
+        (0, 0, false, "not estimated (no usage)", "not reported"),
+        (
+            0,
+            1,
+            false,
+            "not estimated (pricing unavailable)",
+            "not reported",
+        ),
+        (1, 0, true, "USD 0.0000", "0"),
+        (
+            1,
+            1,
+            true,
+            "partially estimated (1/2 requests; pricing unavailable)",
+            "0",
+        ),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.runtime.stats.estimated_requests = estimated;
+        app.runtime.stats.unestimated_requests = unknown;
+        app.runtime.stats.cache_write_observed = cache_reported;
+        let lines = info_rail_detail_lines(&app);
+        assert!(lines.contains(&format!("total spent: {cost}")));
+        assert!(lines.contains(&format!("cache tokens: read 0 · write {cache} · miss 0")));
+        for fact in app.usage_detail_lines() {
+            assert!(lines.contains(&fact), "usage fact lost: {fact}");
+        }
+    }
+}
