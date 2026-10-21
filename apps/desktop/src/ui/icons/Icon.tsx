@@ -1,6 +1,6 @@
 import type { SVGAttributes } from "react";
 
-export type IconName = "add" | "agents" | "appearance-auto" | "back" | "check" | "chevron-down" | "chevron-up" | "close" | "copy" | "delete" | "download" | "edit" | "extensions" | "external" | "filter" | "history" | "interrupt-next" | "language" | "library" | "lock" | "menu" | "model" | "moon" | "more" | "pause" | "pin" | "play" | "queue" | "search" | "send" | "settings" | "shield" | "stack" | "stop" | "sun" | "warning";
+export type IconName = "add" | "agents" | "appearance-auto" | "back" | "check" | "chevron-down" | "chevron-up" | "close" | "copy" | "delete" | "download" | "edit" | "extensions" | "external" | "filter" | "history" | "image" | "interrupt-next" | "language" | "library" | "lock" | "menu" | "model" | "moon" | "more" | "pause" | "pin" | "play" | "queue" | "search" | "send" | "settings" | "shield" | "stack" | "stop" | "sun" | "warning";
 
 const paths: Record<IconName, string> = {
   add: "M12 5v14M5 12h14",
@@ -19,6 +19,7 @@ const paths: Record<IconName, string> = {
   external: "M14 4h6v6m0-6-9 9M19 14v5H5V5h5",
   filter: "M4 6h16M7 12h10m-7 6h4",
   history: "M4 12a8 8 0 1 0 2.3-5.7L4 8m0-5v5h5m3-1v5l3 2",
+  image: "M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01",
   "interrupt-next": "M4 7h9m-9 5h6m-6 5h9m3-11v12m0-6 4 4m-4-4 4-4",
   language: "M4 5h10M9 3v2m-3 4c1.6 3.2 4.4 5.5 8 6.5M13 8c-1.2 4-4.1 7.2-8 9m10-5 4 9m-6 0 4-9 4 9m-6-3h6",
   library: "M4 5h16v14H4zM8 5v14m4-10h5m-5 4h5",

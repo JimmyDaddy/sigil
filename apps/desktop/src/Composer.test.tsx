@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createRef, type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -1180,4 +1182,70 @@ it("uses Shift+Tab for backward focus without accepting a suggestion, while Tab 
   await user.tab();
   await waitFor(() => expect(onOpenSettings).toHaveBeenCalledOnce());
   expect(onSubmit).not.toHaveBeenCalled();
+});
+
+
+describe("compact composer presentation", () => {
+  it("keeps the image picker in the editing toolbar with accessible busy feedback and the exact draft", async () => {
+    const user = userEvent.setup();
+    let settle!: (image: DraftImage | null) => void;
+    const pending = new Promise<DraftImage | null>((resolve) => { settle = resolve; });
+    const onPickImage = vi.fn(() => pending);
+    const { onSubmit } = renderComposer({ onPickImage });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "    原始草稿  \n";
+    setEditorText(input, source);
+    const attach = screen.getByRole("button", { name: "Attach image" });
+    const tools = attach.closest(".composer-editing-tools");
+    expect(tools?.contains(screen.getByRole("button", { name: "Format" }))).toBe(true);
+    expect(tools?.contains(screen.getByRole("button", { name: "Preview" }))).toBe(true);
+    expect(attach.getAttribute("title")).toBe("Attach image");
+    expect(attach.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
+    expect(attach.textContent).toBe("");
+    await user.click(attach);
+    expect(onPickImage).toHaveBeenCalledOnce();
+    const busy = screen.getByRole("button", { name: "Attaching image…" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(busy.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(input);
+    expect(editorText(input)).toBe(source);
+    await act(async () => { settle(draftImage); await pending; });
+    expect(screen.getByRole("img", { name: "Image 1" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Attach image" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(editorText(input)).toBe(source);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("uses controlled Markdown typography for preview headings, task lists and quotes without changing source", async () => {
+    const parsed = document.createElement("style");
+    parsed.textContent = readFileSync(resolve(process.cwd(), "src/features/conversation/conversation.css"), "utf8");
+    document.head.append(parsed);
+    const features = Array.from(parsed.sheet!.cssRules).find((rule) =>
+      "name" in rule && rule.name === "features"
+    ) as CSSGroupingRule;
+    const style = document.createElement("style");
+    style.textContent = Array.from(features.cssRules, (rule) => rule.cssText).join("\n");
+    parsed.replaceWith(style);
+    try {
+      const user = userEvent.setup();
+      renderComposer();
+      const input = screen.getByRole("combobox", { name: "Message Sigil" });
+      const source = "# Preview heading\n\nA paragraph.\n\n> A quote.\n\n- [ ] First\n- [x] Second\n\n`inline`\n\n```text\n  exact code  \n```";
+      setEditorText(input, source);
+      const editor = editorView(input);
+      await user.click(screen.getByRole("button", { name: "Preview" }));
+      const preview = screen.getByRole("region", { name: "Preview" });
+      expect(getComputedStyle(within(preview).getByRole("heading", { level: 1 })).fontSize).toBe("19px");
+      expect(getComputedStyle(preview.querySelector(".contains-task-list")!).listStyle).toBe("none");
+      expect(getComputedStyle(preview.querySelector(".task-list-item")!).display).toBe("flex");
+      expect(getComputedStyle(preview.querySelector("blockquote")!).paddingLeft).toBe("10px");
+      expect(getComputedStyle(preview.querySelector("blockquote")!).marginLeft).toBe("0px");
+      expect(preview.querySelector("pre code")?.textContent).toBe("  exact code  \n");
+      expect(getComputedStyle(preview.querySelector("pre code")!).padding).not.toBe("1px 4px");
+      expect(editorText(input)).toBe(source);
+      expect(editorView(input)).toBe(editor);
+    } finally {
+      style.remove();
+    }
+  });
 });

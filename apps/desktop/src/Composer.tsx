@@ -502,8 +502,6 @@ export function Composer({
             <Button type="button" variant="quiet" onClick={() => removeImage(image.attachmentId)} aria-label={t("removeImage", { count: index + 1 })}>×</Button>
           </figure>)}
         </div> : null}
-        {onPickImage !== undefined ? <Button type="button" variant="quiet" busy={imageBusy} disabled={active || submitting} onClick={() => void addImage(onPickImage)}>{imageBusy ? t("attachingImage") : t("attachImage")}</Button> : null}
-
         {selectedSkill !== undefined || selectedAgent !== undefined ? (
           <div className="composer-bindings" aria-label={t("activeExtensions")}>
             {selectedSkill !== undefined ? (
@@ -536,6 +534,15 @@ export function Composer({
         ) : null}
         {draftUnsaved ? <small role="status" className="composer-draft-warning">{t("draftNotSaved")}</small> : null}
         <div className="composer-editing-tools">
+          {onPickImage !== undefined ? <IconButton
+            type="button"
+            aria-label={imageBusy ? t("attachingImage") : t("attachImage")}
+            title={imageBusy ? t("attachingImage") : t("attachImage")}
+            aria-busy={imageBusy || undefined}
+            disabled={active || submitting || imageBusy}
+            onClick={() => void addImage(onPickImage)}
+            icon={<Icon name="image" />}
+          /> : null}
           <Popover label={t("markdownFormat")} accessibleLabel={t("markdownFormat")} className="composer-format" open={formatOpen} onOpenChange={setFormatOpen} align="start">
             <div className="composer-format-actions">
               {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => (
