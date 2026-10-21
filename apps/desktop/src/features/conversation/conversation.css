@@ -629,6 +629,12 @@
 
 .approval-dock { display: grid; position: sticky; z-index: 3; bottom: 0; width: min(var(--conversation-content-max-width), calc(100% - var(--conversation-content-gutter) - var(--conversation-content-gutter))); min-width: 0; max-height: min(62vh, 520px); align-self: center; flex: 0 0 auto; gap: 11px; padding: var(--sg-sys-space-4); overflow: hidden; border: 1px solid var(--sg-domain-color-on-warning); border-radius: var(--sg-sys-radius-lg); background: var(--sg-domain-color-warning); box-shadow: var(--sg-sys-elevation-dock); }
 .conversation-panel:has(.composer-document[data-review-active="true"]) .approval-dock { flex-shrink: 1; min-height: 180px; max-height: min(48dvh, 520px); }
+@media (max-height: 640px) {
+  .conversation-panel:has(.composer-document[data-review-active="true"]) { gap: var(--sg-sys-space-2); padding-block: var(--sg-sys-space-2); }
+  .conversation-panel:has(.composer-document[data-review-active="true"]) .timeline { padding-block: var(--sg-sys-space-1); }
+  .conversation-panel:has(.composer-document[data-review-active="true"]) .approval-dock { gap: var(--sg-sys-space-2); padding: var(--sg-sys-space-3); }
+  .conversation-panel:has(.composer-document[data-review-active="true"]) .composer { padding-top: 0; }
+}
 .approval-dock:has(.approval-review) { grid-template-rows: auto minmax(0, 1fr) auto; }
 .approval-review { display: grid; min-width: 0; min-height: 0; grid-auto-rows: max-content; align-content: start; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
 .approval-review > * { min-width: 0; }
