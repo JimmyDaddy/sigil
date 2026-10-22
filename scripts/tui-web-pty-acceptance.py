@@ -10,6 +10,7 @@ and rendered-TUI contracts without contacting a real provider or the network.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import pty
@@ -30,6 +31,15 @@ from typing import Callable
 from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
+SUPPORT_SCRIPT = Path(__file__).with_name("tui-stateful-pty-acceptance.py")
+SUPPORT_SPEC = importlib.util.spec_from_file_location("tui_web_stateful_support", SUPPORT_SCRIPT)
+assert SUPPORT_SPEC is not None and SUPPORT_SPEC.loader is not None
+SUPPORT = importlib.util.module_from_spec(SUPPORT_SPEC)
+sys.modules[SUPPORT_SPEC.name] = SUPPORT
+SUPPORT_SPEC.loader.exec_module(SUPPORT)
+
+PTY_ROWS = 40
+PTY_COLS = 120
 ANSI_RE = re.compile(
     rb"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>])"
 )
@@ -420,7 +430,7 @@ class PtyRunner:
 
     def start(self) -> None:
         master_fd, slave_fd = pty.openpty()
-        termios.tcsetwinsize(slave_fd, (40, 120))
+        termios.tcsetwinsize(slave_fd, (PTY_ROWS, PTY_COLS))
         try:
             self.process = subprocess.Popen(
                 self.command,
@@ -465,16 +475,23 @@ class PtyRunner:
     def rendered(self) -> str:
         return strip_control(bytes(self.output))
 
+    def screen(self) -> str:
+        screen = SUPPORT.VtScreen(rows=PTY_ROWS, cols=PTY_COLS)
+        screen.feed(bytes(self.output))
+        return screen.text()
+
     def wait_until(
         self,
         predicate: Callable[[str], bool],
         timeout: float,
         description: str,
+        *,
+        final_screen: bool = False,
     ) -> str:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.read_available(0.1)
-            rendered = self.rendered()
+            rendered = self.screen() if final_screen else self.rendered()
             if predicate(rendered):
                 return rendered
             if self.process is not None and self.process.poll() is not None:
@@ -567,8 +584,7 @@ def looks_like_trust_gate(text: str) -> bool:
 
 
 def looks_like_main_tui_ready(text: str) -> bool:
-    lowered = text.lower()
-    return "agent:" in lowered and ("build" in lowered or "session" in lowered)
+    return not looks_like_trust_gate(text) and SUPPORT.looks_like_main_tui(text)
 
 
 def write_config(path: Path, port: int) -> None:
@@ -823,6 +839,7 @@ def main() -> int:
             lambda text: looks_like_trust_gate(text) or looks_like_main_tui_ready(text),
             min(30.0, args.timeout),
             "initial TUI screen",
+            final_screen=True,
         )
         if looks_like_trust_gate(initial):
             runner.send("\r")
@@ -830,6 +847,7 @@ def main() -> int:
                 looks_like_main_tui_ready,
                 min(30.0, args.timeout),
                 "main TUI screen after workspace trust",
+                final_screen=True,
             )
 
         runner.type_text("Use websearch and answer from the fixture result.")

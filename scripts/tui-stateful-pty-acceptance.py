@@ -1380,10 +1380,11 @@ def looks_like_trust_gate(text: str) -> bool:
 
 def looks_like_main_tui(text: str) -> bool:
     lowered = text.lower()
+    # The default agent is intentionally absent from the composer. Match its visible gutter
+    # and mode/permission row instead of metadata that can also occur in startup errors.
     return (
         not looks_like_trust_gate(text)
-        and "agent:" in lowered
-        and ("build" in lowered or "session" in lowered)
+        and re.search(r"(?m)^[ \t]*▌[ \t]*(?:build|plan)[ \t]*·[ \t]*\S", lowered) is not None
     )
 
 
@@ -1415,12 +1416,11 @@ def looks_like_open_plan_workbench(text: str) -> bool:
 
 
 def looks_like_dismissed_plan_preview(text: str) -> bool:
-    lowered = text.lower()
     return (
         "Plan ready" not in text
         and "Plan Review" not in text
         and not looks_like_busy_tui(text)
-        and "build · agent:" in lowered
+        and looks_like_main_tui(text)
     )
 
 
@@ -1474,6 +1474,7 @@ def wait_for_main_tui(runner: PtyRunner, timeout: float) -> None:
         lambda text: looks_like_trust_gate(text) or looks_like_main_tui(text),
         timeout,
         "initial TUI",
+        final_screen=True,
     )
     if looks_like_trust_gate(initial):
         runner.send("\r")

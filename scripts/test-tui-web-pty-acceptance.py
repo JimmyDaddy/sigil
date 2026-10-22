@@ -19,6 +19,48 @@ SPEC.loader.exec_module(MODULE)
 
 
 class WebPtyAcceptanceTests(unittest.TestCase):
+    def test_main_probe_recognizes_the_current_composer_without_agent_metadata(self) -> None:
+        for header in (
+            "▌ Build · danger-full-access     fixture-model",
+            "▌ Plan · manual     fixture-model",
+            "▌ Build · reviewer · manual     fixture-model",
+        ):
+            with self.subTest(header=header):
+                self.assertTrue(MODULE.looks_like_main_tui_ready(
+                    f"{header}\n▌\nEnter send · Ctrl-J newline · F4 details"
+                ))
+
+    def test_main_probe_rejects_trust_setup_and_startup_recovery(self) -> None:
+        for screen in (
+            "Workspace trust\ntrust this workspace\n▌ Build · manual     fixture-model",
+            "Trust workspace\n▌ Build · manual     fixture-model",
+            "Set up a model connection\nStep 1 of 4 · Choose the provider\n"
+            "> DeepSeek · Add an API key next",
+            "Startup diagnostics\nConfiguration is saved. Sigil has not started.\n"
+            "agent: main could not build the session\n[Esc] Back to startup",
+            "Build · agent: main\nstate: ready",
+        ):
+            with self.subTest(screen=screen):
+                self.assertFalse(MODULE.looks_like_main_tui_ready(screen))
+
+    def test_startup_wait_uses_the_current_vt_frame_instead_of_prior_trust_text(self) -> None:
+        runner = MODULE.PtyRunner(["sigil"], Path("."), {}, Path("unused.log"))
+        runner.output.extend(
+            b"\x1b[?1049h\x1b[2J\x1b[HWorkspace trust\r\ntrust this workspace"
+            b"\x1b[2J\x1b[H\x1b[36;2H"
+            + "▌".encode()
+            + b"\x1b[36;4HBuild"
+            + " · danger-full-access     fixture-model".encode()
+            + b"\x1b[40;3HEnter send"
+            + " · Ctrl-J newline · F4 details".encode()
+        )
+        self.assertTrue(MODULE.looks_like_trust_gate(runner.rendered()))
+        screen = runner.wait_until(
+            MODULE.looks_like_main_tui_ready, 0.1, "current main TUI", final_screen=True,
+        )
+        self.assertFalse(MODULE.looks_like_trust_gate(screen))
+        self.assertIn("▌ Build · danger-full-access", screen)
+
     def test_semantic_title_request_is_routed_outside_conversation_turns(self) -> None:
         payload = {
             "messages": [

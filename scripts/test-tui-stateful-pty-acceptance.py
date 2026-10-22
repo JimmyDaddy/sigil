@@ -53,9 +53,59 @@ def session_evidence() -> dict[str, dict[str, str]]:
 
 class VtScreenTests(unittest.TestCase):
     def test_main_tui_does_not_treat_workspace_trust_as_ready(self) -> None:
-        trust_screen = "Workspace trust\ntrust this workspace\nBuild · agent: main"
+        trust_screen = "Workspace trust\ntrust this workspace\n▌ Build · manual"
         self.assertFalse(MODULE.looks_like_main_tui(trust_screen))
-        self.assertTrue(MODULE.looks_like_main_tui("Build · agent: main\nstate: ready"))
+
+    def test_main_tui_recognizes_current_composer_without_default_agent_metadata(self) -> None:
+        screen = (
+            "workspace\n git: master · clean\n state: ready\n\n"
+            "no messages yet\nsend a prompt to start\n"
+            " ▌ ─────────────────────────────────────\n"
+            " ▌ Build · manual     direct-task-fixture-model\n ▌\n"
+            "Enter send · Ctrl-J newline · F4 details"
+        )
+        self.assertNotIn("agent:", screen)
+        self.assertTrue(MODULE.looks_like_main_tui(screen))
+        self.assertTrue(MODULE.looks_like_main_tui(
+            " ▌ Plan · manual     deepseek-v4-flash\n ▌\nEnter review · Shift-Tab reopen"
+        ))
+        self.assertTrue(MODULE.looks_like_main_tui(
+            "Thinking...\n ▌ Build · reviewer · manual     deepseek-v4-flash\n"
+            "Ctrl-C stop · Enter add follow-up"
+        ))
+
+    def test_main_tui_rejects_setup_recovery_and_unstructured_main_labels(self) -> None:
+        for screen in (
+            "Set up a model connection\nStep 1 of 4 · Choose the provider\n"
+            "> DeepSeek · Add an API key next\nUp/Down choose · Enter continue · Ctrl-C quit",
+            "Startup\nConfiguration saved · Not started\n"
+            "Another Sigil instance is still using this workspace.\n"
+            "[Enter] Retry Start\n[F1] Diagnostics\n[F2] Edit connection",
+            "Build · agent: main\nstate: ready",
+            "Build · manual\nstate: ready\nEnter send",
+            "▌ Build ·\nEnter send",
+        ):
+            with self.subTest(screen=screen):
+                self.assertFalse(MODULE.looks_like_main_tui(screen))
+
+    def test_startup_wait_uses_the_current_frame_after_trust_is_dismissed(self) -> None:
+        runner = MODULE.PtyRunner(
+            ["sigil"], Path("."), {}, Path("unused.log"), rows=24, cols=80,
+        )
+        runner.output.extend(
+            MODULE.ENTER_ALTERNATE_SCREEN
+            + MODULE.ERASE_SCROLLBACK
+            + MODULE.CLEAR_SCREEN
+            + MODULE.CURSOR_HOME
+            + b"Workspace trust\r\ntrust this workspace"
+            + MODULE.CLEAR_SCREEN
+            + MODULE.CURSOR_HOME
+            + "▌ Build · manual     direct-task-fixture-model\r\n"
+              "▌\r\nEnter send · Ctrl-J newline · F4 details".encode()
+        )
+        with mock.patch.object(runner, "read_available"), mock.patch.object(runner, "send") as send:
+            MODULE.wait_for_main_tui(runner, 0.1)
+        send.assert_not_called()
 
     def test_cache_fixture_is_cold_then_warm_and_aggregates_to_8_percent(self) -> None:
         observations = [MODULE.cache_usage_for_request(index) for index in range(1, 6)]
@@ -460,7 +510,7 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
         self.assertFalse(MODULE.looks_like_open_plan_workbench(f"{workbench}\nThinking..."))
         self.assertTrue(
             MODULE.looks_like_dismissed_plan_preview(
-                "plan rejected\nBuild · agent: main"
+                "plan rejected\n▌ Build · manual     deepseek-v4-flash\nEnter send"
             )
         )
 

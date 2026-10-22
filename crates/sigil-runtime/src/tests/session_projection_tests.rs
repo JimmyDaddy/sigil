@@ -319,12 +319,12 @@ fn catalog_reader_busy_preserves_last_valid_row_and_recovers_after_real_writer_r
         original,
         "busy is not evidence of an invalid zero-message source"
     );
+    drop(writer);
     assert_eq!(
         fs::read(&source)?,
         bytes,
         "the catalog must not repair the journal"
     );
-    drop(writer);
     // The live owner can append after the observer has returned. Catalog snapshots retain no
     // writer lease or data-file shared lock, and the next bounded refresh sees the real write.
     store.append(&SessionLogEntry::User(ModelMessage::user(
