@@ -1,6 +1,6 @@
 # Sigil Rust Agent 核心技术方案（Implementation Snapshot v1）
 
-> **2026-09-22 架构实施状态**：[RFC-0077：模型自主决策与 Harness 职责收敛](rfcs/0077-model-autonomy-and-harness-boundaries-v1.md) 的 R77.0—R77.8 均已完成；DeepSeek V4 Flash 完整 50-fixture × 3-repetition 真实模型资格化 150/150 accepted，route gate Qualified，hard invariants 0。Direct Task 漏路由率为 44,444 ppm（2/45 repetitions，仍在资格合同阈值内）。普通工具循环、PlanReview 普通循环、模型维护 checklist、Direct Task 后台 owner 与恢复、按需读取子代理结果均已在生产路径实现并有隔离测试。逐项证据见 [R77 执行计划](../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)。
+> **2026-09-22 架构实施状态**：[RFC-0077：模型自主决策与 Harness 职责收敛](rfcs/0077-model-autonomy-and-harness-boundaries-v1.md) 的 R77.0—R77.8 均已完成；DeepSeek V4 Flash 完整 50-fixture × 3-repetition 真实模型资格化 150/150 accepted，route gate Qualified，hard invariants 0。Direct Task 漏路由率为 44,444 ppm（2/45 repetitions，仍在资格合同阈值内）。普通工具循环、PlanReview 普通循环、模型维护 checklist、Direct Task 后台 owner 与恢复、按需读取子代理结果均已在生产路径实现并有隔离测试。逐项证据保存在 `.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md`；这是未公开发布的本地台账，公开 checkout 不可访问。
 
 > **2026-09-20 Task 编排硬切换**：Task 的业务下一步完全由主模型通过实际工具调用决定。新 Task 只接受当前 direct admission；旧 planner、DAG、TaskPlan continuation 和 synthesis/recovery 记录不迁移、不恢复、不重放，遇到这些记录在 authority 边界直接 fail closed。Host 仍负责权限、审批、资源、进程、取消、持久化和验证事实，但不替模型选择业务步骤。
 

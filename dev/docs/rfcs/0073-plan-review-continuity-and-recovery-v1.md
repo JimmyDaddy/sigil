@@ -6,7 +6,7 @@
 
 范围：显式 `/plan`、自动 PlanReview、方案修订，以及 Desktop / TUI 对这些流程的共同呈现。
 
-实施切片见[执行计划](../../../.repo-local-dev/rfcs/0073-plan-review-continuity-and-recovery-v1-execution-plan.md)。
+实施切片记录于 `.repo-local-dev/rfcs/0073-plan-review-continuity-and-recovery-v1-execution-plan.md`（本地执行计划与证据，未公开发布，公开 checkout 不可访问）。
 
 ## 2026-09-11 生成链路局部消融
 
@@ -56,7 +56,7 @@
 - [RFC-0069 可恢复性与 Plan 直接执行](0069-recoverability-boundaries-plan-materialization-and-workspace-concurrency-v1.md)
 - [RFC-0070 application / TUI 边界](0070-independent-publishable-tui-framework-and-application-adapter-v1.md)
 - [RFC-0071 资源 authority](0071-unified-resource-authority-and-sandbox-lifecycle-v1.md)
-- [当前资源 journal 移除方向](../../../.repo-local-dev/rfcs/0071-resource-journal-removal-execution-plan.md)
+- 资源 journal 移除历史记录：`.repo-local-dev/rfcs/0071-resource-journal-removal-execution-plan.md`（本地实施证据，未公开发布，公开 checkout 不可访问）；当前公开约束见[工程规范](../../governance/engineering-standards.md)
 - [代码规范](../../governance/code-standards.md)、[工程规范](../../governance/engineering-standards.md)、[测试隔离](../test-isolation.md)
 
 本 RFC 拟替代 RFC-0063 中“文字结果的处置、研究到 finalizer 的数据交接和纠错”对应条款，并细化 RFC-0069 的 Plan 故障隔离。实施前不把本 RFC 的拟议行为写成现状。

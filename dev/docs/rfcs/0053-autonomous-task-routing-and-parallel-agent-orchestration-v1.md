@@ -2,7 +2,7 @@
 
 > **历史 RFC，当前实现以 RFC-0077 为准。** 本文的 host Task scheduler、Planner/Participant/Synthesis 阶段、步骤并发配置、旧恢复协议及 pending Plan/Task 必经选择均已从生产路径退役；不对其持久化协议做恢复或迁移。当前业务编排由模型在普通工具循环中决定，host 只执行结构化授权与可靠性边界。
 
-历史状态：accepted / O0-O8d implementation complete。该完成记录不表示本文中的旧 Task scheduler 仍在当前生产路径中；当前状态见 [RFC-0077 执行计划](../../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)。
+历史状态：accepted / O0-O8d implementation complete。该完成记录不表示本文中的旧 Task scheduler 仍在当前生产路径中；当前模型与 host 的职责边界见 [RFC-0077](0077-model-autonomy-and-harness-boundaries-v1.md)。
 
 创建日期：2026-07-22
 

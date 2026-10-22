@@ -8,7 +8,7 @@
 
 修订日期：2026-08-23
 
-审查记录：[RFC-0070 architecture review](../../../.repo-local-dev/review/rfc-0070-independent-publishable-tui-framework-review-2026-08-23.md)
+审查记录：`.repo-local-dev/review/rfc-0070-independent-publishable-tui-framework-review-2026-08-23.md`（本地 architecture review，未公开发布，公开 checkout 不可访问）
 
 依赖：
 

@@ -2,7 +2,7 @@
 
 日期：2026-09-22。状态：**implementation complete；R77.0—R77.8 已完成，完整真实模型资格化通过**。
 
-实施台账：[R77 执行计划](../../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)。
+实施台账：`.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md`（本地执行计划与证据，未公开发布，公开 checkout 不可访问）。
 
 ## 1. 目标与边界
 
@@ -12,7 +12,7 @@ Sigil 提供模型可以选择的工具，并负责可靠执行、权限、资�
 
 本 RFC 处理七项当前限制及旧协议残留。采用现有 crate、agent loop、工具、权限分析、application contract 与日志，不新增 workflow engine、任务规划器、策略 DSL 或第二套恢复系统。
 
-本 RFC 初稿阶段仅获准设计；用户随后明确授权按执行计划实施，并要求不保留旧代码或历史数据兼容。日志继续 append-only，不自动改写或删除用户文件；遇到已退役 schema 时明确失败，不转换旧语义。R77.8 已使用专用配置与 USD 1,000 调用预算完成 DeepSeek V4 Flash 的 50-fixture × 3-repetition 真实模型资格化；150/150 repetition 被接受，route gate 为 Qualified。逐项数据、误路由率和费用见 [R77 执行计划 §6](../../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md#6-实施证据台账)。
+本 RFC 初稿阶段仅获准设计；用户随后明确授权按执行计划实施，并要求不保留旧代码或历史数据兼容。日志继续 append-only，不自动改写或删除用户文件；遇到已退役 schema 时明确失败，不转换旧语义。R77.8 已使用专用配置与 USD 1,000 调用预算完成 DeepSeek V4 Flash 的 50-fixture × 3-repetition 真实模型资格化；150/150 repetition 被接受，route gate 为 Qualified。逐项数据、误路由率和费用保存在上述本地 R77 执行计划 §6，未随公开仓库提供。
 
 ## 2. 当前基线与问题映射
 
@@ -31,7 +31,7 @@ Sigil 提供模型可以选择的工具，并负责可靠执行、权限、资�
 | A7 | [plan_review_coordinator.rs](../../../crates/sigil-runtime/src/plan_review_coordinator.rs) 的 finalizer 清空研究工具并固定单回合提交 | 一个只读模型循环，提交错误按普通工具错误修正 |
 | A8 | [task_orchestrator/prompts.rs](../../../crates/sigil-kernel/src/task_orchestrator/prompts.rs) 等仍有固定 discovery、participant、synthesis 协议残留 | 删除已无生产调用的业务阶段和强制提示，不保留隐蔽旧引擎 |
 
-相关设计：[模型负责 Task 编排](../../../.repo-local-dev/rfcs/model-owned-task-orchestration-2026-09-19.md)、[最小内核与可选能力](../../../.repo-local-dev/rfcs/0074-minimal-core-and-optional-capability-composition-v1.md)、[RFC-0073](0073-plan-review-continuity-and-recovery-v1.md)。前两份文档的目标方向继续有效，但 Plan finalizer、全文结果门禁与后台能力的现状以本表为准，不能从历史勾选项推断已经完成。
+相关公开设计：[普通对话与模型选择执行](../automatic-conversation-execution.md)、[RFC-0073](0073-plan-review-continuity-and-recovery-v1.md)。历史设计《模型负责 Task 编排》和《最小内核与可选能力》分别保存在 `.repo-local-dev/rfcs/model-owned-task-orchestration-2026-09-19.md` 和 `.repo-local-dev/rfcs/0074-minimal-core-and-optional-capability-composition-v1.md`，属于未公开发布的本地材料，公开 checkout 不可访问。两份历史设计的目标方向继续有效，但 Plan finalizer、全文结果门禁与后台能力的现状以本表为准，不能从历史勾选项推断已经完成。
 
 ## 3. 决策与执行的分工
 
@@ -213,7 +213,7 @@ Desktop/TUI 同时展示所有实际进行中项。Task 运行状态与 todo 分
 
 ## 13. 实施原则与验收
 
-按 [R77 台账](../../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md) 分片实施，每片同时交付新行为、旧路径删除、回归及最小跨表面同步。默认串行，不为实现设计另造代理编排流程。
+按本地 R77 台账（路径见本文开头，未公开发布）分片实施，每片同时交付新行为、旧路径删除、回归及最小跨表面同步。默认串行，不为实现设计另造代理编排流程。
 
 核心验收是“同一用户请求、不同合法模型选择，host 都能正确执行”，而不是只匹配新提示词文本。
 

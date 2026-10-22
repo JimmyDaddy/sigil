@@ -23,7 +23,7 @@
 - [RFC-0066 Durable Task Execution Contracts V2](0066-durable-task-execution-contracts-v2.md)
 - [RFC-0067 Single Execution Spine and Monotonic Plan-to-Task Adoption V1](0067-single-execution-spine-and-monotonic-plan-to-task-adoption-v1.md)
 - [RFC-0068 Durable Recovery Spine and Effect-Scoped Retry V1](0068-durable-recovery-spine-and-effect-scoped-retry-v1.md)
-- [2026-08-22 全项目可恢复性审查](../../../.repo-local-dev/review/sigil-recoverability-failure-containment-project-review-2026-08-22.md)
+- 2026-08-22 全项目可恢复性审查：`.repo-local-dev/review/sigil-recoverability-failure-containment-project-review-2026-08-22.md`（本地审查证据，未公开发布，公开 checkout 不可访问）
 
 ## 1. 摘要
 

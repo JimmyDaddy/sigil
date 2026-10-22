@@ -763,8 +763,8 @@ cargo test -p sigil-runtime
 
 > 本节记录旧 Task DAG 方向，不描述当前实现，也不作为待实现路线。当前 Task 调度由模型
 > 通过普通工具循环决定；host 不根据 TaskPlan、step 状态或固定批次派发 participant。以
-> [RFC-0077](rfcs/0077-model-autonomy-and-harness-boundaries-v1.md) 和其[执行计划](../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)
-> 为准。以下内容保留作历史设计记录。
+> [RFC-0077](rfcs/0077-model-autonomy-and-harness-boundaries-v1.md) 为准。其实施台账位于
+> `.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md`，属于未公开发布的本地证据，公开 checkout 不可访问。以下内容保留作历史设计记录。
 
 目标：把 `/task` 从顺序执行器升级为可审计的任务编排器。
 
