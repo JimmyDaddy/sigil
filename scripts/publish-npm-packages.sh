@@ -27,7 +27,7 @@ packages_dir=""
 package_tarballs_dir=""
 dist_tag=""
 dry_run=false
-publish_verify_attempts="${SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS:-60}"
+publish_verify_attempts="${SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS:-180}"
 publish_verify_delay_seconds="${SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS:-5}"
 
 while [[ $# -gt 0 ]]; do

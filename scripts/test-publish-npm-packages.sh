@@ -48,6 +48,10 @@ if [[ "${1-}" == "view" ]]; then
       attempts="$((attempts + 1))"
       printf '%s\n' "${attempts}" >"${attempts_file}"
       if ((attempts < ${FAKE_NPM_CONVERGE_AFTER:-3})); then
+        if [[ -n "${FAKE_NPM_PENDING_VERSION:-}" ]]; then
+          echo "${FAKE_NPM_PENDING_VERSION}"
+          exit 0
+        fi
         echo "E404" >&2
         exit 1
       fi
@@ -95,17 +99,58 @@ if [[ "${actual_last}" != "${expected_last}" ]]; then
 fi
 
 rm -f "${state_dir}/linux-convergence-attempts"
-FAKE_NPM_LOG="${log_file}" \
+: >"${log_file}"
+if ! env -u SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS \
+  FAKE_NPM_LOG="${log_file}" \
   FAKE_NPM_STATE_DIR="${state_dir}" \
-  FAKE_NPM_CONVERGE_AFTER=13 \
+  FAKE_NPM_CONVERGE_AFTER=62 \
+  FAKE_NPM_PENDING_VERSION=1.2.3-alpha.0 \
   SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS=0 \
   PATH="${fake_bin}:${PATH}" \
   "${repo_root}/scripts/publish-npm-packages.sh" \
   --version 1.2.3-alpha.1 \
   --packages-dir "${packages_dir}" \
-  --tag alpha
-if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "13" ]]; then
-  echo "default npm propagation budget did not reach a thirteenth registry read" >&2
+  --tag alpha >"${tmp_dir}/delayed-convergence.log" 2>&1; then
+  cat "${tmp_dir}/delayed-convergence.log" >&2
+  exit 1
+fi
+if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "62" ]]; then
+  echo "default npm propagation budget did not reach the sixty-second registry read" >&2
+  exit 1
+fi
+if [[ "$(grep -Fc 'observed 1.2.3-alpha.0' "${tmp_dir}/delayed-convergence.log")" != "61" ]]; then
+  echo "delayed npm convergence did not preserve the old dist-tag beyond sixty reads" >&2
+  exit 1
+fi
+actual_last="$(grep '^publish ' "${log_file}" | tail -n 1)"
+if [[ "${actual_last}" != "${expected_last}" ]]; then
+  echo "root package was not published last after delayed convergence: ${actual_last}" >&2
+  exit 1
+fi
+
+rm -f "${state_dir}/linux-convergence-attempts"
+: >"${log_file}"
+if FAKE_NPM_LOG="${log_file}" \
+  FAKE_NPM_STATE_DIR="${state_dir}" \
+  FAKE_NPM_CONVERGE_AFTER=4 \
+  SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS=3 \
+  SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS=0 \
+  PATH="${fake_bin}:${PATH}" \
+  "${repo_root}/scripts/publish-npm-packages.sh" \
+  --version 1.2.3-alpha.1 \
+  --packages-dir "${packages_dir}" \
+  --tag alpha >"${tmp_dir}/convergence-timeout.log" 2>&1; then
+  echo "npm propagation succeeded after exhausting its configured budget" >&2
+  exit 1
+fi
+grep -Fq 'did not converge to 1.2.3-alpha.1 after 3 attempts' \
+  "${tmp_dir}/convergence-timeout.log"
+if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "3" ]]; then
+  echo "npm propagation did not stop at its configured budget" >&2
+  exit 1
+fi
+if grep -Fq "publish ${packages_dir}/sigil --" "${log_file}"; then
+  echo "root package was published before platform registry convergence" >&2
   exit 1
 fi
 
