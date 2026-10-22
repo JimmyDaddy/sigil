@@ -20,6 +20,20 @@ impl Drop for ProductionApprovalRunCleanup {
     }
 }
 
+async fn approval_fixture_source_bytes(path: &Path) -> Result<Vec<u8>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(path)?;
+        // A released foreground can still have a short-lived background writer. Windows
+        // enforces its data-file lock for ordinary reads, so take a consistent shared cut.
+        file.lock_shared()?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)?;
+        anyhow::Ok(bytes)
+    })
+    .await?
+}
+
 fn approval_fixture_run_diagnostics(
     driver: &HttpProductionRunDriver,
     session: &HttpSessionSnapshot,
@@ -1032,7 +1046,9 @@ async fn manual_write_approval_cancel(application_cancel: bool) -> Result<()> {
 
     // Exercise the same error-recovery entry as the watcher with a lost protocol-close
     // projection. The source terminal came from the actual production cancellation above.
-    let source_before = std::fs::read(&session.session_log_path)?;
+    let source_before = approval_fixture_source_bytes(Path::new(&session.session_log_path))
+        .await
+        .context("snapshot the original cancellation source before terminal reconciliation")?;
     let recovered_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
         32,
         Arc::new(HttpDurableProtocolJournal::open(
@@ -1079,7 +1095,9 @@ async fn manual_write_approval_cancel(application_cancel: bool) -> Result<()> {
             .is_none()
     );
     assert_eq!(
-        std::fs::read(&session.session_log_path)?,
+        approval_fixture_source_bytes(Path::new(&session.session_log_path))
+            .await
+            .context("snapshot the cancellation source after terminal reconciliation")?,
         source_before,
         "recovery cannot replace the original terminal or its receipt"
     );
