@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-kernel"
-version = "0.0.1-beta.5"
+version = "0.0.1-beta.6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-process"
-version = "0.0.1-beta.5"
+version = "0.0.1-beta.6"
 dependencies = [
  "anyhow",
  "libc",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tools-builtin"
-version = "0.0.1-beta.5"
+version = "0.0.1-beta.6"
 dependencies = [
  "anyhow",
  "async-compression",

@@ -765,11 +765,10 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 wait_for_text_after(output, catalog_loading_offset, " · unverified]")?;
                 let model_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
-                wait_for_text_after(
-                    output,
-                    model_apply_offset,
-                    "Custom endpoint · Chat Completions",
-                )?;
+                // Closing the model picker redraws only changed cells; the unchanged provider
+                // label need not be emitted again. Await the setup footer, then prove the chosen
+                // model through the persisted configuration and the first real provider request.
+                wait_for_text_after(output, model_apply_offset, "Ctrl-S save · Ctrl-C quit")?;
 
                 // Context window and max output tokens are optional. Leave both automatic and
                 // move from the model row to the save action.
@@ -789,8 +788,8 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 }
                 // Readiness is now the live main-screen phase, not a successful startup notice
                 // retained in conversation history. Both markers must be painted after Save.
-                wait_for_text_after(output, setup_complete_offset, "Build · agent: main")?;
-                wait_for_text_after(output, setup_complete_offset, "ready")?;
+                wait_for_text_after(output, setup_complete_offset, "Build · manual")?;
+                wait_for_text_after(output, setup_complete_offset, "Enter send")?;
 
                 let first_request_offset = captured_len(output);
                 write_input(writer, b"reply with the first-run canary\r")?;

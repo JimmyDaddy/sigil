@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,10 +8,20 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-The signed Desktop build remains at beta.4. Desktop source changes awaiting its next release
-include follow-up reorder and interrupt controls, draft recovery during history loading,
-image attachments, manual model setup when catalog discovery fails, and checkpoint restore
-previews that remain available during run cleanup.
+No additional changes.
+
+## v0.0.1-beta.6 - 2026-10-22
+
+This is a TUI/npm beta. The GitHub Release remains a draft; signed Desktop installers are deferred.
+This update improves TUI editing, review, follow-ups, and startup recovery. Desktop changes listed below are available in source and await a signed Desktop release.
+
+- Desktop adds Markdown highlighting, live preview, formatting tools, undo/redo, and expanded editing while preserving drafts, selections, and reading position.
+- Settings, session navigation, filters, and help now prioritize common actions. Nested filters stay inside their dialogs, and compact windows keep important controls visible.
+- TUI supports text selection and replacement, preserves multiline drafts, and provides focused settings and details with F3 and F4.
+- Long plans, command approvals, and file differences remain readable and scrollable, with review actions available in short windows.
+- Queued follow-ups start separate runs. Editing or resuming them preserves the main draft and displays the correct subsequent result.
+- Cancellation preserves tool output for review. Task pause and continuation state stay visible and consistent across both surfaces.
+- Session recovery finds exact session IDs and restores the last active workspace. Startup clearly explains when another instance owns the workspace, with accessible diagnostics, connection editing, and retry controls.
 
 ## v0.0.1-beta.5 - 2026-09-29
 

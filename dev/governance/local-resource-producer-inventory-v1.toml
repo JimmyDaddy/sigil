@@ -65,7 +65,7 @@ site_id = "R-0004"
 crate_name = "apps"
 module = "apps/desktop/src-tauri/src/lib.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 338
+line = 340
 class = "trusted-product"
 owner = "DesktopProductState"
 root_source = "PlatformProductStateAnchor"
@@ -75,7 +75,7 @@ admission_contract = "ProductStateOwnerAdmission"
 resource_contract = "ProductStateObject(DesktopAppearance)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:lib.rs:338"
+reachability_proof_digest = "scanner-line:lib.rs:340"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -84,7 +84,7 @@ site_id = "R-0005"
 crate_name = "apps"
 module = "apps/desktop/src-tauri/src/recent.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 103
+line = 106
 class = "trusted-product"
 owner = "DesktopProductState"
 root_source = "PlatformProductStateAnchor"
@@ -94,7 +94,7 @@ admission_contract = "ProductStateOwnerAdmission"
 resource_contract = "ProductStateObject(DesktopAppearance)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:recent.rs:103"
+reachability_proof_digest = "scanner-line:recent.rs:106"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -103,7 +103,7 @@ site_id = "R-0006"
 crate_name = "apps"
 module = "apps/desktop/src-tauri/src/recent.rs"
 constructor = "CreateDirectory"
-line = 159
+line = 162
 class = "trusted-product"
 owner = "DesktopProductState"
 root_source = "PlatformProductStateAnchor"
@@ -113,7 +113,7 @@ admission_contract = "ProductStateOwnerAdmission"
 resource_contract = "ProductStateObject(DesktopAppearance)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:recent.rs:159"
+reachability_proof_digest = "scanner-line:recent.rs:162"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -122,7 +122,7 @@ site_id = "R-0007"
 crate_name = "apps"
 module = "apps/desktop/src-tauri/src/recent.rs"
 constructor = "TemporaryFile"
-line = 160
+line = 163
 class = "trusted-product"
 owner = "DesktopProductState"
 root_source = "PlatformProductStateAnchor"
@@ -132,7 +132,7 @@ admission_contract = "ProductStateOwnerAdmission"
 resource_contract = "ProductStateObject(DesktopAppearance)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:recent.rs:160"
+reachability_proof_digest = "scanner-line:recent.rs:163"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -141,7 +141,7 @@ site_id = "R-0008"
 crate_name = "apps"
 module = "apps/desktop/src-tauri/src/recent.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 167
+line = 170
 class = "trusted-product"
 owner = "DesktopProductState"
 root_source = "PlatformProductStateAnchor"
@@ -151,7 +151,7 @@ admission_contract = "ProductStateOwnerAdmission"
 resource_contract = "ProductStateObject(DesktopAppearance)"
 lifecycle_contract = "ProductOwnerAtomicLifecycle"
 receipt_contract = "ProductStateReceipt"
-reachability_proof_digest = "scanner-line:recent.rs:167"
+reachability_proof_digest = "scanner-line:recent.rs:170"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1243,7 +1243,7 @@ site_id = "R-0066"
 crate_name = "sigil-kernel"
 module = "crates/sigil-kernel/src/session/writer.rs"
 constructor = "CreateOrOpenFile"
-line = 2052
+line = 2099
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -1253,7 +1253,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:writer.rs:2052"
+reachability_proof_digest = "scanner-line:writer.rs:2099"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1262,7 +1262,7 @@ site_id = "R-0067"
 crate_name = "sigil-kernel"
 module = "crates/sigil-kernel/src/session/writer.rs"
 constructor = "CreateOrOpenFile"
-line = 2089
+line = 2136
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -1272,7 +1272,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:writer.rs:2089"
+reachability_proof_digest = "scanner-line:writer.rs:2136"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1281,7 +1281,7 @@ site_id = "R-0068"
 crate_name = "sigil-kernel"
 module = "crates/sigil-kernel/src/session/writer.rs"
 constructor = "CreateOrOpenFile"
-line = 2967
+line = 3014
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -1291,7 +1291,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:writer.rs:2967"
+reachability_proof_digest = "scanner-line:writer.rs:3014"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1300,7 +1300,7 @@ site_id = "R-0069"
 crate_name = "sigil-kernel"
 module = "crates/sigil-kernel/src/session/writer.rs"
 constructor = "CreateDirectory"
-line = 3199
+line = 3246
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -1310,7 +1310,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:writer.rs:3199"
+reachability_proof_digest = "scanner-line:writer.rs:3246"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1433,7 +1433,7 @@ site_id = "R-0076"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/arena.rs"
 constructor = "CreateDirectory"
-line = 242
+line = 245
 class = "managed-execution-temp"
 owner = "ResourceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -1443,7 +1443,7 @@ admission_contract = "ManagedExecutionLease"
 resource_contract = "ManagedGeneration(ExecutionTemp)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:arena.rs:242"
+reachability_proof_digest = "scanner-line:arena.rs:245"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1452,7 +1452,7 @@ site_id = "R-0077"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/bootstrap.rs"
 constructor = "CreateOrOpenFile"
-line = 489
+line = 502
 class = "managed-runtime-state"
 owner = "AuthorityBootstrap"
 root_source = "AuthorityBootstrapAnchor"
@@ -1462,7 +1462,7 @@ admission_contract = "AuthorityBootstrapAdmission"
 resource_contract = "AuthorityBootstrapObject(BootstrapMetadata)"
 lifecycle_contract = "AuthorityBootstrapLifecycle"
 receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:bootstrap.rs:489"
+reachability_proof_digest = "scanner-line:bootstrap.rs:502"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1471,7 +1471,7 @@ site_id = "R-0078"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/bootstrap.rs"
 constructor = "CreateDirectory"
-line = 630
+line = 643
 class = "managed-runtime-state"
 owner = "AuthorityBootstrap"
 root_source = "AuthorityBootstrapAnchor"
@@ -1481,7 +1481,7 @@ admission_contract = "AuthorityBootstrapAdmission"
 resource_contract = "AuthorityBootstrapObject(BootstrapMetadata)"
 lifecycle_contract = "AuthorityBootstrapLifecycle"
 receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:bootstrap.rs:630"
+reachability_proof_digest = "scanner-line:bootstrap.rs:643"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -1490,7 +1490,7 @@ site_id = "R-0079"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/control_log_recovery.rs"
 constructor = "CreateOrOpenFile"
-line = 828
+line = 820
 class = "managed-runtime-state"
 owner = "ResourceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -1500,12 +1500,31 @@ admission_contract = "ManagedStorageCurrentState"
 resource_contract = "ManagedNamespace(ControlLogRecovery)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ControlLogRecoveryState"
-reachability_proof_digest = "scanner-line:control_log_recovery.rs:828"
+reachability_proof_digest = "scanner-line:control_log_recovery.rs:820"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0080"
+crate_name = "sigil-resource-authority"
+module = "crates/sigil-resource-authority/src/control_log_recovery.rs"
+constructor = "CreateOrOpenFile"
+line = 899
+class = "managed-runtime-state"
+owner = "ResourceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "ExactManagedGrant"
+admission_contract = "ManagedStorageCurrentState"
+resource_contract = "ManagedNamespace(ControlLogRecovery)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ControlLogRecoveryState"
+reachability_proof_digest = "scanner-line:control_log_recovery.rs:899"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0081"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/durable_snapshot.rs"
 constructor = "CreateOrOpenFile"
@@ -1524,7 +1543,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0081"
+site_id = "R-0082"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/file_access.rs"
 constructor = "CreateOrOpenFile"
@@ -1543,7 +1562,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0082"
+site_id = "R-0083"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/native_save.rs"
 constructor = "TemporaryFile"
@@ -1562,7 +1581,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0083"
+site_id = "R-0084"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "CreateDirectory"
@@ -1581,7 +1600,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0084"
+site_id = "R-0085"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1600,7 +1619,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0085"
+site_id = "R-0086"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1619,7 +1638,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0086"
+site_id = "R-0087"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1638,7 +1657,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0087"
+site_id = "R-0088"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "CreateOrOpenFile"
@@ -1657,7 +1676,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0088"
+site_id = "R-0089"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/quota.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1676,7 +1695,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0089"
+site_id = "R-0090"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/session_scratch.rs"
 constructor = "CreateOrOpenFile"
@@ -1695,7 +1714,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0090"
+site_id = "R-0091"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/session_scratch.rs"
 constructor = "CreateOrOpenFile"
@@ -1714,7 +1733,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0091"
+site_id = "R-0092"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/session_scratch.rs"
 constructor = "CreateOrOpenFile"
@@ -1733,7 +1752,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0092"
+site_id = "R-0093"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/session_scratch.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1752,7 +1771,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0093"
+site_id = "R-0094"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/session_scratch.rs"
 constructor = "CreateDirectory"
@@ -1771,7 +1790,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0094"
+site_id = "R-0095"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/storage.rs"
 constructor = "CreateDirectory"
@@ -1790,7 +1809,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0095"
+site_id = "R-0096"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/storage.rs"
 constructor = "CreateOrOpenFile"
@@ -1809,7 +1828,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0096"
+site_id = "R-0097"
 crate_name = "sigil-resource-authority"
 module = "crates/sigil-resource-authority/src/storage.rs"
 constructor = "CreateOrOpenFile"
@@ -1828,7 +1847,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0097"
+site_id = "R-0098"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_supervisor/projection.rs"
 constructor = "CreateDirectory"
@@ -1847,7 +1866,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0098"
+site_id = "R-0099"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_supervisor/projection.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -1866,7 +1885,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0099"
+site_id = "R-0100"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/chat.rs"
 constructor = "WorktreeOrCheckout"
@@ -1885,7 +1904,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0100"
+site_id = "R-0101"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/chat.rs"
 constructor = "WorktreeOrCheckout"
@@ -1904,30 +1923,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0101"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
-constructor = "WorktreeOrCheckout"
-line = 245
-class = "managed-artifact"
-owner = "IsolatedWorkspaceAuthority"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "Workspace"
-child_access = "None"
-admission_contract = "WorktreeOrCheckout"
-resource_contract = "ManagedGeneration(ArtifactStaging)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:245"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
 site_id = "R-0102"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 294
+line = 309
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -1937,31 +1937,12 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:294"
+reachability_proof_digest = "scanner-line:spawn.rs:309"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0103"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
-constructor = "WorktreeOrCheckout"
-line = 316
-class = "managed-artifact"
-owner = "IsolatedWorkspaceAuthority"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "Workspace"
-child_access = "None"
-admission_contract = "WorktreeOrCheckout"
-resource_contract = "ManagedGeneration(ArtifactStaging)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:316"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
-site_id = "R-0104"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
@@ -1980,11 +1961,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0105"
+site_id = "R-0104"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 390
+line = 346
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -1994,7 +1975,26 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:390"
+reachability_proof_digest = "scanner-line:spawn.rs:346"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0105"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
+constructor = "WorktreeOrCheckout"
+line = 405
+class = "managed-artifact"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "None"
+admission_contract = "WorktreeOrCheckout"
+resource_contract = "ManagedGeneration(ArtifactStaging)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:spawn.rs:405"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2003,7 +2003,7 @@ site_id = "R-0106"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 412
+line = 427
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2013,7 +2013,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:412"
+reachability_proof_digest = "scanner-line:spawn.rs:427"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2022,7 +2022,7 @@ site_id = "R-0107"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 594
+line = 609
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2032,7 +2032,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:594"
+reachability_proof_digest = "scanner-line:spawn.rs:609"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2041,7 +2041,7 @@ site_id = "R-0108"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 621
+line = 636
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2051,7 +2051,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:621"
+reachability_proof_digest = "scanner-line:spawn.rs:636"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2060,7 +2060,7 @@ site_id = "R-0109"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 652
+line = 667
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2070,7 +2070,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:652"
+reachability_proof_digest = "scanner-line:spawn.rs:667"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2079,7 +2079,7 @@ site_id = "R-0110"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 714
+line = 729
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2089,7 +2089,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:714"
+reachability_proof_digest = "scanner-line:spawn.rs:729"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2098,7 +2098,7 @@ site_id = "R-0111"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 728
+line = 743
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2108,7 +2108,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:728"
+reachability_proof_digest = "scanner-line:spawn.rs:743"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2117,7 +2117,7 @@ site_id = "R-0112"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 742
+line = 757
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2127,7 +2127,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:742"
+reachability_proof_digest = "scanner-line:spawn.rs:757"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2136,7 +2136,7 @@ site_id = "R-0113"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 752
+line = 767
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2146,7 +2146,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:752"
+reachability_proof_digest = "scanner-line:spawn.rs:767"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2155,7 +2155,7 @@ site_id = "R-0114"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 1337
+line = 1364
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2165,7 +2165,7 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:1337"
+reachability_proof_digest = "scanner-line:spawn.rs:1364"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2174,7 +2174,7 @@ site_id = "R-0115"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
 constructor = "WorktreeOrCheckout"
-line = 1464
+line = 1372
 class = "managed-artifact"
 owner = "IsolatedWorkspaceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -2184,16 +2184,35 @@ admission_contract = "WorktreeOrCheckout"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:spawn.rs:1464"
+reachability_proof_digest = "scanner-line:spawn.rs:1372"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0116"
 crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/agent_tools/spawn.rs"
+constructor = "WorktreeOrCheckout"
+line = 1524
+class = "managed-artifact"
+owner = "IsolatedWorkspaceAuthority"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "Workspace"
+child_access = "None"
+admission_contract = "WorktreeOrCheckout"
+resource_contract = "ManagedGeneration(ArtifactStaging)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:spawn.rs:1524"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0117"
+crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/application_run.rs"
 constructor = "CreateDirectory"
-line = 7011
+line = 6996
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -2203,12 +2222,12 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:application_run.rs:7011"
+reachability_proof_digest = "scanner-line:application_run.rs:6996"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0117"
+site_id = "R-0118"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/image_attachment.rs"
 constructor = "TemporaryFile"
@@ -2227,7 +2246,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0118"
+site_id = "R-0119"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/image_attachment.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -2246,7 +2265,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0119"
+site_id = "R-0120"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/image_attachment.rs"
 constructor = "TemporaryFile"
@@ -2265,7 +2284,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0120"
+site_id = "R-0121"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/image_attachment.rs"
 constructor = "CreateDirectory"
@@ -2284,7 +2303,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0121"
+site_id = "R-0122"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/integration_lanes/promotion_recovery.rs"
 constructor = "WorktreeOrCheckout"
@@ -2303,7 +2322,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0122"
+site_id = "R-0123"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/integration_lanes.rs"
 constructor = "WorktreeOrCheckout"
@@ -2322,7 +2341,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0123"
+site_id = "R-0124"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/interactive_session_attachment.rs"
 constructor = "CreateDirectory"
@@ -2341,7 +2360,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0124"
+site_id = "R-0125"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/interactive_session_attachment.rs"
 constructor = "CreateOrOpenFile"
@@ -2360,7 +2379,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0125"
+site_id = "R-0126"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/interactive_session_attachment.rs"
 constructor = "CreateOrOpenFile"
@@ -2379,7 +2398,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0126"
+site_id = "R-0127"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2398,7 +2417,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0127"
+site_id = "R-0128"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2417,7 +2436,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0128"
+site_id = "R-0129"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2436,7 +2455,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0129"
+site_id = "R-0130"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2455,7 +2474,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0130"
+site_id = "R-0131"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2474,7 +2493,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0131"
+site_id = "R-0132"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -2493,7 +2512,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0132"
+site_id = "R-0133"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "CreateOrOpenFile"
@@ -2512,7 +2531,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0133"
+site_id = "R-0134"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2531,7 +2550,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0134"
+site_id = "R-0135"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/isolated_workspace.rs"
 constructor = "WorktreeOrCheckout"
@@ -2550,30 +2569,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0135"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "CreateOrOpenFile"
-line = 362
-class = "managed-artifact"
-owner = "ManagedStorage"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "None"
-child_access = "None"
-admission_contract = "ManagedStorageNamespace"
-resource_contract = "ManagedGeneration(ArtifactStaging)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:362"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
 site_id = "R-0136"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 727
+constructor = "CreateOrOpenFile"
+line = 412
 class = "managed-artifact"
 owner = "ManagedStorage"
 root_source = "AuthorityBootstrapAnchor"
@@ -2583,50 +2583,12 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:727"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:412"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0137"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 737
-class = "managed-artifact"
-owner = "ManagedStorage"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "None"
-child_access = "None"
-admission_contract = "ManagedStorageNamespace"
-resource_contract = "ManagedGeneration(ArtifactStaging)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:737"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
-site_id = "R-0138"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 764
-class = "managed-artifact"
-owner = "ManagedStorage"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "None"
-child_access = "None"
-admission_contract = "ManagedStorageNamespace"
-resource_contract = "ManagedGeneration(ArtifactStaging)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:764"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
-site_id = "R-0139"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_artifact_store.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -2645,11 +2607,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0140"
+site_id = "R-0138"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "CreateOrOpenFile"
-line = 1096
+constructor = "DirectWriteOrAtomicReplace"
+line = 787
 class = "managed-artifact"
 owner = "ManagedStorage"
 root_source = "AuthorityBootstrapAnchor"
@@ -2659,7 +2621,45 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1096"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:787"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0139"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/managed_artifact_store.rs"
+constructor = "DirectWriteOrAtomicReplace"
+line = 814
+class = "managed-artifact"
+owner = "ManagedStorage"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "None"
+admission_contract = "ManagedStorageNamespace"
+resource_contract = "ManagedGeneration(ArtifactStaging)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:814"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0140"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/managed_artifact_store.rs"
+constructor = "DirectWriteOrAtomicReplace"
+line = 827
+class = "managed-artifact"
+owner = "ManagedStorage"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "None"
+admission_contract = "ManagedStorageNamespace"
+resource_contract = "ManagedGeneration(ArtifactStaging)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:827"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2667,8 +2667,8 @@ exception_rfc = "0071"
 site_id = "R-0141"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "CreateDirectory"
-line = 1225
+constructor = "CreateOrOpenFile"
+line = 1146
 class = "managed-artifact"
 owner = "ManagedStorage"
 root_source = "AuthorityBootstrapAnchor"
@@ -2678,7 +2678,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1225"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1146"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -2686,8 +2686,8 @@ exception_rfc = "0071"
 site_id = "R-0142"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_artifact_store.rs"
-constructor = "CreateOrOpenFile"
-line = 1235
+constructor = "CreateDirectory"
+line = 1275
 class = "managed-artifact"
 owner = "ManagedStorage"
 root_source = "AuthorityBootstrapAnchor"
@@ -2697,12 +2697,31 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(ArtifactStaging)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1235"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1275"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0143"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/managed_artifact_store.rs"
+constructor = "CreateOrOpenFile"
+line = 1285
+class = "managed-artifact"
+owner = "ManagedStorage"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "None"
+admission_contract = "ManagedStorageNamespace"
+resource_contract = "ManagedGeneration(ArtifactStaging)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:managed_artifact_store.rs:1285"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0144"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateOrOpenFile"
@@ -2721,7 +2740,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0144"
+site_id = "R-0145"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateOrOpenFile"
@@ -2740,7 +2759,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0145"
+site_id = "R-0146"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "DatabaseOrSidecar"
@@ -2759,7 +2778,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0146"
+site_id = "R-0147"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateDirectory"
@@ -2778,7 +2797,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0147"
+site_id = "R-0148"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateOrOpenFile"
@@ -2797,7 +2816,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0148"
+site_id = "R-0149"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateOrOpenFile"
@@ -2816,7 +2835,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0149"
+site_id = "R-0150"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/managed_storage_writer.rs"
 constructor = "CreateOrOpenFile"
@@ -2835,7 +2854,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0150"
+site_id = "R-0151"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/campaign.rs"
 constructor = "CreateDirectory"
@@ -2854,7 +2873,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0151"
+site_id = "R-0152"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/campaign.rs"
 constructor = "CreateDirectory"
@@ -2873,7 +2892,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0152"
+site_id = "R-0153"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/report.rs"
 constructor = "TemporaryDirectory"
@@ -2892,7 +2911,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0153"
+site_id = "R-0154"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/route_contract.rs"
 constructor = "TemporaryDirectory"
@@ -2911,7 +2930,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0154"
+site_id = "R-0155"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/route_contract.rs"
 constructor = "CreateOrOpenFile"
@@ -2930,7 +2949,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0155"
+site_id = "R-0156"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval/trajectory.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -2949,7 +2968,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0156"
+site_id = "R-0157"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval.rs"
 constructor = "CreateDirectory"
@@ -2968,7 +2987,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0157"
+site_id = "R-0158"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/model_eval.rs"
 constructor = "CreateOrOpenFile"
@@ -2987,7 +3006,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0158"
+site_id = "R-0159"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/orchestration_rollout.rs"
 constructor = "CreateOrOpenFile"
@@ -3006,7 +3025,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0159"
+site_id = "R-0160"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/provider_connections/catalog_cache.rs"
 constructor = "CreateDirectory"
@@ -3025,7 +3044,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0160"
+site_id = "R-0161"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/provider_connections/file_store.rs"
 constructor = "CreateDirectory"
@@ -3044,7 +3063,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0161"
+site_id = "R-0162"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/provider_connections/file_store.rs"
 constructor = "CreateOrOpenFile"
@@ -3063,7 +3082,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0162"
+site_id = "R-0163"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/provider_connections/recent.rs"
 constructor = "CreateDirectory"
@@ -3082,30 +3101,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0163"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/r71_authority_composition.rs"
-constructor = "CreateDirectory"
-line = 859
-class = "managed-runtime-state"
-owner = "AuthorityBootstrap"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "None"
-child_access = "None"
-admission_contract = "AuthorityBootstrapAdmission"
-resource_contract = "AuthorityBootstrapObject(StateAnchor)"
-lifecycle_contract = "AuthorityBootstrapLifecycle"
-receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:r71_authority_composition.rs:859"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
 site_id = "R-0164"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/r71_authority_composition.rs"
 constructor = "CreateDirectory"
-line = 864
+line = 865
 class = "managed-runtime-state"
 owner = "AuthorityBootstrap"
 root_source = "AuthorityBootstrapAnchor"
@@ -3115,7 +3115,7 @@ admission_contract = "AuthorityBootstrapAdmission"
 resource_contract = "AuthorityBootstrapObject(StateAnchor)"
 lifecycle_contract = "AuthorityBootstrapLifecycle"
 receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:r71_authority_composition.rs:864"
+reachability_proof_digest = "scanner-line:r71_authority_composition.rs:865"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3123,8 +3123,8 @@ exception_rfc = "0071"
 site_id = "R-0165"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/r71_authority_composition.rs"
-constructor = "TemporaryDirectory"
-line = 1377
+constructor = "CreateDirectory"
+line = 870
 class = "managed-runtime-state"
 owner = "AuthorityBootstrap"
 root_source = "AuthorityBootstrapAnchor"
@@ -3134,7 +3134,7 @@ admission_contract = "AuthorityBootstrapAdmission"
 resource_contract = "AuthorityBootstrapObject(StateAnchor)"
 lifecycle_contract = "AuthorityBootstrapLifecycle"
 receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:r71_authority_composition.rs:1377"
+reachability_proof_digest = "scanner-line:r71_authority_composition.rs:870"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3142,8 +3142,8 @@ exception_rfc = "0071"
 site_id = "R-0166"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/r71_authority_composition.rs"
-constructor = "CreateDirectory"
-line = 1379
+constructor = "TemporaryDirectory"
+line = 1423
 class = "managed-runtime-state"
 owner = "AuthorityBootstrap"
 root_source = "AuthorityBootstrapAnchor"
@@ -3153,12 +3153,31 @@ admission_contract = "AuthorityBootstrapAdmission"
 resource_contract = "AuthorityBootstrapObject(StateAnchor)"
 lifecycle_contract = "AuthorityBootstrapLifecycle"
 receipt_contract = "AuthorityBootstrapReceipt"
-reachability_proof_digest = "scanner-line:r71_authority_composition.rs:1379"
+reachability_proof_digest = "scanner-line:r71_authority_composition.rs:1423"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0167"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/r71_authority_composition.rs"
+constructor = "CreateDirectory"
+line = 1425
+class = "managed-runtime-state"
+owner = "AuthorityBootstrap"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "None"
+admission_contract = "AuthorityBootstrapAdmission"
+resource_contract = "AuthorityBootstrapObject(StateAnchor)"
+lifecycle_contract = "AuthorityBootstrapLifecycle"
+receipt_contract = "AuthorityBootstrapReceipt"
+reachability_proof_digest = "scanner-line:r71_authority_composition.rs:1425"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0168"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/journal.rs"
 constructor = "CreateOrOpenFile"
@@ -3177,7 +3196,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0168"
+site_id = "R-0169"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/journal.rs"
 constructor = "CreateOrOpenFile"
@@ -3196,7 +3215,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0169"
+site_id = "R-0170"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/journal.rs"
 constructor = "CreateDirectory"
@@ -3215,30 +3234,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0170"
-crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
-constructor = "DatabaseOrSidecar"
-line = 763
-class = "managed-runtime-state"
-owner = "SessionLifecycle"
-root_source = "AuthorityBootstrapAnchor"
-input_taint = "None"
-child_access = "None"
-admission_contract = "ManagedStorageNamespace"
-resource_contract = "ManagedGeneration(RuntimeState)"
-lifecycle_contract = "AuthorityLeaseAndCurrentState"
-receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:763"
-test_case_ids = []
-exception_rfc = "0071"
-
-[[sites]]
 site_id = "R-0171"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
-constructor = "CreateOrOpenFile"
-line = 1312
+constructor = "DatabaseOrSidecar"
+line = 772
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3248,7 +3248,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1312"
+reachability_proof_digest = "scanner-line:projection.rs:772"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3256,8 +3256,8 @@ exception_rfc = "0071"
 site_id = "R-0172"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 1349
+constructor = "CreateOrOpenFile"
+line = 1353
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3267,7 +3267,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1349"
+reachability_proof_digest = "scanner-line:projection.rs:1353"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3276,7 +3276,7 @@ site_id = "R-0173"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 1351
+line = 1390
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3286,7 +3286,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1351"
+reachability_proof_digest = "scanner-line:projection.rs:1390"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3295,7 +3295,7 @@ site_id = "R-0174"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 1388
+line = 1392
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3305,7 +3305,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1388"
+reachability_proof_digest = "scanner-line:projection.rs:1392"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3313,8 +3313,8 @@ exception_rfc = "0071"
 site_id = "R-0175"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
-constructor = "CreateDirectory"
-line = 1526
+constructor = "DirectWriteOrAtomicReplace"
+line = 1429
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3324,7 +3324,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1526"
+reachability_proof_digest = "scanner-line:projection.rs:1429"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3332,8 +3332,8 @@ exception_rfc = "0071"
 site_id = "R-0176"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
-constructor = "CreateOrOpenFile"
-line = 1643
+constructor = "CreateDirectory"
+line = 1567
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3343,16 +3343,16 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:projection.rs:1643"
+reachability_proof_digest = "scanner-line:projection.rs:1567"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0177"
 crate_name = "sigil-runtime"
-module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 1282
+module = "crates/sigil-runtime/src/session_lifecycle/projection.rs"
+constructor = "CreateOrOpenFile"
+line = 1684
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3362,7 +3362,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:1282"
+reachability_proof_digest = "scanner-line:projection.rs:1684"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3370,8 +3370,8 @@ exception_rfc = "0071"
 site_id = "R-0178"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "CreateDirectory"
-line = 2054
+constructor = "DirectWriteOrAtomicReplace"
+line = 1315
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3381,7 +3381,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:2054"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:1315"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3390,7 +3390,7 @@ site_id = "R-0179"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
 constructor = "CreateDirectory"
-line = 2245
+line = 2167
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3400,7 +3400,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:2245"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:2167"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3408,8 +3408,8 @@ exception_rfc = "0071"
 site_id = "R-0180"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "CreateOrOpenFile"
-line = 2256
+constructor = "CreateDirectory"
+line = 2358
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3419,7 +3419,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:2256"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:2358"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3428,7 +3428,7 @@ site_id = "R-0181"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
 constructor = "CreateOrOpenFile"
-line = 2910
+line = 2369
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3438,7 +3438,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:2910"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:2369"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3447,7 +3447,7 @@ site_id = "R-0182"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
 constructor = "CreateOrOpenFile"
-line = 2972
+line = 3023
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3457,7 +3457,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:2972"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3023"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3465,8 +3465,8 @@ exception_rfc = "0071"
 site_id = "R-0183"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 3178
+constructor = "CreateOrOpenFile"
+line = 3085
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3476,7 +3476,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3178"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3085"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3485,7 +3485,7 @@ site_id = "R-0184"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 3184
+line = 3291
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3495,7 +3495,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3184"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3291"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3504,7 +3504,7 @@ site_id = "R-0185"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
 constructor = "DirectWriteOrAtomicReplace"
-line = 3185
+line = 3297
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3514,7 +3514,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3185"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3297"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3522,8 +3522,8 @@ exception_rfc = "0071"
 site_id = "R-0186"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "CreateOrOpenFile"
-line = 3219
+constructor = "DirectWriteOrAtomicReplace"
+line = 3298
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3533,7 +3533,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3219"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3298"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3541,8 +3541,8 @@ exception_rfc = "0071"
 site_id = "R-0187"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "DirectWriteOrAtomicReplace"
-line = 3244
+constructor = "CreateOrOpenFile"
+line = 3332
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3552,7 +3552,7 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3244"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3332"
 test_case_ids = []
 exception_rfc = "0071"
 
@@ -3560,8 +3560,8 @@ exception_rfc = "0071"
 site_id = "R-0188"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/session_lifecycle.rs"
-constructor = "CreateOrOpenFile"
-line = 3279
+constructor = "DirectWriteOrAtomicReplace"
+line = 3357
 class = "managed-runtime-state"
 owner = "SessionLifecycle"
 root_source = "AuthorityBootstrapAnchor"
@@ -3571,12 +3571,31 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(RuntimeState)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:session_lifecycle.rs:3279"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3357"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
 site_id = "R-0189"
+crate_name = "sigil-runtime"
+module = "crates/sigil-runtime/src/session_lifecycle.rs"
+constructor = "CreateOrOpenFile"
+line = 3392
+class = "managed-runtime-state"
+owner = "SessionLifecycle"
+root_source = "AuthorityBootstrapAnchor"
+input_taint = "None"
+child_access = "None"
+admission_contract = "ManagedStorageNamespace"
+resource_contract = "ManagedGeneration(RuntimeState)"
+lifecycle_contract = "AuthorityLeaseAndCurrentState"
+receipt_contract = "ManagedResourceReceipt"
+reachability_proof_digest = "scanner-line:session_lifecycle.rs:3392"
+test_case_ids = []
+exception_rfc = "0071"
+
+[[sites]]
+site_id = "R-0190"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/support.rs"
 constructor = "CreateDirectory"
@@ -3595,7 +3614,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0190"
+site_id = "R-0191"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/support.rs"
 constructor = "CreateDirectory"
@@ -3614,7 +3633,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0191"
+site_id = "R-0192"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/support.rs"
 constructor = "CreateOrOpenFile"
@@ -3633,7 +3652,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0192"
+site_id = "R-0193"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/writable_memory.rs"
 constructor = "CreateOrOpenFile"
@@ -3652,7 +3671,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0193"
+site_id = "R-0194"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/writable_memory.rs"
 constructor = "CreateOrOpenFile"
@@ -3671,7 +3690,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0194"
+site_id = "R-0195"
 crate_name = "sigil-runtime"
 module = "crates/sigil-runtime/src/writable_memory.rs"
 constructor = "CreateDirectory"
@@ -3690,7 +3709,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0195"
+site_id = "R-0196"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/changeset_tool.rs"
 constructor = "CreateDirectory"
@@ -3709,7 +3728,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0196"
+site_id = "R-0197"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/changeset_tool.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -3728,7 +3747,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0197"
+site_id = "R-0198"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/changeset_tool.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -3747,7 +3766,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0198"
+site_id = "R-0199"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/docker.rs"
 constructor = "TemporaryDirectory"
@@ -3766,7 +3785,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0199"
+site_id = "R-0200"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_app_container_profile.rs"
 constructor = "CreateDirectory"
@@ -3785,7 +3804,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0200"
+site_id = "R-0201"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_app_container_profile.rs"
 constructor = "CreateOrOpenFile"
@@ -3804,7 +3823,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0201"
+site_id = "R-0202"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_app_container_profile.rs"
 constructor = "CreateOrOpenFile"
@@ -3823,7 +3842,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0202"
+site_id = "R-0203"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_restricted_filesystem.rs"
 constructor = "CreateDirectory"
@@ -3842,7 +3861,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0203"
+site_id = "R-0204"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_restricted_filesystem.rs"
 constructor = "CreateOrOpenFile"
@@ -3861,7 +3880,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0204"
+site_id = "R-0205"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/execution_backends/windows_restricted_filesystem.rs"
 constructor = "CreateOrOpenFile"
@@ -3880,7 +3899,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0205"
+site_id = "R-0206"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3899,7 +3918,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0206"
+site_id = "R-0207"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3918,7 +3937,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0207"
+site_id = "R-0208"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3937,7 +3956,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0208"
+site_id = "R-0209"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/io.rs"
 constructor = "CreateOrOpenFile"
@@ -3956,7 +3975,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0209"
+site_id = "R-0210"
 crate_name = "sigil-tools-builtin"
 module = "crates/sigil-tools-builtin/src/terminal_process/manager.rs"
 constructor = "CreateDirectory"
@@ -3975,7 +3994,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0210"
+site_id = "R-0211"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "CreateDirectory"
@@ -3994,7 +4013,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0211"
+site_id = "R-0212"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -4013,7 +4032,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0212"
+site_id = "R-0213"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app/input_history.rs"
 constructor = "DirectWriteOrAtomicReplace"
@@ -4032,11 +4051,11 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0213"
+site_id = "R-0214"
 crate_name = "sigil-tui"
 module = "crates/sigil-tui/src/app.rs"
 constructor = "CreateDirectory"
-line = 1731
+line = 1750
 class = "managed-execution-temp"
 owner = "ResourceAuthority"
 root_source = "AuthorityBootstrapAnchor"
@@ -4046,12 +4065,12 @@ admission_contract = "ManagedStorageNamespace"
 resource_contract = "ManagedGeneration(ExecutionTemp)"
 lifecycle_contract = "AuthorityLeaseAndCurrentState"
 receipt_contract = "ManagedResourceReceipt"
-reachability_proof_digest = "scanner-line:app.rs:1731"
+reachability_proof_digest = "scanner-line:app.rs:1750"
 test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0214"
+site_id = "R-0215"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "CreateDirectory"
@@ -4070,7 +4089,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0215"
+site_id = "R-0216"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "TemporaryFile"
@@ -4089,7 +4108,7 @@ test_case_ids = []
 exception_rfc = "0071"
 
 [[sites]]
-site_id = "R-0216"
+site_id = "R-0217"
 crate_name = "sigil-updater"
 module = "crates/sigil-updater/src/cache.rs"
 constructor = "DirectWriteOrAtomicReplace"
