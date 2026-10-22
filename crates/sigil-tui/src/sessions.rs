@@ -7,7 +7,6 @@ pub struct SessionHistoryEntry {
     pub session_id: Option<String>,
     pub title: Option<String>,
     pub modified_epoch_secs: u64,
-    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

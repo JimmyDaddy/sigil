@@ -5,9 +5,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     AgentThreadId, ControlEntry, EventHandler, LogicalRunId, Session, SessionLogEntry, ToolCall,
     ToolErrorKind, ToolExecutionStatus, ToolResult, USER_INPUT_SCHEMA_VERSION, UserInputActionV1,
-    UserInputContinuationBindingV1, UserInputIdentityV1, UserInputOptionV1, UserInputPurposeV1,
-    UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1, UserInputRequestV1,
-    UserInputRequestedV1, UserInputSourceV1,
+    UserInputContinuationBindingV1, UserInputIdentityV1, UserInputOptionV1,
+    UserInputPromptOriginV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
+    UserInputRequestRefV1, UserInputRequestV1, UserInputRequestedV1, UserInputSourceV1,
 };
 
 use super::{
@@ -45,6 +45,7 @@ struct RequestUserInputOptionArgsV1 {
 #[derive(Debug)]
 pub(super) struct NormalizedRequestUserInputArgs {
     pub(super) prompt: String,
+    pub(super) prompt_origin: UserInputPromptOriginV1,
     pub(super) questions: Vec<UserInputQuestionV1>,
 }
 
@@ -54,6 +55,11 @@ impl RequestUserInputArgsV1 {
             bail!("request_user_input requires one to three questions");
         }
 
+        let prompt_origin = if self.questions.len() == 1 {
+            UserInputPromptOriginV1::QuestionText
+        } else {
+            UserInputPromptOriginV1::HostQuestionGroup
+        };
         let prompt = if self.questions.len() == 1 {
             self.questions[0].question.clone()
         } else {
@@ -96,7 +102,11 @@ impl RequestUserInputArgsV1 {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(NormalizedRequestUserInputArgs { prompt, questions })
+        Ok(NormalizedRequestUserInputArgs {
+            prompt,
+            prompt_origin,
+            questions,
+        })
     }
 }
 
@@ -187,12 +197,19 @@ where
         .map_or_else(super::unix_time_ms, |existing| {
             existing.requested.request.requested_at_unix_ms
         });
+    // Replays retain the frozen presentation origin, including its historical absence.
+    let prompt_origin = projection
+        .request(&identity)
+        .map_or(Some(args.prompt_origin), |existing| {
+            existing.requested.request.prompt_origin
+        });
     let requested = UserInputRequestedV1::new(UserInputRequestV1 {
         schema_version: USER_INPUT_SCHEMA_VERSION,
         identity,
         source: context.source,
         purpose: UserInputPurposeV1::Clarification,
         prompt: args.prompt,
+        prompt_origin,
         questions: args.questions,
         allowed_actions: vec![
             UserInputActionV1::Submit,
@@ -344,3 +361,7 @@ fn reject_credential_collection(args: &NormalizedRequestUserInputArgs) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/agent_user_input_prompt_origin_tests.rs"]
+mod prompt_origin_tests;

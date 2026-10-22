@@ -48,6 +48,8 @@ Desktop and TUI show bounded live previews while an answer is streaming, then re
 
 TUI keeps the rail compact. Press `F4` (`Alt-I` / `Shift-F2` also work), or click **F4 details** in the rail, for scrollable workspace, session, and usage details even in narrow terminals. `F3` opens settings while keeping your draft. `F1` lists the keys; `Ctrl-O` expands focused tool output.
 
+In the TUI composer, `Ctrl-Z` undoes edits, including clearing with `Esc`; `Ctrl-Y` or `Ctrl-Shift-Z` redoes them. `Alt-Y` pastes back cut text; `Ctrl-Y` keeps that behavior when there is no edit to redo. [Composer editing details](dev/docs/tui-composer-selection.md#撤销与重做) cover selection and draft recovery.
+
 In TUI, `Alt-B` opens completed conversation turns for branching. Choose a turn, then edit your next draft in the new session; branching does not send it or restore workspace files. See the [TUI guide](docs/en/user-guide.md#controlled-checkpoints-and-conversation-forks).
 
 ## Start in under a minute

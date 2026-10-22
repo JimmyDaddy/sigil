@@ -161,6 +161,9 @@ impl EventHandler for AppState {
                 self.active_pane = PaneFocus::Activity;
                 self.approval.scroll_back = 0;
                 self.approval.metadata_collapsed = true;
+                self.approval.metadata_focused = false;
+                self.approval.preview_scroll_back = 0;
+                self.approval.details_scroll_back = 0;
                 self.approval.selected_file_index = 0;
                 self.approval.selected_hunk_index = 0;
                 self.approval.selected_action =

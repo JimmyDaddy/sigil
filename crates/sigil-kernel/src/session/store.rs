@@ -1889,6 +1889,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::ProviderDiagnostic(_) => DurableEventType::DiagnosticRecorded,
         ControlEntry::SessionCompositionBound(_) => DurableEventType::SessionCompositionBound,
         ControlEntry::SessionRuntimeTransitionV1(_) => DurableEventType::SessionRuntimeTransitionV1,
+        ControlEntry::SessionPurposeBoundV1(_) => DurableEventType::SessionPurposeBoundV1,
         ControlEntry::ConversationRunAcceptedV1(_) => DurableEventType::ConversationRunAcceptedV1,
         ControlEntry::ApplicationOperationPreparedV1(_) => {
             DurableEventType::ApplicationOperationPreparedV1

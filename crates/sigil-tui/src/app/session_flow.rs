@@ -15,7 +15,7 @@ use super::{
     formatting::{
         format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_content_block_redacted_for_restore,
-        human_file_size, relative_age_label,
+        relative_age_label,
     },
 };
 #[cfg(test)]
@@ -59,6 +59,34 @@ use restore_projection::{
     suppressed_reasoning_trace_indices,
 };
 impl AppState {
+    /// Rolls back only the view/attachment of an unactivated session transition. The launcher
+    /// must rebuild the original application owner before admitting another target switch.
+    pub(crate) fn return_from_session_route_recovery(&mut self) -> Result<Option<PathBuf>> {
+        let Some((origin, attachment)) = self.session_recovery_return.take() else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            attachment.session_path() == JsonlSessionStore::new(&origin.session_log_path)?.path(),
+            "session recovery return attachment belongs to another origin"
+        );
+        let path = origin.session_log_path.clone();
+        self.restore_session_view(
+            origin.session_id,
+            origin.session_log_path,
+            origin.provider_name,
+            origin.model_name,
+            origin.entries,
+            "已返回原会话，正在恢复连接",
+        );
+        self.retain_worker_session_attachment(path.clone(), attachment);
+        self.runtime.worker_rebind_required = false;
+        self.mark_worker_not_ready();
+        if let Some(config) = self.persisted_config_snapshot().cloned() {
+            self.apply_session_runtime_config(&config);
+        }
+        Ok(Some(path))
+    }
+
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         if let Err(error) = self.load_session_history_before_terminal() {
             self.last_notice = Some(format!("session history unavailable: {error}"));
@@ -282,11 +310,7 @@ impl AppState {
                 label: session_history_display_label(entry),
                 current: entry.path == self.session_log_path,
                 selected: filtered_index == self.session_browser.history_selected,
-                meta: format!(
-                    "{} · {}",
-                    human_file_size(entry.bytes),
-                    relative_age_label(entry.modified_epoch_secs)
-                ),
+                meta: relative_age_label(entry.modified_epoch_secs),
             });
         }
         rows
@@ -695,6 +719,9 @@ impl AppState {
         self.composer.deferred_queue_promotions.clear();
         self.composer.queue_edit_target = None;
         self.restore_queue_edit_draft();
+        if self.session_id != session_id || self.session_log_path != session_log_path {
+            self.reset_composer_edit_context();
+        }
         self.composer.pending_queue_operations.clear();
         self.composer.pending_queue_pause = None;
         self.composer.pending_queue_enqueues.clear();

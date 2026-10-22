@@ -204,6 +204,7 @@ pub enum ControlEntry {
     ProviderDiagnostic(crate::ProviderDiagnosticV1),
     SessionCompositionBound(crate::SessionCompositionSnapshotV1),
     SessionRuntimeTransitionV1(crate::SessionRuntimeTransitionV1),
+    SessionPurposeBoundV1(crate::SessionPurposeBoundV1),
     SessionIdentity {
         provider_name: String,
         model_name: String,
@@ -390,6 +391,7 @@ impl ControlEntry {
             Self::PluginReviewCompletedV1(entry) => entry.validate(),
             Self::SessionCompositionBound(entry) => entry.validate(),
             Self::SessionRuntimeTransitionV1(entry) => entry.validate(),
+            Self::SessionPurposeBoundV1(entry) => entry.validate(),
             Self::VerificationPolicyChanged(entry) => entry.validate(),
             Self::ToolPermissionPlannedV2(entry) => entry.validate(),
             Self::ToolPermissionDecisionV2(entry) => entry.validate(),

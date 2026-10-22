@@ -184,6 +184,7 @@ durable_event_types! {
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionCompositionBound => ("session_composition_bound", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionRuntimeTransitionV1 => ("session_runtime_transition_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    SessionPurposeBoundV1 => ("session_purpose_bound_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
     RunFinalized => ("run_finalized", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
@@ -1849,6 +1850,7 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionCompositionBound(_) => "session_composition_bound",
         ControlEntry::SessionRuntimeTransitionV1(_) => "session_runtime_transition_v1",
+        ControlEntry::SessionPurposeBoundV1(_) => "session_purpose_bound_v1",
         ControlEntry::ConversationRunAcceptedV1(_) => "conversation_run_accepted_v1",
         ControlEntry::ApplicationOperationPreparedV1(_) => "application_operation_prepared_v1",
         ControlEntry::ApplicationOperationCommittedV1(_) => "application_operation_committed_v1",

@@ -38,6 +38,13 @@ impl AppState {
                 self.composer.input_cursor = snapshot.draft.input_cursor;
                 self.composer.input_selection_anchor = snapshot.draft.input_selection_anchor;
                 self.composer.input_paste_spans = snapshot.draft.input_paste_spans;
+                self.composer.edit_history = snapshot.draft.edit_history;
+                self.composer.input_history_edit_context =
+                    snapshot.draft.input_history_edit_context;
+                self.composer.input_history_index = snapshot.draft.input_history_index;
+                self.composer.input_history_draft = snapshot.draft.input_history_draft;
+                self.composer.cleared_input_draft = snapshot.draft.cleared_input_draft;
+                self.composer.input_kill_buffer = snapshot.draft.input_kill_buffer;
                 self.composer.image_attachments = snapshot.draft.image_attachments;
                 self.composer.selected_image_attachment = snapshot.draft.selected_image_attachment;
             }
@@ -82,10 +89,23 @@ impl AppState {
             input_cursor: self.composer.input_cursor,
             input_selection_anchor: self.composer.input_selection_anchor,
             input_paste_spans: self.composer.input_paste_spans.clone(),
+            edit_history: self.composer.edit_history.clone(),
+            input_history_edit_context: self.composer.input_history_edit_context.clone(),
+            input_history_index: self.composer.input_history_index,
+            input_history_draft: self.composer.input_history_draft.clone(),
+            cleared_input_draft: self.composer.cleared_input_draft.clone(),
+            input_kill_buffer: self.composer.input_kill_buffer.clone(),
             image_attachments: self.composer.image_attachments.clone(),
             selected_image_attachment: self.composer.selected_image_attachment,
         };
         let result = self.submit_input_inner();
+        if result.is_ok()
+            && (!draft.input.is_empty() || !draft.image_attachments.is_empty())
+            && self.composer.input.is_empty()
+            && self.composer.queue_edit_target.is_none()
+        {
+            self.composer.edit_history = Default::default();
+        }
         if let Ok(Some(action)) = &result
             && is_composer_run_submission(action)
             && self.composer.input.is_empty()

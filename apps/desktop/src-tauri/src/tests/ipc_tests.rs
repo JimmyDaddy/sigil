@@ -1,5 +1,74 @@
 use super::*;
 
+fn user_input_presentation_request_value() -> serde_json::Value {
+    serde_json::json!({
+        "identity": { "session_scope_id": "presentation-session", "root_logical_run_id": "presentation-run",
+            "source_thread_id": "main", "request_id": "presentation-request", "generation": 1,
+            "source_binding_hash": "a".repeat(64) },
+        "request_hash": "b".repeat(64), "source": "agent", "purpose": "clarification",
+        "prompt": "Provider-authored question", "questions": [{ "id": "choice", "question": "Choose a scope",
+            "required": true, "options": [], "multiple": false }],
+        "allowed_actions": ["submit", "decline", "cancel_run"], "requested_at_unix_ms": 1, "status": "requested"
+    })
+}
+
+#[test]
+fn user_input_presentation_ipc_preserves_typed_prompt_origin_in_camel_case() {
+    for origin in ["question_text", "host_question_group"] {
+        let mut value = user_input_presentation_request_value();
+        value["prompt_origin"] = serde_json::json!(origin);
+        let native: sigil_desktop::DesktopUserInputRequest =
+            serde_json::from_value(value).expect("native request");
+        let ipc = serde_json::to_value(DesktopUserInputRequestSummary::from(native))
+            .expect("request IPC");
+        assert_eq!(ipc["promptOrigin"], origin);
+        assert_eq!(ipc["prompt"], "Provider-authored question");
+        assert!(ipc.get("prompt_origin").is_none());
+    }
+}
+
+#[test]
+fn user_input_presentation_ipc_omits_absent_origin() {
+    let native: sigil_desktop::DesktopUserInputRequest =
+        serde_json::from_value(user_input_presentation_request_value()).expect("native request");
+    let ipc =
+        serde_json::to_value(DesktopUserInputRequestSummary::from(native)).expect("request IPC");
+    assert!(ipc.get("promptOrigin").is_none());
+}
+
+#[test]
+fn user_input_presentation_ipc_exposes_body_free_receipt_for_each_decision() {
+    for decision in ["submitted", "declined", "run_cancelled"] {
+        let native: NativeConversationDisplayContent = serde_json::from_value(serde_json::json!({
+            "type": "tool", "tool_name": "request_user_input", "truncated": false,
+            "original_content_bytes": 0, "user_input_receipt": { "decision": decision,
+                "answered_count": 2, "answer_values": ["must-not-reach-renderer"] }
+        }))
+        .expect("native tool content");
+        let ipc = serde_json::to_value(DesktopConversationDisplayContent::from(native))
+            .expect("tool IPC");
+        assert_eq!(
+            ipc["userInputReceipt"],
+            serde_json::json!({ "decision": decision, "answeredCount": 2 })
+        );
+        assert!(ipc.get("user_input_receipt").is_none());
+        assert!(!ipc.to_string().contains("must-not-reach-renderer"));
+    }
+}
+
+#[test]
+fn user_input_presentation_ipc_ordinary_tools_omit_receipt() {
+    let native: NativeConversationDisplayContent = serde_json::from_value(serde_json::json!({
+        "type": "tool", "tool_name": "read_file", "output": "ordinary output",
+        "truncated": false, "original_content_bytes": 15
+    }))
+    .expect("native tool content");
+    let ipc =
+        serde_json::to_value(DesktopConversationDisplayContent::from(native)).expect("tool IPC");
+    assert!(ipc.get("userInputReceipt").is_none());
+    assert_eq!(ipc["output"], "ordinary output");
+}
+
 #[test]
 fn legacy_catalog_navigation_is_allowlisted_and_preserves_unknown_source_state() {
     for state in ["present", "unverified"] {

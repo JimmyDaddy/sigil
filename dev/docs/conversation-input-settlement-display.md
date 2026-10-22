@@ -1,5 +1,11 @@
 # 等待用户输入后的工具结算展示
 
+## Typed 回执摘要（2026-10-23）
+
+Tool display content 可选 `user_input_receipt { decision, answered_count }`，仅作为展示。摘要来源为同一 `UserInputRequested` 的 continuation assistant message/call/run 绑定，以及 exact identity/request hash 的 `UserInputDecisionAccepted`；决定与数量来自 typed durable decision，不读取 JSON 正文。V3 结果必须成功，且其既有结构化 request ID、generation、request hash 与 call ID facts 精确匹配同一 origin。缺少、冲突或复用 call ID 不能借用另一个请求的摘要。
+
+索引的冷正文水合沿既有 exact origin context 保存该小型摘要，不缓存私密答案值或额外复制完整提问正文；分页、旧结果晚到和另一个 run 的开始不会改归属。`Resolved` 仍只退休表单，保留原有 display origin 到准确 V3 到达；摘要不签发继续 authority，不代替请求结算、Task 完成或工具结果的错误事实。
+
 `AwaitingUserInput` 是当前 conversation run 的公开终态。用户随后取消、拒绝或提交回答时，
 内核仍会为原 `request_user_input` 调用追加 V3 工具结算。展示层不能因 run 已结束而丢失原调用，
 也不能用新活动 run 或恰好相同的 callId 猜测归属。

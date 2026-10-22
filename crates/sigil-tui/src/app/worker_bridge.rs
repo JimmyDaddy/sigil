@@ -243,6 +243,7 @@ impl AppState {
                 }
             }
             WorkerMessage::WorkerReady => {
+                self.session_recovery_return = None;
                 self.worker_startup_progress = None;
                 self.worker_ready = true;
                 self.clear_pending_session_route_startup();
@@ -263,7 +264,11 @@ impl AppState {
                 target_session,
             } => {
                 self.worker_startup_progress = None;
-                self.worker_ready = false;
+                // Rejection of an unactivated target must keep the healthy current worker.
+                // Startup remains not-ready; admitted route recovery explicitly changes scope.
+                if target_session.is_some() {
+                    self.worker_ready = false;
+                }
                 if let Some(target) = target_session {
                     self.restore_session_view(
                         target.session_id,
@@ -315,6 +320,14 @@ impl AppState {
                     "session:recovery",
                     format!("{code:?}; actions={actions:?}; retryable={retryable}"),
                 );
+            }
+            WorkerMessage::SessionSwitchRejected { reason, .. } => {
+                self.last_notice = Some(format!("无法切换会话：{reason}"));
+                self.push_timeline(TimelineRole::Notice, format!("无法切换会话：{reason}"));
+                self.push_event("session:switch-rejected", reason);
+            }
+            WorkerMessage::SessionRecoveryReturnAvailable { origin, attachment } => {
+                self.session_recovery_return = Some((origin, attachment));
             }
             WorkerMessage::ApprovalCommandReceipt(receipt) => {
                 let exact_pending = self.approval.pending.as_mut().filter(|pending| {

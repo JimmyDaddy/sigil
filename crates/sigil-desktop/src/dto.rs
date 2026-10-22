@@ -825,6 +825,8 @@ pub enum DesktopConversationDisplayContent {
     },
     Tool {
         #[serde(default)]
+        user_input_receipt: Option<DesktopConversationDisplayUserInputReceipt>,
+        #[serde(default)]
         call_id: Option<String>,
         #[serde(default)]
         tool_name: Option<String>,
@@ -882,6 +884,14 @@ pub enum DesktopConversationDisplayContent {
         safe_summary: Option<String>,
         summary_truncated: bool,
     },
+}
+
+/// Body-free result of one durable request for user input.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopConversationDisplayUserInputReceipt {
+    pub decision: DesktopUserInputDecisionKind,
+    pub answered_count: u64,
 }
 
 /// One canonical durable conversation item returned by the workspace server.
@@ -3085,6 +3095,8 @@ pub struct DesktopUserInputRequest {
     pub source: DesktopUserInputSource,
     pub purpose: DesktopUserInputPurpose,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_origin: Option<DesktopUserInputPromptOrigin>,
     pub questions: Vec<DesktopUserInputQuestion>,
     pub allowed_actions: Vec<DesktopUserInputAction>,
     pub requested_at_unix_ms: u64,
@@ -3093,6 +3105,13 @@ pub struct DesktopUserInputRequest {
     pub answer_receipt: Option<DesktopUserInputAnswerReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<DesktopUserInputResolution>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopUserInputPromptOrigin {
+    QuestionText,
+    HostQuestionGroup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3299,3 +3318,7 @@ pub struct DesktopMcpImportApplyRequest {
 pub struct DesktopMcpImportApplyResult {
     pub imported_names: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "tests/user_input_presentation_dto_tests.rs"]
+mod user_input_presentation_tests;

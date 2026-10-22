@@ -1,8 +1,5 @@
 use super::session_flow::session_history_display_label;
-use super::{
-    AppAction, AppState,
-    formatting::{human_file_size, relative_age_label},
-};
+use super::{AppAction, AppState, formatting::relative_age_label};
 use crate::slash::{
     EFFORT_SELECTOR_OPTIONS, ResolvedSlashCommand, SLASH_COMMANDS, SlashArgumentOption,
     SlashCommandSpec, SlashSelectorEntry,
@@ -368,10 +365,9 @@ impl AppState {
                     fill: format!("/resume {ordinal}"),
                     label: ordinal.to_string(),
                     description: format!(
-                        "{}{}  {} · {}",
+                        "{}{}  {}",
                         label,
                         if current { "  current" } else { "" },
-                        human_file_size(entry.bytes),
                         relative_age_label(entry.modified_epoch_secs)
                     ),
                     resolved: ResolvedSlashCommand {
@@ -820,7 +816,7 @@ impl AppState {
         let leading_len = self.composer.input.len().saturating_sub(trimmed.len());
         let leading = self.composer.input[..leading_len].to_owned();
         let completed = format!("{leading}{}", entry.fill);
-        self.set_input_and_cursor(completed);
+        self.edit_composer_input(|app| app.set_input_and_cursor(completed));
         self.last_notice = Some(format!("slash completed to {}", entry.fill.trim_end()));
         self.reset_input_history_navigation();
         self.reset_slash_selector();

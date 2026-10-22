@@ -255,6 +255,7 @@ fn model_eval_activity_exact_decisions_do_not_claim_human_provenance() -> Result
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "private question".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "choice".to_owned(),
             question: "private question".to_owned(),

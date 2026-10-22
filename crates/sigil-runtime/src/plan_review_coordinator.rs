@@ -2043,6 +2043,7 @@ impl PlanReviewCoordinator {
                 },
                 purpose: sigil_kernel::UserInputPurposeV1::RevisionGuidance,
                 prompt: "What should change in this plan?".to_owned(),
+                prompt_origin: None,
                 questions: vec![sigil_kernel::UserInputQuestionV1 {
                     id: "revision_guidance".to_owned(),
                     question: "Describe the changes you want before a new plan is prepared."
@@ -4413,6 +4414,7 @@ fn build_plan_review_child_session(
             parent_session.model_name(),
             store,
         )?;
+        bind_plan_review_child_purpose(parent_session, request, &mut session)?;
         session.attach_tool_artifact_store_override(bundle.artifact_store());
         attach_session_url_capability_store(&mut session)?;
         crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
@@ -4427,14 +4429,47 @@ fn build_plan_review_child_session(
             parent_session.model_name(),
             store,
         )?;
+        bind_plan_review_child_purpose(parent_session, request, &mut session)?;
         attach_session_url_capability_store(&mut session)?;
         crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
         return Ok(session);
     }
     let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
+    bind_plan_review_child_purpose(parent_session, request, &mut session)?;
     attach_session_url_capability_store(&mut session)?;
     crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
     Ok(session)
+}
+
+fn bind_plan_review_child_purpose(
+    parent: &Session,
+    request: &PlanReviewRunRequest,
+    child: &mut Session,
+) -> Result<()> {
+    let binding = sigil_kernel::SessionPurposeBoundV1 {
+        schema_version: 1,
+        purpose: sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+            parent_session_id: parent.session_scope_id().to_owned(),
+            plan_review_id: request.plan_review_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            plan_id: request.plan_id.clone(),
+        },
+    };
+    let mut already_bound = false;
+    for existing in child.entries().iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::SessionPurposeBoundV1(binding)) => Some(binding),
+        _ => None,
+    }) {
+        anyhow::ensure!(
+            existing == &binding,
+            "plan-review child purpose binding changed"
+        );
+        already_bound = true;
+    }
+    if already_bound {
+        return Ok(());
+    }
+    child.append_control(ControlEntry::SessionPurposeBoundV1(binding))
 }
 
 fn plan_review_request_from_attempt(
@@ -5582,3 +5617,7 @@ fn session_ref_for_log_path(path: &Path) -> Result<SessionRef> {
     SessionRef::new_relative(&logical_file_name)
         .map_err(|error| anyhow!("failed to build parent session ref: {error}"))
 }
+
+#[cfg(test)]
+#[path = "tests/plan_review_purpose_tests.rs"]
+mod purpose_tests;

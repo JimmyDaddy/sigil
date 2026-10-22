@@ -371,6 +371,7 @@ fn awaiting_user_input_rebuild_is_inactive_and_preserves_durable_request() {
         source: sigil_kernel::UserInputSourceV1::Agent,
         purpose: sigil_kernel::UserInputPurposeV1::Clarification,
         prompt: "Choose the deployment target.".to_owned(),
+        prompt_origin: None,
         questions: Vec::new(),
         allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
         requested_at_unix_ms: 10,

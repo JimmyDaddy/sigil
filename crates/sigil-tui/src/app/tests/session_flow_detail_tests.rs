@@ -144,9 +144,16 @@ fn session_labels_and_identifiers_truncate_as_expected() {
         session_id: None,
         title: Some("A very long title that should still be visible".to_owned()),
         modified_epoch_secs: 0,
-        bytes: 0,
     };
     assert!(session_history_display_label(&titled).starts_with("A very long title"));
+    let untitled = SessionHistoryEntry {
+        title: None,
+        ..titled
+    };
+    assert_eq!(
+        session_history_display_label(&untitled),
+        "Untitled conversation · alpha"
+    );
 }
 
 #[test]
@@ -2167,7 +2174,6 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
-        bytes: 0,
     }];
     app.session_log_path = PathBuf::from("session-current.jsonl");
     assert_eq!(app.resume_candidate_indices(), vec![0]);
@@ -2182,7 +2188,6 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
-        bytes: 0,
     });
     app.session_browser.history.push(SessionHistoryEntry {
         path: PathBuf::from("session-third.jsonl"),
@@ -2190,7 +2195,6 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         session_id: None,
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
-        bytes: 0,
     });
     assert_eq!(app.resolve_resume_target("alpha"), None);
 

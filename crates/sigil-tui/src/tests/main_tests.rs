@@ -699,6 +699,7 @@ fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> a
         },
         purpose: sigil_kernel::UserInputPurposeV1::Clarification,
         prompt: "Choose the managed research scope".to_owned(),
+        prompt_origin: None,
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which module should be migrated first?".to_owned(),

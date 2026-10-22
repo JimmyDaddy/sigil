@@ -1064,10 +1064,10 @@ fn footer_hints_track_plan_revision_editor_submission_and_recovery() -> anyhow::
     };
     app.set_pending_user_input_recovery(request, recovery);
     let recovering = UiViewModel::from_app(&app).footer.hints;
-    assert!(recovering.contains("Tab fields/actions"));
-    assert!(recovering.contains("Enter continue"));
-    assert!(!recovering.contains("Enter submit revision"));
-    assert!(!recovering.contains("Ctrl-Enter actions"));
+    assert!(
+        recovering.is_empty(),
+        "the visible form owns recovery hints"
+    );
     Ok(())
 }
 
@@ -1332,6 +1332,15 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     assert!(view_model.footer.hints.contains("Y allow once"));
     assert!(!view_model.footer.hints.contains("Ctrl-C stop"));
     assert!(!view_model.footer.hints.contains("Esc: interrupt"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    assert!(UiViewModel::from_app(&app).footer.hints.is_empty());
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(
+        UiViewModel::from_app(&app)
+            .footer
+            .hints
+            .contains("Y allow once")
+    );
     Ok(())
 }
 

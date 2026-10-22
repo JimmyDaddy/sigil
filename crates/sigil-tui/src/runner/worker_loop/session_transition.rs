@@ -303,6 +303,7 @@ where
                     retryable,
                     ..
                 }) = recovery
+                && code != sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid
                 && let Ok(target) = load_session(
                     &root_config.agent.runtime_provider,
                     &root_config.agent.model,

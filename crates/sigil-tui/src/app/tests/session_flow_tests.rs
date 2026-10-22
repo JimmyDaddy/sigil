@@ -2188,7 +2188,6 @@ fn resolve_resume_target_accepts_durable_session_id_when_source_ref_is_opaque() 
         session_id: Some("93d49c3f-5ea9-5067-bb41-2eb563a433b4".to_owned()),
         title: Some("分批收尾工作区所有变更".to_owned()),
         modified_epoch_secs: 1,
-        bytes: 128,
     }];
 
     assert_eq!(
@@ -2208,7 +2207,6 @@ fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
             session_id: None,
             title: Some("restored alpha prompt".to_owned()),
             modified_epoch_secs: 2,
-            bytes: 10,
         },
         crate::sessions::SessionHistoryEntry {
             path: Path::new("session-beta.jsonl").to_path_buf(),
@@ -2216,7 +2214,6 @@ fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
             session_id: None,
             title: Some("restored beta prompt".to_owned()),
             modified_epoch_secs: 1,
-            bytes: 10,
         },
     ];
     assert_eq!(app.resolve_resume_target("prompt"), None);

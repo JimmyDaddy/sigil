@@ -976,8 +976,8 @@ fn footer_hints(app: &AppState) -> String {
             return format!("Plan revision · {submit} · Shift-Enter/Ctrl-J new line · Esc back");
         }
         if form.open {
-            return "Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
-                .to_owned();
+            // The form owns its focus-specific keys and reserves enough rows for them.
+            return String::new();
         }
         return "input required · Shift-Tab reopen".to_owned();
     }
@@ -1021,6 +1021,9 @@ fn footer_hints(app: &AppState) -> String {
                 return "F5 pause · Shift-Tab review · Ctrl-C cancel · Enter queue".to_owned();
             }
             return "Approval pending · Shift-Tab review · Enter queue · Ctrl-C cancel".to_owned();
+        }
+        if app.approval.metadata_focused {
+            return String::new();
         }
         return "Esc input · Y allow once · N deny · Tab switch · Enter select · M details"
             .to_owned();

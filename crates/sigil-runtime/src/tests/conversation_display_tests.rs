@@ -267,6 +267,7 @@ fn append_display_waiting_input(
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Choose the scope".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope?".to_owned(),
@@ -404,6 +405,15 @@ fn conversation_display_input_terminal_survives_pagination_and_cold_hydration() 
             .iter()
             .find(|item| item.status == ConversationDisplayStatusV1::Completed)
             .context("settled input tool")?;
+        let expected_decision = if expected == ConversationDisplayStatusV1::Cancelled {
+            sigil_kernel::PublicUserInputDecisionKindV1::RunCancelled
+        } else {
+            sigil_kernel::PublicUserInputDecisionKindV1::Declined
+        };
+        assert!(matches!(&settled.content,
+            ConversationDisplayContentV1::Tool { user_input_receipt: Some(receipt), .. }
+                if receipt.decision == expected_decision && receipt.answered_count == 0
+        ));
         assert_eq!(settled.run_id.as_deref(), Some("input-root"));
         assert_eq!(
             settled.reconciles,
@@ -472,6 +482,7 @@ fn conversation_display_input_private_resolution_before_v3_keeps_exact_origin() 
             source: UserInputSourceV1::Agent,
             purpose: UserInputPurposeV1::Clarification,
             prompt: "Choose the scope".to_owned(),
+            prompt_origin: None,
             questions: vec![UserInputQuestionV1 {
                 id: "scope".to_owned(),
                 question: "Which scope?".to_owned(),
@@ -601,6 +612,101 @@ fn append_display_input_result(
         ToolArtifactSensitivity::Ordinary,
     )?;
     session.append(SessionLogEntry::ToolResultV3(recorded))
+}
+
+#[test]
+fn conversation_display_input_receipt_uses_typed_decision_and_exact_request_facts_not_json()
+-> Result<()> {
+    for (accepted, binding, expected) in [
+        (false, "exact", None),
+        (
+            true,
+            "exact",
+            Some(sigil_kernel::PublicUserInputDecisionKindV1::Declined),
+        ),
+        (true, "call", None),
+        (true, "missing", None),
+        (true, "hash", None),
+        (true, "generation", None),
+        (true, "request", None),
+    ] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let request = append_display_waiting_input(
+            &mut session,
+            "receipt-run",
+            "receipt-run",
+            "receipt-question",
+            "receipt-call",
+        )?;
+        if accepted {
+            let decision = sigil_kernel::UserInputDecisionAcceptedV1::new(
+                &request,
+                sigil_kernel::UserInputCommandId::new("receipt-command")?,
+                sigil_kernel::UserInputDecisionV1::Declined,
+                20,
+            )?;
+            session.append_user_input_lifecycle(vec![
+                sigil_kernel::UserInputLifecycleEntryV1::DecisionAccepted(Box::new(decision)),
+            ])?;
+        }
+        let mut details = json!({
+            "request_id": request.request.identity.request_id.as_str(),
+            "generation": request.request.identity.generation,
+            "request_hash": request.request_hash,
+        });
+        match binding {
+            "missing" => details = json!({}),
+            "hash" => details["request_hash"] = json!(format!("sha256:{}", "f".repeat(64))),
+            "generation" => details["generation"] = json!(2),
+            "request" => details["request_id"] = json!("different-request"),
+            _ => {}
+        }
+        let (recorded, _) = ToolResultRecordedV3::capture(
+            &ToolResult::ok(
+                if binding == "call" {
+                    "unrelated-call"
+                } else {
+                    "receipt-call"
+                },
+                sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
+                r#"{"decision":"submitted","answers":[{"question_id":"scope","value":"forged JSON summary"}]}"#,
+                ToolResultMeta {
+                    details,
+                    ..ToolResultMeta::default()
+                },
+            ),
+            session.tool_artifact_store().as_ref(),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+        for index in 0..120 {
+            session
+                .append_user_message(ModelMessage::user(format!("evict receipt body {index}")))?;
+        }
+        let items = all_display_items(&store.read_event_records_writer()?, &scope)?;
+        let result = items
+            .iter()
+            .find(|item| {
+                item.kind == ConversationDisplayItemKindV1::Tool
+                    && item.status == ConversationDisplayStatusV1::Completed
+            })
+            .context("result")?;
+        let ConversationDisplayContentV1::Tool {
+            user_input_receipt, ..
+        } = &result.content
+        else {
+            unreachable!("tool result content");
+        };
+        assert_eq!(
+            user_input_receipt.as_ref().map(|receipt| receipt.decision),
+            expected
+        );
+        if let Some(receipt) = user_input_receipt {
+            assert_eq!(receipt.answered_count, 0);
+        }
+    }
+    Ok(())
 }
 
 fn all_display_items(
@@ -774,6 +880,11 @@ fn conversation_display_input_submitted_continuation_reconciles_original_outer_r
         "replayed continuation does not settle the tool twice"
     );
     assert_eq!(settled[0].run_id.as_deref(), Some("outer-conversation"));
+    assert!(matches!(&settled[0].content,
+        ConversationDisplayContentV1::Tool { user_input_receipt: Some(receipt), .. }
+            if receipt.decision == sigil_kernel::PublicUserInputDecisionKindV1::Submitted
+                && receipt.answered_count == 1
+    ));
     assert_eq!(
         settled[0].reconciles,
         Some(vec![
@@ -1337,6 +1448,7 @@ fn conversation_display_index_preserves_input_queue_lifecycle_at_old_frontiers()
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Direct request prompt".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope?".to_owned(),
@@ -2990,6 +3102,7 @@ fn plan_review_pending_inputs_follow_each_attempt_latest_generation_and_status()
                 },
                 purpose: sigil_kernel::UserInputPurposeV1::Clarification,
                 prompt: format!("Question generation {generation}"),
+                prompt_origin: None,
                 questions: vec![sigil_kernel::UserInputQuestionV1 {
                     id: "scope".to_owned(),
                     question: "Which scope?".to_owned(),

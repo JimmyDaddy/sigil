@@ -160,6 +160,10 @@ impl AppState {
     }
 
     pub(super) fn insert_input_character(&mut self, character: char) {
+        self.edit_composer_input(|app| app.insert_input_character_inner(character));
+    }
+
+    fn insert_input_character_inner(&mut self, character: char) {
         if character.is_control() && character != '\n' {
             return;
         }
@@ -176,6 +180,10 @@ impl AppState {
     }
 
     pub(super) fn insert_input_text(&mut self, text: &str) {
+        self.edit_composer_input(|app| app.insert_input_text_inner(text));
+    }
+
+    fn insert_input_text_inner(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -221,6 +229,14 @@ impl AppState {
         if self.handle_user_input_form_paste_text(&pasted) {
             return;
         }
+        if self
+            .pending_plan_approval()
+            .is_some_and(|pending| pending.workbench_open)
+        {
+            // The read-only Plan workbench owns input even though it is not a ModalState.
+            // Match key routing: an open answer editor above it keeps first refusal.
+            return;
+        }
 
         if self.try_attach_pasted_image_path(&pasted) {
             return;
@@ -234,6 +250,10 @@ impl AppState {
     }
 
     fn insert_paste_text(&mut self, text: &str) {
+        self.edit_composer_input(|app| app.insert_paste_text_inner(text));
+    }
+
+    fn insert_paste_text_inner(&mut self, text: &str) {
         self.remove_input_selection();
         let start = self.composer.input_cursor;
         let char_count = text.chars().count();
@@ -299,10 +319,10 @@ impl AppState {
             KeyCode::Char('z') | KeyCode::Char('Z')
                 if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
             {
-                if self.restore_cleared_input_draft() {
-                    self.reset_input_history_navigation();
-                    self.reset_slash_selector();
-                    self.last_notice = Some("draft restored".to_owned());
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.redo_composer_edit();
+                } else {
+                    self.undo_composer_edit();
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A')
@@ -348,6 +368,15 @@ impl AppState {
             }
             KeyCode::Char('y') | KeyCode::Char('Y')
                 if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                if !self.redo_composer_edit() {
+                    self.yank_input_kill_buffer();
+                }
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.active_pane == PaneFocus::Composer && has_alt_without_control(key) =>
             {
                 self.yank_input_kill_buffer();
                 self.reset_input_history_navigation();
@@ -556,6 +585,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_character_before_cursor(&mut self) {
+        self.edit_composer_input(|app| app.remove_input_character_before_cursor_inner());
+    }
+
+    fn remove_input_character_before_cursor_inner(&mut self) {
         if self.remove_input_selection() {
             return;
         }
@@ -569,6 +602,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_character_at_cursor(&mut self) {
+        self.edit_composer_input(|app| app.remove_input_character_at_cursor_inner());
+    }
+
+    fn remove_input_character_at_cursor_inner(&mut self) {
         if self.remove_input_selection() {
             return;
         }
@@ -583,6 +620,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_word_before_cursor(&mut self) {
+        self.edit_composer_input(|app| app.remove_input_word_before_cursor_inner());
+    }
+
+    fn remove_input_word_before_cursor_inner(&mut self) {
         if let Some(selection) = self.take_input_selection() {
             self.kill_input_range(selection);
             return;
@@ -597,6 +638,10 @@ impl AppState {
     }
 
     pub(super) fn remove_input_word_after_cursor(&mut self) {
+        self.edit_composer_input(|app| app.remove_input_word_after_cursor_inner());
+    }
+
+    fn remove_input_word_after_cursor_inner(&mut self) {
         if let Some(selection) = self.take_input_selection() {
             self.kill_input_range(selection);
             return;
@@ -671,6 +716,10 @@ impl AppState {
     }
 
     pub(super) fn kill_input_to_line_end(&mut self) {
+        self.edit_composer_input(|app| app.kill_input_to_line_end_inner());
+    }
+
+    fn kill_input_to_line_end_inner(&mut self) {
         if let Some(selection) = self.take_input_selection() {
             self.kill_input_range(selection);
             return;
@@ -695,6 +744,10 @@ impl AppState {
     }
 
     pub(super) fn clear_input_preserving_draft(&mut self) {
+        self.edit_composer_input(|app| app.clear_input_preserving_draft_inner());
+    }
+
+    fn clear_input_preserving_draft_inner(&mut self) {
         if !self.composer.input.is_empty() {
             self.composer.cleared_input_draft = Some(self.composer.input.clone());
         }

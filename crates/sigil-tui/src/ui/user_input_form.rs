@@ -28,12 +28,13 @@ pub(super) fn render_user_input_form(
         render_plan_revision_form(frame, area, form, theme);
         return;
     }
+    let action_lines = regular_action_lines(form, theme, area.width as usize);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(action_lines.len().min(u16::MAX as usize) as u16),
         ])
         .split(area);
     let title = if is_plan_revision(form) {
@@ -48,38 +49,21 @@ pub(super) fn render_user_input_form(
             UserInputFormSource::Mcp { .. } => "MCP input required".to_owned(),
         }
     };
-    let header = Text::from(vec![
-        Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.palette.accent_warning)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            if is_plan_revision(form) {
-                "Describe the change · Enter newline · Ctrl-Enter actions · Esc close"
-            } else if form.recovery_command.is_some() {
-                "An accepted answer is durable · Enter resumes the exact continuation · Esc close"
-            } else if !form.focus_actions
-                && form
-                    .view
-                    .questions
-                    .get(form.focused_question)
-                    .is_some_and(|question| question.options.is_empty())
-            {
-                "Tab fields/actions · Pg scroll · Enter newline · Ctrl-Enter actions · Esc close"
-            } else {
-                "Tab fields/actions · ↑↓ choose · Pg scroll · Space toggle · Enter next field · Ctrl-Enter actions · Esc close"
-            },
-            styles::muted(&theme.palette),
-        )),
-    ]);
+    let header = Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(theme.palette.accent_warning)
+            .add_modifier(Modifier::BOLD),
+    ));
     frame.render_widget(
         Paragraph::new(header).style(styles::body(&theme.palette)),
         rows[0],
     );
     render_fields(frame, rows[1], form, theme);
-    render_actions(frame, rows[2], form, theme);
+    frame.render_widget(
+        Paragraph::new(Text::from(action_lines)).style(styles::body(&theme.palette)),
+        rows[2],
+    );
 }
 
 fn render_plan_revision_form(
@@ -298,10 +282,22 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let mut lines = vec![
-        Line::raw(form.view.prompt.clone()),
-        Line::raw(String::new()),
-    ];
+    let mut lines = wrap_terminal_lines(
+        vec![
+            Line::raw(
+                if form.view.prompt_origin
+                    == Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup)
+                {
+                    "请回答以下问题后继续".to_owned()
+                } else {
+                    form.view.prompt.clone()
+                },
+            ),
+            Line::raw(String::new()),
+        ],
+        inner.width as usize,
+    );
+    let mut question_offsets = Vec::with_capacity(form.view.questions.len());
     if form.recovery_command.is_some() {
         lines.push(Line::from(Span::styled(
             "Your answer is saved. Resume reuses the accepted answer and checks that the request can continue.",
@@ -320,28 +316,31 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
         }
     } else {
         for (index, (question, draft)) in form.view.questions.iter().zip(&form.drafts).enumerate() {
+            question_offsets.push(lines.len());
             let focused = !form.focus_actions && index == form.focused_question;
-            lines.push(Line::from(vec![
+            let mut question_lines = vec![Line::from(vec![
                 Span::styled(
                     if focused { "▶ " } else { "  " },
                     Style::default().fg(theme.palette.accent_primary),
                 ),
                 Span::styled(
-                    format!("{}: ", question.id),
+                    format!("{}. ", index + 1),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(question.question.clone()),
-            ]));
+            ])];
             if let Some(description) = &question.description {
-                lines.push(Line::from(Span::styled(
+                question_lines.push(Line::from(Span::styled(
                     format!("    {description}"),
                     styles::muted(&theme.palette),
                 )));
             }
-            lines.extend(answer_lines(question, draft, focused, theme));
-            lines.push(Line::raw(String::new()));
+            question_lines.extend(answer_lines(question, draft, focused, theme));
+            question_lines.push(Line::raw(String::new()));
+            lines.extend(wrap_terminal_lines(question_lines, inner.width as usize));
         }
     }
+    *form.question_scroll_offsets.borrow_mut() = question_offsets;
     lines = wrap_terminal_lines(lines, inner.width as usize);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     form.scroll_extent.set(max_scroll);
@@ -448,7 +447,11 @@ fn answer_lines(
     }
 }
 
-fn render_actions(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, theme: &Theme) {
+fn regular_action_lines(
+    form: &PendingUserInputForm,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     let spans = UserInputFormAction::ORDER
         .iter()
         .filter(|action| action_available(form, **action))
@@ -468,10 +471,71 @@ fn render_actions(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, th
             ]
         })
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(styles::body(&theme.palette)),
-        area,
+    let mut lines = vec![Line::from(spans)];
+    if let Some(error) = &form.validation_error {
+        lines.push(Line::from(Span::styled(
+            error.message.clone(),
+            Style::default().fg(if error.question_index.is_some() {
+                theme.palette.accent_danger
+            } else {
+                theme.palette.accent_warning
+            }),
+        )));
+    }
+    let hints = if form.recovery_command.is_some() {
+        vec!["Enter Resume · Esc Close".to_owned()]
+    } else if form.focus_actions {
+        vec!["↑ Answers · ←→ / Tab Actions · Enter Confirm · Esc Close".to_owned()]
+    } else {
+        let next = if form.focused_question + 1 < form.view.questions.len() {
+            "Next question"
+        } else {
+            "Actions"
+        };
+        if form
+            .view
+            .questions
+            .get(form.focused_question)
+            .is_some_and(|question| question.options.is_empty())
+        {
+            vec![format!(
+                "Enter {next} · Tab Next · Shift-Tab Previous · Esc Close"
+            )]
+        } else {
+            let choose = if matches!(
+                form.drafts.get(form.focused_question),
+                Some(UserInputDraftValue::SingleSelect {
+                    selected_by_user: true,
+                    ..
+                })
+            ) {
+                "↑↓ Questions · Space Change"
+            } else if matches!(
+                form.drafts.get(form.focused_question),
+                Some(UserInputDraftValue::MultiSelect { .. })
+            ) {
+                "↑↓ Choose · Space Toggle"
+            } else {
+                "↑↓ Choose · Space Select"
+            };
+            vec![
+                format!("{choose} · Enter {next} · Esc Close"),
+                "Type / paste Other · Tab Next · Shift-Tab Previous".to_owned(),
+            ]
+        }
+    };
+    lines.extend(
+        hints
+            .into_iter()
+            .map(|hint| Line::from(Span::styled(hint, styles::muted(&theme.palette)))),
     );
+    if !form.focus_actions && form.scroll_extent.get() > 0 {
+        lines.push(Line::from(Span::styled(
+            "PgUp/PgDn Scroll · Ctrl-Enter Actions",
+            styles::muted(&theme.palette),
+        )));
+    }
+    wrap_terminal_lines(lines, width)
 }
 
 fn action_available(form: &PendingUserInputForm, action: UserInputFormAction) -> bool {

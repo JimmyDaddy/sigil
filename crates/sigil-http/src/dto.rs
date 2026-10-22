@@ -1057,6 +1057,8 @@ pub enum HttpConversationDisplayContent {
     },
     Tool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_input_receipt: Option<HttpConversationDisplayUserInputReceipt>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
@@ -1114,6 +1116,14 @@ pub enum HttpConversationDisplayContent {
         safe_summary: Option<String>,
         summary_truncated: bool,
     },
+}
+
+/// Body-free result of one durable request for user input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpConversationDisplayUserInputReceipt {
+    pub decision: sigil_kernel::PublicUserInputDecisionKindV1,
+    pub answered_count: u64,
 }
 
 /// One canonical, durable display item safe for authenticated local clients.
@@ -1768,6 +1778,7 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 original_content_bytes: usize_as_u64(original_content_bytes),
             },
             ConversationDisplayContentV1::Tool {
+                user_input_receipt,
                 call_id,
                 tool_name,
                 output,
@@ -1786,6 +1797,12 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 truncation_reason,
                 capture_completeness,
             } => Self::Tool {
+                user_input_receipt: user_input_receipt.map(|receipt| {
+                    HttpConversationDisplayUserInputReceipt {
+                        decision: receipt.decision,
+                        answered_count: usize_as_u64(receipt.answered_count),
+                    }
+                }),
                 call_id,
                 tool_name,
                 output,
@@ -3940,6 +3957,8 @@ pub struct HttpUserInputRequest {
     pub source: sigil_kernel::UserInputSourceV1,
     pub purpose: sigil_kernel::UserInputPurposeV1,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_origin: Option<sigil_kernel::UserInputPromptOriginV1>,
     pub questions: Vec<sigil_kernel::UserInputQuestionV1>,
     pub allowed_actions: Vec<sigil_kernel::UserInputActionV1>,
     pub requested_at_unix_ms: u64,
@@ -3958,6 +3977,7 @@ impl From<sigil_kernel::PublicUserInputRequestV1> for HttpUserInputRequest {
             source: request.source,
             purpose: request.purpose,
             prompt: request.prompt,
+            prompt_origin: request.prompt_origin,
             questions: request.questions,
             allowed_actions: request.allowed_actions,
             requested_at_unix_ms: request.requested_at_unix_ms,
@@ -4073,3 +4093,7 @@ pub struct HttpMcpImportApplyRequest {
 pub struct HttpMcpImportApplyResult {
     pub imported_names: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "tests/user_input_presentation_dto_tests.rs"]
+mod user_input_presentation_tests;

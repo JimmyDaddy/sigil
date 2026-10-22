@@ -275,6 +275,7 @@ fn recovery_request(session: &Session, source: UserInputSourceV1) -> Result<User
         source,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Choose the scope before continuing".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which module should be changed?".to_owned(),

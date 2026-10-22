@@ -2508,6 +2508,19 @@ fn queue_background_application_action(
     worker: &mut Option<WorkerRuntime>,
     action: &AppAction,
 ) -> Result<bool> {
+    if app.session_recovery_return.is_some()
+        && matches!(
+            action,
+            AppAction::SwitchSession { .. } | AppAction::StartNewSession { .. }
+        )
+    {
+        if try_return_from_session_route_recovery(app, worker, action)? {
+            return Ok(true);
+        }
+        app.deferred_application_actions.push_back(action.clone());
+        app.set_last_notice("正在收尾恢复操作，随后返回原会话");
+        return Ok(true);
+    }
     let mapped_action = application_bridge::TuiApplicationSession::supports_action(action)
         || matches!(action, AppAction::SetDefaultModel { .. });
     if mapped_action
@@ -2654,6 +2667,26 @@ fn flush_deferred_application_action(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
 ) -> Result<bool> {
+    if app.session_recovery_return.is_some()
+        && app
+            .deferred_application_actions
+            .front()
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    AppAction::SwitchSession { .. } | AppAction::StartNewSession { .. }
+                )
+            })
+    {
+        let action = app
+            .deferred_application_actions
+            .pop_front()
+            .expect("front checked");
+        if try_return_from_session_route_recovery(app, worker, &action)? {
+            return Ok(true);
+        }
+        app.deferred_application_actions.push_front(action);
+    }
     let Some(action) = app.deferred_application_actions.front() else {
         return Ok(false);
     };
@@ -2674,6 +2707,41 @@ fn flush_deferred_application_action(
     let result = queue_background_application_action(app, worker, &action);
     app.deferred_application_actions.extend(remaining);
     anyhow::ensure!(result?, "deferred application action lost its dispatcher");
+    Ok(true)
+}
+
+fn try_return_from_session_route_recovery(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<bool> {
+    let requested_path = match action {
+        AppAction::SwitchSession { session_log_path } => Some(session_log_path),
+        AppAction::StartNewSession { .. } => None,
+        _ => return Ok(false),
+    };
+    if worker.is_some()
+        || app
+            .runtime_maintenance
+            .as_ref()
+            .is_some_and(|owner| owner.is_running())
+        || app
+            .runtime_transition
+            .as_ref()
+            .is_some_and(|owner| owner.is_running())
+    {
+        return Ok(false);
+    }
+    let Some(origin_path) = app.return_from_session_route_recovery()? else {
+        return Ok(false);
+    };
+    if requested_path != Some(&origin_path) {
+        // This remains a UI intent until the original application owner publishes Ready. Its
+        // later new/switch action uses the normal prepare/admission/CAS path.
+        app.deferred_application_actions.push_front(action.clone());
+    }
+    let config = app.session_runtime_config_snapshot().cloned();
+    runtime_transition::maintain(app, worker, config)?;
     Ok(true)
 }
 
@@ -3171,6 +3239,13 @@ fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerM
         return AppState::queue_operation_for_action(action).as_ref() == Some(operation);
     }
     match (action, message) {
+        (
+            AppAction::SwitchSession { session_log_path },
+            WorkerMessage::SessionSwitchRejected {
+                session_log_path: rejected_path,
+                ..
+            },
+        ) => session_log_path == rejected_path,
         (AppAction::SubmitPrompt(a), WorkerMessage::RunStarted { prompt: b })
         | (
             AppAction::SubmitPromptWithAttachments { prompt: a, .. },

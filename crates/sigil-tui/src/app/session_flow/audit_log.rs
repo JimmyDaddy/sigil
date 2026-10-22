@@ -167,6 +167,14 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             };
             format!("[ctl] session runtime {phase}")
         }
+        ControlEntry::SessionPurposeBoundV1(binding) => match &binding.purpose {
+            sigil_kernel::SessionPurposeV1::Conversation => "[ctl] conversation purpose".to_owned(),
+            sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+                parent_session_id, ..
+            } => {
+                format!("[ctl] plan-review research for {parent_session_id}")
+            }
+        },
         ControlEntry::SessionRouteTrustBound { .. } => "[ctl] session route trust bound".to_owned(),
         ControlEntry::ContinuationStateSaved(state) => format!(
             "[ctl] cont {} msg={}",

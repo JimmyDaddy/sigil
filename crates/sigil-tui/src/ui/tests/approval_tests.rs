@@ -108,6 +108,7 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        metadata_focused: false,
         file_rows: vec![
             ApprovalFileRow {
                 path: "src/other.rs".to_owned(),
@@ -160,6 +161,7 @@ fn approval_header_and_review_lines_keep_metadata_secondary() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        metadata_focused: false,
         file_rows: Vec::new(),
         changed_files: vec!["src/lib.rs".to_owned()],
         diff_mode_label: "full",
@@ -178,6 +180,7 @@ fn approval_header_and_review_lines_keep_metadata_secondary() {
     let hidden = approval_header_lines(
         &ApprovalModalView {
             metadata_collapsed: true,
+            metadata_focused: false,
             ..base.clone()
         },
         40,
@@ -349,6 +352,7 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         preview_summary: String::new(),
         change_set: None,
         metadata_collapsed: false,
+        metadata_focused: false,
         has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
@@ -482,6 +486,7 @@ fn approval_header_lines_use_access_risk_and_compact_details_badges() {
     let hidden_text = plain_lines_text(&approval_header_lines(
         &ApprovalModalView {
             metadata_collapsed: true,
+            metadata_focused: false,
             has_diff_preview: false,
             file_rows: Vec::new(),
             changed_files: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
@@ -1032,8 +1037,13 @@ fn render_shell_approval_prioritizes_command_without_internal_identity_or_empty_
     terminal.draw(|frame| render_approval_modal(frame, &app))?;
     let expanded = rendered_content(&terminal);
     assert!(expanded.contains("local:ask network:allow"));
-    assert!(expanded.contains("Command to run"));
-    assert!(expanded.contains("cargo clippy --workspace --all-targets"));
+    assert!(expanded.contains("Full details"));
+    assert!(expanded.contains("M/Esc back"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    terminal.draw(|frame| render_approval_modal(frame, &app))?;
+    let preview = rendered_content(&terminal);
+    assert!(preview.contains("Command to run"));
+    assert!(preview.contains("cargo clippy --workspace --all-targets"));
     Ok(())
 }
 
@@ -1052,6 +1062,7 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        metadata_focused: false,
         has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
@@ -1076,6 +1087,111 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         }),
         ..ApprovalModalView::default()
     }
+}
+
+fn full_details_view() -> ApprovalModalView {
+    let mut view = modal_view("file write");
+    view.metadata_focused = true;
+    view.safe_summary = sigil_kernel::ToolPermissionSummary {
+        title: format!("{} SUMMARY_TITLE_TAIL", "summary ".repeat(30)),
+        detail: format!("{} SUMMARY_DETAIL_TAIL", "完整说明 ".repeat(40)),
+        step_count: 1,
+        workspace_code_steps: 0,
+    };
+    view.analysis = sigil_kernel::ToolAnalysisStatus::Conservative {
+        reasons: (0..6)
+            .map(|index| {
+                sigil_kernel::ToolAnalysisReason::new(
+                    sigil_kernel::ToolAnalysisReasonCode::UnprovenContainment,
+                    Some(format!("analysis detail {index} ANALYSIS_{index}_TAIL")),
+                )
+            })
+            .collect(),
+    };
+    view.subjects = (0..6)
+        .map(|index| {
+            sigil_kernel::ToolSubject::path(
+                format!("original-{index}"),
+                format!("normalized-{index}-SUBJECT_{index}_TAIL"),
+            )
+        })
+        .collect();
+    view.decision_reasons = (0..6)
+        .map(|index| sigil_kernel::PermissionDecisionReason {
+            source: sigil_kernel::PermissionDecisionSource::ManagedRule,
+            code: format!("reason-{index}"),
+            detail: format!(
+                "{} DECISION_{index}_TAIL",
+                "permission explanation ".repeat(8)
+            ),
+        })
+        .collect();
+    view
+}
+
+#[test]
+fn approval_full_details_preserve_all_metadata_without_summary_caps() {
+    let view = full_details_view();
+    let lines = approval_full_metadata_lines(&view, 68, &theme::default_palette());
+    let text = lines.iter().map(plain_line_text).collect::<String>();
+    assert!(text.contains("SUMMARY_TITLE_TAIL"));
+    assert!(text.contains("SUMMARY_DETAIL_TAIL"));
+    for index in 0..6 {
+        assert!(text.contains(&format!("SUBJECT_{index}_TAIL")));
+        assert!(text.contains(&format!("ANALYSIS_{index}_TAIL")));
+        assert!(text.contains(&format!("DECISION_{index}_TAIL")));
+    }
+    assert!(!text.contains('…'));
+}
+
+#[test]
+fn approval_full_details_scroll_reaches_tail_with_fixed_actions_and_return_keys()
+-> anyhow::Result<()> {
+    for (width, height) in [(80, 24), (80, 12), (48, 16)] {
+        let view = full_details_view();
+        let current_theme = theme::Theme::default();
+        let max_scroll = approval_max_scroll(Rect::new(0, 0, width, height), &view, &current_theme);
+        assert!(max_scroll > 0);
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        let area = approval_modal_area(Rect::new(0, 0, width, height), &view);
+        let sections =
+            approval_modal_sections(Block::default().borders(Borders::ALL).inner(area), &view);
+        let viewport =
+            approval_details_block(sections.body, &current_theme.palette).inner(sections.body);
+        assert!(
+            viewport.width > 0 && viewport.height > 0,
+            "{width}x{height} must reserve a nonempty details viewport alongside fixed actions"
+        );
+        let mut visible = String::new();
+        for scroll in 0..=max_scroll {
+            terminal
+                .draw(|frame| render_approval_modal_view(frame, &view, scroll, &current_theme))?;
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Allow once"));
+            assert!(text.contains("Deny"));
+            assert!(text.contains("Approval details"));
+            assert!(text.contains("M/Esc back"));
+            assert!(text.contains("Enter select"));
+            assert!(text.contains("Y allow once"));
+            assert!(text.contains("N deny"));
+            for y in viewport.y..viewport.y.saturating_add(viewport.height) {
+                for x in viewport.x..viewport.x.saturating_add(viewport.width) {
+                    visible.push_str(terminal.backend().buffer()[(x, y)].symbol());
+                }
+            }
+        }
+        assert!(
+            visible.contains("DECISION_5_TAIL"),
+            "{width}x{height} must reach final reason"
+        );
+    }
+    Ok(())
 }
 
 #[test]

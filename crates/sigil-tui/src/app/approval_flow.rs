@@ -391,6 +391,7 @@ impl AppState {
                     .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
                 change_set: None,
                 metadata_collapsed: self.approval.metadata_collapsed,
+                metadata_focused: self.approval.metadata_focused,
                 has_diff_preview: false,
                 file_rows: Vec::new(),
                 changed_files: Vec::new(),
@@ -521,6 +522,7 @@ impl AppState {
                 .unwrap_or_else(|| preview.summary.clone()),
             change_set,
             metadata_collapsed: self.approval.metadata_collapsed,
+            metadata_focused: self.approval.metadata_focused,
             has_diff_preview,
             file_rows,
             changed_files: preview.changed_files.clone(),
@@ -652,7 +654,14 @@ impl AppState {
             return false;
         }
         self.approval.metadata_collapsed = !self.approval.metadata_collapsed;
-        self.approval.scroll_back = 0;
+        self.approval.metadata_focused = !self.approval.metadata_collapsed;
+        if self.approval.metadata_focused {
+            self.approval.preview_scroll_back = self.approval.scroll_back;
+            self.approval.scroll_back = self.approval.details_scroll_back;
+        } else {
+            self.approval.details_scroll_back = self.approval.scroll_back;
+            self.approval.scroll_back = self.approval.preview_scroll_back;
+        }
         self.push_event(
             "approval:view",
             if self.approval.metadata_collapsed {

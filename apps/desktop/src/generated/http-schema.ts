@@ -3599,6 +3599,7 @@ export interface components {
             truncation_reason?: "initial_cap" | "batch_budget" | "binary_only" | "fallback" | null;
             /** @constant */
             type: "tool";
+            user_input_receipt?: components["schemas"]["ConversationDisplayUserInputReceipt"] | null;
         } | {
             call_id: string;
             /** @enum {string|null} */
@@ -3680,6 +3681,12 @@ export interface components {
         ConversationDisplaySource: "durable_transcript" | "durable_run_event" | "live_transient";
         /** @enum {string} */
         ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "paused" | "blocked" | "awaiting_user_input";
+        ConversationDisplayUserInputReceipt: {
+            /** Format: uint64 */
+            answered_count: number;
+            /** @enum {string} */
+            decision: "submitted" | "declined" | "run_cancelled";
+        };
         ConversationForkPointView: {
             prompt_preview?: string | null;
             /** Format: uint64 */
@@ -5578,6 +5585,8 @@ export interface components {
             answer_receipt?: components["schemas"]["UserInputAnswerReceipt"] | null;
             identity: components["schemas"]["UserInputIdentity"];
             prompt: string;
+            /** @enum {string|null} */
+            prompt_origin?: "question_text" | "host_question_group" | null;
             /** @enum {string} */
             purpose: "clarification" | "choice" | "missing_constraint" | "revision_guidance" | "external_elicitation";
             questions: components["schemas"]["UserInputQuestion"][];

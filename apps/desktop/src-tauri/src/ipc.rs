@@ -1664,6 +1664,8 @@ pub(crate) enum DesktopConversationDisplayContent {
     },
     Tool {
         #[serde(skip_serializing_if = "Option::is_none")]
+        user_input_receipt: Option<DesktopConversationDisplayUserInputReceipt>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
@@ -1720,6 +1722,13 @@ pub(crate) enum DesktopConversationDisplayContent {
         safe_summary: Option<String>,
         summary_truncated: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationDisplayUserInputReceipt {
+    decision: &'static str,
+    answered_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -3315,6 +3324,7 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 original_content_bytes,
             },
             NativeConversationDisplayContent::Tool {
+                user_input_receipt,
                 call_id,
                 tool_name,
                 output,
@@ -3333,6 +3343,18 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 truncation_reason,
                 capture_completeness,
             } => Self::Tool {
+                user_input_receipt: user_input_receipt.map(|receipt| {
+                    DesktopConversationDisplayUserInputReceipt {
+                        decision: match receipt.decision {
+                            sigil_desktop::DesktopUserInputDecisionKind::Submitted => "submitted",
+                            sigil_desktop::DesktopUserInputDecisionKind::Declined => "declined",
+                            sigil_desktop::DesktopUserInputDecisionKind::RunCancelled => {
+                                "run_cancelled"
+                            }
+                        },
+                        answered_count: receipt.answered_count,
+                    }
+                }),
                 call_id,
                 tool_name,
                 output,

@@ -45,6 +45,7 @@ fn seed_root_input_request(
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Select the migration mode".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "mode".to_owned(),
             question: "Which migration mode should be used?".to_owned(),

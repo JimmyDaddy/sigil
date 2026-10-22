@@ -87,6 +87,7 @@ impl SurfaceBody {
                         source: request.source.clone(),
                         purpose: request.purpose,
                         prompt: request.prompt.clone(),
+                        prompt_origin: request.prompt_origin,
                         questions: request.questions.clone(),
                         allowed_actions: request.allowed_actions.clone(),
                         requested_at_unix_ms: request.requested_at_unix_ms,

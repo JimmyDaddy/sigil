@@ -8,6 +8,122 @@ use crate::runner::{
     V2ContinuityPreview,
 };
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
+use sigil_kernel::Session;
+use std::{path::PathBuf, sync::Arc};
+
+#[test]
+fn rejected_session_target_keeps_ready_current_context_and_draft() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::WorkerReady)?;
+    let session_id = app.session_id.clone();
+    let path = app.session_log_path.clone();
+    app.composer.input = "保留当前草稿".to_owned();
+    app.handle_worker_message(WorkerMessage::SessionSwitchRejected {
+        session_log_path: PathBuf::from("internal-research.jsonl"),
+        reason: "this is an internal plan-review research record; resume its parent conversation"
+            .to_owned(),
+    })?;
+    assert!(app.worker_ready);
+    assert_eq!(app.session_id, session_id);
+    assert_eq!(app.session_log_path, path);
+    assert_eq!(app.composer.input, "保留当前草稿");
+    app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
+        actions: vec![sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary],
+        recovery_binding: String::new(),
+        retryable: false,
+        target_session: None,
+    })?;
+    assert!(
+        app.worker_ready,
+        "unactivated invalid source does not disable the current worker"
+    );
+    assert_eq!(app.session_id, session_id);
+    Ok(())
+}
+
+#[test]
+fn real_route_recovery_retains_origin_attachment_and_can_return_without_losing_binding()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let origin_path = temp.path().join("origin.jsonl");
+    let origin =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&origin_path)?)?;
+    let origin_id = origin.session_scope_id().to_owned();
+    let entries = origin.entries().to_vec();
+    let attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &origin_path,
+        )?,
+    );
+    app.restore_session_view(
+        origin_id.clone(),
+        origin_path.clone(),
+        "custom".to_owned(),
+        "model".to_owned(),
+        entries.clone(),
+        "",
+    );
+    app.handle_worker_message(WorkerMessage::WorkerReady)?;
+    app.composer.input = "保留草稿".to_owned();
+    app.handle_worker_message(WorkerMessage::SessionRecoveryReturnAvailable {
+        origin: crate::runner::WorkerRouteRecoverySessionTarget {
+            session_id: origin_id.clone(),
+            session_log_path: origin_path.clone(),
+            provider_name: "custom".to_owned(),
+            model_name: "model".to_owned(),
+            entries,
+        },
+        attachment: Arc::clone(&attachment),
+    })?;
+    let target_path = temp.path().join("target.jsonl");
+    app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::ConfirmCurrentRoute,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: "exact-target-recovery-binding".to_owned(),
+        retryable: true,
+        target_session: Some(crate::runner::WorkerRouteRecoverySessionTarget {
+            session_id: "target-session".to_owned(),
+            session_log_path: target_path,
+            provider_name: "custom".to_owned(),
+            model_name: "model".to_owned(),
+            entries: Vec::new(),
+        }),
+    })?;
+    assert!(!app.worker_ready);
+    assert_eq!(
+        app.pending_session_route_recovery_binding(),
+        Some("exact-target-recovery-binding")
+    );
+    assert!(app.session_recovery_return.is_some());
+    assert_eq!(
+        app.return_from_session_route_recovery()?,
+        Some(origin_path.clone())
+    );
+    assert_eq!(app.session_id, origin_id);
+    assert_eq!(app.session_log_path, origin_path);
+    assert_eq!(app.composer.input, "保留草稿");
+    assert!(
+        app.pending_session_route_recovery_binding().is_none(),
+        "target binding is never reused for origin"
+    );
+    assert!(
+        !app.worker_ready,
+        "only actual worker Ready can make the returned origin executable"
+    );
+    assert!(app.worker_session_attachment().is_some());
+    assert!(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &origin_path
+        )
+        .is_err()
+    );
+    Ok(())
+}
 
 #[test]
 fn startup_progress_replaces_stages_without_polluting_history_and_clears_on_ready_or_failure()
@@ -6135,6 +6251,7 @@ pub(crate) fn pending_text_user_input_request() -> Result<sigil_kernel::PublicUs
         source: sigil_kernel::UserInputSourceV1::Agent,
         purpose: sigil_kernel::UserInputPurposeV1::Clarification,
         prompt: "One constraint is required before work can continue.".to_owned(),
+        prompt_origin: None,
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope should be used?".to_owned(),
@@ -6325,6 +6442,7 @@ fn recovered_plan_review_attention_message_restores_the_existing_private_resume_
         },
         purpose: public.purpose,
         prompt: public.prompt,
+        prompt_origin: None,
         questions: public.questions,
         allowed_actions: public.allowed_actions,
         requested_at_unix_ms: public.requested_at_unix_ms,
@@ -6452,6 +6570,7 @@ fn accepted_agent_child_answer_restores_from_parent_route_and_private_child_sess
         source: public.source.clone(),
         purpose: public.purpose,
         prompt: public.prompt.clone(),
+        prompt_origin: None,
         questions: public.questions.clone(),
         allowed_actions: public.allowed_actions.clone(),
         requested_at_unix_ms: public.requested_at_unix_ms,

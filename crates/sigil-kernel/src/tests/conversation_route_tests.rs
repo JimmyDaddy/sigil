@@ -782,6 +782,7 @@ fn reconcile_preserves_waiting_attempts_and_closes_abandoned_finalizers() -> Res
         },
         purpose: crate::UserInputPurposeV1::Clarification,
         prompt: "Choose a migration boundary".to_owned(),
+        prompt_origin: None,
         questions: vec![crate::UserInputQuestionV1 {
             id: "boundary".to_owned(),
             question: "Which boundary should the plan use?".to_owned(),

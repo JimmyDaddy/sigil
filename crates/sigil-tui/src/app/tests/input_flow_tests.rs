@@ -698,6 +698,156 @@ fn modal_paste_does_not_submit_text_input() {
     assert_eq!(state.buffer, "pre onetwo");
 }
 
+fn open_plan_review_for_paste_test(app: &mut AppState) -> Result<()> {
+    app.composer.pending_plan_approval = Some(super::super::PendingPlanApproval::test_fixture(
+        "paste-review-plan",
+        "# Read-only plan",
+        "plan-hash",
+        "Review the plan",
+        vec!["Inspect changes".to_owned()],
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?
+            .is_none()
+    );
+    assert!(app.pending_plan_approval().expect("plan").workbench_open);
+    Ok(())
+}
+
+#[test]
+fn plan_review_paste_does_not_seed_hidden_commands_and_resumes_after_close() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    open_plan_review_for_paste_test(&mut app)?;
+
+    app.handle_paste_text("/resume");
+    app.handle_paste_text("/resume");
+
+    assert!(app.composer.input.is_empty());
+    assert!(app.pending_plan_approval().expect("plan").workbench_open);
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(!app.pending_plan_approval().expect("plan").workbench_open);
+    assert!(app.composer.input.is_empty());
+    app.handle_paste_text("/resume");
+    assert_eq!(app.composer.input, "/resume");
+    Ok(())
+}
+
+#[test]
+fn plan_review_paste_keeps_existing_selection_cursor_and_undo() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.handle_paste_text("甲乙🙂丙");
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+    let cursor = app.composer.input_cursor;
+    let anchor = app.composer.input_selection_anchor;
+    let selection = app.composer_input_selection();
+    open_plan_review_for_paste_test(&mut app)?;
+
+    app.handle_paste_text("/resume\r\nnext");
+
+    assert_eq!(app.composer.input, "甲乙🙂丙");
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert_eq!(app.composer.input_selection_anchor, anchor);
+    assert_eq!(app.composer_input_selection(), selection);
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
+    assert!(
+        app.composer.input.is_empty(),
+        "ignored paste must not create an undo step"
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.composer.input, "甲乙🙂丙");
+    assert_eq!(app.composer_input_selection(), selection);
+    Ok(())
+}
+
+#[test]
+fn plan_review_paste_keeps_folded_draft_and_does_not_attach_image_paths() -> Result<()> {
+    let (root, mut app) = composer_selection_fixture()?;
+    let image_path = root.path().join("sample.png");
+    write_test_png(&image_path)?;
+    app.sigil_paths.attachments_root = root.path().join("attachments");
+    let draft = format!("{}\ntail", "甲".repeat(10_000));
+    app.handle_paste_text(&draft);
+    let spans = app.composer.input_paste_spans.clone();
+    let display = app.composer_display_input();
+    let cursor = app.composer.input_cursor;
+    assert!(!spans.is_empty());
+    open_plan_review_for_paste_test(&mut app)?;
+
+    app.handle_paste_text(&image_path.to_string_lossy());
+
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.composer.input_paste_spans, spans);
+    assert_eq!(app.composer_display_input(), display);
+    assert_eq!(app.composer.input_cursor, cursor);
+    assert!(app.composer.image_attachments.is_empty());
+    assert!(!app.sigil_paths.attachments_root.exists());
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_paste_text(&image_path.to_string_lossy());
+    assert_eq!(
+        app.composer.image_attachments.len(),
+        1,
+        "closed review returns paste ownership to the composer"
+    );
+    assert_eq!(app.composer.input, draft);
+    Ok(())
+}
+
+#[test]
+fn plan_review_paste_preserves_editable_modal_and_question_ownership() -> Result<()> {
+    let (_root, mut app) = composer_selection_fixture()?;
+    app.handle_paste_text("keep composer draft");
+    open_plan_review_for_paste_test(&mut app)?;
+    app.open_text_input(
+        super::super::modal_flow::TextInputTarget::SkillArguments,
+        "pre",
+    );
+
+    app.handle_paste_text(" one\ntwo");
+
+    assert!(
+        matches!(&app.modal_state, Some(ModalState::TextInput(state)) if state.buffer == "pre onetwo")
+    );
+    assert_eq!(app.composer.input, "keep composer draft");
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    app.set_pending_mcp_user_input(
+        super::super::UserInputFormViewModel {
+            prompt: "Answer this".to_owned(),
+            prompt_origin: None,
+            questions: vec![sigil_kernel::UserInputQuestionV1 {
+                id: "answer".to_owned(),
+                question: "What should change?".to_owned(),
+                description: None,
+                required: true,
+                options: Vec::new(),
+                multiple: false,
+            }],
+            allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+        },
+        vec![super::super::UserInputDraftValue::Text(String::new())],
+        "fixture".to_owned(),
+        response_tx,
+    );
+    assert!(app.pending_plan_approval().expect("plan").workbench_open);
+
+    app.handle_paste_text("answer\r\nsecond line");
+
+    assert_eq!(
+        app.pending_user_input().expect("form").drafts,
+        vec![super::super::UserInputDraftValue::Text(
+            "answer\nsecond line".to_owned()
+        )]
+    );
+    assert_eq!(app.composer.input, "keep composer draft");
+    Ok(())
+}
+
 #[test]
 fn setup_field_paste_updates_selected_text_without_saving() {
     let mut app = AppState::from_setup(

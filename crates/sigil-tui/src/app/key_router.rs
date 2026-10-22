@@ -71,6 +71,21 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> anyhow::Result<Option<Option<AppAction>>> {
+        if self.approval_review_open()
+            && self.approval.metadata_focused
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            match key.code {
+                KeyCode::Esc => {
+                    self.toggle_approval_metadata();
+                    return Ok(Some(None));
+                }
+                KeyCode::Char('[' | ']' | ',' | '.' | 'v' | 'V') => return Ok(Some(None)),
+                _ => {}
+            }
+        }
         if self.approval.has_actionable_pending()
             && !self.approval_review_open()
             && key.code == KeyCode::BackTab

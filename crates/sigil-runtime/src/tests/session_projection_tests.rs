@@ -89,6 +89,253 @@ fn projection_service(
 }
 
 #[test]
+fn internal_research_stream_is_retained_but_not_a_conversation_catalog_entry() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "purpose-workspace");
+    let main_path = lifecycle.session_dir.join("conversation.jsonl");
+    let main_id = finalized_session(&main_path, "Keep my conversation", "custom", "model")?;
+    let child_path = lifecycle.session_dir.join("research.jsonl");
+    let mut child =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&child_path)?)?;
+    let turn = sigil_kernel::ConversationTurnRef::new(&main_id, "message", "run")?;
+    let review = sigil_kernel::plan_review_id_for_source(&turn);
+    let attempt = sigil_kernel::plan_review_attempt_id_for_review(&review);
+    child.append_control(ControlEntry::SessionPurposeBoundV1(
+        sigil_kernel::SessionPurposeBoundV1 {
+            schema_version: 1,
+            purpose: sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+                parent_session_id: main_id.clone(),
+                plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review, &attempt),
+                plan_review_id: review,
+                attempt_id: attempt,
+            },
+        },
+    ))?;
+    child.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("Research retained for audit".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+    let child_id = child.session_scope_id().to_owned();
+    drop(child);
+    let bytes = fs::read(&child_path)?;
+    let report = projection.rebuild()?;
+    assert_eq!(report.degraded_source_count, 0);
+    assert_eq!(
+        projection
+            .query(SessionCatalogProjectionQuery::default())?
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(
+        projection.list_workspace_entries()?[0]
+            .session_id
+            .as_deref(),
+        Some(main_id.as_str())
+    );
+    assert_eq!(lifecycle.catalog()?.entries.len(), 1);
+    assert!(matches!(
+        lifecycle
+            .resolve_session_for_reopen(&SessionRef::new_relative("research.jsonl")?, &child_id,),
+        Err(LocalSessionReopenError::NotReady {
+            state: LocalSessionCatalogState::Internal
+        })
+    ));
+    let reconciled = projection.reconcile()?;
+    assert_eq!(reconciled.reused_source_count, 2);
+    assert_eq!(projection.list_workspace_entries()?.len(), 1);
+    assert_eq!(
+        fs::read(&child_path)?,
+        bytes,
+        "catalog and rejection must preserve the audit log"
+    );
+    assert!(!LocalSessionCatalogState::Internal.permits_source_cleanup());
+    Ok(())
+}
+
+#[test]
+fn historical_plan_lineage_hides_only_research_child_and_keeps_route_missing_parent() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "legacy-purpose");
+    let main_path = lifecycle.session_dir.join("parent.jsonl");
+    let mut parent =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&main_path)?)?;
+    let parent_id = parent.session_scope_id().to_owned();
+    let source_turn = sigil_kernel::ConversationTurnRef::new(&parent_id, "source", "run")?;
+    let review = sigil_kernel::plan_review_id_for_source(&source_turn);
+    let attempt = sigil_kernel::plan_review_attempt_id_for_review(&review);
+    let draft = sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
+        sigil_kernel::plan_review_plan_id_for_attempt(&review, &attempt),
+        "A retained historical plan",
+        sigil_kernel::PlanSourceRef {
+            source_turn: Some(source_turn),
+            plan_review_id: Some(review),
+            ..Default::default()
+        },
+        1,
+        None,
+    )?
+    .expect("non-empty historical plan");
+    parent.append_user_message(ModelMessage::user("Plan this change"))?;
+    parent.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let child_path = lifecycle.session_dir.join("old-research.jsonl");
+    let mut child =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&child_path)?)?;
+    child.append_control(ControlEntry::PlanDraftCreated(draft))?;
+    child.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("Research complete".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+    let child_bytes = fs::read(&child_path)?;
+    drop(child);
+    assert!(parent.resolved_model_route().is_none());
+    projection.rebuild()?;
+    let rows = projection.list_workspace_entries()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].session_id.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(rows[0].source_state, LocalSessionCatalogState::Ready);
+    assert_eq!(fs::read(&child_path)?, child_bytes);
+    Ok(())
+}
+
+#[test]
+fn historical_attempt_lineage_hides_managed_research_before_a_draft_exists() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (mut lifecycle, _) = projection_service(temp.path(), "legacy-attempt");
+    let parent_path = lifecycle.session_dir.join("parent.jsonl");
+    let parent_id = explicit_plan_session(&parent_path, "Review without a draft")?;
+    let records = JsonlSessionStore::read_event_records(&parent_path)?;
+    let attempt = records
+        .iter()
+        .find_map(|record| match record.session_log_entry().ok().flatten() {
+            Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) => {
+                Some(attempt)
+            }
+            _ => None,
+        })
+        .expect("parent attempt");
+    let managed_root = temp.path().join("managed-session-log");
+    fs::create_dir_all(&managed_root)?;
+    // Keep an equivalent, noncanonical configured root so this regression is portable beyond
+    // macOS's /var -> /private/var ancestor alias.
+    lifecycle = lifecycle
+        .with_managed_session_log_root(managed_root.join("..").join("managed-session-log"))?;
+    let digest =
+        crate::managed_storage_writer::ManagedStorageWriterAdapterV1::named_namespace_digest(
+            crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+            &format!("pr-{}-research-0", attempt.attempt_id.as_str()),
+        );
+    let child_path = managed_root.join(digest.to_hex()).join("records.jsonl");
+    let child_id = finalized_session(&child_path, "Child question", "custom", "model")?;
+    let bytes = fs::read(&child_path)?;
+    let projection = SessionCatalogProjectionService::new(
+        lifecycle.clone(),
+        temp.path().join("catalog.sqlite3"),
+    );
+    projection.rebuild()?;
+    assert_eq!(projection.list_workspace_entries()?.len(), 1);
+    assert_eq!(
+        projection.list_workspace_entries()?[0]
+            .session_id
+            .as_deref(),
+        Some(parent_id.as_str())
+    );
+    assert_eq!(lifecycle.catalog()?.entries.len(), 1);
+    let aliased_child_path = managed_root
+        .join("..")
+        .join("managed-session-log")
+        .join(digest.to_hex())
+        .join("records.jsonl");
+    assert_eq!(
+        lifecycle.internal_parent_for_legacy_source(&aliased_child_path, bytes.len() as u64)?,
+        Some(parent_id.clone()),
+        "exact eligibility uses the same physical namespace as the catalog"
+    );
+    assert!(matches!(
+        lifecycle.resolve_session_for_reopen(
+            &SessionRef::new_relative(format!("{}.jsonl", digest.to_hex()))?,
+            &child_id,
+        ),
+        Err(LocalSessionReopenError::NotReady {
+            state: LocalSessionCatalogState::Internal
+        })
+    ));
+    projection.reconcile()?;
+    assert_eq!(
+        projection.list_workspace_entries()?.len(),
+        1,
+        "cached internal classification must remain internal"
+    );
+    assert_eq!(fs::read(&child_path)?, bytes);
+    let mut child =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&child_path)?)?;
+    child.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("Historical child resumed before a purpose rebind".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
+    drop(child);
+    projection.reconcile()?;
+    assert_eq!(
+        projection.list_workspace_entries()?.len(),
+        1,
+        "changed pre-marker child must revalidate its cached parent's durable lineage"
+    );
+    Ok(())
+}
+
+#[test]
+fn conflicting_session_purpose_degrades_only_its_own_catalog_row() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "conflicting-purpose");
+    let healthy = lifecycle.session_dir.join("healthy.jsonl");
+    let healthy_id = finalized_session(&healthy, "Keep working", "custom", "model")?;
+    let invalid = lifecycle.session_dir.join("conflicting.jsonl");
+    let mut session =
+        Session::load_from_store("custom", "model", JsonlSessionStore::new(&invalid)?)?;
+    session.append_control(ControlEntry::SessionPurposeBoundV1(
+        sigil_kernel::SessionPurposeBoundV1 {
+            schema_version: 1,
+            purpose: sigil_kernel::SessionPurposeV1::Conversation,
+        },
+    ))?;
+    let source = sigil_kernel::ConversationTurnRef::new(&healthy_id, "source", "run")?;
+    let review = sigil_kernel::plan_review_id_for_source(&source);
+    let attempt = sigil_kernel::plan_review_attempt_id_for_review(&review);
+    session.append_control(ControlEntry::SessionPurposeBoundV1(
+        sigil_kernel::SessionPurposeBoundV1 {
+            schema_version: 1,
+            purpose: sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+                parent_session_id: healthy_id.clone(),
+                plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review, &attempt),
+                plan_review_id: review,
+                attempt_id: attempt,
+            },
+        },
+    ))?;
+    drop(session);
+    let invalid_bytes = fs::read(&invalid)?;
+    let report = projection.rebuild()?;
+    assert_eq!(report.degraded_source_count, 1);
+    let rows = projection.list_workspace_entries()?;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .any(|row| row.session_id.as_deref() == Some(healthy_id.as_str())
+                && row.source_state == LocalSessionCatalogState::Ready)
+    );
+    assert!(rows.iter().any(|row| row.session_ref == "conflicting.jsonl"
+        && row.source_state == LocalSessionCatalogState::Invalid
+        && row.source_diagnostic == Some(SessionCatalogSourceDiagnostic::InvalidProjection)));
+    assert_eq!(lifecycle.catalog()?.entries.len(), 2);
+    assert_eq!(fs::read(&invalid)?, invalid_bytes);
+    Ok(())
+}
+
+#[test]
 fn catalog_explicit_plan_title_is_searchable_without_a_user_message() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "plan-search");
@@ -420,6 +667,7 @@ fn catalog_source_read_diagnostic_preserves_real_cancellation_and_io_causes() ->
             &BTreeMap::new(),
             &BTreeMap::new(),
             current_unix_ms(),
+            &mut std::collections::BTreeSet::new(),
         )
         .expect_err("disappeared candidate must not become missing-identity invalid");
     let SessionCatalogProjectionError::SourceRead { source } = error else {
@@ -985,7 +1233,7 @@ fn projection_revision_change_rebuilds_without_decoding_retired_row_values() -> 
         "chat",
     )?;
     projection.rebuild()?;
-    assert_eq!(SESSION_CATALOG_PROJECTION_REVISION, 6);
+    assert_eq!(SESSION_CATALOG_PROJECTION_REVISION, 7);
     let connection = Connection::open(projection.database_path())?;
     connection.execute(
         "UPDATE session_catalog_workspace_v1 SET projection_revision = ?1",

@@ -812,6 +812,38 @@ pub fn inspect_session_for_route_resume(
         Some(fallback_trust),
         store,
     )?;
+    if let Some(parent_session_id) =
+        crate::session_eligibility::internal_session_parent_from_entries(
+            session.session_scope_id(),
+            session.entries(),
+        )?
+    {
+        return Err(
+            crate::session_eligibility::InternalSessionResumeError { parent_session_id }.into(),
+        );
+    }
+    if session.resolved_model_route().is_none()
+        && let Some(path) = session.store_path()
+    {
+        let paths = crate::paths::resolve_sigil_paths(
+            &root_config.storage,
+            &root_config.session,
+            &root_config.workspace.root,
+        );
+        let lifecycle = crate::LocalSessionLifecycleService::new(
+            paths.workspace_id,
+            paths.session_log_dir,
+            paths.session_exports_root,
+        )
+        .with_managed_session_log_root(paths.state_root.join("managed/session-log"))?;
+        let bytes = std::fs::metadata(path)?.len();
+        if let Some(parent_session_id) = lifecycle.internal_parent_for_legacy_source(path, bytes)? {
+            return Err(crate::session_eligibility::InternalSessionResumeError {
+                parent_session_id,
+            }
+            .into());
+        }
+    }
     let persisted = session.resolved_model_route().cloned().ok_or_else(|| {
         anyhow::anyhow!("session_route_missing: start a new session or select a replacement route")
     })?;

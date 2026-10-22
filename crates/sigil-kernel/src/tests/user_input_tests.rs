@@ -30,6 +30,7 @@ fn text_request(request_id: &str, generation: u32) -> Result<UserInputRequestedV
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "I need one missing constraint before continuing.".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope should I use?".to_owned(),
@@ -61,6 +62,25 @@ fn text_request_for_session(
     let mut request = text_request(request_id, generation)?.request;
     request.identity.session_scope_id = SessionScopeId::new(session.session_scope_id())?;
     UserInputRequestedV1::new(request)
+}
+
+#[test]
+fn prompt_origin_absence_preserves_legacy_serialization_and_request_hash() -> Result<()> {
+    let legacy = text_request("legacy-heading", 1)?;
+    let encoded = serde_json::to_value(&legacy.request)?;
+    assert!(encoded.get("prompt_origin").is_none());
+    let decoded: UserInputRequestV1 = serde_json::from_value(encoded.clone())?;
+    assert_eq!(decoded.prompt_origin, None);
+    assert_eq!(decoded.request_hash()?, legacy.request_hash);
+    let old_canonical = crate::event::canonical_json_bytes(&encoded)?;
+    assert_eq!(
+        crate::stable_event_hash(&old_canonical),
+        legacy.request_hash
+    );
+    let mut current = legacy.request;
+    current.prompt_origin = Some(UserInputPromptOriginV1::QuestionText);
+    assert_ne!(current.request_hash()?, legacy.request_hash);
+    Ok(())
 }
 
 fn awaiting_input_session() -> Result<(
@@ -1039,6 +1059,7 @@ fn mcp_decision_persists_only_answer_hash_and_cannot_claim_continuation() -> Res
         },
         purpose: UserInputPurposeV1::ExternalElicitation,
         prompt: "Choose a format.".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "format".to_owned(),
             question: "Which output format?".to_owned(),

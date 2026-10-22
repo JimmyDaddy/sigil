@@ -137,6 +137,7 @@ fn worker_revision_waiting_commits_the_exact_public_outbox_before_tui_wakeup() -
         },
         purpose: sigil_kernel::UserInputPurposeV1::Clarification,
         prompt: "Which invariant is still unproven?".to_owned(),
+        prompt_origin: None,
         questions: Vec::new(),
         allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
         requested_at_unix_ms: 15,

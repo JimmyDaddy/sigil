@@ -800,6 +800,7 @@ pub use session::{
     session_io_lock_metrics, session_stats_from_entries, tool_model_view_initial_limit,
 };
 pub use session::{ApplicationOperationCommitProofV1, SessionApplicationOperationOwner};
+pub use session::{SessionPurposeBoundV1, SessionPurposeV1};
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,
     SkillStateProjection, SkillTrustState,
@@ -896,10 +897,10 @@ pub use user_input::{
     UserInputContinuationStartedV1, UserInputDecisionAcceptedV1, UserInputDecisionCommandV1,
     UserInputDecisionReceiptV1, UserInputDecisionV1, UserInputDurableDecisionV1,
     UserInputIdentityV1, UserInputLifecycleEntryV1, UserInputOptionV1, UserInputProjectionV1,
-    UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1,
-    UserInputRequestStateV1, UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1,
-    UserInputResolvedV1, UserInputSourceV1, UserInputStatusV1, accept_user_input_decision,
-    prepare_user_input_continuation, preview_user_input_decision,
+    UserInputPromptOriginV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
+    UserInputRequestRefV1, UserInputRequestStateV1, UserInputRequestV1, UserInputRequestedV1,
+    UserInputResolutionV1, UserInputResolvedV1, UserInputSourceV1, UserInputStatusV1,
+    accept_user_input_decision, prepare_user_input_continuation, preview_user_input_decision,
     reconcile_user_input_continuation_after_failed_run, recoverable_user_input_decision,
     recoverable_user_input_decision_from_entries, request_user_input_tool_spec,
     user_input_continuation_logical_run_id,

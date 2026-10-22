@@ -1033,6 +1033,7 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        metadata_focused: false,
         has_diff_preview: true,
         file_rows: Vec::new(),
         changed_files: Vec::new(),
@@ -1061,6 +1062,39 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
 }
 
 #[test]
+fn approval_full_details_geometry_keeps_actions_and_disables_hidden_diff_controls() {
+    let view = ApprovalModalView {
+        metadata_focused: true,
+        metadata_collapsed: false,
+        has_diff_preview: true,
+        session_grant_available: true,
+        command_family_allow_pattern: Some("cargo *".to_owned()),
+        ..ApprovalModalView::default()
+    };
+    for width in [48, 80, 124] {
+        let screen = Rect::new(0, 0, width, 24);
+        let hits = approval_modal_hit_areas(screen, &view).expect("approval hit areas");
+        let inner = inset_rect(hits.modal, 1, 1);
+        let sections = approval_modal_sections(inner, &view);
+        assert!(sections.metadata.is_none());
+        for action in [
+            hits.allow_once_action,
+            hits.allow_session_action,
+            hits.allow_family_action,
+            hits.deny_action,
+        ] {
+            assert!(action.width > 0);
+            assert!(sections.footer.contains((action.x, action.y).into()));
+            assert!(action.right() <= sections.footer.right());
+        }
+        assert_eq!(hits.hunk_previous, Rect::default());
+        assert_eq!(hits.hunk_next, Rect::default());
+        assert_eq!(hits.diff_view_toggle, Rect::default());
+        assert!(hits.file_rows.is_empty());
+    }
+}
+
+#[test]
 fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyhow::Result<()> {
     assert_eq!(
         slash_selector_overlay_rect(Rect::new(0, 0, 10, 4), Rect::new(9, 2, 1, 2), 3),
@@ -1079,7 +1113,6 @@ fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyho
         session_id: None,
         title: Some("Layout snapshot".to_owned()),
         modified_epoch_secs: 1,
-        bytes: 128,
     }];
     app.composer.input = "/resume".to_owned();
 
@@ -1360,6 +1393,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: true,
+        metadata_focused: false,
         has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "note.txt".to_owned(),
@@ -1440,6 +1474,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         preview_title: "Run shell command".to_owned(),
         preview_summary: "cargo test -p sigil-tui".to_owned(),
         metadata_collapsed: true,
+        metadata_focused: false,
         has_diff_preview: false,
         ..ApprovalModalView::default()
     };

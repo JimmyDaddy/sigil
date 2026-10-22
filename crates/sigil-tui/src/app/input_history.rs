@@ -33,6 +33,7 @@ impl AppState {
     pub(super) fn reset_input_history_navigation(&mut self) {
         self.composer.input_history_index = None;
         self.composer.input_history_draft = None;
+        self.composer.input_history_edit_context = None;
     }
 
     pub(super) fn navigate_input_history(&mut self, older: bool) {
@@ -47,6 +48,8 @@ impl AppState {
                     self.composer.input_history_index = Some(index - 1);
                 }
                 None => {
+                    self.composer.input_history_edit_context =
+                        Some(self.capture_composer_edit_context());
                     self.composer.input_history_draft = Some(self.composer.input.clone());
                     self.composer.input_history_index = Some(self.composer.input_history.len() - 1);
                 }
@@ -58,7 +61,11 @@ impl AppState {
                 }
                 Some(_) => {
                     let draft = self.composer.input_history_draft.take().unwrap_or_default();
-                    self.set_input_and_cursor(draft);
+                    if let Some(context) = self.composer.input_history_edit_context.take() {
+                        self.restore_composer_edit_context(context);
+                    } else {
+                        self.set_input_and_cursor(draft);
+                    }
                     self.composer.input_history_index = None;
                     self.reset_slash_selector();
                     return;
@@ -71,6 +78,7 @@ impl AppState {
             && let Some(value) = self.composer.input_history.get(index)
         {
             self.set_input_and_cursor(value.clone());
+            self.composer.edit_history = Default::default();
             self.discard_cleared_input_draft();
             self.reset_slash_selector();
         }

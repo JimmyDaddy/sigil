@@ -741,6 +741,11 @@ export type ConversationDisplayStatus =
   | "blocked"
   | "awaiting_user_input";
 
+export interface UserInputReceipt {
+  decision: "submitted" | "declined" | "run_cancelled";
+  answeredCount: number;
+}
+
 export type ConversationDisplayContent =
   | {
       type: "message";
@@ -764,6 +769,7 @@ export type ConversationDisplayContent =
     }
   | {
       type: "tool";
+      userInputReceipt?: UserInputReceipt;
       callId?: string;
       toolName?: string;
       input?: string;
@@ -1063,6 +1069,7 @@ export interface UserInputRequest {
   };
   purpose: UserInputPurpose;
   prompt: string;
+  promptOrigin?: "question_text" | "host_question_group";
   questions: UserInputQuestion[];
   allowedActions: UserInputAction[];
   requestedAtUnixMs: number;

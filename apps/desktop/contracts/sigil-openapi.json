@@ -2859,6 +2859,16 @@
               },
               "type": {
                 "const": "tool"
+              },
+              "user_input_receipt": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ConversationDisplayUserInputReceipt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -3277,6 +3287,27 @@
           "awaiting_user_input"
         ],
         "type": "string"
+      },
+      "ConversationDisplayUserInputReceipt": {
+        "properties": {
+          "answered_count": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "decision": {
+            "enum": [
+              "submitted",
+              "declined",
+              "run_cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "answered_count"
+        ],
+        "type": "object"
       },
       "ConversationForkPointView": {
         "properties": {
@@ -11475,6 +11506,17 @@
             "maxLength": 512,
             "minLength": 1,
             "type": "string"
+          },
+          "prompt_origin": {
+            "enum": [
+              "question_text",
+              "host_question_group",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "purpose": {
             "enum": [

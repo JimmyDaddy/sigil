@@ -22,6 +22,7 @@ fn revision_request() -> Result<sigil_kernel::PublicUserInputRequestV1> {
         },
         purpose: sigil_kernel::UserInputPurposeV1::RevisionGuidance,
         prompt: "What should change in this plan?".to_owned(),
+        prompt_origin: None,
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "revision_guidance".to_owned(),
             question: "Describe the change.".to_owned(),
@@ -278,6 +279,404 @@ fn ordinary_text_form_uses_enter_to_focus_actions() -> Result<()> {
     Ok(())
 }
 
+fn ordinary_app_with_questions(
+    questions: Vec<sigil_kernel::UserInputQuestionV1>,
+) -> Result<AppState> {
+    let mut request = revision_request()?;
+    request.source = sigil_kernel::UserInputSourceV1::Agent;
+    request.purpose = sigil_kernel::UserInputPurposeV1::Clarification;
+    request.questions = questions;
+    request
+        .allowed_actions
+        .push(sigil_kernel::UserInputActionV1::CancelRun);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_pending_user_input(request);
+    Ok(app)
+}
+
+fn ordinary_question(id: &str) -> sigil_kernel::UserInputQuestionV1 {
+    sigil_kernel::UserInputQuestionV1 {
+        id: id.to_owned(),
+        question: format!("请回答 {id}？"),
+        description: None,
+        required: true,
+        options: Vec::new(),
+        multiple: false,
+    }
+}
+
+fn choice_question(multiple: bool) -> sigil_kernel::UserInputQuestionV1 {
+    let mut question = ordinary_question("choice");
+    question.options = vec![sigil_kernel::UserInputOptionV1 {
+        id: "suggested".to_owned(),
+        label: "建议选项".to_owned(),
+        description: None,
+    }];
+    question.multiple = multiple;
+    question
+}
+
+#[test]
+fn ordinary_form_paste_preserves_unicode_multiline_answer_and_original_composer_draft() -> Result<()>
+{
+    let mut app = ordinary_app_with_questions(vec![ordinary_question("note")])?;
+    let request = app
+        .pending_user_input()
+        .expect("form")
+        .request
+        .clone()
+        .expect("request");
+    app.composer.input = "原来的草稿 👨‍👩‍👧‍👦\n不能改变".to_owned();
+    app.composer.input_cursor = 3;
+    app.handle_paste_text("  中文 👩🏽‍💻\r\n第二行\n");
+    assert_eq!(text(&app), "  中文 👩🏽‍💻\n第二行\n");
+    assert_eq!(app.composer.input, "原来的草稿 👨‍👩‍👧‍👦\n不能改变");
+    assert_eq!(app.composer.input_cursor, 3);
+    assert!(app.composer.input_paste_spans.is_empty());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    let action = press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            request_id,
+            generation,
+            expected_request_hash,
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers },
+            ..
+        }) if request_id == request.identity.request_id.as_str()
+            && generation == request.identity.generation
+            && expected_request_hash == request.request_hash
+            && answers == vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "note".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "  中文 👩🏽‍💻\n第二行\n".to_owned(),
+                },
+            }]
+    ));
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_choice_paste_targets_other_and_preserves_multi_select_choices() -> Result<()> {
+    for multiple in [false, true] {
+        let mut app = ordinary_app_with_questions(vec![choice_question(multiple)])?;
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        app.handle_paste_text("自己的选择 ✅\n保留详情");
+        assert!(app.composer.input.is_empty());
+        let form = app.pending_user_input().expect("form");
+        match &form.drafts[0] {
+            UserInputDraftValue::SingleSelect {
+                selected,
+                selected_by_user,
+                other,
+            } => {
+                assert_eq!(*selected, Some(1));
+                assert!(*selected_by_user);
+                assert_eq!(other, "自己的选择 ✅\n保留详情");
+            }
+            UserInputDraftValue::MultiSelect {
+                selected, other, ..
+            } => {
+                assert_eq!(selected, &["suggested".to_owned()]);
+                assert_eq!(other, "自己的选择 ✅\n保留详情");
+            }
+            UserInputDraftValue::Text(_) => panic!("expected choice draft"),
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+        let action = press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+        let Some(AppAction::SubmitUserInputDecision {
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers },
+            ..
+        }) = action
+        else {
+            panic!("expected submitted choice");
+        };
+        let expected = if multiple {
+            sigil_kernel::UserInputAnswerValueV1::MultiSelect {
+                option_ids: vec!["suggested".to_owned()],
+                other: Some("自己的选择 ✅\n保留详情".to_owned()),
+            }
+        } else {
+            sigil_kernel::UserInputAnswerValueV1::SingleSelect {
+                option_id: None,
+                other: Some("自己的选择 ✅\n保留详情".to_owned()),
+            }
+        };
+        assert_eq!(answers[0].value, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_space_confirms_the_highlighted_option_or_other_before_changing_it() -> Result<()> {
+    let mut question = choice_question(false);
+    question.options.push(sigil_kernel::UserInputOptionV1 {
+        id: "second".to_owned(),
+        label: "第二个选项".to_owned(),
+        description: None,
+    });
+    let mut app = ordinary_app_with_questions(vec![question.clone()])?;
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE)?;
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE)?;
+    press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+    assert!(matches!(
+        &app.pending_user_input().expect("form").drafts[0],
+        UserInputDraftValue::SingleSelect {
+            selected: Some(1),
+            selected_by_user: true,
+            ..
+        }
+    ));
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(
+        matches!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?,
+            Some(AppAction::SubmitUserInputDecision { decision: sigil_kernel::UserInputDecisionV1::Submitted { answers }, .. })
+                if matches!(&answers[0].value, sigil_kernel::UserInputAnswerValueV1::SingleSelect { option_id: Some(id), other: None } if id == "second")
+        )
+    );
+
+    let mut app = ordinary_app_with_questions(vec![question])?;
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE)?;
+    press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+    assert!(matches!(&app.pending_user_input().expect("form").drafts[0],
+        UserInputDraftValue::SingleSelect { selected: Some(2), selected_by_user: true, other } if other.is_empty()));
+    app.handle_paste_text("其他回答");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(
+        matches!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?,
+            Some(AppAction::SubmitUserInputDecision { decision: sigil_kernel::UserInputDecisionV1::Submitted { answers }, .. })
+                if matches!(&answers[0].value, sigil_kernel::UserInputAnswerValueV1::SingleSelect { option_id: None, other: Some(value) } if value == "其他回答")
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_action_paste_is_consumed_with_visible_feedback() -> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![ordinary_question("note")])?;
+    app.composer.input = "keep composer".to_owned();
+    app.handle_paste_text("keep answer");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+    app.handle_paste_text("must not reach another input");
+    let form = app.pending_user_input().expect("form");
+    assert!(form.focus_actions);
+    assert_eq!(text(&app), "keep answer");
+    assert_eq!(app.composer.input, "keep composer");
+    assert_eq!(
+        form.validation_error
+            .as_ref()
+            .expect("feedback")
+            .question_index,
+        None
+    );
+    assert!(
+        form.validation_error
+            .as_ref()
+            .expect("feedback")
+            .message
+            .contains("↑")
+    );
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE)?;
+    assert!(!app.pending_user_input().expect("form").focus_actions);
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_recovery_paste_cannot_change_an_accepted_answer_or_composer() -> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![ordinary_question("note")])?;
+    let request = app
+        .pending_user_input()
+        .expect("form")
+        .request
+        .clone()
+        .expect("request");
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("form-paste-recovery")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "note".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "original accepted answer".to_owned(),
+                },
+            }],
+        },
+    };
+    app.clear_pending_user_input();
+    app.set_pending_user_input_recovery(request.clone(), command.clone());
+    app.composer.input = "original composer".to_owned();
+    app.handle_paste_text("cannot replace accepted answer");
+    let form = app.pending_user_input().expect("form");
+    assert_eq!(form.recovery_command.as_ref(), Some(&command));
+    assert_eq!(app.composer.input, "original composer");
+    assert_eq!(text(&app), "");
+    assert!(
+        form.validation_error
+            .as_ref()
+            .expect("paste feedback")
+            .message
+            .contains("cannot be edited")
+    );
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?,
+        Some(AppAction::ResumeCommittedUserInput { original_command_id, request_id, .. })
+            if original_command_id == command.command_id.as_str()
+                && request_id == request.identity.request_id.as_str()
+    ));
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_closed_paste_edits_composer_and_reopen_retains_answer() -> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![ordinary_question("note")])?;
+    app.handle_paste_text("保留回答 🔖");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE)?;
+    app.handle_paste_text("现在输入主草稿\n第二行");
+    assert_eq!(app.composer.input, "现在输入主草稿\n第二行");
+    assert_eq!(text(&app), "保留回答 🔖");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?;
+    assert!(app.pending_user_input().expect("form").open);
+    app.handle_paste_text(" + 回到回答");
+    assert_eq!(text(&app), "保留回答 🔖 + 回到回答");
+    assert_eq!(app.composer.input, "现在输入主草稿\n第二行");
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_validation_focuses_first_missing_answer_and_clears_only_when_corrected()
+-> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![
+        ordinary_question("first"),
+        ordinary_question("second"),
+    ])?;
+    let form = app.composer.pending_user_input.as_mut().expect("form");
+    *form.question_scroll_offsets.borrow_mut() = vec![2, 31];
+    form.scroll_extent.set(40);
+    press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL)?;
+    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_none());
+    let form = app.pending_user_input().expect("form");
+    assert_eq!(form.focused_question, 0);
+    assert!(!form.focus_actions);
+    assert_eq!(form.scroll, 2);
+    assert_eq!(
+        form.validation_error
+            .as_ref()
+            .expect("error")
+            .question_index,
+        Some(0)
+    );
+    press(&mut app, KeyCode::Backspace, KeyModifiers::NONE)?;
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_some()
+    );
+    app.handle_paste_text("first answer");
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_none()
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL)?;
+    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_none());
+    let form = app.pending_user_input().expect("form");
+    assert_eq!(form.focused_question, 1);
+    assert!(!form.focus_actions);
+    assert_eq!(form.scroll, 31);
+    assert_eq!(
+        form.validation_error
+            .as_ref()
+            .expect("error")
+            .question_index,
+        Some(1)
+    );
+    assert!(
+        form.validation_error
+            .as_ref()
+            .expect("error")
+            .message
+            .contains("question 2")
+    );
+    app.handle_paste_text("second answer");
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_none()
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_empty_other_is_invalid_until_text_is_pasted() -> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![choice_question(false)])?;
+    let form = app.composer.pending_user_input.as_mut().expect("form");
+    form.drafts[0] = UserInputDraftValue::SingleSelect {
+        selected: Some(1),
+        selected_by_user: true,
+        other: String::new(),
+    };
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_none());
+    assert_eq!(app.pending_user_input().expect("form").focused_question, 0);
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_some()
+    );
+    app.handle_paste_text("真实回答");
+    assert!(
+        app.pending_user_input()
+            .expect("form")
+            .validation_error
+            .is_none()
+    );
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_actions_return_to_the_same_rendered_question_without_submitting() -> Result<()> {
+    let mut app = ordinary_app_with_questions(vec![
+        ordinary_question("first"),
+        ordinary_question("second"),
+    ])?;
+    let form = app.composer.pending_user_input.as_mut().expect("form");
+    *form.question_scroll_offsets.borrow_mut() = vec![2, 31];
+    form.scroll_extent.set(40);
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+    assert!(app.pending_user_input().expect("form").focus_actions);
+    assert!(press(&mut app, KeyCode::Right, KeyModifiers::NONE)?.is_none());
+    assert!(press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?.is_none());
+    assert_eq!(
+        app.pending_user_input().expect("form").selected_action,
+        UserInputFormAction::Submit
+    );
+    assert!(press(&mut app, KeyCode::Up, KeyModifiers::NONE)?.is_none());
+    let form = app.pending_user_input().expect("form");
+    assert!(!form.focus_actions);
+    assert_eq!(form.focused_question, 1);
+    assert_eq!(form.scroll, 31);
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?;
+    assert_eq!(app.pending_user_input().expect("form").focused_question, 0);
+    assert_eq!(app.pending_user_input().expect("form").scroll, 2);
+    Ok(())
+}
+
 fn routed_attention_fixture() -> Result<(
     sigil_kernel::AgentUserInputRouteEntryV1,
     sigil_kernel::UserInputDecisionCommandV1,
@@ -290,6 +689,7 @@ fn routed_attention_fixture() -> Result<(
         source: sigil_kernel::UserInputSourceV1::Agent,
         purpose: public.purpose,
         prompt: public.prompt,
+        prompt_origin: None,
         questions: public.questions,
         allowed_actions: public.allowed_actions,
         requested_at_unix_ms: 1,
@@ -597,6 +997,7 @@ fn ordinary_resume_failure_clears_a_durably_resolved_form_without_marking_answer
         source: public.source,
         purpose: public.purpose,
         prompt: public.prompt,
+        prompt_origin: None,
         questions: public.questions,
         allowed_actions: public.allowed_actions,
         requested_at_unix_ms: 1,

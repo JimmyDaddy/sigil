@@ -491,7 +491,9 @@ impl AppState {
             self.last_notice = Some("agent message unavailable for main".to_owned());
             return false;
         }
-        self.set_input_and_cursor(format!("/agent message {target} "));
+        self.edit_composer_input(|app| {
+            app.set_input_and_cursor(format!("/agent message {target} "))
+        });
         self.blur_composer_agent_panel();
         self.blur_composer_queue_panel();
         self.reset_slash_selector();

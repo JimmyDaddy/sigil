@@ -340,11 +340,24 @@ pub struct UserInputRequestV1 {
     pub source: UserInputSourceV1,
     pub purpose: UserInputPurposeV1,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_origin: Option<UserInputPromptOriginV1>,
     pub questions: Vec<UserInputQuestionV1>,
     pub allowed_actions: Vec<UserInputActionV1>,
     pub requested_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<UserInputContinuationBindingV1>,
+}
+
+/// How the host constructed a question heading; absent for historical or external text.
+/// Presentation may localize a host question-group heading without rewriting external prompts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputPromptOriginV1 {
+    /// The heading is the single model-provided question text.
+    QuestionText,
+    /// The host supplied a generic heading for a group of model-provided questions.
+    HostQuestionGroup,
 }
 
 impl UserInputRequestV1 {
@@ -890,6 +903,7 @@ impl UserInputRequestStateV1 {
             source: self.requested.request.source.clone(),
             purpose: self.requested.request.purpose,
             prompt: self.requested.request.prompt.clone(),
+            prompt_origin: self.requested.request.prompt_origin,
             questions: self.requested.request.questions.clone(),
             allowed_actions: self.requested.request.allowed_actions.clone(),
             requested_at_unix_ms: self.requested.request.requested_at_unix_ms,
@@ -1777,6 +1791,8 @@ pub struct PublicUserInputRequestV1 {
     pub source: UserInputSourceV1,
     pub purpose: UserInputPurposeV1,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_origin: Option<UserInputPromptOriginV1>,
     pub questions: Vec<UserInputQuestionV1>,
     pub allowed_actions: Vec<UserInputActionV1>,
     pub requested_at_unix_ms: u64,

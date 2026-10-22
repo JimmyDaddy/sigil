@@ -27,6 +27,7 @@ fn revision_form() -> PendingUserInputForm {
         },
         purpose: sigil_kernel::UserInputPurposeV1::RevisionGuidance,
         prompt: "What should change in this plan?".to_owned(),
+        prompt_origin: None,
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "revision_guidance".to_owned(),
             question: "Describe the changes you want before a new plan is prepared.".to_owned(),
@@ -58,20 +59,25 @@ fn revision_form() -> PendingUserInputForm {
         focus_actions: false,
         selected_action: UserInputFormAction::Submit,
         drafts: vec![UserInputDraftValue::Text(String::new())],
+        validation_error: None,
         plan_revision_editor: Default::default(),
         scroll: 0,
         scroll_extent: Default::default(),
+        question_scroll_offsets: Default::default(),
     }
 }
 
 fn rendered_content(terminal: &Terminal<TestBackend>) -> String {
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for row in buffer.content().chunks(buffer.area.width as usize) {
+        let mut column = 0;
+        while let Some(cell) = row.get(column) {
+            text.push_str(cell.symbol());
+            column += crate::ui::terminal_cell_width(cell.symbol()).max(1);
+        }
+    }
+    text
 }
 
 #[test]
@@ -202,5 +208,139 @@ fn recovered_input_explains_saved_answer_without_claiming_owner_stopped() -> any
     assert!(rendered.contains("Resume"));
     assert!(!rendered.contains("previous owner stopped"));
     assert!(!rendered.contains("private stored answer"));
+    Ok(())
+}
+
+fn ordinary_form() -> PendingUserInputForm {
+    let mut form = revision_form();
+    form.request.as_mut().expect("request").source = sigil_kernel::UserInputSourceV1::Agent;
+    form.view.questions[0].id = "internal_question_id".to_owned();
+    form.view.questions[0].question = "你希望保留哪些内容？".to_owned();
+    form
+}
+
+#[test]
+fn ordinary_form_localizes_only_a_typed_host_question_group() -> anyhow::Result<()> {
+    let mut form = ordinary_form();
+    form.view.prompt = "Please answer the following questions before continuing.".to_owned();
+    form.view.prompt_origin = Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| render_user_input_form(frame, frame.area(), &form, &Theme::default()))?;
+    assert!(rendered_content(&terminal).contains("请回答以下问题后继续"));
+    assert!(!rendered_content(&terminal).contains("Please answer the following questions"));
+    form.view.prompt_origin = None;
+    terminal.draw(|frame| render_user_input_form(frame, frame.area(), &form, &Theme::default()))?;
+    assert!(rendered_content(&terminal).contains(&form.view.prompt));
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_hints_follow_field_and_action_focus_without_raw_ids() -> anyhow::Result<()> {
+    let mut form = ordinary_form();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| {
+        render_user_input_form(frame, frame.area(), &form, &Theme::default());
+    })?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("你希望保留哪些内容？"));
+    assert!(!rendered.contains("internal_question_id"));
+    assert!(rendered.contains("Enter Actions"));
+    assert!(rendered.contains("Shift-Tab Previous"));
+    assert!(rendered.contains("Esc Close"));
+    assert!(!rendered.contains("Enter newline"));
+
+    form.focus_actions = true;
+    terminal.draw(|frame| {
+        render_user_input_form(frame, frame.area(), &form, &Theme::default());
+    })?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("↑ Answers"));
+    assert!(rendered.contains("←→ / Tab Actions"));
+    assert!(rendered.contains("Enter Confirm"));
+    assert!(rendered.contains("Esc Close"));
+    assert!(!rendered.contains("Shift-Tab Previous"));
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_keeps_validation_and_actions_visible_on_short_narrow_windows() -> anyhow::Result<()>
+{
+    for (width, height) in [(80, 24), (48, 12)] {
+        let mut form = ordinary_form();
+        form.validation_error = Some(crate::app::UserInputFormValidationError {
+            question_index: Some(0),
+            message: "Please answer question 1 before submitting".to_owned(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| {
+            render_user_input_form(frame, frame.area(), &form, &Theme::default());
+        })?;
+        let rendered = rendered_content(&terminal);
+        assert!(rendered.contains("Please answer question 1 before submitting"));
+        assert!(rendered.contains("Submit"));
+        assert!(rendered.contains("Decline"));
+        assert!(rendered.contains("Esc Close"));
+        assert!(rendered.contains("Enter Actions"));
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_action_hints_wrap_and_returned_question_uses_rendered_rows() -> anyhow::Result<()>
+{
+    let mut form = ordinary_form();
+    let mut second = form.view.questions[0].clone();
+    form.view.questions[0].description = Some("Long question detail. ".repeat(36));
+    second.id = "second".to_owned();
+    second.question = "Second question is the focused return target".to_owned();
+    form.view.questions.push(second);
+    form.drafts
+        .push(UserInputDraftValue::Text("Keep this answer".to_owned()));
+    form.focused_question = 1;
+    form.focus_actions = true;
+    let mut terminal = Terminal::new(TestBackend::new(48, 12))?;
+    terminal.draw(|frame| {
+        render_user_input_form(frame, frame.area(), &form, &Theme::default());
+    })?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("↑ Answers"));
+    assert!(rendered.contains("Enter Confirm"));
+    assert!(rendered.contains("Esc Close"));
+    assert!(form.question_scroll_offsets.borrow()[1] > 10);
+
+    form.focus_actions = false;
+    form.scroll = form.question_scroll_offsets.borrow()[1];
+    terminal.draw(|frame| {
+        render_user_input_form(frame, frame.area(), &form, &Theme::default());
+    })?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Second question is the focused return target"));
+    assert!(rendered.contains("Keep this answer"));
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_choice_hint_describes_other_input_and_next_question() -> anyhow::Result<()> {
+    let mut form = ordinary_form();
+    form.view.questions[0].options = vec![sigil_kernel::UserInputOptionV1 {
+        id: "option".to_owned(),
+        label: "Suggested option".to_owned(),
+        description: None,
+    }];
+    form.drafts[0] = UserInputDraftValue::SingleSelect {
+        selected: None,
+        selected_by_user: false,
+        other: String::new(),
+    };
+    form.view.questions.push(form.view.questions[0].clone());
+    form.drafts.push(UserInputDraftValue::Text(String::new()));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+    terminal.draw(|frame| {
+        render_user_input_form(frame, frame.area(), &form, &Theme::default());
+    })?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Enter Next question"));
+    assert!(rendered.contains("Space Select"));
+    assert!(rendered.contains("Type / paste Other"));
     Ok(())
 }

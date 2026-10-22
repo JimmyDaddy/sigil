@@ -1777,7 +1777,6 @@ fn resume_selector_exact_durable_id_keeps_the_typed_target_and_original_ordinal(
             session_id: Some("93d49c3f-5ea9-5067-bb41-2eb563a433b4".to_owned()),
             title: Some(format!("Cross-reference {id}")),
             modified_epoch_secs: 2,
-            bytes: 128,
         },
         crate::sessions::SessionHistoryEntry {
             path: target.clone(),
@@ -1785,7 +1784,6 @@ fn resume_selector_exact_durable_id_keeps_the_typed_target_and_original_ordinal(
             session_id: Some(id.to_owned()),
             title: Some("Report canary".to_owned()),
             modified_epoch_secs: 1,
-            bytes: 128,
         },
     ];
     for query in [id.to_owned(), id.to_ascii_uppercase()] {
@@ -1828,7 +1826,6 @@ fn resume_selector_durable_id_matching_preserves_existing_literal_queries() -> R
             session_id: None,
             title: Some("Alpha notes".to_owned()),
             modified_epoch_secs: 2,
-            bytes: 128,
         },
         crate::sessions::SessionHistoryEntry {
             path: second.clone(),
@@ -1836,7 +1833,6 @@ fn resume_selector_durable_id_matching_preserves_existing_literal_queries() -> R
             session_id: Some("4d17a623-30c8-5dde-bc65-c751f2aaa3b8".to_owned()),
             title: Some("Report canary".to_owned()),
             modified_epoch_secs: 1,
-            bytes: 128,
         },
     ];
     for (query, expected) in [
@@ -1874,7 +1870,6 @@ fn resume_selector_empty_message_distinguishes_no_match_from_no_sessions() {
         session_id: None,
         title: Some("Alpha task".to_owned()),
         modified_epoch_secs: 1,
-        bytes: 128,
     }];
     app.composer.input = "/resume zzz".to_owned();
 

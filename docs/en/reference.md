@@ -21,8 +21,9 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Insert composer newline | `Ctrl-J`; `Shift-Enter` / `Alt-Enter` when supported |
 | Move composer cursor | `Ctrl-A/E`, `Ctrl-B/F`, `Alt-B/F`, arrows |
 | Delete composer text | `Backspace/Delete`, `Ctrl-H/W`, modified Backspace/Delete |
-| Kill/yank line tail | `Ctrl-K/Y` |
-| Restore the last draft cleared with `Esc` | `Ctrl-Z` |
+| Kill/yank line tail | `Ctrl-K` / `Alt-Y`; `Ctrl-Y` also yanks when no redo is available |
+| Undo composer edits, including clearing with `Esc` | `Ctrl-Z` |
+| Redo composer edits | `Ctrl-Y` / `Ctrl-Shift-Z` |
 | Select and copy transcript text | Drag and release; copies automatically and excludes the info rail |
 | Retry selected transcript copy | `Ctrl-C` when a failed selection remains active |
 | Copy selection, or latest assistant reply when no selection is active | `Ctrl-L`; info rail is excluded |
@@ -45,7 +46,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Run diagnostics on changed source | `Alt-D` |
 | Cancel focused terminal task | `Alt-X` |
 
-`Up/Down` first handles composer history or multiline movement. `Ctrl-Z` restores one cleared draft; it is not a general undo stack.
+`Up/Down` first handles composer history or multiline movement. Undo/redo belongs to the current unsent draft; sending or switching conversations clears it. With a redo available, `Ctrl-Y` redoes it; `Alt-Y` always yanks cut text.
 
 ## Slash Commands
 

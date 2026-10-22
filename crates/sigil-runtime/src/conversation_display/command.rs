@@ -272,6 +272,7 @@ pub(super) fn project_terminal_snapshot(
         ConversationDisplayContentV1::Tool {
             call_id: Some(bound_identity(&origin.requested_call_id)),
             tool_name: Some(origin.name.clone()),
+            user_input_receipt: None,
             input: origin.input.clone(),
             execution_id: Some(task.handle.task_id.as_str().to_owned()),
             execution_started_at_ms: origin.execution_started_at_ms,

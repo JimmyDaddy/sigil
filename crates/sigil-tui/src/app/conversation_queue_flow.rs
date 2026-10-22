@@ -450,11 +450,18 @@ impl AppState {
                 input_cursor: self.composer.input_cursor,
                 input_selection_anchor: self.composer.input_selection_anchor,
                 input_paste_spans: self.composer.input_paste_spans.clone(),
+                edit_history: std::mem::take(&mut self.composer.edit_history),
+                input_history_edit_context: self.composer.input_history_edit_context.take(),
+                input_history_index: self.composer.input_history_index.take(),
+                input_history_draft: self.composer.input_history_draft.take(),
+                cleared_input_draft: self.composer.cleared_input_draft.take(),
+                input_kill_buffer: self.composer.input_kill_buffer.take(),
                 image_attachments: std::mem::take(&mut self.composer.image_attachments),
                 selected_image_attachment: self.composer.selected_image_attachment.take(),
             });
         }
         self.composer.queue_edit_target = Some(item.queued.queue_id.clone());
+        self.reset_composer_edit_context();
         self.set_input_and_cursor(item.queued.prompt.clone());
         self.active_pane = PaneFocus::Composer;
         self.blur_composer_queue_panel();
@@ -607,6 +614,12 @@ impl AppState {
         self.composer.input_cursor = draft.input_cursor;
         self.composer.input_selection_anchor = draft.input_selection_anchor;
         self.composer.input_paste_spans = draft.input_paste_spans;
+        self.composer.edit_history = draft.edit_history;
+        self.composer.input_history_edit_context = draft.input_history_edit_context;
+        self.composer.input_history_index = draft.input_history_index;
+        self.composer.input_history_draft = draft.input_history_draft;
+        self.composer.cleared_input_draft = draft.cleared_input_draft;
+        self.composer.input_kill_buffer = draft.input_kill_buffer;
         self.composer.image_attachments = draft.image_attachments;
         self.composer.selected_image_attachment = draft.selected_image_attachment;
     }
@@ -807,7 +820,6 @@ impl AppState {
                     self.composer.queue_edit_target = None;
                     self.restore_queue_edit_draft();
                     self.reset_slash_selector();
-                    self.reset_input_history_navigation();
                 }
                 self.last_notice = Some(operation.success_label().to_owned());
                 self.push_event("follow-up:completed", operation.success_label());

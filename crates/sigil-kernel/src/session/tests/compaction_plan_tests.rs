@@ -85,6 +85,7 @@ fn append_suspended_user_input(
         source: crate::UserInputSourceV1::Agent,
         purpose: crate::UserInputPurposeV1::Clarification,
         prompt: "Choose one migration mode".to_owned(),
+        prompt_origin: None,
         questions: vec![crate::UserInputQuestionV1 {
             id: "mode".to_owned(),
             question: "Which migration mode should be used?".to_owned(),
@@ -409,6 +410,7 @@ fn adaptive_tail_pins_a_suspended_user_input_tool_turn() -> Result<()> {
         source: crate::UserInputSourceV1::Agent,
         purpose: crate::UserInputPurposeV1::Clarification,
         prompt: "Choose one migration mode".to_owned(),
+        prompt_origin: None,
         questions: vec![crate::UserInputQuestionV1 {
             id: "mode".to_owned(),
             question: "Which migration mode should be used?".to_owned(),

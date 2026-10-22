@@ -75,6 +75,7 @@ pub(in crate::session) fn waiting_fixture(
         },
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Which scope?".to_owned(),
+        prompt_origin: None,
         questions: vec![crate::UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope?".to_owned(),

@@ -2126,6 +2126,7 @@ fn mcp_user_input_form(
     Ok((
         super::UserInputFormViewModel {
             prompt: normalize_mcp_form_message(&request.message)?,
+            prompt_origin: None,
             questions,
             allowed_actions: vec![
                 sigil_kernel::UserInputActionV1::Submit,

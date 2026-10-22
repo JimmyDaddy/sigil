@@ -1248,6 +1248,17 @@ pub enum WorkerMessage {
         retryable: bool,
         target_session: Option<WorkerRouteRecoverySessionTarget>,
     },
+    /// Target activation failed while the current session and its execution owner remain live.
+    SessionSwitchRejected {
+        session_log_path: PathBuf,
+        reason: String,
+    },
+    /// Retains the original attachment until a failed target is repaired or explicitly abandoned.
+    SessionRecoveryReturnAvailable {
+        origin: WorkerRouteRecoverySessionTarget,
+        attachment:
+            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    },
     Event(Box<RunEvent>),
     ApprovalCommandReceipt(WorkerApprovalCommandReceipt),
     LocalOperationOutcome(LocalOperationOutcome),

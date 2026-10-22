@@ -657,7 +657,11 @@ for line in sys.stdin:
         assert!(registry.spec_for("mcp_catalog").is_some());
         for server in servers {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while !plugin_root.join(format!("{server}-launches")).exists() {
+                // Opening the marker creates it before Python flushes the line. Cancellation
+                // must begin only after that first launch observation is complete.
+                while !fs::read_to_string(plugin_root.join(format!("{server}-launches")))
+                    .is_ok_and(|marker| marker == "launched\n")
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             })

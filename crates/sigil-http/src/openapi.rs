@@ -2240,6 +2240,14 @@ pub fn http_openapi_document() -> Value {
                         "name": { "type": "string", "minLength": 1, "maxLength": 512 }
                     }
                 },
+                "ConversationDisplayUserInputReceipt": {
+                    "type": "object",
+                    "required": ["decision", "answered_count"],
+                    "properties": {
+                        "decision": { "type": "string", "enum": ["submitted", "declined", "run_cancelled"] },
+                        "answered_count": { "type": "integer", "format": "uint64" }
+                    }
+                },
                 "ConversationDisplayContent": {
                     "oneOf": [
                         {
@@ -2277,6 +2285,7 @@ pub fn http_openapi_document() -> Value {
                             "required": ["type", "truncated", "original_content_bytes", "has_more", "preview_truncated"],
                             "properties": {
                                 "type": { "const": "tool" },
+                                "user_input_receipt": { "oneOf": [{ "$ref": "#/components/schemas/ConversationDisplayUserInputReceipt" }, { "type": "null" }] },
                                 "call_id": { "type": ["string", "null"], "maxLength": 512 },
                                 "tool_name": { "type": ["string", "null"], "maxLength": 512 },
                                 "output": { "type": ["string", "null"], "maxLength": 65536 },
@@ -2664,6 +2673,7 @@ pub fn http_openapi_document() -> Value {
                         ] },
                         "purpose": { "type": "string", "enum": ["clarification", "choice", "missing_constraint", "revision_guidance", "external_elicitation"] },
                         "prompt": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "prompt_origin": { "type": ["string", "null"], "enum": ["question_text", "host_question_group", null] },
                         "questions": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/components/schemas/UserInputQuestion" } },
                         "allowed_actions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["submit", "decline", "cancel_run"] } },
                         "requested_at_unix_ms": { "type": "integer", "format": "uint64" },

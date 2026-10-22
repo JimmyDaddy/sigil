@@ -40,7 +40,7 @@ pub use query::{
 pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 3;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
 // Increment whenever unchanged durable sources need new validation or display projection rules.
-const SESSION_CATALOG_PROJECTION_REVISION: u16 = 6;
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 7;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
 const MAX_RECOVERY_LEASE_RETRIES: usize = 20;
@@ -412,7 +412,9 @@ impl SessionCatalogProjectionService {
         &self,
     ) -> Result<Vec<SessionCatalogProjectionEntry>, SessionCatalogProjectionError> {
         let connection = self.open_connection()?;
-        list_workspace_entries(&connection, &self.lifecycle.workspace_id)
+        let mut entries = list_workspace_entries(&connection, &self.lifecycle.workspace_id)?;
+        entries.retain(|entry| entry.source_state != LocalSessionCatalogState::Internal);
+        Ok(entries)
     }
 
     /// Persists a display-name override for one exact catalog identity and refreshes SQLite.
@@ -882,7 +884,7 @@ impl SessionCatalogProjectionService {
             let degraded_source_count = scan
                 .entries
                 .iter()
-                .filter(|entry| entry.source_state != LocalSessionCatalogState::Ready)
+                .filter(|entry| entry.source_state.permits_source_cleanup())
                 .count();
             let identity_conflict_count = identity_conflict_count(&scan.entries);
             let next_by_ref = scan
@@ -1001,6 +1003,27 @@ impl SessionCatalogProjectionService {
             .len()
             .saturating_sub(self.lifecycle.limits.max_catalog_entries);
         candidates.truncate(self.lifecycle.limits.max_catalog_entries);
+        let refresh_parent_lineage = candidates.iter().any(|candidate| {
+            let reference = candidate.session_ref.as_path().to_string_lossy();
+            existing.get(reference.as_ref()).is_some_and(|previous| {
+                previous.source_state == LocalSessionCatalogState::Internal
+                    && (previous.source_bytes != candidate.bytes
+                        || previous.source_modified_at_unix_ms != candidate.modified_at_unix_ms)
+            })
+        });
+        let candidate_paths = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate
+                        .session_ref
+                        .as_path()
+                        .to_string_lossy()
+                        .into_owned(),
+                    candidate.path.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let pins = self
             .lifecycle
             .session_pin_projection()
@@ -1012,6 +1035,7 @@ impl SessionCatalogProjectionService {
         let mut validated_bytes = 0_u64;
         let mut entries = Vec::with_capacity(candidates.len());
         let mut reused_source_count = 0;
+        let mut research_sources = BTreeSet::new();
         for candidate in candidates {
             let state = candidate_state(&candidate, &self.lifecycle.limits, &mut validated_bytes);
             let session_ref = candidate
@@ -1021,6 +1045,8 @@ impl SessionCatalogProjectionService {
                 .into_owned();
             if !force_rebuild
                 && let Some(previous) = existing.get(&session_ref)
+                && (!refresh_parent_lineage
+                    || previous.source_state == LocalSessionCatalogState::Internal)
                 && source_fingerprint_matches(previous, &candidate, state, indexed_at_unix_ms)
             {
                 let mut reused = previous.clone();
@@ -1047,7 +1073,17 @@ impl SessionCatalogProjectionService {
                 &pins,
                 &display_names,
                 indexed_at_unix_ms,
+                &mut research_sources,
             )?);
+        }
+        for entry in &mut entries {
+            if entry.source_state == LocalSessionCatalogState::Ready
+                && candidate_paths
+                    .get(&entry.session_ref)
+                    .is_some_and(|path| research_sources.contains(path))
+            {
+                entry.source_state = LocalSessionCatalogState::Internal;
+            }
         }
         let scanned_source_count = entries.len();
         if truncated_source_count > 0 && !force_rebuild {
@@ -1077,6 +1113,7 @@ impl SessionCatalogProjectionService {
         pins: &BTreeMap<sigil_kernel::SessionRef, (String, bool)>,
         display_names: &BTreeMap<sigil_kernel::SessionRef, (String, String)>,
         indexed_at_unix_ms: u64,
+        research_sources: &mut BTreeSet<PathBuf>,
     ) -> Result<SessionCatalogProjectionEntry, SessionCatalogProjectionError> {
         let session_ref = candidate
             .session_ref
@@ -1105,6 +1142,30 @@ impl SessionCatalogProjectionService {
             }
         };
         ensure_source_stable(&candidate)?;
+        match crate::session_eligibility::internal_session_parent_from_records(&records) {
+            Ok(Some(_)) => entry.source_state = LocalSessionCatalogState::Internal,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(session_ref = %entry.session_ref, %error, "session purpose projection is invalid");
+                entry.source_state = LocalSessionCatalogState::Invalid;
+                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
+                return Ok(entry);
+            }
+        }
+        let mut verified_research_sources = BTreeSet::new();
+        if let Err(error) = self
+            .lifecycle
+            .collect_plan_review_research_sources_from_records(
+                &candidate.path,
+                &records,
+                &mut verified_research_sources,
+            )
+        {
+            tracing::warn!(session_ref = %entry.session_ref, %error, "session research lineage is invalid");
+            entry.source_state = LocalSessionCatalogState::Invalid;
+            entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
+            return Ok(entry);
+        }
         let snapshot = match session_list_projection_from_records(&records) {
             Ok(snapshot) if snapshot.sessions.len() == 1 => snapshot,
             Ok(snapshot) if snapshot.sessions.is_empty() => {
@@ -1148,6 +1209,7 @@ impl SessionCatalogProjectionService {
         {
             entry.title = Some(display_name.clone());
         }
+        research_sources.extend(verified_research_sources);
         Ok(entry)
     }
 }
@@ -1248,6 +1310,8 @@ fn source_fingerprint_matches(
     observed_at_unix_ms: u64,
 ) -> bool {
     (previous.source_state == state
+        || (state == LocalSessionCatalogState::Ready
+            && previous.source_state == LocalSessionCatalogState::Internal)
         || (state == LocalSessionCatalogState::Ready
             && previous.source_state == LocalSessionCatalogState::Invalid
             && observed_at_unix_ms
@@ -2072,6 +2136,7 @@ fn decode_entry_row(
 fn catalog_state_name(state: LocalSessionCatalogState) -> &'static str {
     match state {
         LocalSessionCatalogState::Ready => "ready",
+        LocalSessionCatalogState::Internal => "internal",
         LocalSessionCatalogState::Oversized => "oversized",
         LocalSessionCatalogState::ScanBudgetExceeded => "scan_budget_exceeded",
         LocalSessionCatalogState::Invalid => "invalid",
@@ -2117,6 +2182,7 @@ fn decode_catalog_state(
 ) -> Result<LocalSessionCatalogState, rusqlite::Error> {
     match value.as_str() {
         "ready" => Ok(LocalSessionCatalogState::Ready),
+        "internal" => Ok(LocalSessionCatalogState::Internal),
         "oversized" => Ok(LocalSessionCatalogState::Oversized),
         "scan_budget_exceeded" => Ok(LocalSessionCatalogState::ScanBudgetExceeded),
         "invalid" => Ok(LocalSessionCatalogState::Invalid),

@@ -458,6 +458,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Ctrl-J: Insert a newline in the composer.".to_owned(),
         "Shift-Enter or Alt-Enter: Insert a newline when terminal keyboard enhancement is active and reports modifiers.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
+        "Ctrl-Z: Undo an edit, including clearing with Esc. Ctrl-Y or Ctrl-Shift-Z: Redo.".to_owned(),
         "Enter while busy: Queue a follow-up after the current reply.".to_owned(),
         String::new(),
         "Review".to_owned(),
@@ -491,7 +492,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Tab/Enter: Choose the displayed approval action.".to_owned(),
         "F: Allow this command family and save its permission rule.".to_owned(),
         "V: Inspect the pending diff or preview when available.".to_owned(),
-        "Esc: Return to input without deciding; Shift-Tab reopens tool approval.".to_owned(),
+        "M: Open full approval details; Up/Down, PageUp/PageDown or Home/End scroll them.".to_owned(),
+        "Esc: Return from full details to preview, or from preview to input; Shift-Tab reopens approval.".to_owned(),
         String::new(),
         "Agents".to_owned(),
     ]);
@@ -526,8 +528,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),
         "Shift-Left/Right/Up/Down or Shift-Home/End: Select composer text; typing or pasting replaces it.".to_owned(),
         "Backspace/Delete, Ctrl-H, Ctrl-W, Ctrl/Alt-Backspace, or Ctrl/Alt-Delete: Delete composer text.".to_owned(),
-        "Ctrl-K/Y: Kill to composer line end and yank the killed text.".to_owned(),
-        "Ctrl-Z: Restore the last draft cleared with Esc.".to_owned(),
+        "Ctrl-K: Kill to composer line end. Alt-Y: Yank; Ctrl-Y also yanks when there is no edit to redo.".to_owned(),
         "Up/Down or Ctrl-P/N: Navigate prompt history.".to_owned(),
         "PageUp/PageDown or Ctrl-U/D: Scroll transcript by page.".to_owned(),
     ]);

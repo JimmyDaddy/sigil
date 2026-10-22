@@ -548,6 +548,7 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
 
     let mut typed_tool_page = page.clone();
     typed_tool_page.items[0].content = crate::DesktopConversationDisplayContent::Tool {
+        user_input_receipt: None,
         call_id: Some("call-1".to_owned()),
         tool_name: Some("shell".to_owned()),
         input: None,

@@ -1324,7 +1324,7 @@ pub(super) fn approval_modal_area(screen: Rect, view: &ApprovalModalView) -> Rec
     .unwrap_or(72)
     .min(screen.width.saturating_sub(8).max(36) as usize);
 
-    let height = if view.has_diff_preview {
+    let height = if view.metadata_focused || view.has_diff_preview {
         screen.height.min(34)
     } else {
         let review_width = inner_width.saturating_sub(6).max(1);
@@ -1357,13 +1357,27 @@ pub(super) fn approval_modal_sections(
 ) -> ApprovalModalSections {
     let metadata_height = approval_metadata_section_height(view);
     let mut constraints = vec![
-        Constraint::Length(approval_header_line_count(view).saturating_add(2)),
-        Constraint::Min(if view.has_diff_preview { 8 } else { 6 }),
+        Constraint::Length(if view.metadata_focused {
+            1
+        } else {
+            approval_header_line_count(view).saturating_add(2)
+        }),
+        Constraint::Min(if view.metadata_focused {
+            1
+        } else if view.has_diff_preview {
+            8
+        } else {
+            6
+        }),
     ];
     if metadata_height > 0 {
         constraints.push(Constraint::Length(metadata_height));
     }
-    constraints.push(Constraint::Length(4));
+    constraints.push(Constraint::Length(if view.metadata_focused {
+        approval_details_footer_height(inner.width, view)
+    } else {
+        4
+    }));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
@@ -1392,6 +1406,21 @@ fn approval_modal_hit_areas(
     let footer_inner = inset_rect(sections.footer, 1, 1);
     let (allow_once_action, allow_session_action, allow_family_action, deny_action) =
         approval_action_hit_areas(footer_inner, view);
+    if view.metadata_focused {
+        return Some(ApprovalModalHitAreas {
+            modal,
+            diff_area: sections.body,
+            hunk_previous: Rect::default(),
+            hunk_next: Rect::default(),
+            diff_view_toggle: Rect::default(),
+            metadata_toggle: Rect::default(),
+            file_rows: Vec::new(),
+            allow_once_action,
+            allow_session_action,
+            allow_family_action,
+            deny_action,
+        });
+    }
     let diff_area = approval_diff_area(sections.body, view);
     let diff_inner = inset_rect(diff_area, 1, 1);
     let diff_status = Rect::new(diff_inner.x, diff_inner.y, diff_inner.width, 1);
@@ -1423,7 +1452,7 @@ fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
 }
 
 fn approval_metadata_section_height(view: &ApprovalModalView) -> u16 {
-    if view.metadata_collapsed {
+    if view.metadata_collapsed || view.metadata_focused {
         0
     } else {
         8u16.saturating_add(u16::from(approval_analysis_has_recovery_hint(
@@ -1655,7 +1684,7 @@ fn approval_status_badge_rect(y: u16, cursor: &mut u16, end: u16, label: &str) -
     rect
 }
 
-fn approval_action_hit_areas(
+pub(super) fn approval_action_hit_areas(
     footer_inner: Rect,
     view: &ApprovalModalView,
 ) -> (Rect, Rect, Rect, Rect) {
@@ -1669,6 +1698,7 @@ fn approval_action_hit_areas(
     }
 
     let mut cursor = footer_inner.x;
+    let mut row = footer_inner.y;
     let end = footer_inner.x.saturating_add(footer_inner.width);
     let mut allow_once = Rect::default();
     let mut allow_session = Rect::default();
@@ -1678,16 +1708,15 @@ fn approval_action_hit_areas(
         view.session_grant_available,
         view.command_family_allow_pattern.is_some(),
     ) {
-        if cursor >= end {
+        let width = approval_action_badge_width(action.label(), view.selected_action == *action);
+        if view.metadata_focused && cursor > footer_inner.x && cursor.saturating_add(width) > end {
+            cursor = footer_inner.x;
+            row = row.saturating_add(1);
+        }
+        if cursor >= end || row >= footer_inner.y.saturating_add(footer_inner.height) {
             break;
         }
-        let width = approval_action_badge_width(action.label(), view.selected_action == *action);
-        let rect = Rect::new(
-            cursor,
-            footer_inner.y,
-            width.min(end.saturating_sub(cursor)),
-            1,
-        );
+        let rect = Rect::new(cursor, row, width.min(end.saturating_sub(cursor)), 1);
         match action {
             ApprovalAction::AllowOnce => allow_once = rect,
             ApprovalAction::AllowSession => allow_session = rect,
@@ -1697,6 +1726,31 @@ fn approval_action_hit_areas(
         cursor = cursor.saturating_add(width).saturating_add(1);
     }
     (allow_once, allow_session, allow_family, deny)
+}
+
+fn approval_details_footer_height(width: u16, view: &ApprovalModalView) -> u16 {
+    let content_width = width.saturating_sub(2).max(1);
+    let (once, session, family, deny) =
+        approval_action_hit_areas(Rect::new(0, 0, content_width, u16::MAX), view);
+    let action_rows = [once, session, family, deny]
+        .iter()
+        .filter(|area| area.width > 0)
+        .map(|area| area.y.saturating_add(1))
+        .max()
+        .unwrap_or(1);
+    let hint_rows = approval_details_key_hints()
+        .iter()
+        .map(|hint| hint.chars().count().div_ceil(content_width as usize) as u16)
+        .sum::<u16>();
+    action_rows.saturating_add(hint_rows).saturating_add(2)
+}
+
+pub(super) fn approval_details_key_hints() -> [&'static str; 3] {
+    [
+        "↑↓/Pg/Home/End scroll · M/Esc back",
+        "Tab/←→ actions · Enter select",
+        "Y allow once · N deny",
+    ]
 }
 
 fn approval_action_badge_width(label: &str, selected: bool) -> u16 {

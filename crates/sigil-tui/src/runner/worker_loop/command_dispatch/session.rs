@@ -771,6 +771,23 @@ where
                         if let Some((attachment, recovery)) =
                             session_transition_recovery_message(&error)
                         {
+                            if let (Some(current), Some(origin_attachment)) = (
+                                state.session.current.as_ref(),
+                                state.session.attachment_lease.as_ref(),
+                            ) {
+                                let _ = message_tx.send(
+                                    WorkerMessage::SessionRecoveryReturnAvailable {
+                                        origin: crate::runner::WorkerRouteRecoverySessionTarget {
+                                            session_id: current.session_scope_id().to_owned(),
+                                            session_log_path: state.session.log_path.clone(),
+                                            provider_name: current.provider_name().to_owned(),
+                                            model_name: current.model_name().to_owned(),
+                                            entries: current.entries().to_vec(),
+                                        },
+                                        attachment: Arc::clone(origin_attachment),
+                                    },
+                                );
+                            }
                             let _ = message_tx.send(attachment);
                             let _ = message_tx.send(recovery);
                             return WorkerCommandDispatchControl::Break;
@@ -781,7 +798,10 @@ where
                         ) {
                             let _ = message_tx.send(recovery);
                         } else {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                            let _ = message_tx.send(WorkerMessage::SessionSwitchRejected {
+                                session_log_path: recovery_path,
+                                reason: format!("{error:#}"),
+                            });
                         }
                     }
                 }

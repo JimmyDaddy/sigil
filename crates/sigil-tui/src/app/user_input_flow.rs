@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
     AppAction, AppState, PendingMcpElicitation, PendingUserInputForm, UserInputDraftValue,
-    UserInputFormAction, UserInputFormSource, UserInputFormViewModel,
+    UserInputFormAction, UserInputFormSource, UserInputFormValidationError, UserInputFormViewModel,
 };
 
 impl AppState {
@@ -40,6 +40,14 @@ impl AppState {
                 return Some(None);
             }
             return None;
+        }
+        if let Some(form) = self.composer.pending_user_input.as_mut()
+            && form
+                .validation_error
+                .as_ref()
+                .is_some_and(|error| error.question_index.is_none())
+        {
+            form.validation_error = None;
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             let revision = self
@@ -98,13 +106,46 @@ impl AppState {
             .composer
             .pending_user_input
             .as_mut()
-            .filter(|form| form.open && form.is_plan_revision_editor())
+            .filter(|form| form.open)
         else {
             return false;
         };
-        if let Some(UserInputDraftValue::Text(value)) = form.drafts.first_mut() {
-            form.plan_revision_editor.insert(value, text);
+        if form.is_plan_revision_editor() {
+            if let Some(UserInputDraftValue::Text(value)) = form.drafts.first_mut() {
+                form.plan_revision_editor.insert(value, text);
+            }
+            return true;
         }
+        if form.focus_actions || form.recovery_command.is_some() {
+            form.validation_error = Some(UserInputFormValidationError {
+                question_index: None,
+                message: if form.recovery_command.is_some() {
+                    "Saved answers cannot be edited here".to_owned()
+                } else {
+                    "Press ↑ to return to an answer before pasting".to_owned()
+                },
+            });
+            return true;
+        }
+        match form.drafts.get_mut(form.focused_question) {
+            Some(UserInputDraftValue::Text(value)) => value.push_str(text),
+            Some(UserInputDraftValue::SingleSelect {
+                selected,
+                selected_by_user,
+                other,
+            }) => {
+                other.push_str(text);
+                *selected = form
+                    .view
+                    .questions
+                    .get(form.focused_question)
+                    .map(|question| question.options.len());
+                *selected_by_user = true;
+            }
+            Some(UserInputDraftValue::MultiSelect { other, .. }) => other.push_str(text),
+            None => return true,
+        }
+        self.clear_corrected_user_input_error();
         true
     }
 
@@ -124,6 +165,7 @@ impl AppState {
                 if let Some(form) = self.composer.pending_user_input.as_mut() {
                     form.focus_actions = false;
                 }
+                self.reveal_focused_user_input_region();
                 Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => Some(self.submit_user_input_action()),
@@ -160,12 +202,6 @@ impl AppState {
                     form.focused_question = form.focused_question.saturating_sub(1);
                 }
                 self.reveal_focused_user_input_region();
-                Some(None)
-            }
-            KeyCode::Enter
-                if key.modifiers.is_empty() && self.focused_user_input_is_multiline() =>
-            {
-                self.edit_user_input_text(Some('\n'));
                 Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -241,13 +277,6 @@ impl AppState {
         }
     }
 
-    fn focused_user_input_is_multiline(&self) -> bool {
-        // The provider-neutral question contract no longer carries a field-level
-        // multiline switch. Ordinary text questions are single-line form fields;
-        // the dedicated plan-revision editor owns multiline editing explicitly.
-        false
-    }
-
     fn update_user_input_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
         if let Some(form) = self.composer.pending_user_input.as_mut() {
             let max_scroll = form.scroll_extent.get();
@@ -265,12 +294,13 @@ impl AppState {
             form.scroll = extent;
             return;
         }
-        let denominator = form.view.questions.len().saturating_sub(1);
-        form.scroll = if denominator == 0 {
-            form.scroll.min(extent)
-        } else {
-            extent.saturating_mul(form.focused_question) / denominator
-        };
+        form.scroll = form
+            .question_scroll_offsets
+            .borrow()
+            .get(form.focused_question)
+            .copied()
+            .unwrap_or(0)
+            .min(extent);
     }
 
     fn move_user_input_selection(&mut self, direction: isize) {
@@ -324,6 +354,7 @@ impl AppState {
                 }
             }
         }
+        self.clear_corrected_user_input_error();
     }
 
     fn toggle_user_input_selection(&mut self) -> bool {
@@ -333,7 +364,7 @@ impl AppState {
         let Some(question) = form.view.questions.get(form.focused_question) else {
             return false;
         };
-        match (
+        let toggled = match (
             question.options.is_empty(),
             question.multiple,
             form.drafts.get_mut(form.focused_question),
@@ -347,9 +378,14 @@ impl AppState {
                     ..
                 }),
             ) => {
-                let next = selected
-                    .map(|current| (current + 1) % question.options.len())
-                    .unwrap_or(0);
+                let next = if *selected_by_user {
+                    selected
+                        .filter(|current| *current < question.options.len())
+                        .map(|current| (current + 1) % question.options.len())
+                        .unwrap_or(0)
+                } else {
+                    selected.unwrap_or(0)
+                };
                 *selected = Some(next);
                 *selected_by_user = true;
                 true
@@ -372,7 +408,11 @@ impl AppState {
                 true
             }
             _ => false,
+        };
+        if toggled {
+            self.clear_corrected_user_input_error();
         }
+        toggled
     }
 
     fn edit_user_input_text(&mut self, character: Option<char>) {
@@ -384,7 +424,21 @@ impl AppState {
         };
         let target = match draft {
             UserInputDraftValue::Text(value) => Some(value),
-            UserInputDraftValue::SingleSelect { other, .. } => Some(other),
+            UserInputDraftValue::SingleSelect {
+                selected,
+                selected_by_user,
+                other,
+            } => {
+                if character.is_some() {
+                    *selected = form
+                        .view
+                        .questions
+                        .get(form.focused_question)
+                        .map(|question| question.options.len());
+                    *selected_by_user = true;
+                }
+                Some(other)
+            }
             UserInputDraftValue::MultiSelect { other, .. } => Some(other),
         };
         let Some(target) = target else {
@@ -395,6 +449,27 @@ impl AppState {
             None => {
                 target.pop();
             }
+        }
+        self.clear_corrected_user_input_error();
+    }
+
+    fn clear_corrected_user_input_error(&mut self) {
+        let Some(form) = self.composer.pending_user_input.as_mut() else {
+            return;
+        };
+        let Some(error) = &form.validation_error else {
+            return;
+        };
+        if error.question_index.is_none()
+            || (error.question_index == Some(form.focused_question)
+                && form
+                    .view
+                    .questions
+                    .get(form.focused_question)
+                    .zip(form.drafts.get(form.focused_question))
+                    .is_some_and(|(question, draft)| user_input_answer(question, draft).is_ok()))
+        {
+            form.validation_error = None;
         }
     }
 
@@ -436,7 +511,9 @@ impl AppState {
             }
             UserInputFormAction::Submit => {
                 let mut answers = Vec::with_capacity(form.view.questions.len());
-                for (question, draft) in form.view.questions.iter().zip(&form.drafts) {
+                for (index, (question, draft)) in
+                    form.view.questions.iter().zip(&form.drafts).enumerate()
+                {
                     match user_input_answer(question, draft) {
                         Ok(Some(answer)) => answers.push(answer),
                         Ok(None) => {}
@@ -454,11 +531,28 @@ impl AppState {
                                 }
                             };
                             self.last_notice = Some(message.clone());
-                            if revision
-                                && let Some(form) = self.composer.pending_user_input.as_mut()
-                            {
-                                form.plan_revision_editor.error = Some(message);
+                            if let Some(form) = self.composer.pending_user_input.as_mut() {
+                                if revision {
+                                    form.plan_revision_editor.error = Some(message);
+                                } else {
+                                    form.validation_error = Some(UserInputFormValidationError {
+                                        question_index: Some(index),
+                                        message: match error {
+                                            UserInputAnswerError::Required => format!(
+                                                "Please answer question {} before submitting",
+                                                index + 1
+                                            ),
+                                            UserInputAnswerError::InvalidType => format!(
+                                                "Check the answer to question {} before submitting",
+                                                index + 1
+                                            ),
+                                        },
+                                    });
+                                    form.focused_question = index;
+                                    form.focus_actions = false;
+                                }
                             }
+                            self.reveal_focused_user_input_region();
                             return None;
                         }
                     }
@@ -608,9 +702,11 @@ impl AppState {
             focus_actions: selected_action == UserInputFormAction::Resume,
             selected_action,
             drafts,
+            validation_error: None,
             plan_revision_editor: Default::default(),
             scroll: 0,
             scroll_extent: Default::default(),
+            question_scroll_offsets: Default::default(),
         };
         if let Some(previous) = self
             .composer
@@ -650,9 +746,11 @@ impl AppState {
             focus_actions: false,
             selected_action: UserInputFormAction::Submit,
             drafts,
+            validation_error: None,
             plan_revision_editor: Default::default(),
             scroll: 0,
             scroll_extent: Default::default(),
+            question_scroll_offsets: Default::default(),
         });
     }
 
@@ -1093,9 +1191,11 @@ fn preserve_user_input_presentation(
     next.focus_actions = previous.focus_actions;
     next.selected_action = previous.selected_action;
     next.drafts = previous.drafts.clone();
+    next.validation_error = previous.validation_error.clone();
     next.plan_revision_editor = previous.plan_revision_editor.clone();
     next.scroll = previous.scroll;
     next.scroll_extent = previous.scroll_extent.clone();
+    next.question_scroll_offsets = previous.question_scroll_offsets.clone();
 }
 
 fn same_plan_revision_request(

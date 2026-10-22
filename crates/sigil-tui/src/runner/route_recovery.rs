@@ -146,6 +146,9 @@ pub(crate) fn worker_session_route_recovery_message(
             true,
         ),
         sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable(source) => {
+            if source.is::<sigil_runtime::session_eligibility::InternalSessionResumeError>() {
+                return None;
+            }
             if source
                 .downcast_ref::<sigil_runtime::provider_connections::ResolvedRouteError>()
                 .is_some()

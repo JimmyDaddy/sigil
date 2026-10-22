@@ -551,7 +551,6 @@ fn query_session_history(
                 session_id: row.session_id,
                 title: row.title,
                 modified_epoch_secs: row.source_modified_at_unix_ms / 1000,
-                bytes: row.source_bytes,
             })
         })
         .collect::<Result<Vec<_>>>()?;

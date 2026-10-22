@@ -5969,6 +5969,7 @@ async fn cancel_direct_task_user_input(
         source: sigil_kernel::UserInputSourceV1::Agent,
         purpose: sigil_kernel::UserInputPurposeV1::Clarification,
         prompt: "Choose a scope".to_owned(),
+        prompt_origin: None,
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "scope".to_owned(),
             question: "Which scope?".to_owned(),

@@ -6279,6 +6279,7 @@ fn attachment_reconcile_keeps_a_durable_revision_waiting_checkpoint_resumable() 
             },
             purpose: sigil_kernel::UserInputPurposeV1::Clarification,
             prompt: "Which scope?".to_owned(),
+            prompt_origin: None,
             questions: vec![sigil_kernel::UserInputQuestionV1 {
                 id: "scope".to_owned(),
                 question: "Which scope?".to_owned(),

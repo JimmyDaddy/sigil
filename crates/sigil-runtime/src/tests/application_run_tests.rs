@@ -359,6 +359,7 @@ fn seed_application_user_input_request(
         source: UserInputSourceV1::Agent,
         purpose: UserInputPurposeV1::Clarification,
         prompt: "Choose a runtime mode".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "mode".to_owned(),
             question: "Which mode should continue?".to_owned(),
@@ -676,6 +677,7 @@ fn bound_session_entries_keep_user_input_admission_scope_and_stream_checks() -> 
         },
         purpose: UserInputPurposeV1::ExternalElicitation,
         prompt: "Choose a value".to_owned(),
+        prompt_origin: None,
         questions: vec![UserInputQuestionV1 {
             id: "value".to_owned(),
             question: "Which value?".to_owned(),

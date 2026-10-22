@@ -38,7 +38,12 @@ pub(in crate::app) fn session_history_display_label(entry: &SessionHistoryEntry)
         .title
         .as_deref()
         .map(|title| truncate_session_view_text(title, 48))
-        .unwrap_or_else(|| session_history_label(&entry.label))
+        .unwrap_or_else(|| {
+            format!(
+                "Untitled conversation · {}",
+                session_history_label(&entry.label)
+            )
+        })
 }
 
 #[cfg(test)]

@@ -20,18 +20,6 @@ use super::file_type::{
 const TOOL_DISPLAY_CONTENT_MAX_BYTES: usize = 64 * 1024;
 const RESTORED_TOOL_ENVELOPE_PARSE_MAX_BYTES: usize = 128 * 1024;
 
-pub(super) fn human_file_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    if bytes < 1024 * 1024 {
-        return format!("{:.1} KB", bytes as f64 / KB);
-    }
-    format!("{:.1} MB", bytes as f64 / MB)
-}
-
 pub(super) fn relative_age_label(modified_epoch_secs: u64) -> String {
     let now_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

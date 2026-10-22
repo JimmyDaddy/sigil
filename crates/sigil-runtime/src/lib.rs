@@ -1,5 +1,6 @@
 use std::{env, path::PathBuf, sync::Arc};
 
+pub mod session_eligibility;
 pub mod session_runtime_controller;
 
 use anyhow::{Context, Result, anyhow};

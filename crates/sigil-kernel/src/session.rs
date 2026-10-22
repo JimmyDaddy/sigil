@@ -233,6 +233,7 @@ pub(crate) use effect_reconciliation::{
     validate_terminal as validate_effect_reconciliation_terminal,
 };
 pub use entry::*;
+mod purpose;
 pub use facade::{Session, StableCompactionSnapshot};
 pub use plan_review_terminal::plan_review_revision_run_id;
 pub use portable_compaction::{
@@ -352,6 +353,7 @@ pub(crate) use public_event_outbox::{
     validate_outbox_entry as validate_public_event_outbox_entry,
 };
 pub use public_event_validator::PublicEventOutboxValidatorV1;
+pub use purpose::{SessionPurposeBoundV1, SessionPurposeV1};
 pub use recovery_blocker::{
     RECOVERY_BLOCKER_PROJECTION_SCHEMA_VERSION, RecoveryBlockerProjectionV1,
     RecoveryBlockerResolutionStateV1,

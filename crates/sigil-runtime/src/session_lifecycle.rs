@@ -94,6 +94,8 @@ impl Default for LocalSessionLifecycleLimits {
 #[serde(rename_all = "snake_case")]
 pub enum LocalSessionCatalogState {
     Ready,
+    /// Valid audit stream owned by an internal workflow, not a standalone conversation.
+    Internal,
     Oversized,
     ScanBudgetExceeded,
     Invalid,
@@ -104,7 +106,10 @@ impl LocalSessionCatalogState {
     /// identity.
     #[must_use]
     pub const fn permits_source_cleanup(self) -> bool {
-        !matches!(self, Self::Ready)
+        matches!(
+            self,
+            Self::Oversized | Self::ScanBudgetExceeded | Self::Invalid
+        )
     }
 }
 
@@ -699,6 +704,7 @@ impl LocalSessionLifecycleService {
         let pins = self.session_pin_projection()?;
         let display_names = self.session_display_name_projection()?;
         let mut entries = Vec::with_capacity(candidates.len());
+        let mut research_sources = std::collections::BTreeSet::new();
         for candidate in candidates {
             let state = if candidate.symlink_or_non_file {
                 LocalSessionCatalogState::Invalid
@@ -712,7 +718,12 @@ impl LocalSessionLifecycleService {
                 validated_bytes = validated_bytes.saturating_add(candidate.bytes);
                 LocalSessionCatalogState::Ready
             };
-            let mut entry = self.catalog_entry(candidate, state);
+            let mut entry = self.catalog_entry_with_research_sources(
+                candidate,
+                state,
+                Some(&mut research_sources),
+                None,
+            );
             entry.pinned = entry.session_id.as_deref().is_some_and(|session_id| {
                 pins.get(&entry.session_ref)
                     .is_some_and(|(pinned_session_id, pinned)| {
@@ -728,6 +739,10 @@ impl LocalSessionLifecycleService {
             }
             entries.push(entry);
         }
+        entries.retain(|entry| {
+            entry.state != LocalSessionCatalogState::Internal
+                && !research_sources.contains(&entry.path)
+        });
         Ok(LocalSessionCatalog {
             entries,
             truncated_entry_count,
@@ -808,7 +823,8 @@ impl LocalSessionLifecycleService {
         } else {
             LocalSessionCatalogState::Ready
         };
-        let entry = self.catalog_entry(
+        let mut route_missing = false;
+        let entry = self.catalog_entry_with_research_sources(
             SessionCandidate {
                 session_ref: session_ref.clone(),
                 path: canonical_path,
@@ -817,9 +833,21 @@ impl LocalSessionLifecycleService {
                 symlink_or_non_file,
             },
             state,
+            None,
+            Some(&mut route_missing),
         );
         if entry.state != LocalSessionCatalogState::Ready {
             return Err(LocalSessionReopenError::NotReady { state: entry.state });
+        }
+        if route_missing
+            && self
+                .internal_parent_for_legacy_source(&entry.path, entry.bytes)
+                .map_err(|source| LocalSessionReopenError::CatalogUnavailable { source })?
+                .is_some()
+        {
+            return Err(LocalSessionReopenError::NotReady {
+                state: LocalSessionCatalogState::Internal,
+            });
         }
         let Some(session_id) = entry.session_id else {
             return Err(LocalSessionReopenError::NotReady {
@@ -1953,10 +1981,12 @@ impl LocalSessionLifecycleService {
         })
     }
 
-    fn catalog_entry(
+    fn catalog_entry_with_research_sources(
         &self,
         candidate: SessionCandidate,
         initial_state: LocalSessionCatalogState,
+        research_sources: Option<&mut std::collections::BTreeSet<PathBuf>>,
+        route_missing: Option<&mut bool>,
     ) -> LocalSessionCatalogEntry {
         let session_ref = candidate.session_ref;
         let mut entry = LocalSessionCatalogEntry {
@@ -1986,6 +2016,14 @@ impl LocalSessionLifecycleService {
                     return entry;
                 }
             };
+        match crate::session_eligibility::internal_session_parent_from_records(&records) {
+            Ok(Some(_)) => entry.state = LocalSessionCatalogState::Internal,
+            Ok(None) => {}
+            Err(_) => {
+                entry.state = LocalSessionCatalogState::Invalid;
+                return entry;
+            }
+        }
         let projection = match project_records(&records) {
             Ok(projection) if projection.session_id.is_some() => projection,
             Ok(_) | Err(_) => {
@@ -1993,6 +2031,21 @@ impl LocalSessionLifecycleService {
                 return entry;
             }
         };
+        if let Some(missing) = route_missing {
+            *missing = projection.resolved_model_route.is_none();
+        }
+        if let Some(sources) = research_sources
+            && self
+                .collect_plan_review_research_sources_from_records(
+                    &candidate.path,
+                    &records,
+                    sources,
+                )
+                .is_err()
+        {
+            entry.state = LocalSessionCatalogState::Invalid;
+            return entry;
+        }
         entry.session_id = projection.session_id;
         entry.provider_name = projection.provider_name;
         entry.model_name = projection.model_name;
@@ -2000,6 +2053,105 @@ impl LocalSessionLifecycleService {
         entry.transcript_message_count = projection.messages.len();
         entry.finalized_turn_count = projection.finalized_turn_count;
         entry
+    }
+
+    fn collect_plan_review_research_sources_from_records(
+        &self,
+        parent_path: &Path,
+        records: &[SessionStreamRecord],
+        sources: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        let mut verified_sources = std::collections::BTreeSet::new();
+        // Candidate paths use the canonical source root. Match that same namespace, including
+        // benign ancestor aliases such as macOS /var versus /private/var, without following leaves.
+        let managed_root = match self
+            .managed_session_log_root
+            .as_deref()
+            .map(fs::canonicalize)
+            .transpose()
+        {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        for record in records {
+            if let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) =
+                record.session_log_entry()?
+            {
+                anyhow::ensure!(
+                    attempt.child_session_ref
+                        == sigil_kernel::plan_review_child_session_ref(
+                            &attempt.plan_review_id,
+                            &attempt.attempt_id
+                        ),
+                    "plan-review child reference does not match its typed lineage"
+                );
+                if let Some(parent_dir) = parent_path.parent() {
+                    verified_sources.insert(attempt.child_session_ref.resolve(parent_dir));
+                }
+                if let Some(root) = managed_root.as_ref() {
+                    let key = format!("pr-{}-research-0", attempt.attempt_id.as_str());
+                    let digest = crate::managed_storage_writer::ManagedStorageWriterAdapterV1::named_namespace_digest(
+                        crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+                        &key,
+                    );
+                    verified_sources.insert(root.join(digest.to_hex()).join("records.jsonl"));
+                }
+            }
+        }
+        sources.extend(verified_sources);
+        Ok(())
+    }
+
+    /// Checks historical child bindings only within this service's bounded, validated sources.
+    /// No writer is acquired and no missing route is fabricated for an internal stream.
+    pub(crate) fn internal_parent_for_legacy_source(
+        &self,
+        target_path: &Path,
+        already_observed_bytes: u64,
+    ) -> Result<Option<String>> {
+        let metadata = fs::symlink_metadata(target_path)?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "legacy session target must be a real file"
+        );
+        let target_path = fs::canonicalize(target_path)?;
+        let mut observed_bytes = already_observed_bytes;
+        let mut candidates = self.session_source_candidates()?;
+        candidates.sort_by(|left, right| right.modified_at_unix_ms.cmp(&left.modified_at_unix_ms));
+        candidates.truncate(self.limits.max_catalog_entries);
+        for candidate in candidates {
+            if candidate.path == target_path
+                || candidate.symlink_or_non_file
+                || candidate.bytes > self.limits.max_stream_bytes
+                || observed_bytes.saturating_add(candidate.bytes)
+                    > self.limits.max_total_validation_bytes
+            {
+                continue;
+            }
+            observed_bytes = observed_bytes.saturating_add(candidate.bytes);
+            let Ok(reader) =
+                sigil_kernel::SessionRecordReadHandle::open_existing_observer(&candidate.path)
+            else {
+                continue;
+            };
+            let Ok(records) = reader.read_event_records() else {
+                continue;
+            };
+            let mut sources = std::collections::BTreeSet::new();
+            if self
+                .collect_plan_review_research_sources_from_records(
+                    &candidate.path,
+                    &records,
+                    &mut sources,
+                )
+                .is_ok()
+                && sources.contains(&target_path)
+            {
+                return Ok(records.first().map(|record| record.session_id().to_owned()));
+            }
+        }
+        Ok(None)
     }
 
     fn resolve_ready_source(&self, source_path: &Path) -> Result<LocalSessionCatalogEntry> {

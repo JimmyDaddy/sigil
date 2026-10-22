@@ -1875,6 +1875,33 @@ async fn managed_plan_review_research_controls_stay_in_the_child_session() -> Re
         parent.model_name(),
         JsonlSessionStore::new(bundle.session_log_path())?,
     )?;
+    let purposes = child
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionPurposeBoundV1(binding)) => Some(binding),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        purposes.len(),
+        1,
+        "research purpose must be bound once before the child asks a question"
+    );
+    assert!(
+        matches!(&purposes[0].purpose, sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+        parent_session_id, plan_review_id, attempt_id, plan_id,
+    } if parent_session_id == parent.session_scope_id()
+        && plan_review_id == &request.plan_review_id
+        && attempt_id == &request.attempt_id && plan_id == &request.plan_id)
+    );
+    assert!(
+        !parent.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionPurposeBoundV1(_))
+        )),
+        "child purpose cannot change its parent conversation's eligibility"
+    );
     assert!(
         child.entries().iter().any(|entry| matches!(
             entry,

@@ -172,6 +172,7 @@ impl SessionCatalogProjectionService {
              pinned, indexed_at_unix_ms \
              FROM session_catalog_entry_v1 \
              WHERE workspace_id = ?1 \
+               AND source_state <> 'internal' \
                AND (?2 IS NULL OR provider_name = ?2) \
                AND (?3 IS NULL OR pinned = ?3) \
                AND (?4 IS NULL OR source_state = ?4) \

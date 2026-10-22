@@ -2,10 +2,9 @@ use super::super::{
     build_model_picker_options, char_to_byte_index, format_terminal_task_block_redacted,
     format_token_compact, format_token_count, format_tool_content_block_redacted_for_restore,
     format_tool_result_block_redacted, format_tool_result_block_redacted_with_call,
-    hash_timeline_line, human_file_size, line_has_visible_content, non_empty_or,
-    normalize_command_prefix_character, parse_reasoning_effort, persisted_root_config,
-    plain_line_text, ratio_to_percent, sidebar_width_for_terminal, summarize_error,
-    summarize_terminal_reason,
+    hash_timeline_line, line_has_visible_content, non_empty_or, normalize_command_prefix_character,
+    parse_reasoning_effort, persisted_root_config, plain_line_text, ratio_to_percent,
+    sidebar_width_for_terminal, summarize_error, summarize_terminal_reason,
 };
 use super::*;
 use ratatui::text::{Line, Span};
@@ -38,10 +37,6 @@ fn terminal_reason_summary_prefers_the_actionable_leaf() {
 
 #[test]
 fn formatting_helpers_cover_normalization_and_layout() {
-    assert_eq!(human_file_size(999), "999 B");
-    assert_eq!(human_file_size(1_536), "1.5 KB");
-    assert_eq!(human_file_size(2 * 1024 * 1024), "2.0 MB");
-
     assert_eq!(parse_reasoning_effort("LOW"), Some(ReasoningEffort::Low));
     assert_eq!(parse_reasoning_effort("med"), Some(ReasoningEffort::Medium));
     assert_eq!(parse_reasoning_effort("unknown"), None);

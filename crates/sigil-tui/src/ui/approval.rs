@@ -25,8 +25,9 @@ use super::{
         number_unified_diff_lines,
     },
     layout_snapshot::{
-        approval_diff_view_control_label, approval_file_list_width,
-        approval_metadata_control_label, approval_modal_area, approval_modal_sections,
+        approval_action_hit_areas, approval_details_key_hints, approval_diff_view_control_label,
+        approval_file_list_width, approval_metadata_control_label, approval_modal_area,
+        approval_modal_sections,
     },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
     text::wrap_terminal_lines,
@@ -89,12 +90,35 @@ fn render_approval_modal_view(
     let footer_lines = approval_footer_lines_with_palette(view, palette);
     let sections = approval_modal_sections(inner, view);
 
+    let header = Paragraph::new(Text::from(header_lines)).wrap(Wrap { trim: false });
     frame.render_widget(
-        Paragraph::new(Text::from(header_lines))
-            .block(Block::default().padding(Padding::uniform(1)))
-            .wrap(Wrap { trim: false }),
+        if view.metadata_focused {
+            header
+        } else {
+            header.block(Block::default().padding(Padding::uniform(1)))
+        },
         sections.header,
     );
+
+    if view.metadata_focused {
+        let block = approval_details_block(sections.body, palette);
+        let viewport = block.inner(sections.body);
+        frame.render_widget(block, sections.body);
+        let lines = approval_full_metadata_lines(view, viewport.width as usize, palette);
+        let max_scroll = lines.len().saturating_sub(viewport.height as usize);
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                lines
+                    .into_iter()
+                    .skip(scroll_back.min(max_scroll))
+                    .take(viewport.height as usize)
+                    .collect::<Vec<_>>(),
+            )),
+            viewport,
+        );
+        render_approval_details_footer(frame, sections.footer, view, palette);
+        return;
+    }
 
     let content = approval_content_layout(sections.body, view, current_theme);
     if !view.has_diff_preview {
@@ -289,6 +313,13 @@ pub(crate) fn approval_max_scroll(
     let area = approval_modal_area(screen, view);
     let sections =
         approval_modal_sections(Block::default().borders(Borders::ALL).inner(area), view);
+    if view.metadata_focused {
+        let viewport =
+            approval_details_block(sections.body, &current_theme.palette).inner(sections.body);
+        return approval_full_metadata_lines(view, viewport.width as usize, &current_theme.palette)
+            .len()
+            .saturating_sub(viewport.height as usize);
+    }
     let content = approval_content_layout(sections.body, view, current_theme);
     if content.viewport.width == 0 || content.viewport.height == 0 {
         return 0;
@@ -342,6 +373,75 @@ fn render_approval_metadata(
     );
 }
 
+fn approval_details_block(area: Rect, palette: &ThemePalette) -> Block<'static> {
+    let block = Block::default()
+        .padding(Padding::horizontal(1))
+        .border_style(Style::default().fg(palette.border_subtle));
+    // Keep the sole content row available after fixed actions in short terminals.
+    if area.height <= 1 {
+        block
+    } else {
+        block.title("Full details").borders(Borders::TOP)
+    }
+}
+
+fn render_approval_details_footer(
+    frame: &mut Frame,
+    area: Rect,
+    view: &ApprovalModalView,
+    palette: &ThemePalette,
+) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .padding(Padding::new(1, 1, 0, 1))
+        .border_style(Style::default().fg(palette.border_subtle));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (once, session, family, deny) = approval_action_hit_areas(inner, view);
+    let mut hint_y = inner.y;
+    for (action, rect) in [
+        (ApprovalAction::AllowOnce, once),
+        (ApprovalAction::AllowSession, session),
+        (ApprovalAction::AllowFamily, family),
+        (ApprovalAction::Deny, deny),
+    ] {
+        if rect.width == 0 {
+            continue;
+        }
+        let color = if action == ApprovalAction::Deny {
+            palette.approval_deny_bg
+        } else {
+            palette.approval_allow_bg
+        };
+        frame.render_widget(
+            Paragraph::new(approval_action_badge_with_palette(
+                action.label(),
+                color,
+                view.selected_action == action,
+                palette,
+            )),
+            rect,
+        );
+        hint_y = hint_y.max(rect.y.saturating_add(1));
+    }
+    let lines = wrap_terminal_lines(
+        approval_details_key_hints()
+            .into_iter()
+            .map(|hint| Line::styled(hint, Style::default().fg(palette.text_muted)))
+            .collect(),
+        inner.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)),
+        Rect::new(
+            inner.x,
+            hint_y,
+            inner.width,
+            inner.y.saturating_add(inner.height).saturating_sub(hint_y),
+        ),
+    );
+}
+
 fn render_approval_footer(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -362,7 +462,9 @@ fn render_approval_footer(
 }
 
 fn approval_block_title(view: &ApprovalModalView) -> &'static str {
-    if view.has_diff_preview {
+    if view.metadata_focused {
+        " Approval details "
+    } else if view.has_diff_preview {
         " Review file changes "
     } else if view.tool_name == "bash" {
         " Approve command? "
@@ -485,6 +587,132 @@ fn approval_preview_summary_lines_with_palette(
             ))
         })
         .collect()
+}
+
+fn approval_full_metadata_lines(
+    view: &ApprovalModalView,
+    width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let mut values = vec![
+        ("policy".to_owned(), view.policy_label.clone()),
+        (
+            "summary".to_owned(),
+            format!("{}\n{}", view.safe_summary.title, view.safe_summary.detail),
+        ),
+        (
+            "effects".to_owned(),
+            if view.effects.is_empty() {
+                "none".to_owned()
+            } else {
+                view.effects
+                    .iter()
+                    .map(|effect| permission_effect_label(*effect))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
+        (
+            "containment".to_owned(),
+            containment_label(&view.containment),
+        ),
+    ];
+    let (status, reasons) = match &view.analysis {
+        ToolAnalysisStatus::Complete => ("complete", &[][..]),
+        ToolAnalysisStatus::Conservative { reasons } => ("conservative", reasons.as_slice()),
+        ToolAnalysisStatus::Unsupported { reason } => ("unsupported", std::slice::from_ref(reason)),
+        ToolAnalysisStatus::Invalid { reason } => ("invalid", std::slice::from_ref(reason)),
+    };
+    values.push(("analysis".to_owned(), status.to_owned()));
+    for (index, reason) in reasons.iter().enumerate() {
+        values.push((
+            format!("analysis reason {}", index + 1),
+            format!(
+                "{}{}",
+                analysis_reason_code_label(reason.code),
+                reason
+                    .detail
+                    .as_ref()
+                    .map(|detail| format!(" — {detail}"))
+                    .unwrap_or_default(),
+            ),
+        ));
+    }
+    for (index, subject) in view.subjects.iter().enumerate() {
+        let mut detail = format!(
+            "{} ({}, {})\n{}",
+            subject.kind.as_str(),
+            subject.scope.as_str(),
+            subject.access.as_str(),
+            subject.original
+        );
+        if subject.normalized != subject.original {
+            detail.push_str(&format!("\nnormalized: {}", subject.normalized));
+        }
+        if let Some(path) = &subject.canonical_path {
+            detail.push_str(&format!("\ncanonical: {}", path.display()));
+        }
+        values.push((format!("subject {}", index + 1), detail));
+    }
+    if view.subjects.is_empty() {
+        values.push(("subjects".to_owned(), "none".to_owned()));
+    }
+    for (index, reason) in view.decision_reasons.iter().enumerate() {
+        values.push((
+            format!("decision {}", index + 1),
+            format!(
+                "{}/{}\n{}",
+                decision_source_label(reason.source),
+                reason.code,
+                reason.detail,
+            ),
+        ));
+    }
+    if view.decision_reasons.is_empty() {
+        values.push(("decisions".to_owned(), "none".to_owned()));
+    }
+    values.push((
+        "session grant".to_owned(),
+        if view.session_grant_available {
+            "available for equivalent policy-bounded requests".to_owned()
+        } else {
+            format!(
+                "unavailable because {}",
+                session_grant_unavailable_reason_label(view.session_grant_unavailable_reason)
+            )
+        },
+    ));
+    if let Some(source) = &view.source_agent {
+        values.push(("agent".to_owned(), source.clone()));
+    }
+    if let Some(change_set) = &view.change_set {
+        values.push(("change set".to_owned(), change_set.id.clone()));
+        values.push(("format".to_owned(), change_set.format_hint.clone()));
+    }
+    if let Some(hint) = analysis_recovery_hint(&view.analysis) {
+        values.push(("recovery".to_owned(), hint.to_owned()));
+    }
+    if let Some(pattern) = &view.command_family_allow_pattern {
+        values.push((
+            "family".to_owned(),
+            format!("allow future {pattern} commands"),
+        ));
+    }
+    wrap_terminal_lines(
+        values
+            .into_iter()
+            .map(|(label, value)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{label}: "),
+                        Style::default().fg(palette.text_muted),
+                    ),
+                    Span::styled(value, Style::default().fg(palette.text_secondary)),
+                ])
+            })
+            .collect(),
+        width,
+    )
 }
 
 fn approval_permission_metadata_lines(

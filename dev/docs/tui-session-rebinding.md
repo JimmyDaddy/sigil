@@ -2,6 +2,8 @@
 
 设置保存可重建当前会话的 worker；随后新建或切换会话时，应用服务必须绑定目标会话的新作用域。该流程继续使用本次启动已有的 managed command journal owner，不能因为旧服务还保留命令恢复资料而再次申请相同 namespace。
 
+普通恢复不再把内部 PlanReview research stream 当成用户会话。失败目标在激活前保留原 owner；真实 route recovery 另保留原会话返回上下文，返回时先恢复原 application owner，再接纳其它切换。用途、历史兼容和边界见[会话恢复资格](session-resume-eligibility.md)。
+
 `TuiApplicationJournals` 仅属于内部 TUI host：
 
 - command reservation store 在同一 authority writer、application、subject 和 workspace 内共享，保留原命令的 K/F、CAS、恢复及审计记录。

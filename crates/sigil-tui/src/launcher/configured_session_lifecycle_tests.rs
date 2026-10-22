@@ -335,6 +335,188 @@ fn config_saved_new_session_reuses_journals_and_can_return_to_retained_scope() -
     Ok(())
 }
 
+#[test]
+fn route_recovery_return_rebuilds_original_application_before_another_switch() -> Result<()> {
+    assert_route_recovery_return_before_session_action(false)
+}
+
+#[test]
+fn route_recovery_new_session_rebuilds_original_application_before_new_admission() -> Result<()> {
+    assert_route_recovery_return_before_session_action(true)
+}
+
+fn assert_route_recovery_return_before_session_action(start_new: bool) -> Result<()> {
+    let reactor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let _entered = reactor.enter();
+    let (fixture, mut app, mut worker) = real_runtime_transition_fixture()?;
+    let origin_id = app.session_id.clone();
+    let origin_path = app.session_log_path.clone();
+    let origin_prefix = std::fs::read(&origin_path)?;
+    let origin_attachment = app
+        .worker_session_attachment()
+        .context("original attachment")?;
+    let origin_entries = sigil_kernel::JsonlSessionStore::read_entries(&origin_path)?;
+    let target_path = fixture.path().join("unactivated-target.jsonl");
+    let target = sigil_kernel::Session::load_from_store(
+        "custom",
+        "model",
+        sigil_kernel::JsonlSessionStore::new(&target_path)?,
+    )?;
+    let target_id = target.session_scope_id().to_owned();
+    let target_entries = target.entries().to_vec();
+    drop(target);
+    let target_bytes = std::fs::read(&target_path)?;
+    let target_attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &target_path,
+        )?,
+    );
+    app.handle_worker_message(WorkerMessage::SessionRecoveryReturnAvailable {
+        origin: crate::runner::WorkerRouteRecoverySessionTarget {
+            session_id: origin_id.clone(),
+            session_log_path: origin_path.clone(),
+            provider_name: app.runtime.provider_name.clone(),
+            model_name: app.runtime.model_name.clone(),
+            entries: origin_entries,
+        },
+        attachment: Arc::clone(&origin_attachment),
+    })?;
+    app.handle_worker_message(WorkerMessage::SessionAttachmentTransferred {
+        session_log_path: target_path.clone(),
+        attachment: target_attachment,
+    })?;
+    app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::ConfirmCurrentRoute,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: "frozen-target-route-binding".to_owned(),
+        retryable: true,
+        target_session: Some(crate::runner::WorkerRouteRecoverySessionTarget {
+            session_id: target_id,
+            session_log_path: target_path.clone(),
+            provider_name: "custom".to_owned(),
+            model_name: "model".to_owned(),
+            entries: target_entries,
+        }),
+    })?;
+    assert_eq!(
+        app.pending_session_route_recovery_binding(),
+        Some("frozen-target-route-binding")
+    );
+    let next_path = app.session_log_dir.join("after-route-recovery.jsonl");
+    let action = if start_new {
+        AppAction::StartNewSession {
+            session_log_path: next_path.clone(),
+        }
+    } else {
+        AppAction::SwitchSession {
+            session_log_path: origin_path.clone(),
+        }
+    };
+    assert!(queue_background_application_action(
+        &mut app,
+        &mut worker,
+        &action
+    )?);
+    assert_eq!(
+        app.deferred_application_actions.len(),
+        1,
+        "join the retired owner before returning"
+    );
+    assert!(app.session_recovery_return.is_some());
+    assert_eq!(
+        app.pending_session_route_recovery_binding(),
+        Some("frozen-target-route-binding")
+    );
+    assert!(
+        !next_path.exists(),
+        "new session must not be published in the recovery target scope"
+    );
+    maintain(&mut app, &mut worker, None)?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app
+        .runtime_maintenance
+        .as_ref()
+        .is_some_and(|owner| owner.is_running())
+    {
+        anyhow::ensure!(Instant::now() < deadline, "old owner did not join");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    poll_maintenance(&mut app, &mut worker)?;
+    assert!(worker.is_none());
+    assert!(flush_deferred_application_action(&mut app, &mut worker)?);
+    assert_eq!(
+        app.deferred_application_actions.len(),
+        usize::from(start_new)
+    );
+    assert!(
+        !next_path.exists(),
+        "deferred /new still requires the origin application Ready"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        poll_maintenance(&mut app, &mut worker)?;
+        drain_worker_messages_inner(&mut app, &mut worker, None)?;
+        if worker
+            .as_ref()
+            .is_some_and(|runtime| runtime.ready && runtime.application.is_some())
+        {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "origin application did not become Ready: {:?}",
+            app.last_notice()
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.session_id, origin_id);
+    assert!(app.session_recovery_return.is_none());
+    assert!(app.pending_session_route_recovery_binding().is_none());
+    let action = if start_new {
+        let action = app
+            .deferred_application_actions
+            .pop_front()
+            .context("deferred new session intent")?;
+        assert!(
+            matches!(&action, AppAction::StartNewSession { session_log_path } if session_log_path == &next_path)
+        );
+        action
+    } else {
+        AppAction::StartNewSession {
+            session_log_path: next_path,
+        }
+    };
+    // Use the original UI intent only after a real source owner has become Ready. The helper
+    // checks the exact normal prepare/admission/fingerprint/CAS receipt and transferred file.
+    execute_session_action(&mut app, &mut worker, action)?;
+    assert_ne!(app.session_id, origin_id);
+    drop(origin_attachment);
+    execute_session_action(
+        &mut app,
+        &mut worker,
+        AppAction::SwitchSession {
+            session_log_path: origin_path.clone(),
+        },
+    )?;
+    assert_eq!(app.session_id, origin_id);
+    assert!(std::fs::read(&origin_path)?.starts_with(&origin_prefix));
+    assert_eq!(std::fs::read(&target_path)?, target_bytes);
+    shutdown::shutdown_tui_owners(
+        &mut app,
+        &mut worker,
+        &mut TuiShutdownState::default(),
+        &mut None,
+        false,
+        |_| {},
+    )?;
+    Ok(())
+}
+
 fn read_request(socket: &mut std::net::TcpStream) -> Result<serde_json::Value> {
     // macOS accept inherits O_NONBLOCK from the listener. Request/body reads below use the
     // socket timeout, while only the listener's accept loop uses nonblocking polling.

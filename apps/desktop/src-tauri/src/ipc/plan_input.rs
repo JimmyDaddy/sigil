@@ -329,6 +329,8 @@ pub(crate) struct DesktopUserInputRequestSummary {
     pub(crate) source: DesktopUserInputSourceSummary,
     pub(crate) purpose: &'static str,
     pub(crate) prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt_origin: Option<&'static str>,
     pub(crate) questions: Vec<DesktopUserInputQuestionSummary>,
     pub(crate) allowed_actions: Vec<&'static str>,
     pub(crate) requested_at_unix_ms: u64,
@@ -438,6 +440,12 @@ impl From<sigil_desktop::DesktopUserInputRequest> for DesktopUserInputRequestSum
             source: user_input_source(value.source),
             purpose: user_input_purpose_label(value.purpose),
             prompt: value.prompt,
+            prompt_origin: value.prompt_origin.map(|origin| match origin {
+                sigil_desktop::DesktopUserInputPromptOrigin::QuestionText => "question_text",
+                sigil_desktop::DesktopUserInputPromptOrigin::HostQuestionGroup => {
+                    "host_question_group"
+                }
+            }),
             questions: value.questions.into_iter().map(Into::into).collect(),
             allowed_actions: value
                 .allowed_actions

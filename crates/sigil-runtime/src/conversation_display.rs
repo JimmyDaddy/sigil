@@ -210,6 +210,15 @@ pub enum ConversationDisplayCheckpointConflictReasonV1 {
     InvalidBinding,
 }
 
+/// A display-only receipt derived from an exact durable user-input decision.
+/// It carries no answer text and grants no continuation authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConversationDisplayUserInputReceiptV1 {
+    pub decision: sigil_kernel::PublicUserInputDecisionKindV1,
+    pub answered_count: usize,
+}
+
 /// Stable semantic slot used to correlate one live protocol item with its durable successor.
 ///
 /// The public identifier derived from this slot is a one-way digest; it never exposes the durable
@@ -251,6 +260,8 @@ pub enum ConversationDisplayContentV1 {
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_input_receipt: Option<ConversationDisplayUserInputReceiptV1>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,6 +486,7 @@ struct ToolProjection {
 #[derive(Debug, Clone)]
 struct WaitingInputToolProjection {
     request_hash: String,
+    receipt: Option<ConversationDisplayUserInputReceiptV1>,
     tool: ToolProjection,
 }
 
@@ -485,6 +497,34 @@ impl ToolProjectionState {
         scope: &str,
         active_run: &Option<ActiveRunProjection>,
     ) -> Result<()> {
+        if let ControlEntry::UserInputDecisionAccepted(accepted) = control {
+            if let Some(origin) = self.waiting_inputs.get_mut(&accepted.identity) {
+                accepted.validate_shape()?;
+                if accepted.request_hash != origin.request_hash {
+                    bail!("user input display receipt does not bind its exact request");
+                }
+                let (decision, answered_count) = match &accepted.decision {
+                    sigil_kernel::UserInputDurableDecisionV1::Submitted {
+                        answered_question_ids,
+                        ..
+                    } => (
+                        sigil_kernel::PublicUserInputDecisionKindV1::Submitted,
+                        answered_question_ids.len(),
+                    ),
+                    sigil_kernel::UserInputDurableDecisionV1::Declined => {
+                        (sigil_kernel::PublicUserInputDecisionKindV1::Declined, 0)
+                    }
+                    sigil_kernel::UserInputDurableDecisionV1::RunCancelled => {
+                        (sigil_kernel::PublicUserInputDecisionKindV1::RunCancelled, 0)
+                    }
+                };
+                origin.receipt = Some(ConversationDisplayUserInputReceiptV1 {
+                    decision,
+                    answered_count,
+                });
+            }
+            return Ok(());
+        }
         let ControlEntry::UserInputRequested(requested) = control else {
             return Ok(());
         };
@@ -511,14 +551,37 @@ impl ToolProjectionState {
         {
             bail!("user input display continuation changed its exact source");
         }
+        if self
+            .waiting_inputs
+            .contains_key(&requested.request.identity)
+        {
+            return Ok(());
+        }
         self.waiting_inputs.insert(
             requested.request.identity.clone(),
             WaitingInputToolProjection {
                 request_hash: requested.request_hash.clone(),
+                receipt: None,
                 tool: tool.clone(),
             },
         );
         Ok(())
+    }
+
+    fn input_receipt_origin_for_result(
+        &self,
+        result: &sigil_kernel::ToolResultRecordedV3,
+    ) -> Option<(
+        &sigil_kernel::UserInputIdentityV1,
+        &WaitingInputToolProjection,
+    )> {
+        if result.tool_name != sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME
+            || result.wire_semantics.outcome != sigil_kernel::ToolResultOutcomeV1::Success
+        {
+            return None;
+        }
+        self.input_origin_for_result(result)
+            .filter(|(_, origin)| origin.receipt.is_some())
     }
 
     fn input_origin_for_result(
@@ -1699,6 +1762,7 @@ fn project_session_entry(
                     ConversationDisplayContentV1::Tool {
                         call_id: Some(call_id),
                         tool_name: Some(tool_name.clone()),
+                        user_input_receipt: None,
                         input: input.clone(),
                         execution_id: None,
                         execution_started_at_ms: None,
@@ -1750,6 +1814,9 @@ fn project_session_entry(
             Ok(items)
         }
         SessionLogEntry::ToolResultV3(result) => {
+            let user_input_receipt = tools
+                .input_receipt_origin_for_result(&result)
+                .and_then(|(_, origin)| origin.receipt.clone());
             let is_input_result = result.tool_name == sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME;
             let input_origin = tools
                 .input_origin_for_result(&result)
@@ -1814,6 +1881,7 @@ fn project_session_entry(
                         || bound_identity(&result.tool_name),
                         |tool| tool.name.clone(),
                     )),
+                    user_input_receipt,
                     input: command.input,
                     execution_id: command.execution_id,
                     execution_started_at_ms: command.started_at_ms,
@@ -2835,6 +2903,7 @@ mod attention_queue_tests {
             source: sigil_kernel::UserInputSourceV1::Agent,
             purpose: sigil_kernel::UserInputPurposeV1::Clarification,
             prompt: request_id.to_owned(),
+            prompt_origin: None,
             questions: Vec::new(),
             allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
             requested_at_unix_ms,

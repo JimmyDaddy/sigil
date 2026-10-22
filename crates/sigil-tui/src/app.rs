@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
@@ -17,6 +17,7 @@ mod checkpoint_flow;
 mod command_dispatch;
 mod command_elapsed;
 mod compaction_flow;
+mod composer_edit_history;
 pub(crate) mod config_flow;
 mod conversation_fork_flow;
 mod conversation_queue_flow;
@@ -346,14 +347,24 @@ pub(crate) struct PendingUserInputForm {
     pub(crate) focus_actions: bool,
     pub(crate) selected_action: UserInputFormAction,
     pub(crate) drafts: Vec<UserInputDraftValue>,
+    pub(crate) validation_error: Option<UserInputFormValidationError>,
     pub(crate) plan_revision_editor: plan_revision_editor::PlanRevisionEditorState,
     pub(crate) scroll: usize,
     pub(crate) scroll_extent: ViewportScrollExtent,
+    // Rendered row offsets stay shared with the input owner, like scroll_extent.
+    pub(crate) question_scroll_offsets: Rc<RefCell<Vec<usize>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserInputFormValidationError {
+    pub(crate) question_index: Option<usize>,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserInputFormViewModel {
     pub(crate) prompt: String,
+    pub(crate) prompt_origin: Option<sigil_kernel::UserInputPromptOriginV1>,
     pub(crate) questions: Vec<sigil_kernel::UserInputQuestionV1>,
     pub(crate) allowed_actions: Vec<sigil_kernel::UserInputActionV1>,
 }
@@ -362,6 +373,7 @@ impl From<&sigil_kernel::PublicUserInputRequestV1> for UserInputFormViewModel {
     fn from(request: &sigil_kernel::PublicUserInputRequestV1) -> Self {
         Self {
             prompt: request.prompt.clone(),
+            prompt_origin: request.prompt_origin,
             questions: request.questions.clone(),
             allowed_actions: request.allowed_actions.clone(),
         }
@@ -608,6 +620,12 @@ pub struct AppState {
     pub session_id: String,
     pub(crate) runtime_transition: Option<crate::launcher::RuntimeTransitionOwner>,
     pub(crate) runtime_maintenance: Option<crate::launcher::RuntimeMaintenanceOwner>,
+    pub(crate) session_recovery_return: Option<(
+        crate::runner::WorkerRouteRecoverySessionTarget,
+        std::sync::Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+    )>,
     pub(crate) deferred_application_actions: std::collections::VecDeque<AppAction>,
     pub(crate) retained_application_admissions: Vec<crate::launcher::PendingApplicationAdmission>,
     pending_worker_session_attachment: std::cell::RefCell<
@@ -1299,6 +1317,7 @@ impl AppState {
             session_id,
             runtime_transition: None,
             runtime_maintenance: None,
+            session_recovery_return: None,
             deferred_application_actions: std::collections::VecDeque::new(),
             retained_application_admissions: Vec::new(),
             pending_worker_session_attachment: std::cell::RefCell::new(None),
@@ -1465,6 +1484,7 @@ impl AppState {
             session_id,
             runtime_transition: None,
             runtime_maintenance: None,
+            session_recovery_return: None,
             deferred_application_actions: std::collections::VecDeque::new(),
             retained_application_admissions: Vec::new(),
             pending_worker_session_attachment: std::cell::RefCell::new(None),
@@ -2083,7 +2103,6 @@ impl AppState {
                     return Ok(None);
                 }
                 if self.cancel_queue_edit() {
-                    self.reset_input_history_navigation();
                     self.reset_slash_selector();
                     self.active_pane = PaneFocus::Composer;
                     return Ok(None);

@@ -22,6 +22,87 @@ fn fixture(width: u16, height: u16) -> Result<(tempfile::TempDir, AppState)> {
     Ok((root, app))
 }
 
+#[test]
+fn approval_full_details_have_independent_scroll_and_escape_returns_to_same_preview() -> Result<()>
+{
+    let (_root, mut app) = fixture(80, 24)?;
+    app.approval
+        .pending
+        .as_mut()
+        .expect("pending")
+        .safe_summary
+        .detail = "Long review detail with a required tail. ".repeat(120);
+    app.approval.scroll_back = 3;
+    let identity = app
+        .approval
+        .pending
+        .as_ref()
+        .expect("pending")
+        .approval_request_id
+        .clone();
+    let selected_action = app.approval.selected_action;
+    assert!(press(&mut app, KeyCode::Char('m'))?.is_none());
+    assert!(app.approval.metadata_focused);
+    assert_eq!(app.approval.scroll_back, 0);
+    assert!(press(&mut app, KeyCode::End)?.is_none());
+    let details_tail = app.approval.scroll_back;
+    assert!(details_tail > 10);
+    assert!(press(&mut app, KeyCode::Esc)?.is_none());
+    assert!(app.approval_review_open());
+    assert!(!app.approval.metadata_focused);
+    assert_eq!(app.approval.scroll_back, 3);
+    assert_eq!(app.approval.selected_action, selected_action);
+    assert_eq!(
+        app.approval
+            .pending
+            .as_ref()
+            .expect("pending")
+            .approval_request_id,
+        identity
+    );
+    press(&mut app, KeyCode::Char('m'))?;
+    assert_eq!(app.approval.scroll_back, details_tail);
+    press(&mut app, KeyCode::Home)?;
+    assert_eq!(app.approval.scroll_back, 0);
+    press(&mut app, KeyCode::Char('m'))?;
+    press(&mut app, KeyCode::Esc)?;
+    assert!(!app.approval_review_open());
+    Ok(())
+}
+
+#[test]
+fn approval_full_details_decisions_stay_bound_to_current_request_and_new_request_resets_view()
+-> Result<()> {
+    let (_root, mut app) = fixture(80, 24)?;
+    let pending = app.approval.pending.as_ref().expect("pending");
+    let call_id = pending.call.id.clone();
+    let request_id = pending.approval_request_id.clone();
+    press(&mut app, KeyCode::Char('m'))?;
+    for (key, approved) in [(KeyCode::Char('y'), true), (KeyCode::Char('n'), false)] {
+        assert!(matches!(press(&mut app, key)?,
+            Some(AppAction::ApprovalDecision { call_id: actual_call, approval_request_id, approved: actual })
+                if actual_call == call_id && approval_request_id == request_id && actual == approved
+        ));
+    }
+    app.approval.selected_action = ApprovalAction::Deny;
+    assert!(matches!(press(&mut app, KeyCode::Enter)?,
+        Some(AppAction::ApprovalDecision { call_id: actual_call, approval_request_id, approved: false })
+            if actual_call == call_id && approval_request_id == request_id
+    ));
+    app.approval.scroll_back = 20;
+    request_next(
+        &mut app,
+        "call-full-details-next",
+        "approval-full-details-next",
+    )?;
+    assert!(!app.approval.metadata_focused);
+    assert!(app.approval.metadata_collapsed);
+    assert_eq!(app.approval.scroll_back, 0);
+    assert_eq!(app.approval.details_scroll_back, 0);
+    assert_eq!(app.approval.preview_scroll_back, 0);
+    Ok(())
+}
+
 fn press(app: &mut AppState, code: KeyCode) -> Result<Option<AppAction>> {
     app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))
 }

@@ -840,15 +840,21 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
     worker.send(WorkerCommand::SwitchSession {
-        session_log_path: restore_log_path,
+        session_log_path: restore_log_path.clone(),
         attachment_recovery_binding: None,
     })?;
-    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let error = worker
+        .recv_until(|message| matches!(message, WorkerMessage::SessionSwitchRejected { .. }))?;
     assert!(matches!(
         error,
-        WorkerMessage::RunFailed(ref text)
-            if text == "cannot switch sessions while the agent is running"
+        WorkerMessage::SessionSwitchRejected { ref session_log_path, ref reason }
+            if session_log_path == &restore_log_path
+                && reason == "cannot switch sessions while the agent is running"
     ));
+    assert!(
+        !restore_log_path.exists(),
+        "a busy switch must not create or activate its target"
+    );
 
     worker.send(WorkerCommand::CancelRun)?;
     let _ = worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
@@ -933,6 +939,80 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
         ]
     ));
 
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_to_internal_research_rejects_without_retiring_current_owner() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let current_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let child_path = temp.path().join(".sigil/sessions/internal-research.jsonl");
+    let root_config = routed_test_root_config(&workspace_root, "planned-model");
+    let mut child = sigil_kernel::Session::load_from_store(
+        "planned",
+        "planned-model",
+        JsonlSessionStore::new(&child_path)?,
+    )?;
+    let source = sigil_kernel::ConversationTurnRef::new("parent-session", "message", "run")?;
+    let review = sigil_kernel::plan_review_id_for_source(&source);
+    let attempt = sigil_kernel::plan_review_attempt_id_for_review(&review);
+    child.append_control(ControlEntry::SessionPurposeBoundV1(
+        sigil_kernel::SessionPurposeBoundV1 {
+            schema_version: 1,
+            purpose: sigil_kernel::SessionPurposeV1::PlanReviewResearch {
+                parent_session_id: "parent-session".to_owned(),
+                plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review, &attempt),
+                plan_review_id: review,
+                attempt_id: attempt,
+            },
+        },
+    ))?;
+    drop(child);
+    let child_bytes = fs::read(&child_path)?;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("Still available".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let worker = spawn_test_worker(
+        root_config,
+        current_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: child_path.clone(),
+        attachment_recovery_binding: None,
+    })?;
+    let rejected = worker
+        .recv_until(|message| matches!(message, WorkerMessage::SessionSwitchRejected { .. }))?;
+    assert!(
+        matches!(rejected, WorkerMessage::SessionSwitchRejected { session_log_path, reason }
+        if session_log_path == child_path && reason.contains("internal plan-review research") && !reason.contains("stream is invalid"))
+    );
+    assert!(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current_path
+        )
+        .is_err(),
+        "current owner remains held"
+    );
+    let released_target =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &child_path,
+        )?;
+    drop(released_target);
+    assert_eq!(fs::read(&child_path)?, child_bytes);
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "Continue the original conversation".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let completed =
+        worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    assert!(matches!(completed, WorkerMessage::RunFinished { .. }));
+    assert!(JsonlSessionStore::read_entries(&current_path)?.iter().any(|entry| matches!(entry, SessionLogEntry::Assistant(message) if message.content.as_deref() == Some("Still available"))));
+    assert_eq!(fs::read(&child_path)?, child_bytes);
     worker.shutdown()?;
     Ok(())
 }

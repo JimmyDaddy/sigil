@@ -155,6 +155,14 @@ fn command_metadata_generates_help_and_control_hints() {
             .any(|line| line == "V: Inspect the pending diff or preview when available.")
     );
     assert!(
+        help.iter()
+            .any(|line| line.starts_with("M: Open full approval details;"))
+    );
+    assert!(
+        help.iter()
+            .any(|line| line.starts_with("Esc: Return from full details to preview,"))
+    );
+    assert!(
         help.iter().any(|line| {
             line == "Ctrl-A/E: Move to the start/end of the current composer line."
         })
@@ -166,13 +174,11 @@ fn command_metadata_generates_help_and_control_hints() {
     );
     assert!(
         help.iter().any(|line| {
-            line == "Ctrl-K/Y: Kill to composer line end and yank the killed text."
+            line == "Ctrl-K: Kill to composer line end. Alt-Y: Yank; Ctrl-Y also yanks when there is no edit to redo."
         })
     );
-    assert!(
-        help.iter()
-            .any(|line| line == "Ctrl-Z: Restore the last draft cleared with Esc.")
-    );
+    assert!(help.iter().any(|line| line
+        == "Ctrl-Z: Undo an edit, including clearing with Esc. Ctrl-Y or Ctrl-Shift-Z: Redo."));
     assert!(help.iter().any(|line| {
         line == "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. F5: Pause task. Ctrl-L: Latest reply."
     }));
@@ -252,7 +258,11 @@ fn composer_selection_help_describes_replacement_and_preserves_readline_controls
 fn keyboard_help_keeps_approval_scope_and_queue_timing_without_internal_jargon() {
     let help = keyboard_help_lines(true).join("\n");
     assert!(help.contains("while the approval review is open"));
-    assert!(help.contains("Shift-Tab reopens tool approval"));
+    assert!(help.contains("Esc: Return from full details to preview, or from preview to input; Shift-Tab reopens approval."));
+    assert!(help.contains(
+        "M: Open full approval details; Up/Down, PageUp/PageDown or Home/End scroll them."
+    ));
+    assert!(help.contains("Tab/Enter: Choose the displayed approval action."));
     assert!(help.contains("save its permission rule"));
     assert!(help.contains("shell and remote effects are never undone"));
     assert!(help.contains("after the current reply"));
