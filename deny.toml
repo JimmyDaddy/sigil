@@ -3,8 +3,8 @@ all-features = true
 
 [advisories]
 # Every exception is owned by dev/governance/dependency-supply-chain.md and mirrored by the
-# independent cargo-audit job. The Tauri exceptions are confined to the current upstream Linux
-# WebKitGTK/build-time graph and must be removed when Tauri migrates those paths.
+# independent cargo-audit job. Tauri exceptions are limited to documented Linux/BSD desktop
+# integration/build dependencies and the Windows desktop updater; remove them on upstream migration.
 ignore = [
   "RUSTSEC-2024-0370",
   "RUSTSEC-2024-0411",
@@ -26,6 +26,12 @@ ignore = [
   "RUSTSEC-2025-0100",
   "RUSTSEC-2025-0141",
   "RUSTSEC-2017-0008",
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
 ]
 
 [licenses]

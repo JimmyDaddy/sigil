@@ -408,3 +408,34 @@ workspace、文档、站点和分发 gate。
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 | --- | --- | --- | --- | --- | --- |
 | `agent-client-protocol` | `=2.2.0`；默认 feature 为空，未启用 unstable | `sigil/acp` | 官方 ACP stdio JSON-RPC framing、typed v1 schema 与 editor permission/session 接口；沿共享 application run/approval/session/cleanup owner，不持有第二 agent loop；stdout 专用于协议，ResourceLink 不自动读取，客户端 env 仅 session/run-local | Apache-2.0；agentclientprotocol/rust-sdk；Cargo.lock 锁定 SDK、derive 2.2.0 与 schema 1.9.1 | SDK/current-thread fixtures、真实 editor deny/cancel/reconnect 及 supply-chain gate 均需当前非零证据；旧 binary 的审批 panic 不算拒绝通过。不得把 SDK fixture 代替编辑器或跨平台资格化 |
+
+
+## 2026-10-22 发布前依赖复核
+
+TUI HTTPS 运行图更新到 `rustls 0.23.46`、`rustls-webpki 0.103.16`、
+`webpki-roots 1.0.10`；根锁文件同时更新 `webpki-root-certs 1.0.10`、
+`quinn-proto 0.11.19`，并由 Rustls 的兼容约束同步更新 AWS-LC。独立 fuzz 锁文件同步
+Rustls、WebPKI、根证书和 Quinn 的兼容安全版本。没有新增直接依赖、feature 或 registry 来源。
+这些修复不通过 advisory ignore 处理；TUI 完整依赖图的 advisories、licenses、bans 和 sources
+检查已经通过，补丁后的完整测试和最终发布提交的远端检查另行记录。
+
+当前锁图的以下六项仅由 Desktop 引入，按既有精确例外机制同步到 `deny.toml` 与独立 audit job。
+本轮发布范围为 TUI/npm，Desktop 延后；这些记录不能代替 Desktop 发布资格。
+
+| 精确 advisory | 当前 owner 与平台 | 风险、现有前置与例外边界 | 移除条件 |
+| --- | --- | --- | --- |
+| `RUSTSEC-2026-0367`、`RUSTSEC-2026-0368`、`RUSTSEC-2026-0369` | `apps/desktop` → `tauri-plugin-updater 2.10.1` → `zip 4.6.1`；Windows updater | ZIP 解压的权限与符号链接处理存在漏洞；Windows 安装路径确实调用受影响的 `ZipArchive::extract`。当前应用先由 `Update::download()` 验证更新签名，成功后才向 `install()` 交付相同字节；签名是缓解条件，不代表漏洞已修复。`sigil` 与 `sigil-tui-host` 的完整锁图（含开发依赖）均不可达该包；例外不得扩展到 provider、tool 或通用归档处理 | 稳定 updater 迁移到 ZIP 9 后删除这三项并复跑审计、签名与 Windows 更新安装验收；Windows Desktop 正式发布前必须重新处理与评估 |
+| `RUSTSEC-2026-0370`、`RUSTSEC-2026-0371`、`RUSTSEC-2026-0372` | `apps/desktop` → `tauri-plugin-opener 2.5.4` → `zbus 5.18.0` → `zvariant 5.13.1` / `zvariant_derive 5.13.1` / `zbus_names 4.3.4`；Linux/BSD Desktop | 三个 standalone crate 已合入 zbus 6，属于维护状态告警且没有 patched standalone 版本。TUI keyring 使用 `sync-secret-service` → `dbus-secret-service`，不走此链；这三项不是 TUI 的维护例外 | 稳定 opener 完成 zbus 6 迁移后删除并复跑 Linux/BSD Desktop 集成及全图审计 |
+
+截至本次复核，稳定 updater `2.14.0` 仍依赖 ZIP 4，稳定 opener `2.7.2` 仍依赖 zbus 5；
+两者还要求 Tauri `^2.12`，故直接升级既扩大变更，也不能清除这些项。本轮不改 Tauri/plugin pin、
+不使用未发布 Git commit、不强行覆盖不兼容大版本。未知 advisory 与许可证/来源检查仍保持阻断；
+任何新增通往上述包的 TUI/provider/tool 路径都必须重新评估，不能沿用本节结论。
+
+复核来源：[ZIP 权限公告](https://rustsec.org/advisories/RUSTSEC-2026-0367.html)、
+[ZIP 符号链接公告](https://rustsec.org/advisories/RUSTSEC-2026-0368.html)、
+[ZIP 权限经符号链接逃逸公告](https://rustsec.org/advisories/RUSTSEC-2026-0369.html)、
+[zvariant 维护公告](https://rustsec.org/advisories/RUSTSEC-2026-0370.html)、
+[updater 2.10.1 下载验签与安装源码](https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.10.1/plugins/updater/src/updater.rs)、
+[尚未发布的 ZIP 9 迁移](https://github.com/tauri-apps/plugins-workspace/commit/ba98bfadc4c868c9a7e1a226c83af528e1f11b89)、
+[opener 的 zbus 6 迁移](https://github.com/tauri-apps/plugins-workspace/pull/3722)。

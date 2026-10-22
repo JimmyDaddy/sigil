@@ -22,6 +22,7 @@ This update improves TUI editing, review, follow-ups, and startup recovery. Desk
 - Queued follow-ups start separate runs. Editing or resuming them preserves the main draft and displays the correct subsequent result.
 - Cancellation preserves tool output for review. Task pause and continuation state stay visible and consistent across both surfaces.
 - Session recovery finds exact session IDs and restores the last active workspace. Startup clearly explains when another instance owns the workspace, with accessible diagnostics, connection editing, and retry controls.
+- Updated HTTPS, certificate verification, and transport security dependencies.
 
 ## v0.0.1-beta.5 - 2026-09-29
 
