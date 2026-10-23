@@ -58,11 +58,24 @@
 
 排版消费官方 CommonMark/GFM 语法树，通过 mark/line/replace decorations 改变展示，不使用自写正则 parser。光标进入局部节点或选择对应内容时揭示该处标记，闭合标记之后继续输入立即排版；工具菜单聚焦期间保留所选语法，避免浏览器选区塌缩。“编辑选项”的“显示 Markdown 原文”只切换同一 editor 的呈现，不增加第二 pane，不重置 selection、滚动、附件、草稿或撤销历史。
 
-格式操作仍提供粗体、斜体、行内代码、代码块、列表和链接，修改同一原始字符串。Cmd/Ctrl-B、I、K 保留；基础 Cmd/Ctrl-Z 与重做只负责误删或格式修改撤回，不增加记录列表或历史按钮。主题、原文模式和展开不重挂 editor。展开只提高长文上限，短文按实际内容高度显示：普通上限 min(176px,24dvh)，展开 min(280px,38dvh)，当前审批时 88px，保留会话正文空间；实际窄窗几何与输入法另行原生确认。
+格式操作仍提供粗体、斜体、行内代码、代码块、列表和链接，修改同一原始字符串。Cmd/Ctrl-B、I、K 保留；基础 Cmd/Ctrl-Z 与重做只负责误删或格式修改撤回，不增加记录列表或历史按钮。主题、原文模式和展开不重挂 editor。展开只提高长文上限，短文按实际内容高度显示：普通上限 min(176px,24dvh)，展开 min(280px,38dvh)，当前审批时 88px，保留会话正文空间；实际窄窗几何与不同输入法分别进行原生确认。
 
 Enter 发送（运行中入队），Shift+Enter 换行；代码 fence、原文模式和展开态规则一致。组合输入先于建议、格式与发送，期间冻结装饰并映射原范围，浏览器提交后再排版。编辑弹层打开时，Escape 优先取消输入法候选，不关闭弹层或移动编辑焦点；随后普通 Escape 才关闭弹层。普通 Markdown 连同空白、CRLF、中文和代码 fence 直接发送，不 trim。异步发送只清理原 revision；后续编辑、composition、附件与迟到 durable draft identity 均保留既有范围。256 KiB 草稿预算或存储失败保留文字和之前已保存值，不阻止编辑或发送。
 
 样式由官方 scoped theme adapter 消费应用语义 token，不手工改 contentDOM，不添加 `!important`。依赖边界见[供应链台账](../governance/dependency-supply-chain.md#markdown-原位编辑desktop-polish-b3-d012026-10-23-更新)。组件与引擎测试覆盖完成语法即时排版、原文 toggle 不重挂、selection/scroll/history、合成 composition 事件、精确提交、late draft identity、附件和危险内容惰性；jsdom 不代表真实输入法或 native 布局资格化。
+
+### 中文输入法的原生验收
+
+使用普通 macOS WebKit 桌面壳、生产 renderer 与独立配置和工作区。记录实际输入源，通过实体字母键逐个输入拼音，截图确认系统候选窗与 marked text；Unicode 文字注入、合成 composition 事件和自动测试不替代这一证据。自动操作每个实体键前检查目标仍在前台，投递失焦或回执不确定时停止并重新建立候选，不能把投递故障当作产品缺陷。
+
+按以下边界分别保存候选、确认后的草稿及必要的发送回执：
+
+- 空格和数字选词不发送；候选结束后输入普通数字、Shift+Enter 换行与 Enter 发送准确。Enter 的候选行为以当前输入法为准，不假设它一定提交汉字。
+- Escape 先取消候选，保留草稿；编辑弹层同时打开时不误关闭或移动焦点，下一次普通 Escape 可以关闭弹层。
+- 标题、粗体和列表中的中文输入及局部替换保留 Markdown 原文；撤销/重做、原文开关、长文滚动与展开不丢字。
+- 运行期间确认候选不入队，明确提交后只入队一次；队列处理后保留后来编辑的新草稿。使用脚本 provider 时，只证明本地应用流程，不扩大为真实模型效果。
+
+2026-10-24 已在搜狗拼音下按上述范围实机复验，包含 16 行实体键中文长文。实机发现并修复了候选取消 Escape 同时关闭编辑弹层的问题；修复候选再次通过同一路径。此结果不代表 Apple 拼音、其他操作系统或全部输入法均已验收。
 
 官方依据：[Decorations](https://codemirror.net/examples/decoration/)、[StateField / direct decorations](https://codemirror.net/docs/ref/#view.EditorView.decorations)、[Markdown 配置](https://codemirror.net/docs/ref/#lang-markdown.markdown)、[Lezer Markdown](https://code.haverbeke.berlin/lezer/markdown)，访问日期 2026-10-23。
 
