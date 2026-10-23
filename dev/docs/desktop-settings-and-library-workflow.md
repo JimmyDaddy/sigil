@@ -23,3 +23,7 @@
 ## 交互依据
 
 确认框的动作、目标和取消入口参考 [W3C 数据错误预防说明](https://www.w3.org/WAI/WCAG22/Understanding/error-prevention-legal-financial-data.html) 对重要提交审查与确认的原则，以及 [WAI-ARIA 确认弹层模式](https://www.w3.org/WAI/ARIA/apg/patterns/alertdialog/) 的标题、说明和模态语义。该引用是本流程的设计依据，不构成完整无障碍合规声明。
+
+## 首次会话空状态
+
+首次空库的主要引导只在主区显示，侧栏保留会话数量，不重复显示“没有匹配”或第二个开始入口。只有已经提交的搜索与已应用筛选才触发“没有匹配”的提示；尚未提交的搜索草稿不改变空态判断。加载、读取失败和来源警示保持各自状态。

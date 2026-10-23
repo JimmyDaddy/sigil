@@ -28,6 +28,7 @@ export function HistoryContent({
   selectedSessionId,
   navigationBusy,
   openingSessionRef,
+  filtersApplied = false,
 }: {
   state: HistoryState;
   page: CatalogPage;
@@ -41,6 +42,7 @@ export function HistoryContent({
   selectedSessionId?: string;
   navigationBusy?: boolean;
   openingSessionRef?: string;
+  filtersApplied?: boolean;
 }) {
   const { locale, t } = useLocale();
   const previousSessionPress = useRef<
@@ -112,12 +114,12 @@ export function HistoryContent({
           ) : null}
         </span>
       </div>
-      {page.entries.length === 0 ? (
+      {page.entries.length === 0 ? filtersApplied ? (
         <div className="history-empty">
           <strong>{t("noMatchingConversation")}</strong>
           <p>{t("adjustFilters")}</p>
         </div>
-      ) : (
+      ) : null : (
         <div className="history-groups">
           {groups.map((group) => (
             <section className="history-group" key={group.id} aria-labelledby={`history-group-${group.id}`}>

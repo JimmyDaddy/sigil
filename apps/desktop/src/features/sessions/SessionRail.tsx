@@ -9,6 +9,7 @@ import { Button, Checkbox, IconButton, Popover, Select, TextField, Tooltip } fro
 
 interface SessionRailProps {
   readonly historyState: HistoryState;
+  readonly filtersApplied: boolean;
   readonly catalog: CatalogPage;
   readonly legacyHistory?: LegacySharedSessionHistory;
   readonly legacyWorkspaceLabel?: string;
@@ -41,6 +42,7 @@ interface SessionRailProps {
 
 export function SessionRail({
   historyState,
+  filtersApplied,
   catalog,
   legacyHistory,
   legacyWorkspaceLabel,
@@ -141,6 +143,7 @@ export function SessionRail({
       <div className="session-rail-scroll">
         <HistoryContent
           state={historyState}
+          filtersApplied={filtersApplied}
           page={catalog}
           selectedSessionId={selectedSessionId}
           navigationBusy={navigationBusy}

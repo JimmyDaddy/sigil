@@ -89,7 +89,7 @@ it.each(["owner-first", "events-first"] as const)("continues the same paused Tas
         failedChildren: 0, lanes: [], lanesTruncated: false, canContinue: true,
       } }),
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await screen.findByRole("button", { name: "Continue Task" });
   await waitFor(() => expect(listener).toBeDefined());
@@ -178,7 +178,7 @@ it.each(["run_finished", "run_cancelled", "run_blocked"] as const)(
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Read the recorded result");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -1424,7 +1424,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Keep this draft");
@@ -1450,7 +1450,7 @@ describe("desktop workspace and history shell", () => {
       }),
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     expect(await screen.findByText(/Use environment variable · api\.deepseek\.com/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Add connection" }));
@@ -1573,7 +1573,7 @@ describe("desktop workspace and history shell", () => {
       exportSupportBundle,
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.click(screen.getByRole("button", { name: "Support" }));
     await user.click(screen.getByRole("button", { name: "Open support and diagnostics" }));
@@ -2281,7 +2281,7 @@ describe("desktop workspace and history shell", () => {
       saveProviderDefaultModel,
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByRole("combobox", { name: "Model" });
     await user.click(screen.getByRole("button", { name: "Open settings" }));
@@ -2840,7 +2840,7 @@ describe("desktop workspace and history shell", () => {
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     const model = await screen.findByRole("heading", { name: "Default model for new conversations" });
     await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
@@ -2878,7 +2878,7 @@ describe("desktop workspace and history shell", () => {
     await screen.findByRole("heading", { name: "Open a workspace" });
     await user.click(screen.getByRole("button", { name: "Open workspace" }));
     expect(await screen.findByText("Conversations")).toBeTruthy();
-    expect(await screen.findByText("No matching conversation.")).toBeTruthy();
+    expect(await screen.findByText("0 conversations")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByRole("combobox", { name: "Message Sigil" })).toBeTruthy();
@@ -3240,7 +3240,7 @@ describe("desktop workspace and history shell", () => {
       openRecentWorkspace,
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.click(screen.getByRole("button", { name: "Appearance & preferences" }));
     await user.click(screen.getByRole("checkbox", { name: "Reopen the most recent workspace" }));
@@ -3521,7 +3521,7 @@ describe("desktop workspace and history shell", () => {
     await act(async () => {
       resolveCatalog?.(emptyCatalog);
     });
-    expect(await within(navigation).findByText("No matching conversation.")).toBeTruthy();
+    expect(await within(navigation).findByText("0 conversations")).toBeTruthy();
     expect(navigation.querySelector(".history-skeleton")).toBeNull();
   });
 
@@ -4380,7 +4380,7 @@ describe("desktop workspace and history shell", () => {
         },
       })} />);
 
-      await screen.findByText("No matching conversation.");
+      await screen.findByText("0 conversations");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
       await waitFor(() => expect(confirmOwner).toBeDefined());
       act(() => {
@@ -5114,7 +5114,7 @@ describe("desktop workspace and history shell", () => {
     const navigation = screen.getByRole("dialog", { name: "Browse conversations" });
     expect(navigation.id).toBe("desktop-navigation");
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close Browse conversations" }));
-    expect(await screen.findByText("No matching conversation.")).toBeTruthy();
+    expect(await screen.findByText("0 conversations")).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Browse conversations" })).toBeNull();
     expect(document.activeElement).toBe(navigationTrigger);
@@ -5186,7 +5186,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const activityTrigger = await screen.findByRole("button", { name: "Open Agent activity" });
     await user.click(activityTrigger);
@@ -5216,7 +5216,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "Load more" }));
     await waitFor(() => expect(firstPageRequests).toBe(2));
     expect(screen.queryByText("Conversation history refreshed because the list changed.")).toBeNull();
@@ -5245,7 +5245,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     expect(screen.queryByText("Available")).toBeNull();
@@ -5439,7 +5439,7 @@ describe("desktop workspace and history shell", () => {
       },
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Finish before attach");
@@ -5617,7 +5617,7 @@ describe("desktop workspace and history shell", () => {
         subscribeRunStreamStatus: async () => () => undefined,
       })} />);
 
-      await screen.findByText("No matching conversation.");
+      await screen.findByText("0 conversations");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
       await screen.findByRole("button", { name: "Cancel work" });
       const composer = await readyComposer();
@@ -5778,7 +5778,7 @@ describe("desktop workspace and history shell", () => {
         subscribeRunStreamStatus: async () => () => undefined,
       })} />);
 
-      await screen.findByText("No matching conversation.");
+      await screen.findByText("0 conversations");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
       await screen.findByRole("button", { name: "Cancel work" });
       typeEditorText(await readyComposer(), "Continue after the delayed owner handoff");
@@ -6163,7 +6163,7 @@ describe("desktop workspace and history shell", () => {
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       createSession,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(createSession).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("Creating a new conversation…")).toBeTruthy();
@@ -6185,7 +6185,7 @@ describe("desktop workspace and history shell", () => {
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       startRun,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Show immediate feedback");
@@ -6227,7 +6227,7 @@ describe("desktop workspace and history shell", () => {
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       commandConversationQueue,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Start the first run");
@@ -6285,7 +6285,7 @@ describe("desktop workspace and history shell", () => {
       },
       commandConversationQueue,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Start the first run");
@@ -6320,7 +6320,7 @@ describe("desktop workspace and history shell", () => {
       }),
       commandConversationQueue,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Start the first run");
@@ -6354,7 +6354,7 @@ describe("desktop workspace and history shell", () => {
       }),
       commandConversationQueue,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await readyComposer();
     await user.click(await screen.findByRole("button", { name: "Open follow-up queue, 1 messages" }));
@@ -6397,7 +6397,7 @@ describe("desktop workspace and history shell", () => {
       conversationQueue: async (_workspaceId, sessionId) => queueView(sessionId),
       commandConversationQueue,
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await readyComposer();
     await user.click(await screen.findByRole("button", { name: "Open follow-up queue, 2 messages" }));
@@ -6617,7 +6617,7 @@ describe("desktop workspace and history shell", () => {
         subscribeRunStreamStatus: async () => () => undefined,
       })} />);
 
-      await screen.findByText("No matching conversation.");
+      await screen.findByText("0 conversations");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
       await waitFor(() => expect(document.querySelector("[data-continuity-owner-run-id='run-handoff-A']")).toBeTruthy());
       const event = (runId: string, kind: TimelineEvent["kind"], sequence: number): TimelineEvent => ({
@@ -6742,7 +6742,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     composer.focus();
@@ -6792,7 +6792,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect((await screen.findByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     await user.click(screen.getByRole("button", { name: "Context and cache details" }));
@@ -6900,7 +6900,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     await user.selectOptions(
@@ -6974,7 +6974,7 @@ describe("desktop workspace and history shell", () => {
       startRun,
     })} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     const model = screen.getByRole("combobox", { name: "Model" });
@@ -7035,7 +7035,7 @@ describe("desktop workspace and history shell", () => {
     });
     const first = render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const composer = await readyComposer();
     typeEditorText(composer, "Run this after Shift+Enter");
@@ -7050,7 +7050,7 @@ describe("desktop workspace and history shell", () => {
 
     first.unmount();
     render(<App bridge={bridge} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(editorText(screen.getByLabelText("Message Sigil"))).toBe("Follow-up draft");
     if (originalStorage !== undefined) Object.defineProperty(window, "localStorage", originalStorage);
@@ -7072,7 +7072,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await waitFor(() => expect(eventListener).toBeDefined());
     const timeline = screen.getByRole("log", { name: "Conversation timeline" });
@@ -7122,7 +7122,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await waitFor(() => expect(eventListener).toBeDefined());
     const timeline = screen.getByRole("log", { name: "Conversation timeline" });
@@ -7420,7 +7420,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Run tests");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -7516,7 +7516,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Edit a file");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -7679,7 +7679,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const reviewTrigger = await screen.findByRole("button", { name: "Open verification: check failed" });
     expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
@@ -7726,7 +7726,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await waitFor(() => expect(eventListener).toBeDefined());
     const base = {
@@ -7850,7 +7850,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     expect(await screen.findByText("task-restart-control")).toBeTruthy();
@@ -7924,7 +7924,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Implement the active Task safely");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -8071,7 +8071,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     expect(await screen.findByText("Refactor the workspace snapshot binding")).toBeTruthy();
@@ -8146,7 +8146,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     expect(await screen.findByText("Stale plan draft")).toBeTruthy();
@@ -8197,7 +8197,7 @@ describe("desktop workspace and history shell", () => {
       planDecision,
     });
     render(<App bridge={bridge} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByText("Review remains available");
     if (state === "active") {
@@ -8273,7 +8273,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("The review stopped before typed completion")).toBeTruthy();
     if (hasCandidate) {
@@ -8348,7 +8348,7 @@ describe("desktop workspace and history shell", () => {
       subscribeRunStreamStatus: async (listener) => { streamListener = listener; return () => undefined; },
     });
     render(<App bridge={bridge} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByRole("button", { name: "Cancel run" });
     await waitFor(() => expect(eventListener).toBeDefined());
@@ -8467,7 +8467,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const select = await screen.findByRole("combobox", { name: "Which mode should Sigil use?" });
     const conversationHistory = screen.getByRole("log", { hidden: true }) as HTMLDivElement;
@@ -8580,7 +8580,7 @@ describe("desktop workspace and history shell", () => {
         bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
         display,
       })} />);
-      await screen.findByText("No matching conversation.");
+      await screen.findByText("0 conversations");
       await user.click(screen.getByRole("button", { name: "New conversation" }));
       await screen.findByRole("combobox", { name: "Which history mode?" });
       const timeline = screen.getByRole("log", { hidden: true }) as HTMLDivElement;
@@ -8672,7 +8672,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Start the persistent development server");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -8736,7 +8736,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     typeEditorText(await readyComposer(), "Start a development server");
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -8851,7 +8851,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.click(await screen.findByRole("button", { name: "Stop task" }));
     await waitFor(() => expect(cancelTerminalTask).toHaveBeenCalledWith(
@@ -8922,7 +8922,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.click(await screen.findByRole("button", { name: "Review integration" }));
     expect(await screen.findByRole("dialog", { name: "Task integration review" })).toBeTruthy();
@@ -8985,7 +8985,7 @@ describe("desktop workspace and history shell", () => {
     });
     render(<App bridge={bridge} />);
 
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await user.click(await screen.findByRole("button", { name: "Review integration" }));
     await user.click(await screen.findByRole("button", { name: "Accept and continue" }));
@@ -9026,7 +9026,7 @@ it("sends image-only input through the conversation panel and retains it after m
     releaseImages,
     startRun,
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await readyComposer();
   await user.click(screen.getByRole("button", { name: "Attach image" }));
@@ -9063,7 +9063,7 @@ it("branches beside a finalized message without checkpoints, keeps failed select
     display: async (_workspace, sessionId) => sessionId === "branch-http" ? { ...page, requestScope: "fork-branch", items: [], totalItems: "0" } : page,
     conversationRecovery, commandConversationRecovery, openSession, startRun,
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   typeEditorText(await readyComposer(), "Keep this parent draft");
   await user.click(await screen.findByRole("button", { name: "Branch from here" }));
@@ -9146,7 +9146,7 @@ it("reviews outdated recorded lines through the normal run and preserves comment
     conversationRecovery: async () => ({ checkpoints: [checkpoint], forkPoints: [], throughStreamSequence: 8 }),
     checkpointReview: async () => review, checkpointRestorePreview, startRun,
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await readyComposer();
   await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
@@ -9182,7 +9182,7 @@ it("imports a branch conclusion during an active run without replacing the draft
     branchKnowledgePreview: async (_workspace, _session, source) => ({ ...source, points: [{ sourceTurnDigest: "exact-turn", sourceMessageId: "exact-message", sourceTextSha256: "full-source-hash", summarySha256: "selected-summary-hash", summary: "Use bounded traversal with existing ignore rules.", truncated: false }] }),
     commandConversationRecovery, startRun,
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   const composer = await readyComposer();
   typeEditorText(composer, "Keep working on the current approach");
@@ -9219,7 +9219,7 @@ it.each(["accepted", "failed"] as const)("queues review comments while running a
       diffs: [{ sourceCallId: "old-edit", diffDigest: "old-diff", path: "src/a.ts", fileState: "unknown", truncated: false, lines: [{ text: "+new", newLine: 1 }] }] }),
     startRun, commandConversationQueue,
   })} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   const composer = await readyComposer();
   typeEditorText(composer, "Keep working");
@@ -9262,7 +9262,7 @@ it.each(["retired", "terminal"] as const)("A1 records only visible accepted cont
     subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
   });
   render(<App bridge={bridge} />);
-  await screen.findByText("No matching conversation.");
+  await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   typeEditorText(await readyComposer(), "Observe only actual content");
   await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -9365,7 +9365,7 @@ describe("shared conversation history navigation", () => {
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [current], recentWorkspaces: [] }),
       catalog: async () => ({ ...emptyCatalog, workspaceId: kind === "stale" ? original.id : current.id, legacySharedHistory: { ...history, workspaceId: kind === "self" ? current.id : original.id } }),
     })} />);
-    await screen.findByText("No matching conversation.");
+    await screen.findByText("0 conversations");
     expect(screen.queryByRole("complementary", { name: "Shared conversation history" })).toBeNull();
   });
 });

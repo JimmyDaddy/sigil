@@ -1026,12 +1026,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const recoveryWithoutSession = selectedSession === undefined && (
     !emptyCreationAllowed || sessionRestoreFailed
   );
-  const historyFiltersApplied = searchQuery.trim() !== "" || searchDraft.trim() !== "" || providerFilter.trim() !== "" || sourceFilter !== "all" || pinnedOnly;
+  const historyFiltersApplied = searchQuery.trim() !== "" || providerFilter.trim() !== "" || sourceFilter !== "all" || pinnedOnly;
   const emptyHistory = historyState === "ready" && catalog.workspaceId === activeWorkspaceId && catalog.entries.length === 0;
   const sessionNavigationBusy = sessionActionState === "working" || conversationNavigation !== undefined;
   const navigationContent = activeWorkspace === undefined ? null : (
     <SessionRail
       historyState={historyState}
+      filtersApplied={historyFiltersApplied}
       catalog={catalog}
       legacyHistory={legacyHistory}
       legacyWorkspaceLabel={legacyIdentity === undefined ? undefined : workspaceDisplayLabel(legacyIdentity, [...workspaces, ...recentWorkspaces])}
