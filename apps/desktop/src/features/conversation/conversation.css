@@ -455,6 +455,7 @@
 .tool-artifact-retrieval { display: grid; min-width: 0; gap: 6px; margin: 7px 0 0 30px; padding-top: 6px; border-top: 1px solid var(--sg-sys-color-outline); }
 .tool-artifact-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
 .tool-artifact-actions form { display: flex; min-width: min(100%, 320px); flex: 1; align-items: center; gap: 5px; }
+.tool-artifact-search > .sg-button { margin: 3px 0; }
 .tool-artifact-search-field { min-width: 80px; flex: 1; }
 .tool-artifact-actions input { min-height: 28px; padding: 4px 7px; }
 .tool-artifact-retrieval > small, .tool-artifact-unavailable { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }

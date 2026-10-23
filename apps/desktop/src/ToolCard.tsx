@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
@@ -114,6 +114,10 @@ export function ToolCard({
   const [artifactBusy, setArtifactBusy] = useState(false);
   const [artifactError, setArtifactError] = useState(false);
   const [artifactQuery, setArtifactQuery] = useState("");
+  const [artifactSearchOpen, setArtifactSearchOpen] = useState(false);
+  const artifactSearchId = useId();
+  const artifactSearchInput = useRef<HTMLInputElement>(null);
+  const artifactSearchToggle = useRef<HTMLButtonElement>(null);
   const canReadArtifact =
     tool.artifactRef !== undefined
     && tool.artifactAvailability === "available"
@@ -130,11 +134,15 @@ export function ToolCard({
     setArtifactBusy(false);
     setArtifactError(false);
     setArtifactQuery("");
+    setArtifactSearchOpen(false);
     return () => {
       artifactReadGeneration.current += 1;
       artifactReadBusy.current = false;
     };
   }, [tool.key, tool.artifactRef, canReadArtifact]);
+  useEffect(() => {
+    if (artifactSearchOpen) artifactSearchInput.current?.focus();
+  }, [artifactSearchOpen]);
   const readArtifact = useCallback((selector: ToolArtifactSelector) => {
     const read = readArtifactRef.current;
     if (!canReadArtifact || read === undefined || artifactReadBusy.current) return;
@@ -179,13 +187,13 @@ export function ToolCard({
   const visibleShortPage = completeInlineOutput ?? artifactPage;
   const compactSearch = completeInlineOutput !== undefined
     && presentation.tone === "success" && tool.artifactHasMore !== true;
-  const artifactSearch = (
+  const artifactSearchForm = (
     <form onSubmit={(event) => {
       event.preventDefault();
       const query = artifactQuery.trim();
       if (query !== "") void readArtifact({ kind: "search_literal", query, startOffset: 0, maxMatches: 20, contextLines: 2 });
     }}>
-      <TextField label={t("searchSavedOutput")} labelHidden containerClassName="tool-artifact-search-field"
+      <TextField ref={artifactSearchInput} label={t("searchSavedOutput")} labelHidden containerClassName="tool-artifact-search-field"
         maxLength={512} value={artifactQuery} onChange={(event) => setArtifactQuery(event.target.value)} />
       <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>{t("search")}</Button>
     </form>
@@ -200,6 +208,23 @@ export function ToolCard({
     )}
     {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
   </>;
+  const artifactSearchButton = (
+    <Button ref={artifactSearchToggle} type="button" variant="quiet" leadingIcon={<Icon name="search" />}
+      aria-expanded={artifactSearchOpen} aria-controls={artifactSearchId}
+      onClick={() => setArtifactSearchOpen((open) => !open)}>{t("searchSavedOutput")}</Button>
+  );
+  const artifactSearchPanel = artifactSearchOpen ? (
+    <div id={artifactSearchId} className="tool-card-body" onKeyDown={(event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setArtifactSearchOpen(false);
+      artifactSearchToggle.current?.focus();
+    }}>
+      <div className="tool-artifact-actions">{artifactSearchForm}</div>
+      {compactSearch ? artifactResults : null}
+    </div>
+  ) : null;
   const artifactPresentation = tool.artifactAvailability === undefined
     ? undefined
     : presentArtifactStatus(tool.artifactAvailability, t);
@@ -287,13 +312,10 @@ export function ToolCard({
         </details>
       )}
       {canReadArtifact && compactSearch ? (
-        <details className="tool-details">
-          <summary>{t("searchSavedOutput")}</summary>
-          <div className="tool-card-body">
-            <div className="tool-artifact-actions">{artifactSearch}</div>
-            {artifactResults}
-          </div>
-        </details>
+        <div className="tool-details tool-artifact-search">
+          {artifactSearchButton}
+          {artifactSearchPanel}
+        </div>
       ) : canReadArtifact ? (
         <Collapsible className="tool-artifact-retrieval" label={t("savedOutputDetails")}>
           <div className="tool-artifact-actions">
@@ -305,8 +327,9 @@ export function ToolCard({
             >
               {artifactPage === undefined ? t("viewSavedOutput") : t("restartSavedOutput")}
             </Button>
-            {artifactSearch}
+            {artifactSearchButton}
           </div>
+          {artifactSearchPanel}
           {artifactResults}
         </Collapsible>
       ) : artifactPresentation !== undefined ? (

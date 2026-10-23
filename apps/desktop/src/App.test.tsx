@@ -1012,6 +1012,8 @@ describe("desktop coding-agent components", () => {
     await user.click(screen.getByRole("button", { name: "Next page" }));
     expect(readArtifact).toHaveBeenNthCalledWith(2, nextSelector);
 
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
     await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "needle");
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText("matching context")).toBeTruthy();
@@ -1022,6 +1024,13 @@ describe("desktop coding-agent components", () => {
       maxMatches: 20,
       contextLines: 2,
     });
+    const search = screen.getByRole("button", { name: "Search saved tool output" });
+    await user.click(search);
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
+    expect(screen.getByText("matching context")).toBeTruthy();
+    await user.click(search);
+    expect((screen.getByRole("textbox", { name: "Search saved tool output" }) as HTMLInputElement).value).toBe("needle");
+    expect(readArtifact).toHaveBeenCalledTimes(3);
   });
 
   it("keeps an expired artifact summary auditable without offering retrieval", () => {

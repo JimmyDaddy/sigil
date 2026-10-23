@@ -119,9 +119,9 @@ it("shows complete short UTF8 output directly with only a secondary search discl
   expect((await screen.findByLabelText("exec_command saved output page")).textContent?.trimEnd()).toBe(body.trimEnd());
   expect(read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 4_096 });
   expect(screen.queryByText("Full output and search")).toBeNull();
-  const search = screen.getByText("Search saved tool output", { selector: "summary" }).closest("details")!;
-  expect(search.open).toBe(false);
-  expect(search.classList.contains("sg-collapsible")).toBe(false);
+  const search = screen.getByRole("button", { name: "Search saved tool output" });
+  expect(search.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Restart saved output", hidden: true })).toBeNull();
   expect(screen.queryByText(/saved bytes are available|bounded pages/)).toBeNull();
 });
@@ -152,7 +152,7 @@ describe("compact saved output search", () => {
     const original = await screen.findByLabelText("read_file saved output page");
     const originalText = original.textContent;
     expect(originalText).toContain("  # 社团🌿\r\nsecond line  ");
-    await user.click(screen.getByText("Search saved tool output", { selector: "summary" }));
+    await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
     await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "社团");
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain("first matching line");
@@ -177,10 +177,16 @@ describe("compact saved output search", () => {
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
     expect(screen.getByText("Full output and search").closest("details")?.classList.contains("sg-collapsible")).toBe(true);
-    expect(screen.queryByText("Search saved tool output", { selector: "summary" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
     await user.click(screen.getByText("Full output and search"));
     expect(screen.getByRole("button", { name: "Restart saved output" })).toBeTruthy();
-    expect(screen.getByRole("textbox", { name: "Search saved tool output" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
+    const search = screen.getByRole("button", { name: "Search saved tool output" });
+    await user.click(search);
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search saved tool output" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
+    expect(document.activeElement).toBe(search);
     if (mode === "failed") expect(screen.getByText("Read permission failed")).toBeTruthy();
     if (mode === "binary") expect(screen.getByText("Binary output is available in details.")).toBeTruthy();
     if (mode === "paged") {
@@ -199,7 +205,7 @@ describe("compact saved output search", () => {
     await user.click(screen.getByText("Full output and search"));
     await user.click(screen.getByRole("button", { name: "View saved output" }));
     expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain("社团🌿");
-    expect(screen.getByText("Search saved tool output", { selector: "summary" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Search saved tool output" })).toBeTruthy();
     expect(screen.queryByText("Full output and search")).toBeNull();
   });
 
@@ -213,11 +219,11 @@ describe("compact saved output search", () => {
     render(<ToolCard tool={tool} onReadArtifact={read} />);
     const original = await screen.findByLabelText("read_file saved output page");
     const text = original.textContent;
-    const toggle = screen.getByText("Search saved tool output", { selector: "summary" });
+    const toggle = screen.getByRole("button", { name: "Search saved tool output" });
     await user.click(toggle);
     await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "社团");
     await user.click(screen.getByRole("button", { name: "Search" }));
-    expect(await within(toggle.closest("details")!).findByRole("alert")).toBeTruthy();
+    expect(await within(toggle.closest("article")!).findByRole("alert")).toBeTruthy();
     expect(original.textContent).toBe(text);
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain("retry match");
@@ -231,7 +237,7 @@ describe("compact saved output search", () => {
     const read = vi.fn(async (selector: ToolArtifactSelector) => selector.kind === "byte_slice" ? savedPage(artifactRef, selector, source) : pending);
     const view = render(<ToolCard tool={tool} onReadArtifact={read} />);
     await screen.findByLabelText("read_file saved output page");
-    await user.click(screen.getByText("Search saved tool output", { selector: "summary" }));
+    await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
     await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "社团");
     await user.click(screen.getByRole("button", { name: "Search" }));
     const nextRef = scope === "artifact ref" ? `ta1_${"d".repeat(32)}` : artifactRef;
@@ -240,6 +246,7 @@ describe("compact saved output search", () => {
     view.rerender(<ToolCard tool={{ ...tool, key: scope === "tool key" ? "next-call" : tool.key,
       artifactRef: nextRef, artifactPersistedBytes: nextSource.length }} onReadArtifact={nextRead} />);
     expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain(nextSource);
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
     await act(async () => { completeSearch(savedPage(artifactRef, read.mock.calls[1]![0], "obsolete search match")); await pending; });
     expect(screen.getByLabelText("read_file saved output page").textContent).toContain(nextSource);
     expect(screen.queryByText(/obsolete search match|社团/)).toBeNull();
