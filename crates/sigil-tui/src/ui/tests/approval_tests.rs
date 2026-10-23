@@ -568,8 +568,8 @@ fn approval_footer_lines_only_show_file_navigation_for_multiple_files() {
         ..modal_view("file read")
     });
 
-    assert!(!plain_line_text(&single[1]).contains(",/. file"));
-    assert!(plain_line_text(&multi[1]).contains(",/. file"));
+    assert!(!plain_lines_text(&single).contains(",/. file"));
+    assert!(plain_lines_text(&multi).contains(",/. file"));
     assert!(!plain_line_text(&single[0]).contains("Enter"));
     assert!(plain_line_text(&single[1]).contains("Enter select"));
 }
@@ -1190,6 +1190,286 @@ fn approval_full_details_scroll_reaches_tail_with_fixed_actions_and_return_keys(
             visible.contains("DECISION_5_TAIL"),
             "{width}x{height} must reach final reason"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn approval_short_production_surface_preserves_preview_details_decisions_and_draft()
+-> anyhow::Result<()> {
+    for diff in [false, true] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.composer.input = "保留尚未发送的草稿 🙂".to_owned();
+        app.composer.input_cursor = 4;
+        app.composer.input_selection_anchor = Some(1);
+        let identity = test_approval_identity("call-short-surface");
+        let metadata = full_details_view();
+        app.handle(RunEvent::ToolApprovalRequested {
+            display_call_id: None,
+            approval_identity: identity.clone(),
+            effects: metadata.effects,
+            analysis: metadata.analysis,
+            containment: metadata.containment,
+            safe_summary: metadata.safe_summary,
+            decision_reasons: metadata.decision_reasons,
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(
+                sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                    code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::SnapshotRequired,
+                },
+            ),
+            call: ToolCall {
+                id: identity.call_id.clone(),
+                name: if diff { "write_file" } else { "exec_command" }.to_owned(),
+                args_json: json!({
+                    "command": format!(
+                        "printf 'COMMAND_HEAD'\n{}\nprintf 'COMMAND_TAIL'",
+                        "printf '保留完整命令 🌿'; ".repeat(30)
+                    ),
+                    "path": "src/lib.rs",
+                })
+                .to_string(),
+            },
+            spec: ToolSpec {
+                name: if diff { "write_file" } else { "exec_command" }.to_owned(),
+                description: "Short terminal approval fixture".to_owned(),
+                input_schema: json!({"type":"object"}),
+                category: if diff { ToolCategory::File } else { ToolCategory::Shell },
+                access: if diff { ToolAccess::Write } else { ToolAccess::Execute },
+                network_effect: None,
+                preview: if diff {
+                    ToolPreviewCapability::Required
+                } else {
+                    ToolPreviewCapability::None
+                },
+            },
+            subjects: metadata.subjects,
+            network_effect: None,
+            local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+            network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            operation: if diff {
+                sigil_kernel::ToolOperation::OverwriteFile
+            } else {
+                sigil_kernel::ToolOperation::ExecuteWorkspaceCheckCommand
+            },
+            risk: sigil_kernel::PermissionRisk::Medium,
+            subject_zones: Vec::new(),
+            confirmation: None,
+            snapshot_required: false,
+            command_permission_matches: Vec::new(),
+            preview: diff.then(multi_file_preview),
+        })?;
+        app.set_terminal_size(80, 12);
+        assert!(app.approval.metadata_collapsed);
+        assert!(!app.approval.metadata_focused);
+        let selected_action = app.approval.selected_action;
+        let (terminal, surface) = production_approval_frame(&app, 80, 12)?;
+        assert_approval_surface_decisions(&terminal, &surface, &identity);
+        let initial = rendered_content(&terminal);
+        assert!(initial.contains("risk medium"));
+        assert!(initial.contains("M details"));
+        assert!(initial.contains("Details"));
+        assert!(initial.contains(if diff {
+            "--- src/lib.rs"
+        } else {
+            "COMMAND_HEAD"
+        }));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+        let preview_scroll = app.approval.scroll_back;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+        assert!(app.approval.metadata_focused);
+        for height in [12, 24, 12] {
+            app.set_terminal_size(80, height);
+            app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+            let (terminal, surface) = production_approval_frame(&app, 80, height)?;
+            assert_approval_surface_decisions(&terminal, &surface, &identity);
+            let end_frame = rendered_content(&terminal);
+            assert!(end_frame.contains("Approval details"));
+            assert!(end_frame.contains("M/Esc back"));
+            assert!(end_frame.contains("↑↓/Pg/Home/End scroll"));
+            let view = surface.approval.as_ref().expect("approval view");
+            let modal = surface.layout.approval_modal.expect("approval modal");
+            let sections =
+                approval_modal_sections(Block::default().borders(Borders::ALL).inner(modal), view);
+            let viewport =
+                approval_details_block(sections.body, &surface.theme.palette).inner(sections.body);
+            let visible_details = (viewport.y..viewport.bottom())
+                .map(|y| {
+                    (viewport.x..viewport.right())
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<String>();
+            assert!(
+                visible_details.contains("session grant: unavailable because"),
+                "the final field must be readable in one {height}-row frame: {end_frame}"
+            );
+            assert!(visible_details.contains("the decision is bound to a file snapshot"));
+        }
+        let details_scroll = app.approval.scroll_back;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert!(!app.approval.metadata_focused);
+        assert_eq!(app.approval.scroll_back, preview_scroll);
+        let (terminal, surface) = production_approval_frame(&app, 80, 12)?;
+        assert_approval_surface_decisions(&terminal, &surface, &identity);
+        if !diff {
+            assert!(rendered_content(&terminal).contains("COMMAND_TAIL"));
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+        assert_eq!(app.approval.scroll_back, details_scroll);
+        assert_eq!(app.approval.selected_action, selected_action);
+        assert_eq!(app.composer.input, "保留尚未发送的草稿 🙂");
+        assert_eq!(app.composer.input_cursor, 4);
+        assert_eq!(app.composer.input_selection_anchor, Some(1));
+        assert!(matches!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?,
+            Some(crate::app::AppAction::ApprovalDecision {
+                call_id,
+                approval_request_id,
+                approved: false,
+            }) if call_id == identity.call_id && approval_request_id == identity.approval_request_id
+        ));
+    }
+    Ok(())
+}
+
+fn production_approval_frame(
+    app: &AppState,
+    width: u16,
+    height: u16,
+) -> anyhow::Result<(Terminal<TestBackend>, crate::surface::SurfaceModel)> {
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, width, height),
+        app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    Ok((terminal, surface))
+}
+
+fn assert_approval_surface_decisions(
+    terminal: &Terminal<TestBackend>,
+    surface: &crate::surface::SurfaceModel,
+    identity: &sigil_kernel::ApprovalRequestIdentityV2,
+) {
+    use crate::mouse::HitTarget;
+
+    let text = rendered_content(terminal);
+    assert!(text.contains("Allow once"));
+    assert!(text.contains("Deny"));
+    assert!(text.contains("Tab/←→ actions"));
+    assert!(text.contains("Enter select"));
+    assert!(text.contains("Y allow once"));
+    assert!(text.contains("N deny"));
+    assert_eq!(
+        surface.layout.approval_request_identity,
+        Some((
+            identity.call_id.clone(),
+            identity.approval_request_id.clone()
+        ))
+    );
+    let hits = surface
+        .layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("approval geometry");
+    for (action, area) in [
+        (ApprovalAction::AllowOnce, hits.allow_once_action),
+        (ApprovalAction::Deny, hits.deny_action),
+    ] {
+        assert!(area.width > 0 && area.height > 0);
+        assert!(area.bottom() < surface.layout.screen.bottom());
+        assert_eq!(
+            surface.layout.hit_target(area.x, area.y),
+            HitTarget::ApprovalAction { action }
+        );
+        let rendered = (area.x..area.right())
+            .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains(action.label()));
+    }
+    let view = surface.approval.as_ref().expect("approval view");
+    let sections = approval_modal_sections(
+        Block::default().borders(Borders::ALL).inner(hits.modal),
+        view,
+    );
+    if view.metadata_focused {
+        let viewport =
+            approval_details_block(sections.body, &surface.theme.palette).inner(sections.body);
+        assert!(viewport.height >= 2);
+        assert!(hits.metadata_toggle.width == 0);
+    } else {
+        let content = approval_content_layout(sections.body, view, &surface.theme);
+        assert!(content.viewport.height > 0);
+        assert!(hits.metadata_toggle.width > 0 && hits.metadata_toggle.height > 0);
+        assert_eq!(
+            surface
+                .layout
+                .hit_target(hits.metadata_toggle.x, hits.metadata_toggle.y),
+            HitTarget::ApprovalMetadataToggle
+        );
+        let rendered = (hits.metadata_toggle.x..hits.metadata_toggle.right())
+            .map(|x| terminal.backend().buffer()[(x, hits.metadata_toggle.y)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Details"));
+    }
+}
+
+#[test]
+fn approval_short_single_diff_row_remains_content_without_hidden_controls() -> anyhow::Result<()> {
+    let mut view = modal_view("file write");
+    view.metadata_collapsed = true;
+    view.session_grant_available = true;
+    view.command_family_allow_pattern = Some("cargo *".to_owned());
+    view.hunk_total = 3;
+    view.file_rows.push(ApprovalFileRow {
+        path: "src/main.rs".to_owned(),
+        selected: false,
+        diagnostics: None,
+        action: None,
+    });
+    view.diff_lines = vec![ApprovalDiffLine {
+        text: "+SOLE_DIFF_ROW".to_owned(),
+        kind: ApprovalDiffLineKind::Added,
+        active_hunk: false,
+    }];
+    let theme = theme::Theme::default();
+    // The centered modal reserves two screen rows before its own two border rows.
+    // At this width all four actions and navigation need seven footer rows, so fourteen
+    // screen rows leave exactly one diff row after the header and preview border.
+    let screen = Rect::new(0, 0, 48, 14);
+    let modal = approval_modal_area(screen, &view);
+    let sections =
+        approval_modal_sections(Block::default().borders(Borders::ALL).inner(modal), &view);
+    let content = approval_content_layout(sections.body, &view, &theme);
+    assert_eq!(content.viewport.height, 1);
+    assert!(content.status.is_none());
+    assert!(content.summary.is_none());
+    let mut terminal = Terminal::new(TestBackend::new(48, 14))?;
+    terminal.draw(|frame| render_approval_modal_view(frame, &view, 0, &theme))?;
+    let text = rendered_content(&terminal);
+    assert!(text.contains("SOLE_DIFF_ROW"));
+    for action in ["Allow once", "Allow session", "Allow family", "Deny"] {
+        assert!(text.contains(action));
+    }
+    let status = approval_diff_status_area(approval_preview_inner(content.outer));
+    assert_eq!(status.height, 0);
+    let controls = super::super::layout_snapshot::approval_diff_control_hit_areas(status, &view);
+    for area in [
+        controls.hunk_previous,
+        controls.hunk_next,
+        controls.diff_view_toggle,
+        controls.metadata_toggle,
+    ] {
+        assert_eq!(area, Rect::default());
     }
     Ok(())
 }

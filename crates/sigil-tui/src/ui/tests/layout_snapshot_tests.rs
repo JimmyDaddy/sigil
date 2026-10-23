@@ -1072,25 +1072,68 @@ fn approval_full_details_geometry_keeps_actions_and_disables_hidden_diff_control
         ..ApprovalModalView::default()
     };
     for width in [48, 80, 124] {
-        let screen = Rect::new(0, 0, width, 24);
+        for height in [12, 24] {
+            let screen = Rect::new(0, 0, width, height);
+            let hits = approval_modal_hit_areas(screen, &view).expect("approval hit areas");
+            let inner = inset_rect(hits.modal, 1, 1);
+            let sections = approval_modal_sections(inner, &view);
+            assert!(sections.metadata.is_none());
+            for action in [
+                hits.allow_once_action,
+                hits.allow_session_action,
+                hits.allow_family_action,
+                hits.deny_action,
+            ] {
+                assert!(action.width > 0);
+                assert!(sections.footer.contains((action.x, action.y).into()));
+                assert!(action.right() <= sections.footer.right());
+            }
+            assert_eq!(hits.hunk_previous, Rect::default());
+            assert_eq!(hits.hunk_next, Rect::default());
+            assert_eq!(hits.diff_view_toggle, Rect::default());
+            assert!(hits.file_rows.is_empty());
+        }
+    }
+}
+
+#[test]
+fn approval_short_preview_never_exposes_diff_controls_outside_visible_body() {
+    let view = ApprovalModalView {
+        metadata_collapsed: true,
+        has_diff_preview: true,
+        session_grant_available: true,
+        command_family_allow_pattern: Some("cargo *".to_owned()),
+        hunk_total: 3,
+        file_rows: (0..2)
+            .map(|index| ApprovalFileRow {
+                path: format!("file-{index}.rs"),
+                selected: index == 0,
+                diagnostics: None,
+                action: None,
+            })
+            .collect(),
+        ..ApprovalModalView::default()
+    };
+    for (width, height) in [(80, 12), (48, 14), (48, 13), (48, 12), (48, 8), (4, 4)] {
+        let screen = Rect::new(0, 0, width, height);
         let hits = approval_modal_hit_areas(screen, &view).expect("approval hit areas");
         let inner = inset_rect(hits.modal, 1, 1);
         let sections = approval_modal_sections(inner, &view);
-        assert!(sections.metadata.is_none());
-        for action in [
-            hits.allow_once_action,
-            hits.allow_session_action,
-            hits.allow_family_action,
-            hits.deny_action,
+        let preview = approval_preview_inner(approval_diff_area(sections.body, &view));
+        for control in [
+            hits.hunk_previous,
+            hits.hunk_next,
+            hits.diff_view_toggle,
+            hits.metadata_toggle,
         ] {
-            assert!(action.width > 0);
-            assert!(sections.footer.contains((action.x, action.y).into()));
-            assert!(action.right() <= sections.footer.right());
+            if preview.height < 2 {
+                assert_eq!(control, Rect::default());
+            } else if control.width > 0 {
+                assert!(sections.body.contains((control.x, control.y).into()));
+                assert!(control.bottom() <= sections.body.bottom());
+                assert!(control.right() <= sections.body.right());
+            }
         }
-        assert_eq!(hits.hunk_previous, Rect::default());
-        assert_eq!(hits.hunk_next, Rect::default());
-        assert_eq!(hits.diff_view_toggle, Rect::default());
-        assert!(hits.file_rows.is_empty());
     }
 }
 

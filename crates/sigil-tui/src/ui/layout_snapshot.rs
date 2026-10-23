@@ -1,4 +1,7 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    text::Line,
+};
 use sigil_kernel::{ToolAnalysisReasonCode, ToolAnalysisStatus};
 
 use crate::{
@@ -26,6 +29,7 @@ use super::{
         config_step_hit_spans, config_visual_rows, footer_action_width, split_config_context_lines,
         top_aligned_config_area,
     },
+    text::wrap_terminal_lines,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1354,41 +1358,72 @@ pub(super) fn approval_modal_sections(
     inner: Rect,
     view: &ApprovalModalView,
 ) -> ApprovalModalSections {
-    let metadata_height = approval_metadata_section_height(view);
-    let mut constraints = vec![
-        Constraint::Length(if view.metadata_focused {
-            1
-        } else {
-            approval_header_line_count(view).saturating_add(2)
-        }),
-        Constraint::Min(if view.metadata_focused {
-            1
-        } else if view.has_diff_preview {
-            8
-        } else {
-            6
-        }),
-    ];
-    if metadata_height > 0 {
-        constraints.push(Constraint::Length(metadata_height));
-    }
-    constraints.push(Constraint::Length(if view.metadata_focused {
-        approval_details_footer_height(inner.width, view)
+    // Reserve decisions first. Conflicting Min/Length constraints can otherwise give a short
+    // preview no usable header or footer even though its keyboard decisions remain active.
+    let footer_height = approval_footer_height(inner.width, view).min(inner.height);
+    let header_height = if view.metadata_focused || inner.height < 16 {
+        1
     } else {
-        4
-    }));
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
-    let metadata = (metadata_height > 0).then_some(chunks[2]);
-    let footer = chunks[if metadata.is_some() { 3 } else { 2 }];
-    ApprovalModalSections {
-        header: chunks[0],
-        body: chunks[1],
-        metadata,
-        footer,
+        approval_header_line_count(view).saturating_add(2)
     }
+    .min(inner.height.saturating_sub(footer_height));
+    let remaining = inner
+        .height
+        .saturating_sub(header_height)
+        .saturating_sub(footer_height);
+    let requested_metadata = approval_metadata_section_height(view);
+    let metadata_height = if remaining >= requested_metadata.saturating_add(6) {
+        requested_metadata
+    } else {
+        0
+    };
+    let body_height = remaining.saturating_sub(metadata_height);
+    let body_y = inner.y.saturating_add(header_height);
+    let metadata_y = body_y.saturating_add(body_height);
+    ApprovalModalSections {
+        header: Rect::new(inner.x, inner.y, inner.width, header_height),
+        body: Rect::new(inner.x, body_y, inner.width, body_height),
+        metadata: (metadata_height > 0).then_some(Rect::new(
+            inner.x,
+            metadata_y,
+            inner.width,
+            metadata_height,
+        )),
+        footer: Rect::new(
+            inner.x,
+            metadata_y.saturating_add(metadata_height),
+            inner.width,
+            footer_height,
+        ),
+    }
+}
+
+pub(super) fn approval_header_inner(area: Rect) -> Rect {
+    inset_rect(area, 1, u16::from(area.height >= 3))
+}
+
+pub(super) fn approval_footer_inner(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(1),
+    )
+}
+
+pub(super) fn approval_preview_inner(area: Rect) -> Rect {
+    let bottom_padding = u16::from(area.height >= 8);
+    let inner = approval_footer_inner(area);
+    Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(bottom_padding),
+    )
+}
+
+pub(super) fn approval_diff_status_area(inner: Rect) -> Rect {
+    Rect::new(inner.x, inner.y, inner.width, u16::from(inner.height >= 2))
 }
 
 fn approval_modal_hit_areas(
@@ -1402,7 +1437,7 @@ fn approval_modal_hit_areas(
     }
 
     let sections = approval_modal_sections(inner, view);
-    let footer_inner = inset_rect(sections.footer, 1, 1);
+    let footer_inner = approval_footer_inner(sections.footer);
     let (allow_once_action, allow_session_action, allow_family_action, deny_action) =
         approval_action_hit_areas(footer_inner, view);
     if view.metadata_focused {
@@ -1421,13 +1456,13 @@ fn approval_modal_hit_areas(
         });
     }
     let diff_area = approval_diff_area(sections.body, view);
-    let diff_inner = inset_rect(diff_area, 1, 1);
-    let diff_status = Rect::new(diff_inner.x, diff_inner.y, diff_inner.width, 1);
+    let diff_inner = approval_preview_inner(diff_area);
+    let diff_status = approval_diff_status_area(diff_inner);
     let diff_controls = approval_diff_control_hit_areas(diff_status, view);
     let metadata_toggle = if view.has_diff_preview {
         diff_controls.metadata_toggle
     } else {
-        approval_header_metadata_hit_area(inset_rect(sections.header, 1, 1), view)
+        approval_header_metadata_hit_area(approval_header_inner(sections.header), view)
     };
 
     Some(ApprovalModalHitAreas {
@@ -1546,11 +1581,12 @@ fn approval_file_row_hit_areas(
         return Vec::new();
     }
 
-    let file_inner = inset_rect(
-        Rect::new(body_area.x, body_area.y, file_width, body_area.height),
-        1,
-        1,
-    );
+    let file_inner = approval_preview_inner(Rect::new(
+        body_area.x,
+        body_area.y,
+        file_width,
+        body_area.height,
+    ));
     if file_inner.width == 0 || file_inner.height == 0 {
         return Vec::new();
     }
@@ -1708,7 +1744,7 @@ pub(super) fn approval_action_hit_areas(
         view.command_family_allow_pattern.is_some(),
     ) {
         let width = approval_action_badge_width(action.label(), view.selected_action == *action);
-        if view.metadata_focused && cursor > footer_inner.x && cursor.saturating_add(width) > end {
+        if cursor > footer_inner.x && cursor.saturating_add(width) > end {
             cursor = footer_inner.x;
             row = row.saturating_add(1);
         }
@@ -1727,7 +1763,7 @@ pub(super) fn approval_action_hit_areas(
     (allow_once, allow_session, allow_family, deny)
 }
 
-fn approval_details_footer_height(width: u16, view: &ApprovalModalView) -> u16 {
+fn approval_footer_height(width: u16, view: &ApprovalModalView) -> u16 {
     let content_width = width.saturating_sub(2).max(1);
     let (once, session, family, deny) =
         approval_action_hit_areas(Rect::new(0, 0, content_width, u16::MAX), view);
@@ -1737,19 +1773,42 @@ fn approval_details_footer_height(width: u16, view: &ApprovalModalView) -> u16 {
         .map(|area| area.y.saturating_add(1))
         .max()
         .unwrap_or(1);
-    let hint_rows = approval_details_key_hints()
-        .iter()
-        .map(|hint| hint.chars().count().div_ceil(content_width as usize) as u16)
-        .sum::<u16>();
-    action_rows.saturating_add(hint_rows).saturating_add(2)
+    let hint_rows = approval_footer_hint_lines(view, content_width).len() as u16;
+    action_rows.saturating_add(hint_rows).saturating_add(1)
 }
 
-pub(super) fn approval_details_key_hints() -> [&'static str; 3] {
-    [
-        "↑↓/Pg/Home/End scroll · M/Esc back",
-        "Tab/←→ actions · Enter select",
-        "Y allow once · N deny",
-    ]
+pub(super) fn approval_footer_hint_lines(
+    view: &ApprovalModalView,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let selection = "Tab/←→ actions · Enter select";
+    let mut decisions = "Y allow once · N deny".to_owned();
+    if view.command_family_allow_pattern.is_some() {
+        decisions.push_str(" · F allow family");
+    }
+    let combined = format!("{selection} · {decisions}");
+    let mut hints = if combined.chars().count() <= width as usize {
+        vec![Line::raw(combined)]
+    } else {
+        vec![Line::raw(selection), Line::raw(decisions)]
+    };
+    let navigation = if view.metadata_focused {
+        "↑↓/Pg/Home/End scroll · M/Esc back".to_owned()
+    } else {
+        let mut navigation = "↑↓/Pg/Home/End scroll · M details · Esc input".to_owned();
+        if view.has_diff_preview {
+            navigation.push_str(" · V view");
+            if view.hunk_total > 1 {
+                navigation.push_str(" · [/] hunk");
+            }
+            if view.file_rows.len() > 1 {
+                navigation.push_str(" · ,/. file");
+            }
+        }
+        navigation
+    };
+    hints.push(Line::raw(navigation));
+    wrap_terminal_lines(hints, width as usize)
 }
 
 fn approval_action_badge_width(label: &str, selected: bool) -> u16 {

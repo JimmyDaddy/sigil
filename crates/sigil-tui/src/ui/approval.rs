@@ -25,9 +25,10 @@ use super::{
         number_unified_diff_lines,
     },
     layout_snapshot::{
-        approval_action_hit_areas, approval_details_key_hints, approval_diff_view_control_label,
-        approval_file_list_width, approval_metadata_control_label, approval_modal_area,
-        approval_modal_sections,
+        approval_action_hit_areas, approval_diff_status_area, approval_diff_view_control_label,
+        approval_file_list_width, approval_footer_hint_lines, approval_footer_inner,
+        approval_header_inner, approval_metadata_control_label, approval_modal_area,
+        approval_modal_sections, approval_preview_inner,
     },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
     text::wrap_terminal_lines,
@@ -87,18 +88,10 @@ fn render_approval_modal_view(
         current_theme.syntax_theme,
         palette,
     );
-    let footer_lines = approval_footer_lines_with_palette(view, palette);
     let sections = approval_modal_sections(inner, view);
 
     let header = Paragraph::new(Text::from(header_lines)).wrap(Wrap { trim: false });
-    frame.render_widget(
-        if view.metadata_focused {
-            header
-        } else {
-            header.block(Block::default().padding(Padding::uniform(1)))
-        },
-        sections.header,
-    );
+    frame.render_widget(header, approval_header_inner(sections.header));
 
     if view.metadata_focused {
         let block = approval_details_block(sections.body, palette);
@@ -116,7 +109,7 @@ fn render_approval_modal_view(
             )),
             viewport,
         );
-        render_approval_details_footer(frame, sections.footer, view, palette);
+        render_approval_footer(frame, sections.footer, view, palette);
         return;
     }
 
@@ -127,7 +120,7 @@ fn render_approval_modal_view(
         if let Some(metadata_area) = sections.metadata {
             render_approval_metadata(frame, view, metadata_area, palette);
         }
-        render_approval_footer(frame, sections.footer, footer_lines, palette);
+        render_approval_footer(frame, sections.footer, view, palette);
         return;
     }
 
@@ -153,7 +146,7 @@ fn render_approval_modal_view(
                             view.file_rows.len()
                         ))
                         .borders(Borders::TOP)
-                        .padding(Padding::new(1, 1, 0, 1))
+                        .padding(Padding::new(1, 1, 0, u16::from(file_area.height >= 8)))
                         .border_style(Style::default().fg(palette.border_subtle)),
                 )
                 .wrap(Wrap { trim: false }),
@@ -179,7 +172,7 @@ fn render_approval_modal_view(
     if let Some(metadata_area) = sections.metadata {
         render_approval_metadata(frame, view, metadata_area, palette);
     }
-    render_approval_footer(frame, sections.footer, footer_lines, palette);
+    render_approval_footer(frame, sections.footer, view, palette);
 }
 
 struct ApprovalContentLayout {
@@ -217,32 +210,38 @@ fn approval_content_layout(
         let block = Block::default()
             .title(title)
             .borders(Borders::TOP)
-            .padding(Padding::new(1, 1, 0, 1))
+            .padding(Padding::new(1, 1, 0, u16::from(outer.height >= 8)))
             .border_style(Style::default().fg(palette.border_subtle));
-        let inner = block.inner(outer);
+        let inner = approval_preview_inner(outer);
         let summary_lines = approval_preview_summary_lines_with_palette(
             view,
             inner.width as usize,
             current_theme.syntax_theme,
             palette,
         );
-        let mut constraints = vec![Constraint::Length(1)];
-        if !summary_lines.is_empty() {
-            constraints.push(Constraint::Length(summary_lines.len() as u16));
-        }
-        constraints.push(Constraint::Min(1));
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(inner);
+        let status = approval_diff_status_area(inner);
+        let summary_height = (summary_lines.len() as u16)
+            .min(inner.height.saturating_sub(status.height).saturating_sub(1));
+        let summary_y = inner.y.saturating_add(status.height);
+        let viewport_y = summary_y.saturating_add(summary_height);
         return ApprovalContentLayout {
             outer,
             block,
             files: (file_width > 0).then_some(chunks[0]),
-            status: Some(sections[0]),
-            summary: (!summary_lines.is_empty()).then_some(sections[1]),
+            status: (status.height > 0).then_some(status),
+            summary: (summary_height > 0).then_some(Rect::new(
+                inner.x,
+                summary_y,
+                inner.width,
+                summary_height,
+            )),
             summary_lines,
-            viewport: *sections.last().unwrap_or(&inner),
+            viewport: Rect::new(
+                inner.x,
+                viewport_y,
+                inner.width,
+                inner.bottom().saturating_sub(viewport_y),
+            ),
         };
     }
     let risk_color = permission_risk_color(view.risk, palette);
@@ -254,9 +253,8 @@ fn approval_content_layout(
     let block = Block::default()
         .title(title)
         .title_style(Style::default().fg(risk_color).add_modifier(Modifier::BOLD))
-        .padding(Padding::horizontal(1))
         .borders(Borders::TOP)
-        .padding(Padding::new(2, 2, 0, 1))
+        .padding(Padding::new(2, 2, 0, u16::from(body.height >= 8)))
         .border_style(Style::default().fg(palette.border_subtle))
         .style(Style::default().bg(palette.surface_code));
     ApprovalContentLayout {
@@ -385,7 +383,7 @@ fn approval_details_block(area: Rect, palette: &ThemePalette) -> Block<'static> 
     }
 }
 
-fn render_approval_details_footer(
+fn render_approval_footer(
     frame: &mut Frame,
     area: Rect,
     view: &ApprovalModalView,
@@ -393,9 +391,9 @@ fn render_approval_details_footer(
 ) {
     let block = Block::default()
         .borders(Borders::TOP)
-        .padding(Padding::new(1, 1, 0, 1))
+        .padding(Padding::horizontal(1))
         .border_style(Style::default().fg(palette.border_subtle));
-    let inner = block.inner(area);
+    let inner = approval_footer_inner(area);
     frame.render_widget(block, area);
     let (once, session, family, deny) = approval_action_hit_areas(inner, view);
     let mut hint_y = inner.y;
@@ -424,13 +422,10 @@ fn render_approval_details_footer(
         );
         hint_y = hint_y.max(rect.y.saturating_add(1));
     }
-    let lines = wrap_terminal_lines(
-        approval_details_key_hints()
-            .into_iter()
-            .map(|hint| Line::styled(hint, Style::default().fg(palette.text_muted)))
-            .collect(),
-        inner.width as usize,
-    );
+    let lines = approval_footer_hint_lines(view, inner.width)
+        .into_iter()
+        .map(|line| line.style(Style::default().fg(palette.text_muted)))
+        .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(Text::from(lines)),
         Rect::new(
@@ -439,25 +434,6 @@ fn render_approval_details_footer(
             inner.width,
             inner.y.saturating_add(inner.height).saturating_sub(hint_y),
         ),
-    );
-}
-
-fn render_approval_footer(
-    frame: &mut Frame,
-    area: ratatui::layout::Rect,
-    lines: Vec<Line<'static>>,
-    palette: &ThemePalette,
-) {
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .padding(Padding::new(1, 1, 0, 1))
-                    .border_style(Style::default().fg(palette.border_subtle)),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
     );
 }
 
@@ -1071,60 +1047,17 @@ fn approval_footer_lines(view: &ApprovalModalView) -> Vec<Line<'static>> {
     approval_footer_lines_with_palette(view, &palette)
 }
 
+#[cfg(test)]
 fn approval_footer_lines_with_palette(
     view: &ApprovalModalView,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let file_hint = if view.file_rows.len() > 1 {
-        " · ,/. file"
-    } else {
-        ""
-    };
-    let mut action_line = approval_action_badges(view, palette);
-    if action_line.is_empty() {
-        action_line.push(Span::styled(
-            "No available actions",
-            Style::default().fg(palette.text_muted),
-        ));
-    }
-    let details_hint = if view.metadata_collapsed {
-        "M details"
-    } else {
-        "M hide details"
-    };
-    let family_hint = if view.command_family_allow_pattern.is_some() {
-        " · F allow family"
-    } else {
-        ""
-    };
-    let action_hint = if view.has_diff_preview {
-        format!(
-            "Esc input · Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · V view"
-        )
-    } else {
-        format!(
-            "Esc input · Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · ↑/↓ scroll"
-        )
-    };
-    let navigation_hint = if view.has_diff_preview {
-        let hunk_hint = if view.hunk_total > 1 {
-            " · [/] hunk"
-        } else {
-            ""
-        };
-        format!("{hunk_hint}{file_hint} · ↑/↓ scroll")
-    } else {
-        String::new()
-    };
-    vec![
-        Line::from(action_line),
-        Line::styled(
-            format!("{action_hint}{navigation_hint}"),
-            Style::default().fg(palette.text_muted),
-        ),
-    ]
+    let mut lines = vec![Line::from(approval_action_badges(view, palette))];
+    lines.extend(approval_footer_hint_lines(view, 120));
+    lines
 }
 
+#[cfg(test)]
 fn approval_action_badges(view: &ApprovalModalView, palette: &ThemePalette) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (index, action) in ApprovalAction::order(
