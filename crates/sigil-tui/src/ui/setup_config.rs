@@ -1,7 +1,9 @@
 mod startup;
+mod workspace_trust;
 
 pub(super) use startup::setup_content_layout;
 pub(crate) use startup::setup_recovery_scroll_bounds;
+pub(crate) use workspace_trust::workspace_trust_scroll_bounds;
 
 use ratatui::{
     Frame,
@@ -194,15 +196,18 @@ pub(super) fn config_step_hit_spans(source: &str, width: usize) -> Vec<(usize, u
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
+    if let Some(view) = app.workspace_trust_view() {
+        workspace_trust::render_workspace_trust(frame, &view, palette);
+        render_modal(frame, app);
+        return;
+    }
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
         .split(frame.area());
     render_status(frame, outer[0], app);
 
-    let (title, lines) = if app.is_workspace_trust_gate_mode() {
-        ("Workspace Trust", app.workspace_trust_gate_lines())
-    } else if app.setup_recovery_view().is_some() {
+    let (title, lines) = if app.setup_recovery_view().is_some() {
         ("Startup", app.setup_lines())
     } else {
         ("Setup", app.setup_lines())
@@ -305,6 +310,11 @@ pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
         return;
     };
     let palette = &surface.theme.palette;
+    if let Some(view) = &setup.workspace_trust {
+        workspace_trust::render_workspace_trust(frame, view, palette);
+        super::modal::render_modal_surface(frame, &surface.modal, &surface.theme);
+        return;
+    }
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])

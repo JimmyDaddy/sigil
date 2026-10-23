@@ -13,24 +13,20 @@ use crate::workspace_trust::WorkspaceTrustGateState;
 impl AppState {
     pub(crate) fn enter_workspace_trust_gate(&mut self) -> Result<()> {
         stable_workspace_id(&self.workspace_root)?;
-        self.workspace_trust_gate_state = Some(WorkspaceTrustGateState);
+        self.workspace_trust_gate_state = Some(WorkspaceTrustGateState::default());
         self.bootstrap_workspace_trust_gate();
         Ok(())
     }
 
-    pub(crate) fn workspace_trust_gate_lines(&self) -> Vec<String> {
-        vec![
-            "Workspace trust".to_owned(),
-            "[workspace]".to_owned(),
-            format!("path: {}", self.workspace_root.display()),
-            String::new(),
-            "[what this means]".to_owned(),
-            "Trust this workspace before Sigil loads repo-local instructions or checks.".to_owned(),
-            "Untrusted repositories stay data-only and cannot start normal agent execution."
-                .to_owned(),
-            String::new(),
-            "Enter trust and continue  Ctrl-C quit".to_owned(),
-        ]
+    pub(crate) fn workspace_trust_view(&self) -> Option<crate::surface::WorkspaceTrustSurface> {
+        self.workspace_trust_gate_state.as_ref().map(|state| {
+            crate::surface::WorkspaceTrustSurface {
+                workspace_label: crate::ui::sanitize_terminal_text(
+                    &self.workspace_root.display().to_string(),
+                ),
+                path_scroll_rows: state.path_scroll_rows,
+            }
+        })
     }
 
     pub(super) fn handle_workspace_trust_gate_key_event(
@@ -48,6 +44,33 @@ impl AppState {
             }
             KeyCode::Esc => {
                 self.should_quit = true;
+                Ok(None)
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End => {
+                if let Some(view) = self.workspace_trust_view() {
+                    let (max, page) = crate::ui::workspace_trust_scroll_bounds(
+                        self.terminal_width,
+                        self.terminal_height,
+                        &view,
+                    );
+                    if let Some(state) = self.workspace_trust_gate_state.as_mut() {
+                        let current = state.path_scroll_rows.min(max);
+                        state.path_scroll_rows = match key.code {
+                            KeyCode::Up => current.saturating_sub(1),
+                            KeyCode::Down => current.saturating_add(1).min(max),
+                            KeyCode::PageUp => current.saturating_sub(page),
+                            KeyCode::PageDown => current.saturating_add(page).min(max),
+                            KeyCode::Home => 0,
+                            KeyCode::End => max,
+                            _ => current,
+                        };
+                    }
+                }
                 Ok(None)
             }
             _ => Ok(None),

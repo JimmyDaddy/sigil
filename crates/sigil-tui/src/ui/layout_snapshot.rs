@@ -769,11 +769,10 @@ fn intent_stack_modal_hit_areas(screen: Rect, app: &AppState) -> Option<IntentSt
 }
 
 fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
-    let lines = if app.is_workspace_trust_gate_mode() {
-        app.workspace_trust_gate_lines()
-    } else {
-        app.setup_lines()
-    };
+    if app.is_workspace_trust_gate_mode() {
+        return None;
+    }
+    let lines = app.setup_lines();
     let recovery = app.setup_recovery_view();
     let layout = super::setup_config::setup_content_layout(
         screen,

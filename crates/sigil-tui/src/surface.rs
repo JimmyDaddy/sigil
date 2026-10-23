@@ -28,9 +28,17 @@ pub(crate) type VirtualTextWindow = sigil_tui::VirtualSequence<Line<'static>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetupSurface {
     pub trust_gate: bool,
+    pub workspace_trust: Option<WorkspaceTrustSurface>,
     pub lines: Vec<String>,
     pub field_line_indices: Vec<usize>,
     pub recovery: Option<SetupRecoverySurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceTrustSurface {
+    /// Complete display-only workspace label, never an authority path.
+    pub workspace_label: String,
+    pub path_scroll_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

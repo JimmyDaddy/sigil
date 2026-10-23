@@ -1711,7 +1711,7 @@ fn workspace_trust_gate_uses_production_surface_until_confirmed() -> anyhow::Res
         "trust is a distinct application state"
     );
 
-    for (width, height) in [(140, 44), (80, 24)] {
+    for (width, height) in [(140, 44), (80, 24), (80, 12)] {
         let surface = crate::surface_adapter::build_surface_model(
             ratatui::layout::Rect::new(0, 0, width, height),
             &app,
@@ -1733,10 +1733,26 @@ fn workspace_trust_gate_uses_production_surface_until_confirmed() -> anyhow::Res
         let mut terminal = Terminal::new(TestBackend::new(width, height))?;
         terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
         let rendered = rendered_content(&terminal);
-        assert!(rendered.contains("Workspace Trust"));
-        assert!(rendered.contains("path:"));
+        assert_eq!(rendered.matches("Trust this workspace?").count(), 1);
+        assert!(rendered.contains("repo-local instructions/checks"));
+        assert!(rendered.contains("normal agent execution stays blocked"));
+        // A wrapped path has a border and terminal padding between its rows.
+        // Compare all of its characters after removing only those row edges.
+        let unwrapped = rendered_rows(&terminal)
+            .iter()
+            .map(|row| {
+                row.trim_matches(|character: char| character.is_whitespace() || character == '│')
+            })
+            .collect::<String>();
+        assert!(
+            unwrapped.contains(&fixture.path().display().to_string()),
+            "complete path should be visible at {width}×{height}: {rendered}"
+        );
         assert!(rendered.contains("Enter trust and continue"));
         assert!(rendered.contains("Ctrl-C quit"));
+        assert!(!rendered.contains("Status"));
+        assert!(!rendered.contains("ws="));
+        assert!(!rendered.contains("cfg="));
     }
 
     assert!(
@@ -1773,6 +1789,62 @@ fn workspace_trust_gate_uses_production_surface_until_confirmed() -> anyhow::Res
     assert!(!rendered.contains("workspace trust"));
     assert!(!rendered.contains("trust this workspace before using sigil"));
     assert!(!rendered.contains("ctx:"));
+    Ok(())
+}
+
+#[test]
+fn workspace_trust_short_surface_scrolls_complete_path_with_fixed_facts_and_actions()
+-> anyhow::Result<()> {
+    let fixture = tempdir()?;
+    let mut workspace = fixture.path().to_path_buf();
+    for index in 0..12 {
+        workspace.push(format!("workspace-segment-{index}-{}", "x".repeat(30)));
+    }
+    workspace.push("workspace-tail");
+    std::fs::create_dir_all(&workspace)?;
+    let mut config = test_config();
+    config.workspace.root = workspace.display().to_string();
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("cache").display().to_string());
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
+    app.set_terminal_size(80, 12);
+    app.enter_workspace_trust_gate()?;
+    let before = std::fs::read(&app.session_log_path).ok();
+    for (key, contains, absent) in [
+        (KeyCode::Home, "workspace-segment-0", "workspace-tail"),
+        (KeyCode::End, "workspace-tail", "workspace-segment-0"),
+        (KeyCode::Home, "workspace-segment-0", "workspace-tail"),
+    ] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?
+                .is_none()
+        );
+        let surface = crate::surface_adapter::build_surface_model(
+            ratatui::layout::Rect::new(0, 0, 80, 12),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 12))?;
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rendered = rendered_content(&terminal);
+        assert!(rendered.contains(contains), "{rendered}");
+        assert!(!rendered.contains(absent), "{rendered}");
+        assert!(rendered.contains("Trust this workspace?"));
+        assert!(rendered.contains("repo-local instructions/checks"));
+        assert!(rendered.contains("normal agent execution stays blocked"));
+        assert!(rendered.contains("Enter trust and continue"));
+        assert!(rendered.contains("Esc / Ctrl-C quit"));
+        assert!(rendered.contains("Folder lines"));
+        assert!(surface.layout.setup_hit_areas.is_none());
+    }
+    assert!(app.is_workspace_trust_gate_mode());
+    assert_eq!(before, std::fs::read(&app.session_log_path).ok());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 

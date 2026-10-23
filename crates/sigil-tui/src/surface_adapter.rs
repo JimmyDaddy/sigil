@@ -84,8 +84,9 @@ fn setup_surface(app: &AppState) -> Option<SetupSurface> {
     }
     Some(SetupSurface {
         trust_gate: app.is_workspace_trust_gate_mode(),
+        workspace_trust: app.workspace_trust_view(),
         lines: if app.is_workspace_trust_gate_mode() {
-            app.workspace_trust_gate_lines()
+            Vec::new()
         } else {
             app.setup_lines()
         },

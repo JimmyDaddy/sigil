@@ -19,11 +19,7 @@ fn workspace_trust_gate_enter_persists_decision() -> Result<()> {
     assert!(app.is_workspace_trust_gate_mode());
     assert!(app.timeline.is_empty());
     assert!(app.timeline_plain_lines().is_empty());
-    assert!(
-        app.workspace_trust_gate_lines()
-            .join("\n")
-            .contains("Enter trust and continue")
-    );
+    assert!(app.workspace_trust_view().is_some());
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))?;
     assert!(action.is_none());
@@ -47,6 +43,56 @@ fn workspace_trust_gate_enter_persists_decision() -> Result<()> {
         )
     }));
     assert_eq!(app.last_notice(), Some("workspace trusted"));
+    Ok(())
+}
+
+#[test]
+fn workspace_trust_gate_scroll_and_quit_do_not_persist_decision() -> Result<()> {
+    for quit in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let temp = tempdir()?;
+        let config = RootConfig {
+            config_version: 2,
+            workspace: WorkspaceConfig {
+                root: temp.path().display().to_string(),
+            },
+            storage: StorageConfig {
+                state_root: sigil_kernel::StorageRoot::Path(
+                    temp.path().join("state").display().to_string(),
+                ),
+                cache_root: sigil_kernel::StorageRoot::Path(
+                    temp.path().join("cache").display().to_string(),
+                ),
+                ..StorageConfig::default()
+            },
+            ..test_config()
+        };
+        let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+        app.set_terminal_size(80, 12);
+        app.enter_workspace_trust_gate()?;
+        let before = std::fs::read(&app.session_log_path).ok();
+        for key in [
+            KeyCode::Down,
+            KeyCode::PageDown,
+            KeyCode::End,
+            KeyCode::Up,
+            KeyCode::PageUp,
+            KeyCode::Home,
+        ] {
+            assert!(
+                app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?
+                    .is_none()
+            );
+            assert!(app.is_workspace_trust_gate_mode());
+            assert!(!app.should_quit);
+        }
+        assert!(app.handle_key_event(quit)?.is_none());
+        assert!(app.should_quit);
+        assert_eq!(before, std::fs::read(&app.session_log_path).ok());
+        assert!(app.composer.input.is_empty());
+    }
     Ok(())
 }
 
