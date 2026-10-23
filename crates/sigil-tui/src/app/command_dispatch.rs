@@ -220,6 +220,8 @@ impl AppState {
                 }
             }
             UiCommand::ReadNextToolArtifactPage => self.request_selected_tool_artifact_next_page(),
+            UiCommand::ReadPreviousToolArtifactPage => self.show_previous_tool_artifact_page(),
+            UiCommand::ReturnToToolArtifactText => self.return_to_tool_artifact_text(),
             UiCommand::SearchToolArtifact => self.open_selected_tool_artifact_search(),
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::CancelFocusedTerminalTask => false,

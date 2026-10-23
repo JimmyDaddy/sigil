@@ -318,6 +318,16 @@ fn tool_artifact_next_page_and_literal_search_emit_typed_worker_commands() -> Re
 
     assert!(app.open_selected_tool_artifact_search());
     assert_eq!(app.modal_title(), Some("Search Full Tool Output"));
+    assert!(
+        app.modal_lines()
+            .iter()
+            .any(|line| line == "Enter search · Ctrl-U clear · Esc cancel")
+    );
+    assert!(
+        !app.modal_lines()
+            .iter()
+            .any(|line| line.contains("F2 save"))
+    );
     app.apply_modal_outcome(ModalOutcome::TextSubmitted {
         target: TextInputTarget::ToolArtifactSearch,
         value: "literal needle".to_owned(),
@@ -988,4 +998,375 @@ fn tool_card_interaction_private_helpers_cover_stale_selection_and_reveal_guards
     app.push_timeline(TimelineRole::User, "inspect this workspace");
     app.rerender_tool_selection_change(Some(0), 0);
     assert!(!app.timeline_render_lines().is_empty());
+}
+
+fn reading_page(
+    start_line: u64,
+    body: &str,
+    next: Option<u64>,
+) -> sigil_kernel::ToolArtifactPageV1 {
+    sigil_kernel::ToolArtifactPageV1 {
+        artifact_ref: tool_artifact_ref(),
+        selector: sigil_kernel::ToolArtifactSelectorV1::LinePage {
+            start_line,
+            line_count: 200,
+        },
+        body: body.to_owned(),
+        body_encoding: sigil_kernel::ToolArtifactPageEncoding::Utf8,
+        returned_bytes: body.len() as u32,
+        page_sha256: format!("sha256:{}", "b".repeat(64)),
+        artifact_sha256: format!("sha256:{}", "c".repeat(64)),
+        eof: next.is_none(),
+        match_count: 0,
+        next_selector: next.map(
+            |start_line| sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line,
+                line_count: 200,
+            },
+        ),
+    }
+}
+
+#[test]
+fn tool_artifact_cached_back_forward_and_text_return_preserve_reading_context() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.focus_latest_tool_card();
+    let _ = app.drain_pending_worker_commands();
+    assert!(app.apply_tool_artifact_page(&reading_page(0, "first body", Some(200))));
+    assert!(app.apply_tool_artifact_page(&reading_page(200, "second body", None)));
+    assert!(full_plain_timeline(&app).contains("lines 201–201 · end"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("first body"));
+    assert!(!full_plain_timeline(&app).contains("second body"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("second body"));
+    assert!(
+        app.drain_pending_worker_commands().is_empty(),
+        "cached navigation must not spend the read budget"
+    );
+    let search = sigil_kernel::ToolArtifactPageV1 {
+        selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
+            query: "missing literal".to_owned(),
+            start_offset: 0,
+            max_matches: 50,
+            context_lines: 2,
+        },
+        body: String::new(),
+        returned_bytes: 0,
+        ..reading_page(0, "", None)
+    };
+    assert!(app.apply_tool_artifact_page(&search));
+    let rendered = full_plain_timeline(&app);
+    assert!(rendered.contains("Search \"missing literal\" · 0 matches"));
+    assert!(rendered.contains("No matches on this page"));
+    assert!(!rendered.contains("(empty page)"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("second body"));
+    assert!(!full_plain_timeline(&app).contains("No matches"));
+    assert!(app.open_selected_tool_artifact_search());
+    assert!(
+        app.modal_lines()
+            .iter()
+            .any(|line| line.contains("missing literal")),
+        "the successful query must survive leaving search"
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("bounded preview"));
+    assert!(app.drain_pending_worker_commands().is_empty());
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_budget_failure_preserves_reading_page_and_cached_navigation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.focus_latest_tool_card();
+    let _ = app.drain_pending_worker_commands();
+    assert!(app.apply_tool_artifact_page(&reading_page(0, "cached first page", Some(87))));
+    assert!(app.apply_tool_artifact_page(&reading_page(87, "cached second page", Some(174))));
+    let before = app.timeline[0].text.clone();
+    app.apply_tool_artifact_read_failure(
+        &tool_artifact_ref(),
+        ToolArtifactDisplayReadFailure::BudgetExhausted,
+    );
+    assert_eq!(
+        app.timeline[0].text, before,
+        "budget denial must preserve page and next selector"
+    );
+    assert!(!app.timeline_state.tool_artifact_reading.is_empty());
+    assert!(app.show_previous_tool_artifact_page());
+    assert!(full_plain_timeline(&app).contains("cached first page"));
+    assert!(app.request_selected_tool_artifact_next_page());
+    assert!(full_plain_timeline(&app).contains("cached second page"));
+    assert!(app.return_to_tool_artifact_text());
+    assert!(full_plain_timeline(&app).contains("bounded preview"));
+    assert!(
+        app.drain_pending_worker_commands().is_empty(),
+        "cached return must not spend the remaining read budget"
+    );
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_history_is_bounded_and_revoked_pages_cannot_be_reopened() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    for index in 0..12 {
+        let page = reading_page(index * 200, &"x".repeat(32 * 1024), Some((index + 1) * 200));
+        assert!(app.apply_tool_artifact_page(&page));
+    }
+    let retained_pages = app
+        .timeline_state
+        .tool_artifact_reading
+        .values()
+        .map(|state| state.pages.len())
+        .sum::<usize>();
+    let retained_bytes = app
+        .timeline_state
+        .tool_artifact_reading
+        .values()
+        .map(|state| state.retained_bytes())
+        .sum::<usize>();
+    assert!(retained_pages <= super::super::tool_card_interaction::TOOL_ARTIFACT_HISTORY_MAX_PAGES);
+    assert!(retained_bytes <= super::super::tool_card_interaction::TOOL_ARTIFACT_HISTORY_MAX_BYTES);
+    app.apply_tool_artifact_read_failure(
+        &tool_artifact_ref(),
+        ToolArtifactDisplayReadFailure::Rejected,
+    );
+    assert!(app.timeline_state.tool_artifact_reading.is_empty());
+    assert!(!app.show_previous_tool_artifact_page());
+    assert!(!app.return_to_tool_artifact_text());
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_cached_navigation_preserves_composer_word_navigation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    assert!(app.apply_tool_artifact_page(&reading_page(0, "first body", Some(200))));
+    assert!(app.apply_tool_artifact_page(&reading_page(200, "second body", None)));
+    app.active_pane = PaneFocus::Composer;
+    app.composer.input = "one two".to_owned();
+    app.composer.input_cursor = app.composer.input.len();
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("second body"));
+    assert_eq!(app.composer.input, "one two");
+    Ok(())
+}
+
+fn search_reading_page(query: &str, body: &str) -> sigil_kernel::ToolArtifactPageV1 {
+    sigil_kernel::ToolArtifactPageV1 {
+        selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
+            query: query.to_owned(),
+            start_offset: 0,
+            max_matches: 50,
+            context_lines: 2,
+        },
+        match_count: u16::from(!body.is_empty()),
+        ..reading_page(0, body, None)
+    }
+}
+
+#[test]
+fn tool_artifact_text_return_restores_the_page_visible_before_search_after_back() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.focus_latest_tool_card();
+    let _ = app.drain_pending_worker_commands();
+    assert!(app.apply_tool_artifact_page(&reading_page(0, "body-page-one", Some(200))));
+    assert!(app.apply_tool_artifact_page(&reading_page(200, "body-page-two", Some(400))));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("body-page-one"));
+    assert!(app.apply_tool_artifact_page(&search_reading_page("query", "query-only-result")));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+    let rendered = full_plain_timeline(&app);
+    assert!(
+        rendered.contains("body-page-one"),
+        "return must use the body page visible before search"
+    );
+    assert!(!rendered.contains("body-page-two"));
+    assert!(!rendered.contains("query-only-result"));
+    assert!(
+        app.drain_pending_worker_commands().is_empty(),
+        "back and return must use already-read pages"
+    );
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_back_follows_navigation_instead_of_mixed_cache_insertion_order() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.focus_latest_tool_card();
+    let _ = app.drain_pending_worker_commands();
+    assert!(app.apply_tool_artifact_page(&reading_page(0, "body-page-one", Some(200))));
+    assert!(app.apply_tool_artifact_page(&reading_page(200, "body-page-two", Some(400))));
+    assert!(app.apply_tool_artifact_page(&search_reading_page("query", "query-only-result")));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+    assert!(full_plain_timeline(&app).contains("body-page-two"));
+    assert!(
+        app.drain_pending_worker_commands().is_empty(),
+        "return must not read again"
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))?;
+    let commands = app.drain_pending_worker_commands();
+    assert!(matches!(
+        commands.as_slice(),
+        [WorkerCommand::ReadToolArtifactPage {
+            selector: sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line: 400,
+                ..
+            },
+            ..
+        }]
+    ));
+    assert!(app.apply_tool_artifact_page(&reading_page(400, "body-page-three", None)));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+    let rendered = full_plain_timeline(&app);
+    assert!(
+        rendered.contains("body-page-two"),
+        "previous view was page two, even though query was cached later"
+    );
+    assert!(!rendered.contains("body-page-three"));
+    assert!(!rendered.contains("query-only-result"));
+    assert!(
+        app.drain_pending_worker_commands().is_empty(),
+        "back must not read again"
+    );
+    Ok(())
+}
+
+fn tool_reading_surface_text(app: &AppState, height: u16) -> Result<String> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))?;
+    let surface = crate::surface_adapter::build_surface_model(
+        ratatui::layout::Rect::new(0, 0, 80, height),
+        app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    Ok(terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect())
+}
+
+#[test]
+fn tool_artifact_bounded_page_starts_at_its_context_and_every_line_remains_scrollable() -> Result<()>
+{
+    for height in [12, 24] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.set_terminal_size(80, height);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&tool_artifact_card("available", true))?;
+        card["tool_name"] = serde_json::json!("read_file");
+        card["summary"] = serde_json::json!("46 lines · 93.5 KiB");
+        app.push_timeline(TimelineRole::User, "read the long output");
+        app.push_timeline(TimelineRole::Tool, card.to_string());
+        app.push_timeline(TimelineRole::Assistant, "saved output ready");
+        let _ = app.focus_latest_tool_card();
+        let body = (1..=87)
+            .map(|index| {
+                format!(
+                    "line {index:03} AUDIT_MARKER_{index:03} {}",
+                    "a".repeat(160)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(app.apply_tool_artifact_page(&reading_page(0, &body, Some(87))));
+        let first_screen = tool_reading_surface_text(&app, height)?;
+        assert!(
+            first_screen.contains("Text · lines 1–87"),
+            "{height}: page context must be visible after a read"
+        );
+        assert!(
+            first_screen.contains("AUDIT_MARKER_001"),
+            "{height}: reading must begin at page one"
+        );
+        assert!(
+            !first_screen.contains("46 lines"),
+            "the original preview count is not a saved page count"
+        );
+        assert!(full_plain_timeline(&app).contains("AUDIT_MARKER_087"));
+        assert!(!full_plain_timeline(&app).contains("23 more lines hidden"));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+        assert!(
+            tool_reading_surface_text(&app, height)?.contains("Text · lines 1–87"),
+            "Ctrl-G must return to page context"
+        );
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+        assert!(
+            full_plain_timeline(&app).contains("AUDIT_MARKER_087"),
+            "reopening must not restore the ordinary preview cap"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..app.timeline_render_line_count().saturating_mul(2) {
+            let screen = tool_reading_surface_text(&app, height)?;
+            for index in 1..=87 {
+                if screen.contains(&format!("AUDIT_MARKER_{index:03}")) {
+                    seen.insert(index);
+                }
+            }
+            if app.timeline_scroll_back == 0 {
+                break;
+            }
+            let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+        }
+        let expected: std::collections::BTreeSet<_> = (1..=87).collect();
+        assert_eq!(
+            seen, expected,
+            "all lines of the already-read bounded page must be scrollable at height {height}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_search_clear_replaces_retained_query_without_changing_other_text_inputs()
+-> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.focus_latest_tool_card();
+    let _ = app.drain_pending_worker_commands();
+    assert!(app.apply_tool_artifact_page(&search_reading_page("old literal", "match")));
+    assert!(app.open_selected_tool_artifact_search());
+    assert!(
+        app.modal_lines()
+            .iter()
+            .any(|line| line == "Enter search · Ctrl-U clear · Esc cancel")
+    );
+    assert_eq!(
+        app.modal_input_cursor().map(|(_, cursor, _)| cursor),
+        Some(11)
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))?;
+    assert_eq!(
+        app.modal_input_cursor().map(|(_, cursor, _)| cursor),
+        Some(0)
+    );
+    app.handle_paste_text("replacement");
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let commands = app.drain_pending_worker_commands();
+    assert!(
+        matches!(commands.as_slice(), [WorkerCommand::ReadToolArtifactPage {
+        selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral { query, .. }, ..
+    }] if query == "replacement")
+    );
+    app.open_text_input(TextInputTarget::SkillArguments, "keep text");
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))?;
+    assert_eq!(
+        app.modal_input_cursor().map(|(_, cursor, _)| cursor),
+        Some(9)
+    );
+    Ok(())
 }

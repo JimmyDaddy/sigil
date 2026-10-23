@@ -171,6 +171,7 @@ impl AppState {
         self.timeline.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_artifact_reading.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_event("mode", "workspace_trust");

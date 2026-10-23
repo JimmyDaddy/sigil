@@ -253,9 +253,7 @@ impl TextInputTarget {
             Self::McpImportPath => {
                 "Choose a JSON file with mcpServers. Relative paths use the workspace folder. The preview does not start servers."
             }
-            Self::ToolArtifactSearch => {
-                "Enter one exact literal. Regex, glob, shell expressions and paths are not accepted."
-            }
+            Self::ToolArtifactSearch => "Search saved output for exact text.",
         }
     }
 
@@ -478,8 +476,13 @@ impl AppState {
                 if let Some(key) = state.target.config_key() {
                     lines.push(format!("key: {key}"));
                 }
+                let keys = if state.target == TextInputTarget::ToolArtifactSearch {
+                    "Enter search · Ctrl-U clear · Esc cancel"
+                } else {
+                    "Enter apply  F2 save  F3 save+close  Esc cancel"
+                };
                 lines.extend([
-                    "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
+                    keys.to_owned(),
                     String::new(),
                     format!("{}: {}|", state.target.prompt_label(), state.buffer),
                 ]);
@@ -1560,6 +1563,13 @@ impl AppState {
                 KeyCode::Esc => {
                     self.modal_state = None;
                     ModalOutcome::Dismissed("closed text input".to_owned())
+                }
+                KeyCode::Char('u')
+                    if state.target == TextInputTarget::ToolArtifactSearch
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    state.buffer.clear();
+                    ModalOutcome::None
                 }
                 KeyCode::Backspace => {
                     let _ = state.buffer.pop();

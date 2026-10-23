@@ -69,6 +69,16 @@ impl AppState {
             .or(self.last_notice.as_deref())
     }
 
+    pub(crate) fn action_feedback(&self) -> Option<&super::ActionFeedback> {
+        self.action_feedback.as_ref()
+    }
+
+    pub(super) fn show_action_feedback(&mut self, message: impl Into<String>, warning: bool) {
+        let message = message.into();
+        self.last_notice = Some(message.clone());
+        self.action_feedback = Some(super::ActionFeedback { message, warning });
+    }
+
     pub(crate) fn set_last_notice(&mut self, notice: impl Into<String>) {
         self.last_notice = Some(notice.into());
     }

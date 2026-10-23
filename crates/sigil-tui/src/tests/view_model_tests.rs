@@ -1457,7 +1457,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "Ctrl-C stop · Enter add follow-up · F4 details · F1 help"
+        "Ctrl-C stop · F1 help · Enter add follow-up · F4 details"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Preparing);
     assert_eq!(

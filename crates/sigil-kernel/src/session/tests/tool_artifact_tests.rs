@@ -1045,6 +1045,90 @@ fn per_turn_budget_is_shared_and_counts_attempts() -> Result<()> {
 }
 
 #[test]
+fn per_turn_budget_reservation_failure_is_typed_and_preserves_remaining_window() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let body = (1..=500)
+        .map(|index| {
+            format!(
+                "line {index:03} AUDIT_MARKER_{index:03} {}",
+                "a".repeat(160)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let descriptor = store.capture_text(
+        "call-reservation-budget",
+        "read_file",
+        &body,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let budget = ToolArtifactReadBudgetV1::default();
+    for start_line in [0, 87] {
+        budget.read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::LinePage {
+                start_line,
+                line_count: 200,
+            },
+        )?;
+    }
+    for query in ["AUDIT_MARKER_090", "MISSING_READER_LITERAL"] {
+        budget.read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::SearchLiteral {
+                query: query.to_owned(),
+                start_offset: 0,
+                max_matches: 50,
+                context_lines: 2,
+            },
+        )?;
+    }
+    budget.read_page(
+        &store,
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::LinePage {
+            start_line: 174,
+            line_count: 200,
+        },
+    )?;
+    let before = budget.usage();
+    assert_eq!(before, (5, 49_742));
+    let error = budget
+        .read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::LinePage {
+                start_line: 261,
+                line_count: 200,
+            },
+        )
+        .expect_err("remaining bytes cannot admit another full-page reservation");
+    assert!(error.is::<ToolArtifactReadBudgetExhausted>());
+    assert_eq!(budget.usage(), before);
+    assert_eq!(
+        store.resolve(&descriptor.artifact_ref)?.retrieval_policy,
+        descriptor.retrieval_policy
+    );
+    assert_eq!(
+        store.availability(&descriptor),
+        ToolArtifactAvailability::Available
+    );
+    let smaller_page = budget.read_page(
+        &store,
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 1024,
+        },
+    )?;
+    assert_eq!(smaller_page.returned_bytes, 1024);
+    assert_eq!(budget.usage(), (6, 50_766));
+    Ok(())
+}
+
+#[test]
 fn root_budget_turn_reset_restores_the_window() -> Result<()> {
     let (_temp, store) = store_fixture()?;
     let descriptor = store.capture_text(

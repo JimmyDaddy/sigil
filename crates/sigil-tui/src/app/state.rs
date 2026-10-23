@@ -41,6 +41,8 @@ pub(crate) struct TimelineState {
     pub(in crate::app) expanded_tool_activity_keys: BTreeSet<String>,
     pub(in crate::app) collapsed_tool_activity_keys: BTreeSet<String>,
     pub(in crate::app) tool_activity_visible_rows: BTreeMap<String, usize>,
+    pub(in crate::app) tool_artifact_reading:
+        BTreeMap<String, super::tool_card_interaction::ToolArtifactReadingState>,
     pub(in crate::app) streaming_assistant_index: Option<usize>,
     pub(in crate::app) streaming_reasoning_index: Option<usize>,
     /// Entries emitted by the current provider physical attempt but not yet confirmed by a

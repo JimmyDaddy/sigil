@@ -795,6 +795,7 @@ impl AppState {
         self.command_approval_request_ids.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_artifact_reading.clear();
         self.timeline_state.expanded_thinking_entry_indices.clear();
         self.timeline_state.collapsed_thinking_entry_indices.clear();
         self.timeline_state.expanded_diagram_entry_indices.clear();

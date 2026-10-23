@@ -82,7 +82,12 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
             (preview, hidden)
         })
         .unwrap_or_default();
-    if tool_name_matches(&tool_name, "read_file") {
+    if tool_name_matches(&tool_name, "read_file")
+        && object
+            .get("artifact")
+            .and_then(|artifact| artifact.get("reading_label"))
+            .is_none()
+    {
         let returned_lines = metadata
             .returned_lines
             .unwrap_or(preview_lines.len() as u64);
@@ -136,6 +141,14 @@ fn parse_tool_artifact(value: &Value) -> Option<ToolCardArtifact> {
             .get("persisted_bytes")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        reading_label: object
+            .get("reading_label")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        reading_search: object
+            .get("reading_search")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         has_more: object
             .get("has_more")
             .and_then(Value::as_bool)

@@ -798,6 +798,7 @@ fn footer_context_width_uses_available_space_and_hides_small_areas() {
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: String::new(),
+        action_feedback: None,
         workspace_git_label: String::new(),
         context_label: "ctx 18% · 1200/8000".to_owned(),
     };
@@ -1632,6 +1633,7 @@ fn shell_footer_helpers_cover_context_thresholds() {
     let footer = FooterViewModel {
         run_label: "Run".to_owned(),
         hints: "hint".to_owned(),
+        action_feedback: None,
         is_busy: false,
         phase: RunPhase::Idle,
         workspace_git_label: String::new(),
@@ -2631,6 +2633,7 @@ fn footer_context_width_covers_empty_and_bounded_states() {
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: "Enter send".to_owned(),
+        action_feedback: None,
         workspace_git_label: String::new(),
         context_label: "ctx 12%".to_owned(),
     };
@@ -2702,6 +2705,7 @@ fn render_footer_status_returns_early_for_zero_and_tiny_areas() -> anyhow::Resul
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: String::new(),
+        action_feedback: None,
         workspace_git_label: String::new(),
         context_label: "ctx 12%".to_owned(),
     };
@@ -2725,6 +2729,7 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: "Enter send".to_owned(),
+        action_feedback: None,
         workspace_git_label: "feature/tui-status · 3 changes".to_owned(),
         context_label: String::new(),
     };
@@ -2751,6 +2756,7 @@ fn render_footer_status_uses_empty_workspace_space_for_context() -> anyhow::Resu
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: String::new(),
+        action_feedback: None,
         workspace_git_label: String::new(),
         context_label: context_label.clone(),
     };
@@ -2788,7 +2794,8 @@ fn narrow_footer_keeps_busy_cancellation_action_visible() -> anyhow::Result<()> 
         phase: RunPhase::Preparing,
         is_busy: true,
         run_label: "preparing".to_owned(),
-        hints: "Ctrl-C stop · Enter add follow-up · F1 help".to_owned(),
+        hints: "Ctrl-C stop · F1 help · Enter add follow-up · F4 details".to_owned(),
+        action_feedback: None,
         workspace_git_label: "a-very-long-feature-branch".to_owned(),
         context_label: "ctx: 10%".to_owned(),
     };
@@ -2796,6 +2803,7 @@ fn narrow_footer_keeps_busy_cancellation_action_visible() -> anyhow::Result<()> 
     terminal.draw(|frame| render_footer_status(frame, frame.area(), &footer, &Theme::default()))?;
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Ctrl-C stop"));
+    assert!(rendered.contains("F1 help"));
     assert!(!rendered.contains("feature-branch"));
     Ok(())
 }
@@ -3718,5 +3726,129 @@ fn render_config_empty_catalogs_omit_blank_context_and_preserve_raw_footer_hit_i
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn main_surface_shows_action_feedback_without_growing_the_short_footer() -> anyhow::Result<()> {
+    for height in [12, 24] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.set_terminal_size(80, height);
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+        let mut terminal = Terminal::new(TestBackend::new(80, height))?;
+        let surface = crate::surface_adapter::build_surface_model(
+            Rect::new(0, 0, 80, height),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        assert_eq!(surface.layout.footer.height, 1);
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rows = rendered_rows(&terminal);
+        let footer = rows.last().expect("footer row");
+        assert!(footer.contains("no activities yet"), "{height}: {footer}");
+        assert!(footer.contains("F1 help"), "{height}: {footer}");
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+        let surface = crate::surface_adapter::build_surface_model(
+            Rect::new(0, 0, 80, height),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 2,
+                terminal_epoch: 1,
+            },
+        );
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        let rows = rendered_rows(&terminal);
+        let footer = rows.last().expect("footer row");
+        assert!(!footer.contains("no activities yet"));
+        assert!(footer.contains("Enter send"));
+        assert!(footer.contains("F1 help"));
+        assert_eq!(app.composer.input, "x");
+    }
+    Ok(())
+}
+
+#[test]
+fn main_surface_shows_read_failure_and_clipboard_result_in_the_existing_footer()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    app.handle_worker_message(WorkerMessage::ToolArtifactPageReadFailed {
+        request_id: 1,
+        artifact_ref: sigil_kernel::ToolArtifactRefV1 {
+            artifact_id: format!("ta1_{}", "a".repeat(32)),
+        },
+        failure: crate::runner::ToolArtifactDisplayReadFailure::BudgetExhausted,
+        entries: Vec::new(),
+    })?;
+    let mut terminal = Terminal::new(TestBackend::new(80, 12))?;
+    let draw = |terminal: &mut Terminal<TestBackend>, app: &AppState| -> anyhow::Result<()> {
+        let surface = crate::surface_adapter::build_surface_model(
+            Rect::new(0, 0, 80, 12),
+            app,
+            crate::surface::SurfaceState {
+                frame_generation: 1,
+                terminal_epoch: 1,
+            },
+        );
+        terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+        Ok(())
+    };
+    draw(&mut terminal, &app)?;
+    assert!(rendered_content(&terminal).contains("read budget exhausted"));
+    assert!(
+        rendered_rows(&terminal)
+            .last()
+            .expect("footer row")
+            .contains("F1 help")
+    );
+    app.record_clipboard_copy_success("ok");
+    draw(&mut terminal, &app)?;
+    assert!(
+        rendered_rows(&terminal)
+            .last()
+            .expect("footer row")
+            .contains("copied")
+    );
+    app.record_clipboard_copy_unavailable("test clipboard failure");
+    draw(&mut terminal, &app)?;
+    assert!(
+        rendered_rows(&terminal)
+            .last()
+            .expect("footer row")
+            .contains("clipboard unavailable")
+    );
+    Ok(())
+}
+
+#[test]
+fn activity_footer_matches_focus_at_80_columns() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "activity",
+        "ls",
+        "[]",
+        ToolResultMeta::default(),
+    )))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+    let mut terminal = Terminal::new(TestBackend::new(80, 12))?;
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, 80, 12),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let rows = rendered_rows(&terminal);
+    let footer = rows.last().expect("footer row");
+    assert!(footer.contains("Ctrl-O expand"));
+    assert!(footer.contains("Esc input"));
+    assert!(footer.contains("F1 help"));
+    assert!(!footer.contains("Enter send"));
     Ok(())
 }

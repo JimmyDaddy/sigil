@@ -283,6 +283,44 @@ fn render_footer_status(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    if let Some(feedback) = &footer.action_feedback {
+        let help = "F1 help";
+        let help_width = terminal_cell_width(help) as u16;
+        let message_width = inner.width.saturating_sub(help_width.saturating_add(3));
+        if message_width > 0 {
+            frame.render_widget(
+                Paragraph::new(truncate_display_width(
+                    &feedback.message,
+                    message_width as usize,
+                ))
+                .style(Style::default().fg(if feedback.warning {
+                    theme.palette.accent_warning
+                } else {
+                    theme.palette.accent_info
+                })),
+                Rect::new(inner.x, inner.y, message_width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(help).style(styles::muted(&theme.palette)),
+                Rect::new(
+                    inner.right().saturating_sub(help_width),
+                    inner.y,
+                    help_width,
+                    1,
+                ),
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(truncate_display_width(
+                    &feedback.message,
+                    inner.width as usize,
+                ))
+                .style(styles::muted(&theme.palette)),
+                inner,
+            );
+        }
+        return;
+    }
     let hints = fitted_footer_hints(&footer.hints, inner.width as usize);
     let hint_width = terminal_cell_width(&hints) as u16;
     if hint_width > 0 {
@@ -341,7 +379,7 @@ fn fitted_footer_hints(hints: &str, width: usize) -> String {
         return String::new();
     }
     let mut fitted = String::new();
-    for hint in hints.split(" · ").take(3) {
+    for hint in hints.split(" · ").take(4) {
         let candidate = if fitted.is_empty() {
             hint.to_owned()
         } else {

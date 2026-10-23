@@ -32,6 +32,8 @@ pub(crate) enum UiCommand {
     SelectPreviousToolCard,
     ToggleSelectedToolCard,
     ReadNextToolArtifactPage,
+    ReadPreviousToolArtifactPage,
+    ReturnToToolArtifactText,
     SearchToolArtifact,
     ClearToolCardFocus,
     CancelFocusedTerminalTask,
@@ -286,6 +288,20 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
+        command: UiCommand::ReadPreviousToolArtifactPage,
+        keys: &[KeyBinding { label: "Alt-Left" }],
+        slash: None,
+        help: "Return to the previous saved-output page already read, without another read.",
+        surface: CommandSurface::ToolCard,
+    },
+    UiCommandSpec {
+        command: UiCommand::ReturnToToolArtifactText,
+        keys: &[KeyBinding { label: "Alt-Home" }],
+        slash: None,
+        help: "Return from search to the last text page, or return to the original preview.",
+        surface: CommandSurface::ToolCard,
+    },
+    UiCommandSpec {
         command: UiCommand::SearchToolArtifact,
         keys: &[KeyBinding { label: "Alt-F" }],
         slash: None,
@@ -335,6 +351,12 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         }
         KeyCode::Char('n') | KeyCode::Char('N') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::ReadNextToolArtifactPage)
+        }
+        KeyCode::Left if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::ReadPreviousToolArtifactPage)
+        }
+        KeyCode::Home if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::ReturnToToolArtifactText)
         }
         KeyCode::Char('f') | KeyCode::Char('F') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::SearchToolArtifact)
@@ -480,6 +502,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
             UiCommand::SelectPreviousToolCard,
             UiCommand::ToggleSelectedToolCard,
             UiCommand::ReadNextToolArtifactPage,
+            UiCommand::ReadPreviousToolArtifactPage,
+            UiCommand::ReturnToToolArtifactText,
             UiCommand::SearchToolArtifact,
             UiCommand::ClearToolCardFocus,
             UiCommand::CancelFocusedTerminalTask,

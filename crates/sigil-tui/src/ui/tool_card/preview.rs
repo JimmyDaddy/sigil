@@ -37,7 +37,12 @@ pub(super) fn render_tool_expanded_preview_body_with_palette(
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if command_tool(summary) {
+    if command_tool(summary)
+        && summary
+            .artifact
+            .as_ref()
+            .is_none_or(|artifact| artifact.reading_label.is_none())
+    {
         lines.extend(render_bash_command_section_with_palette(
             summary,
             accent,
@@ -133,6 +138,18 @@ pub(super) fn render_tool_preview_body_with_palette(
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    if summary
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| artifact.reading_label.is_some())
+    {
+        return render_code_preview_lines_with_palette(
+            accent,
+            &summary.preview_lines,
+            palette.markdown_code_bg,
+            palette,
+        );
+    }
     if (tool_name_matches(&summary.tool_name, "ls")
         || tool_name_matches(&summary.tool_name, "glob"))
         && let Some(lines) = render_path_list_preview_with_palette(summary, accent, palette)

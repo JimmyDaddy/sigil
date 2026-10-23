@@ -1342,7 +1342,7 @@ impl AppState {
             .selected_timeline_text()
             .or_else(|| self.latest_assistant_response_text());
         let Some(text) = text else {
-            self.last_notice = Some("nothing to copy".to_owned());
+            self.show_action_feedback("nothing to copy", false);
             return None;
         };
         Some(self.request_clipboard_copy(text))
@@ -1480,12 +1480,12 @@ impl AppState {
 
     pub fn record_clipboard_copy_success(&mut self, text: &str) {
         self.clear_timeline_text_selection_state();
-        self.last_notice = Some(format!("copied {}", clipboard_copy_status(text)));
+        self.show_action_feedback(format!("copied {}", clipboard_copy_status(text)), false);
         self.push_event("selection:copy", clipboard_copy_status(text));
     }
 
     pub fn record_clipboard_copy_unavailable(&mut self, reason: &str) {
-        self.last_notice = Some(format!("clipboard unavailable: {reason}"));
+        self.show_action_feedback(format!("clipboard unavailable: {reason}"), true);
         self.push_event("selection:copy", format!("unavailable {reason}"));
     }
 

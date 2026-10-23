@@ -42,6 +42,59 @@ enum ToolCardRevealPolicy {
 }
 
 const TOOL_CARD_VISIBLE_ROWS_STEP: usize = 64;
+pub(super) const TOOL_ARTIFACT_HISTORY_MAX_PAGES: usize = 8;
+pub(super) const TOOL_ARTIFACT_HISTORY_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct ToolArtifactReadingCursor {
+    selector: Option<ToolArtifactSelectorV1>,
+    text_selector: Option<ToolArtifactSelectorV1>,
+}
+
+#[derive(Debug)]
+pub(super) struct ToolArtifactReadingState {
+    original_text: String,
+    pub(super) pages: Vec<ToolArtifactPageV1>,
+    // Cache insertion order cannot identify the prior view or a search's text return target.
+    cursor: ToolArtifactReadingCursor,
+    back_stack: Vec<ToolArtifactReadingCursor>,
+    query: String,
+}
+
+impl ToolArtifactReadingState {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.original_text.len() + self.pages.iter().map(|page| page.body.len()).sum::<usize>()
+    }
+
+    fn remember_cursor(&mut self) {
+        self.back_stack.push(self.cursor.clone());
+        if self.back_stack.len() > TOOL_ARTIFACT_HISTORY_MAX_PAGES {
+            self.back_stack.remove(0);
+        }
+    }
+
+    fn discard_evicted_navigation(&mut self) {
+        self.back_stack.retain(|cursor| {
+            cursor
+                .selector
+                .as_ref()
+                .is_none_or(|selector| self.pages.iter().any(|page| &page.selector == selector))
+        });
+        for cursor in self
+            .back_stack
+            .iter_mut()
+            .chain(std::iter::once(&mut self.cursor))
+        {
+            if cursor
+                .text_selector
+                .as_ref()
+                .is_some_and(|selector| !self.pages.iter().any(|page| &page.selector == selector))
+            {
+                cursor.text_selector = None;
+            }
+        }
+    }
+}
 const TERMINAL_TASK_LOG_LABEL_ROOT: &str = "state/artifacts/tasks";
 const TERMINAL_TASK_LOG_PREVIEW_MAX_BYTES: usize = 512 * 1024;
 
@@ -54,6 +107,10 @@ struct ToolCardArtifactTarget {
 }
 
 impl AppState {
+    pub(crate) fn has_focused_tool_card(&self) -> bool {
+        self.timeline_state.selected_tool_activity_key.is_some()
+    }
+
     pub(crate) fn has_tool_cards(&self) -> bool {
         !self.timeline_state.tool_activity_cache.is_empty()
     }
@@ -100,7 +157,7 @@ impl AppState {
 
     pub(super) fn focus_latest_tool_card(&mut self) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no activities yet".to_owned());
+            self.show_action_feedback("no activities yet", false);
             return false;
         };
         let (selected_index, _) = entries
@@ -116,7 +173,7 @@ impl AppState {
 
     pub(super) fn select_adjacent_tool_card(&mut self, forward: bool) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no activities yet".to_owned());
+            self.show_action_feedback("no activities yet", false);
             return false;
         };
         let (selected_index, _) = self.next_tool_entry(&entries, forward);
@@ -133,16 +190,16 @@ impl AppState {
     }
 
     pub(super) fn request_selected_tool_artifact_next_page(&mut self) -> bool {
-        let Some((_, target)) = self.selected_tool_artifact_target() else {
-            self.last_notice = Some("focused activity has no saved full output".to_owned());
+        let Some((entry_index, target)) = self.selected_tool_artifact_target() else {
+            self.show_action_feedback("focused activity has no saved full output", true);
             return false;
         };
         if !tool_artifact_availability_allows_read(&target.availability) {
-            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            self.show_action_feedback(tool_artifact_unavailable_notice(&target.availability), true);
             return false;
         }
         if !target.has_more && target.next_selector.is_none() {
-            self.last_notice = Some("the focused tool output has no next page".to_owned());
+            self.show_action_feedback("the focused tool output has no next page", false);
             return false;
         }
         let selector = target
@@ -151,24 +208,41 @@ impl AppState {
                 start_line: 0,
                 line_count: 200,
             });
+        if let Some(page) = self
+            .timeline_state
+            .tool_artifact_reading
+            .get(&target.artifact_ref.artifact_id)
+            .and_then(|state| state.pages.iter().find(|page| page.selector == selector))
+            .cloned()
+        {
+            return self.navigate_tool_artifact_page(entry_index, &page);
+        }
         self.enqueue_tool_artifact_page_read(target.artifact_ref, selector)
     }
 
     pub(super) fn open_selected_tool_artifact_search(&mut self) -> bool {
         let Some((_, target)) = self.selected_tool_artifact_target() else {
-            self.last_notice = Some("focused activity has no searchable full output".to_owned());
+            self.show_action_feedback("focused activity has no searchable full output", true);
             return false;
         };
         if !tool_artifact_availability_allows_read(&target.availability) {
-            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            self.show_action_feedback(tool_artifact_unavailable_notice(&target.availability), true);
             return false;
         }
         if self.runtime.is_busy {
-            self.last_notice =
-                Some("wait for the active run before inspecting saved tool output".to_owned());
+            self.show_action_feedback(
+                "wait for the active run before inspecting saved tool output",
+                true,
+            );
             return false;
         }
-        self.open_text_input(TextInputTarget::ToolArtifactSearch, "");
+        let query = self
+            .timeline_state
+            .tool_artifact_reading
+            .get(&target.artifact_ref.artifact_id)
+            .map(|state| state.query.clone())
+            .unwrap_or_default();
+        self.open_text_input(TextInputTarget::ToolArtifactSearch, &query);
         self.last_notice = Some("enter an exact literal to search the full output".to_owned());
         true
     }
@@ -176,16 +250,15 @@ impl AppState {
     pub(super) fn request_selected_tool_artifact_search(&mut self, query: &str) -> bool {
         let query = query.trim();
         if query.is_empty() || query.len() > 512 {
-            self.last_notice =
-                Some("artifact search literal must contain 1 to 512 bytes".to_owned());
+            self.show_action_feedback("artifact search literal must contain 1 to 512 bytes", true);
             return false;
         }
         let Some((_, target)) = self.selected_tool_artifact_target() else {
-            self.last_notice = Some("focused activity has no searchable full output".to_owned());
+            self.show_action_feedback("focused activity has no searchable full output", true);
             return false;
         };
         if !tool_artifact_availability_allows_read(&target.availability) {
-            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            self.show_action_feedback(tool_artifact_unavailable_notice(&target.availability), true);
             return false;
         }
         self.enqueue_tool_artifact_page_read(
@@ -205,8 +278,10 @@ impl AppState {
         selector: ToolArtifactSelectorV1,
     ) -> bool {
         if self.runtime.is_busy {
-            self.last_notice =
-                Some("wait for the active run before inspecting saved tool output".to_owned());
+            self.show_action_feedback(
+                "wait for the active run before inspecting saved tool output",
+                true,
+            );
             return false;
         }
         let request_id = self.next_background_request_id();
@@ -215,7 +290,7 @@ impl AppState {
             artifact_ref,
             selector,
         });
-        self.last_notice = Some("reading a bounded page from saved tool output".to_owned());
+        self.show_action_feedback("reading saved tool output", false);
         true
     }
 
@@ -224,9 +299,39 @@ impl AppState {
             tool_card_artifact_target(&entry.text)
                 .is_some_and(|target| target.artifact_ref == page.artifact_ref)
         }) else {
-            self.last_notice = Some("artifact page belongs to a hidden activity".to_owned());
+            self.show_action_feedback("artifact page belongs to a hidden activity", true);
             return false;
         };
+        self.remember_tool_artifact_page(entry_index, page);
+        self.navigate_tool_artifact_page(entry_index, page)
+    }
+
+    fn navigate_tool_artifact_page(
+        &mut self,
+        entry_index: usize,
+        page: &ToolArtifactPageV1,
+    ) -> bool {
+        if let Some(state) = self
+            .timeline_state
+            .tool_artifact_reading
+            .get_mut(&page.artifact_ref.artifact_id)
+        {
+            if state.cursor.selector.as_ref() != Some(&page.selector) {
+                state.remember_cursor();
+                state.cursor.selector = Some(page.selector.clone());
+            }
+            if !matches!(page.selector, ToolArtifactSelectorV1::SearchLiteral { .. }) {
+                state.cursor.text_selector = Some(page.selector.clone());
+            }
+        }
+        self.display_tool_artifact_page(entry_index, page)
+    }
+
+    fn display_tool_artifact_page(
+        &mut self,
+        entry_index: usize,
+        page: &ToolArtifactPageV1,
+    ) -> bool {
         let Some(entry) = self.timeline.get_mut(entry_index) else {
             return false;
         };
@@ -238,7 +343,13 @@ impl AppState {
         };
         let preview_lines = match page.body_encoding {
             ToolArtifactPageEncoding::Utf8 if page.body.is_empty() => {
-                vec!["(empty page)".to_owned()]
+                vec![
+                    if matches!(page.selector, ToolArtifactSelectorV1::SearchLiteral { .. }) {
+                        "No matches on this page. Alt-Home returns to text.".to_owned()
+                    } else {
+                        "This output page is empty.".to_owned()
+                    },
+                ]
             }
             ToolArtifactPageEncoding::Utf8 => page.body.lines().map(str::to_owned).collect(),
             ToolArtifactPageEncoding::Base64 => vec![format!("base64:{}", page.body)],
@@ -259,7 +370,7 @@ impl AppState {
         );
         object.insert(
             "hidden_lines".to_owned(),
-            serde_json::Value::Number(u64::from(page.next_selector.is_some()).into()),
+            serde_json::Value::Number(0.into()),
         );
         let base_summary = object
             .get("artifact_summary_base")
@@ -278,15 +389,7 @@ impl AppState {
         );
         object.insert(
             "summary".to_owned(),
-            serde_json::Value::String(format!(
-                "{base_summary} · saved output page {} B{}",
-                page.returned_bytes,
-                if page.match_count > 0 {
-                    format!(" · {} matches", page.match_count)
-                } else {
-                    String::new()
-                }
-            )),
+            serde_json::Value::String(base_summary),
         );
         if let Some(artifact) = object
             .get_mut("artifact")
@@ -306,6 +409,17 @@ impl AppState {
                     .as_ref()
                     .and_then(|selector| serde_json::to_value(selector).ok())
                     .unwrap_or(serde_json::Value::Null),
+            );
+            artifact.insert(
+                "reading_label".to_owned(),
+                serde_json::Value::String(tool_artifact_page_label(page)),
+            );
+            artifact.insert(
+                "reading_search".to_owned(),
+                serde_json::Value::Bool(matches!(
+                    page.selector,
+                    ToolArtifactSelectorV1::SearchLiteral { .. }
+                )),
             );
             artifact.insert(
                 "page_sha256".to_owned(),
@@ -329,18 +443,194 @@ impl AppState {
                 .remove(&activity_key);
             self.timeline_state
                 .tool_activity_visible_rows
-                .insert(activity_key, TOOL_CARD_VISIBLE_ROWS_STEP);
+                .remove(&activity_key);
         }
         self.refresh_replaced_tool_timeline_entry(entry_index);
-        self.reveal_timeline_entry(entry_index);
-        self.last_notice = Some(if page.eof {
-            format!("saved output page loaded · {} B · end", page.returned_bytes)
-        } else {
-            format!(
-                "saved output page loaded · {} B · Alt-N next",
-                page.returned_bytes
+        self.reveal_timeline_entry_start(entry_index);
+        self.last_notice = Some(tool_artifact_page_label(page));
+        self.action_feedback = None;
+        true
+    }
+
+    fn remember_tool_artifact_page(&mut self, entry_index: usize, page: &ToolArtifactPageV1) {
+        let artifact_id = page.artifact_ref.artifact_id.clone();
+        let Some(entry) = self.timeline.get(entry_index) else {
+            return;
+        };
+        let state = self
+            .timeline_state
+            .tool_artifact_reading
+            .entry(artifact_id.clone())
+            .or_insert_with(|| ToolArtifactReadingState {
+                original_text: entry.text.clone(),
+                pages: Vec::new(),
+                cursor: ToolArtifactReadingCursor::default(),
+                back_stack: Vec::new(),
+                query: String::new(),
+            });
+        let index = state
+            .pages
+            .iter()
+            .position(|cached| cached.selector == page.selector)
+            .unwrap_or_else(|| {
+                state.pages.push(page.clone());
+                state.pages.len() - 1
+            });
+        state.pages[index] = page.clone();
+        if let ToolArtifactSelectorV1::SearchLiteral { query, .. } = &page.selector {
+            state.query = query.clone();
+        }
+        loop {
+            let states = &mut self.timeline_state.tool_artifact_reading;
+            let page_count = states
+                .values()
+                .map(|state| state.pages.len())
+                .sum::<usize>();
+            let bytes = states
+                .values()
+                .map(ToolArtifactReadingState::retained_bytes)
+                .sum::<usize>();
+            if page_count <= TOOL_ARTIFACT_HISTORY_MAX_PAGES
+                && states.len() <= TOOL_ARTIFACT_HISTORY_MAX_PAGES
+                && bytes <= TOOL_ARTIFACT_HISTORY_MAX_BYTES
+            {
+                break;
+            }
+            if let Some(key) = states
+                .keys()
+                .find(|key| key.as_str() != artifact_id)
+                .cloned()
+            {
+                states.remove(&key);
+            } else if let Some(state) = states.get_mut(&artifact_id)
+                && state.pages.len() > 1
+            {
+                let remove_index = state
+                    .pages
+                    .iter()
+                    .position(|cached| {
+                        cached.selector != page.selector
+                            && state.cursor.selector.as_ref() != Some(&cached.selector)
+                            && state.cursor.text_selector.as_ref() != Some(&cached.selector)
+                    })
+                    .or_else(|| {
+                        state
+                            .pages
+                            .iter()
+                            .position(|cached| cached.selector != page.selector)
+                    });
+                if let Some(remove_index) = remove_index {
+                    state.pages.remove(remove_index);
+                    state.discard_evicted_navigation();
+                } else {
+                    states.remove(&artifact_id);
+                    break;
+                }
+            } else {
+                states.remove(&artifact_id);
+                break;
+            }
+        }
+    }
+
+    pub(super) fn show_previous_tool_artifact_page(&mut self) -> bool {
+        let Some((entry_index, target)) = self.selected_tool_artifact_target() else {
+            self.show_action_feedback("focused activity has no saved full output", true);
+            return false;
+        };
+        if !tool_artifact_availability_allows_read(&target.availability) {
+            self.show_action_feedback(tool_artifact_unavailable_notice(&target.availability), true);
+            return false;
+        }
+        let Some(state) = self
+            .timeline_state
+            .tool_artifact_reading
+            .get_mut(&target.artifact_ref.artifact_id)
+        else {
+            self.show_action_feedback("no previous page is cached", false);
+            return false;
+        };
+        while let Some(cursor) = state.back_stack.pop() {
+            match &cursor.selector {
+                Some(selector) => {
+                    if let Some(page) = state
+                        .pages
+                        .iter()
+                        .find(|page| &page.selector == selector)
+                        .cloned()
+                    {
+                        state.cursor = cursor;
+                        return self.display_tool_artifact_page(entry_index, &page);
+                    }
+                }
+                None => {
+                    state.cursor = cursor;
+                    return self.restore_tool_artifact_preview(
+                        entry_index,
+                        &target.artifact_ref.artifact_id,
+                        false,
+                    );
+                }
+            }
+        }
+        self.show_action_feedback("no previous page is cached", false);
+        false
+    }
+
+    pub(super) fn return_to_tool_artifact_text(&mut self) -> bool {
+        let Some((entry_index, target)) = self.selected_tool_artifact_target() else {
+            self.show_action_feedback("focused activity has no saved full output", true);
+            return false;
+        };
+        if !tool_artifact_availability_allows_read(&target.availability) {
+            self.show_action_feedback(tool_artifact_unavailable_notice(&target.availability), true);
+            return false;
+        }
+        if let Some(state) = self
+            .timeline_state
+            .tool_artifact_reading
+            .get(&target.artifact_ref.artifact_id)
+            && matches!(
+                state.cursor.selector,
+                Some(ToolArtifactSelectorV1::SearchLiteral { .. })
             )
-        });
+            && let Some(text_selector) = &state.cursor.text_selector
+            && let Some(page) = state
+                .pages
+                .iter()
+                .find(|page| &page.selector == text_selector)
+                .cloned()
+        {
+            return self.navigate_tool_artifact_page(entry_index, &page);
+        }
+        self.restore_tool_artifact_preview(entry_index, &target.artifact_ref.artifact_id, true)
+    }
+
+    fn restore_tool_artifact_preview(
+        &mut self,
+        entry_index: usize,
+        artifact_id: &str,
+        remember_current: bool,
+    ) -> bool {
+        let Some(state) = self
+            .timeline_state
+            .tool_artifact_reading
+            .get_mut(artifact_id)
+        else {
+            self.show_action_feedback("original preview is no longer cached", false);
+            return false;
+        };
+        if remember_current && state.cursor.selector.is_some() {
+            state.remember_cursor();
+        }
+        state.cursor = ToolArtifactReadingCursor::default();
+        let Some(entry) = self.timeline.get_mut(entry_index) else {
+            return false;
+        };
+        entry.text = state.original_text.clone();
+        self.refresh_replaced_tool_timeline_entry(entry_index);
+        self.reveal_timeline_entry_start(entry_index);
+        self.show_action_feedback("original output preview restored", false);
         true
     }
 
@@ -357,6 +647,11 @@ impl AppState {
             ToolArtifactDisplayReadFailure::BudgetExhausted
             | ToolArtifactDisplayReadFailure::AuditUnavailable => None,
         };
+        if availability.is_some() {
+            self.timeline_state
+                .tool_artifact_reading
+                .remove(&artifact_ref.artifact_id);
+        }
         if let Some(availability) = availability
             && let Some(entry_index) = self.timeline.iter().position(|entry| {
                 tool_card_artifact_target(&entry.text)
@@ -379,21 +674,24 @@ impl AppState {
                 self.refresh_replaced_tool_timeline_entry(entry_index);
             }
         }
-        self.last_notice = Some(match failure {
-            ToolArtifactDisplayReadFailure::BudgetExhausted => {
-                "saved output read budget exhausted (8 reads / 64 KiB)".to_owned()
-            }
-            ToolArtifactDisplayReadFailure::Unavailable(availability) => {
-                tool_artifact_unavailable_notice(tool_artifact_availability_label(availability))
-            }
-            ToolArtifactDisplayReadFailure::Rejected => {
-                "saved output read was rejected by the session policy".to_owned()
-            }
-            ToolArtifactDisplayReadFailure::AuditUnavailable => {
-                "saved output was not shown because its audit receipt could not be committed"
-                    .to_owned()
-            }
-        });
+        self.show_action_feedback(
+            match failure {
+                ToolArtifactDisplayReadFailure::BudgetExhausted => {
+                    "saved output read budget exhausted (8 reads / 64 KiB)".to_owned()
+                }
+                ToolArtifactDisplayReadFailure::Unavailable(availability) => {
+                    tool_artifact_unavailable_notice(tool_artifact_availability_label(availability))
+                }
+                ToolArtifactDisplayReadFailure::Rejected => {
+                    "saved output read was rejected by the session policy".to_owned()
+                }
+                ToolArtifactDisplayReadFailure::AuditUnavailable => {
+                    "saved output was not shown because its audit receipt could not be committed"
+                        .to_owned()
+                }
+            },
+            true,
+        );
     }
 
     pub(super) fn begin_tool_card_body_click(&mut self, entry_index: usize) {
@@ -447,7 +745,7 @@ impl AppState {
         reveal_policy: ToolCardRevealPolicy,
     ) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no activities yet".to_owned());
+            self.show_action_feedback("no activities yet", false);
             return false;
         };
         let (selected_index, selected_key) = self.ensure_selected_tool_entry(&entries);
@@ -500,6 +798,11 @@ impl AppState {
                 .tool_activity_visible_rows
                 .insert(selected_key.clone(), TOOL_CARD_VISIBLE_ROWS_STEP);
             self.expand_terminal_task_preview_to_rows(selected_index, TOOL_CARD_VISIBLE_ROWS_STEP);
+        }
+        if self.tool_entry_has_saved_output_page(selected_index) {
+            self.timeline_state
+                .tool_activity_visible_rows
+                .remove(&selected_key);
         }
         self.rerender_timeline_entry(selected_index);
         self.apply_tool_card_reveal_policy(selected_index, reveal_policy, was_at_tail);
@@ -672,12 +975,42 @@ impl AppState {
             .min(self.max_timeline_scroll_back());
     }
 
+    fn tool_entry_has_saved_output_page(&self, entry_index: usize) -> bool {
+        self.tool_entry_json(entry_index).is_some_and(|value| {
+            value
+                .get("artifact")
+                .and_then(|artifact| artifact.get("reading_label"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+    }
+
+    fn reveal_timeline_entry_start(&mut self, entry_index: usize) {
+        let Some(range) = self.timeline_entry_render_range(entry_index) else {
+            return;
+        };
+        let effective_len = self.effective_timeline_render_len();
+        let end = range
+            .start
+            .saturating_add(self.timeline_viewport_rows().max(1))
+            .min(effective_len);
+        self.timeline_scroll_back = effective_len
+            .saturating_sub(end)
+            .min(self.max_timeline_scroll_back());
+    }
+
     fn apply_tool_card_reveal_policy(
         &mut self,
         entry_index: usize,
         reveal_policy: ToolCardRevealPolicy,
         was_at_tail: bool,
     ) {
+        if reveal_policy != ToolCardRevealPolicy::KeepViewport
+            && self.tool_entry_has_saved_output_page(entry_index)
+        {
+            self.reveal_timeline_entry_start(entry_index);
+            return;
+        }
         match reveal_policy {
             ToolCardRevealPolicy::KeepViewport => {}
             ToolCardRevealPolicy::RevealEntry => self.reveal_timeline_entry(entry_index),
@@ -959,4 +1292,53 @@ fn terminal_task_log_label_path(value: &serde_json::Value) -> Option<std::path::
         .and_then(serde_json::Value::as_str)
         .filter(|path| !path.trim().is_empty())
         .map(std::path::PathBuf::from)
+}
+
+fn tool_artifact_page_label(page: &ToolArtifactPageV1) -> String {
+    let end = if page.eof { " · end" } else { "" };
+    match &page.selector {
+        ToolArtifactSelectorV1::LinePage { start_line, .. } => {
+            let count = page.body.lines().count() as u64;
+            if count == 0 {
+                format!("Text · empty page{end}")
+            } else {
+                format!(
+                    "Text · lines {}–{}{end}",
+                    start_line.saturating_add(1),
+                    start_line.saturating_add(count)
+                )
+            }
+        }
+        ToolArtifactSelectorV1::ByteSlice { offset, .. } => {
+            if page.returned_bytes == 0 {
+                format!("Text · empty page{end}")
+            } else {
+                format!(
+                    "Text · bytes {}–{}{end}",
+                    offset.saturating_add(1),
+                    offset.saturating_add(u64::from(page.returned_bytes))
+                )
+            }
+        }
+        ToolArtifactSelectorV1::SearchLiteral {
+            query,
+            start_offset,
+            ..
+        } => {
+            let safe_query = crate::ui::sanitize_terminal_text(query);
+            let mut query = safe_query.chars().take(32).collect::<String>();
+            if safe_query.chars().count() > 32 {
+                query.push('…');
+            }
+            let range = if *start_offset == 0 {
+                String::new()
+            } else {
+                format!(" · from byte {}", start_offset.saturating_add(1))
+            };
+            format!(
+                "Search \"{query}\" · {} matches{range}{end}",
+                page.match_count
+            )
+        }
+    }
 }

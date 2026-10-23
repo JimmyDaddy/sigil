@@ -963,11 +963,8 @@ pub(in crate::runner) fn read_tool_artifact_page_for_display(
         &active_epoch_id,
     ) {
         Ok(read) => read,
-        Err(_) => {
-            let (reads, bytes) = budget.usage();
-            let failure = if reads >= sigil_kernel::TOOL_ARTIFACT_READS_PER_TURN
-                || bytes >= sigil_kernel::TOOL_ARTIFACT_READ_BYTES_PER_TURN
-            {
+        Err(error) => {
+            let failure = if error.is::<sigil_kernel::ToolArtifactReadBudgetExhausted>() {
                 ToolArtifactDisplayReadFailure::BudgetExhausted
             } else {
                 ToolArtifactDisplayReadFailure::Rejected

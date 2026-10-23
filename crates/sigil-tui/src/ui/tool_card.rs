@@ -68,6 +68,10 @@ pub(crate) fn render_tool_entry_lines(
 ) -> Vec<Line<'static>> {
     let summary = parse_tool_summary(&entry.text);
     let display = build_tool_card_display(&summary);
+    let reading_page = summary
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| artifact.reading_label.is_some());
     let activity = build_tool_activity_view(&summary, &entry.text, entry_index);
     let palette = &options.theme.palette;
     let accent = palette.accent_danger;
@@ -97,7 +101,7 @@ pub(crate) fn render_tool_entry_lines(
         && !command_tool(&summary)
         && display.status.kind == StatusKind::Success
     {
-        if let Some(summary_line) = &display.summary {
+        if !reading_page && let Some(summary_line) = &display.summary {
             let used = lines[0]
                 .spans
                 .iter()
@@ -118,6 +122,7 @@ pub(crate) fn render_tool_entry_lines(
         }
         if summary.artifact.as_ref().is_some_and(|artifact| {
             artifact.availability != "available"
+                || artifact.reading_label.is_some()
                 || artifact.persisted_bytes < artifact.observed_bytes
         }) && let Some(line) = tool_artifact_status_line(&summary, palette)
         {
@@ -132,7 +137,7 @@ pub(crate) fn render_tool_entry_lines(
             palette,
         );
     }
-    if let Some(summary_line) = display.summary.clone() {
+    if !reading_page && let Some(summary_line) = display.summary.clone() {
         lines.push(timeline_content_line(
             accent,
             vec![Span::styled(
@@ -145,6 +150,33 @@ pub(crate) fn render_tool_entry_lines(
     }
     if let Some(artifact_line) = tool_artifact_status_line(&summary, palette) {
         lines.push(artifact_line);
+    }
+    if selected
+        && expanded
+        && let Some(artifact) = summary.artifact.as_ref().filter(|artifact| {
+            artifact.reading_label.is_some() && artifact.availability == "available"
+        })
+    {
+        let navigation = format!(
+            "Alt-← back · Alt-Home {}{}",
+            if artifact.reading_search {
+                "text"
+            } else {
+                "preview"
+            },
+            if artifact.has_more {
+                " · Alt-N next"
+            } else {
+                ""
+            }
+        );
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                navigation,
+                Style::default().fg(palette.text_muted),
+            )],
+        ));
     }
     let result_frame = if tool_has_preview(&summary) {
         let result_start_index = lines.len();
@@ -196,6 +228,13 @@ fn limit_expanded_tool_preview_body(
     accent: Color,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    if summary
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| artifact.reading_label.is_some())
+    {
+        return body;
+    }
     let Some(visible_rows) = visible_rows else {
         return body;
     };
@@ -246,6 +285,8 @@ struct ToolCardArtifact {
     observed_bytes: u64,
     persisted_bytes: u64,
     has_more: bool,
+    reading_label: Option<String>,
+    reading_search: bool,
 }
 
 fn tool_artifact_status_line(
@@ -254,6 +295,25 @@ fn tool_artifact_status_line(
 ) -> Option<Line<'static>> {
     let artifact = summary.artifact.as_ref()?;
     let (label, color) = if artifact.availability == "available" {
+        if let Some(label) = &artifact.reading_label {
+            let partial = artifact.persisted_bytes < artifact.observed_bytes;
+            let label = if partial {
+                format!("Saved portion · {label}")
+            } else {
+                label.clone()
+            };
+            return Some(timeline_content_line(
+                palette.accent_danger,
+                vec![Span::styled(
+                    label,
+                    Style::default().fg(if partial {
+                        palette.accent_warning
+                    } else {
+                        palette.accent_info
+                    }),
+                )],
+            ));
+        }
         let size = format_tool_artifact_bytes(artifact.persisted_bytes);
         let next_action = if artifact.has_more {
             " · Alt-N next"

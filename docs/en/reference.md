@@ -32,6 +32,8 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Expand or collapse focused activity | `Ctrl-O` |
 | Read the next bounded page from focused saved tool output | `Alt-N` |
 | Search a bounded literal in focused saved tool output | `Alt-F` |
+| Return to the previously viewed output page | `Alt-Left` |
+| Return from search to the prior text page, or from text to the original preview | `Alt-Home` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `F5` (`Alt-P` also works); resume later with `/task continue` |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |

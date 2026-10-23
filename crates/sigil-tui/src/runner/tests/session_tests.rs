@@ -139,6 +139,136 @@ fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() ->
     Ok(())
 }
 
+#[test]
+fn tui_tool_artifact_reservation_exhaustion_keeps_usage_and_read_policy() -> Result<()> {
+    let temp = tempdir()?;
+    let durable_store = JsonlSessionStore::new(temp.path().join("reservation-session.jsonl"))?;
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&durable_store);
+    let body = (1..=500)
+        .map(|index| {
+            format!(
+                "line {index:03} AUDIT_MARKER_{index:03} {}",
+                "a".repeat(160)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+        &sigil_kernel::ToolResult::ok(
+            "call-reservation-budget",
+            "read_file",
+            body,
+            sigil_kernel::ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let descriptor = recorded
+        .artifact
+        .descriptor()
+        .expect("published artifact")
+        .clone();
+    let mut session = sigil_kernel::Session::load_from_store("custom", "model", durable_store)?;
+    session.attach_tool_artifact_store_override(artifact_store.clone());
+    session.append(SessionLogEntry::ToolResultV3(recorded))?;
+    let budget = sigil_kernel::ToolArtifactReadBudgetV1::default();
+    for start_line in [0, 87] {
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &budget,
+            &descriptor.artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line,
+                line_count: 200,
+            },
+        )
+        .expect("read within the shared byte budget");
+    }
+    for query in ["AUDIT_MARKER_090", "MISSING_READER_LITERAL"] {
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &budget,
+            &descriptor.artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
+                query: query.to_owned(),
+                start_offset: 0,
+                max_matches: 50,
+                context_lines: 2,
+            },
+        )
+        .expect("search within the shared byte budget");
+    }
+    read_tool_artifact_page_for_display(
+        &mut session,
+        &budget,
+        &descriptor.artifact_ref,
+        sigil_kernel::ToolArtifactSelectorV1::LinePage {
+            start_line: 174,
+            line_count: 200,
+        },
+    )
+    .expect("third page still fits after the searches");
+    let before = budget.usage();
+    assert_eq!(before, (5, 49_742));
+    assert_eq!(
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &budget,
+            &descriptor.artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line: 261,
+                line_count: 200
+            },
+        ),
+        Err(ToolArtifactDisplayReadFailure::BudgetExhausted)
+    );
+    assert_eq!(budget.usage(), before);
+    assert_eq!(
+        artifact_store
+            .resolve(&descriptor.artifact_ref)?
+            .retrieval_policy,
+        descriptor.retrieval_policy
+    );
+    assert_eq!(
+        artifact_store.availability(&descriptor),
+        sigil_kernel::ToolArtifactAvailability::Available
+    );
+    let receipt = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) => Some(receipt),
+            _ => None,
+        })
+        .expect("rejected read retains its audit receipt");
+    assert_eq!(
+        receipt.outcome,
+        sigil_kernel::ToolArtifactReadOutcome::Rejected
+    );
+    assert_eq!(receipt.returned_bytes, 0);
+    assert_eq!(
+        receipt.selector,
+        sigil_kernel::ToolArtifactSelectorV1::LinePage {
+            start_line: 261,
+            line_count: 200
+        }
+    );
+    let smaller_page = read_tool_artifact_page_for_display(
+        &mut session,
+        &budget,
+        &descriptor.artifact_ref,
+        sigil_kernel::ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 1024,
+        },
+    )
+    .expect("a smaller page can still use the remaining window");
+    assert_eq!(smaller_page.returned_bytes, 1024);
+    assert_eq!(budget.usage(), (6, 50_766));
+    Ok(())
+}
+
 struct ImageCapturingProvider {
     request_tx: mpsc::Sender<CompletionRequest>,
 }

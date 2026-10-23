@@ -103,6 +103,14 @@ fn maps_tool_card_key_events_to_commands() {
         command_for_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE)),
         Some(UiCommand::OpenConfig)
     );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
+        Some(UiCommand::ReadPreviousToolArtifactPage)
+    );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT)),
+        Some(UiCommand::ReturnToToolArtifactText)
+    );
     assert!(tool_card_commands().any(|command| command == UiCommand::ClearToolCardFocus));
 }
 

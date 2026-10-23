@@ -474,6 +474,7 @@ pub(crate) struct FooterViewModel {
     pub is_busy: bool,
     pub run_label: String,
     pub hints: String,
+    pub action_feedback: Option<crate::app::ActionFeedback>,
     pub workspace_git_label: String,
     pub context_label: String,
 }
@@ -927,6 +928,7 @@ impl FooterViewModel {
                     .is_some_and(|pending| pending.actions_available()),
             run_label: footer_run_label(app),
             hints: footer_hints(app),
+            action_feedback: app.action_feedback().cloned(),
             workspace_git_label: if app.info_rail_visible() {
                 String::new()
             } else {
@@ -953,7 +955,7 @@ fn footer_run_label(app: &AppState) -> String {
 fn footer_hints(app: &AppState) -> String {
     let queue = app.composer_queue_summary();
     if app.selected_timeline_text().is_some() {
-        return "Ctrl-C copy selection · Esc clear selection".to_owned();
+        return "Ctrl-C copy selection · Esc clear selection · F1 help".to_owned();
     }
     if let Some(form) = app.pending_user_input() {
         if form.is_plan_revision_editor() {
@@ -1034,13 +1036,24 @@ fn footer_hints(app: &AppState) -> String {
         } else {
             ""
         };
-        return format!("Verification {action}I inspect · Esc input");
+        return format!("Verification {action}I inspect · Esc input · F1 help");
     }
     if app.is_composer_queue_panel_focused() {
         if let Some(pending) = app.composer_queue_pending_operation_label() {
-            return format!("{pending} · ↑↓ item · Tab/Esc input");
+            return format!("{pending} · ↑↓ item · Tab/Esc input · F1 help");
         }
-        return "Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input".to_owned();
+        return "Follow-ups ↑↓ item · Tab/Esc input · F1 help · Enter selected · ←/→ action"
+            .to_owned();
+    }
+    if app.active_pane == PaneFocus::Activity {
+        if app.has_focused_tool_card() {
+            if app.runtime.is_busy {
+                return "Ctrl-C stop · Ctrl-O expand/collapse · Esc input · F1 help".to_owned();
+            }
+            return "Ctrl-O expand/collapse · Alt-F search · Esc input · F1 help · Alt-J/K activity"
+                .to_owned();
+        }
+        return "↑↓ item · Esc input · F1 help".to_owned();
     }
     if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
         let queue = queue
@@ -1048,7 +1061,7 @@ fn footer_hints(app: &AppState) -> String {
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
         return format!(
-            "Ctrl-C stop · {queue}Enter add follow-up · Ctrl-B background · F4 details · F1 help"
+            "Ctrl-C stop · F1 help · {queue}Enter add follow-up · Ctrl-B background · F4 details"
         );
     }
     if app.runtime.is_busy {
@@ -1061,7 +1074,7 @@ fn footer_hints(app: &AppState) -> String {
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!("Ctrl-C stop · {pause}{queue}Enter add follow-up · F4 details · F1 help");
+        return format!("Ctrl-C stop · {pause}F1 help · {queue}Enter add follow-up · F4 details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -1081,22 +1094,21 @@ fn footer_hints(app: &AppState) -> String {
         return "↑↓ choose · Tab accept · Enter run · Esc close".to_owned();
     }
     if app.is_composer_agent_panel_focused() {
-        let mut hints = "↑↓ agent · Enter switch".to_owned();
+        let mut hints = "↑↓ agent · Enter switch · Esc input · F1 help".to_owned();
         if composer_agent_panel_child_selected(app) {
             hints.push_str(" · Alt-C close · Alt-M message");
         }
-        hints.push_str(" · Esc input");
         return hints;
     }
     if let Some(queue) = queue {
-        return format!("{queue} · Tab follow-ups");
+        return format!("Tab follow-ups · F1 help · {queue}");
     }
     let newline_hint = if app.terminal_keyboard_enhancement_enabled() {
         "Shift-Enter newline"
     } else {
         "Ctrl-J newline"
     };
-    format!("Enter send · {newline_hint} · F4 details · F1 help · Ctrl-L copy reply · / commands")
+    format!("Enter send · {newline_hint} · F1 help · F4 details · Ctrl-L copy reply · / commands")
 }
 
 fn composer_agent_panel_child_selected(app: &AppState) -> bool {

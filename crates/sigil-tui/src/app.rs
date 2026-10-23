@@ -689,6 +689,7 @@ pub struct AppState {
     pending_mouse_left_down: bool,
     pending_tool_card_body_click_entry: Option<usize>,
     last_notice: Option<String>,
+    action_feedback: Option<ActionFeedback>,
     worker_startup_progress: Option<String>,
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
@@ -697,6 +698,12 @@ pub struct AppState {
     terminal_width: u16,
     terminal_height: u16,
     slash_selector_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActionFeedback {
+    pub(crate) message: String,
+    pub(crate) warning: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1417,6 +1424,7 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: None,
+            action_feedback: None,
             worker_startup_progress: None,
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
@@ -1588,6 +1596,7 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: startup_error,
+            action_feedback: None,
             worker_startup_progress: None,
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
@@ -1710,6 +1719,7 @@ impl AppState {
         self.timeline.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_artifact_reading.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.worker_startup_progress =
@@ -1745,6 +1755,7 @@ impl AppState {
         self.timeline.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_artifact_reading.clear();
         self.events.clear();
         self.push_timeline(TimelineRole::System, "quick setup");
         self.push_timeline(TimelineRole::Notice, "launch dir = workspace");
@@ -1784,6 +1795,7 @@ impl AppState {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
+        self.action_feedback = None;
         if self.is_workspace_trust_gate_mode() {
             return self.handle_workspace_trust_gate_key_event(key);
         }
@@ -1969,7 +1981,10 @@ impl AppState {
         if let Some(command) = command_for_key_event(key) {
             let composer_owns_shortcut = matches!(
                 command,
-                UiCommand::SearchToolArtifact | UiCommand::OpenConversationFork
+                UiCommand::SearchToolArtifact
+                    | UiCommand::ReadPreviousToolArtifactPage
+                    | UiCommand::ReturnToToolArtifactText
+                    | UiCommand::OpenConversationFork
             ) && self.active_pane == PaneFocus::Composer
                 && !self.composer.input.is_empty();
             // Alt-F remains readline-compatible while the user is editing.

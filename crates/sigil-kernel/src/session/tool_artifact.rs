@@ -2337,6 +2337,11 @@ struct ToolArtifactReadBudgetState {
     delivered_pages: std::collections::BTreeMap<String, (String, ToolArtifactPageV1)>,
 }
 
+/// Admission rejection when the next page cannot fit the remaining shared read window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("tool artifact per-turn read budget exhausted")]
+pub struct ToolArtifactReadBudgetExhausted;
+
 /// Root-owned retrieval budget reset at each model-turn boundary and shared by cloned and
 /// parallel tool contexts. Delegated children inherit the remaining counters but cannot reset
 /// them at their own model-turn boundaries.
@@ -2429,7 +2434,7 @@ impl ToolArtifactReadBudgetV1 {
             if state.reads >= TOOL_ARTIFACT_READS_PER_TURN
                 || state.bytes.saturating_add(reserved_bytes) > TOOL_ARTIFACT_READ_BYTES_PER_TURN
             {
-                bail!("tool artifact per-turn read budget exhausted");
+                return Err(ToolArtifactReadBudgetExhausted.into());
             }
             state.reads = state.reads.saturating_add(1);
             state.bytes = state.bytes.saturating_add(reserved_bytes);
