@@ -1,5 +1,4 @@
 import {
-  useDeferredValue,
   useEffect,
   useId,
   useLayoutEffect,
@@ -11,7 +10,6 @@ import {
   type RefObject,
 } from "react";
 
-import { SafeMarkdown } from "./SafeMarkdown";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./ui/editor/MarkdownEditor";
 import type { MarkdownFormat } from "./ui/editor/markdownEditing";
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
@@ -133,18 +131,8 @@ export function Composer({
   const [prompt, setPrompt] = useState(() => readDraft(storageKey));
   const [draftUnsaved, setDraftUnsaved] = useState(false);
   const editorRef = useRef<MarkdownEditorHandle>(null);
-  const [previewVisible, setPreviewVisible] = useState(false);
+  const [sourceMode, setSourceMode] = useState(false);
   const [editorExpanded, setEditorExpanded] = useState(false);
-  const previewRef = useRef<HTMLElement>(null);
-  const previewPosition = useRef({ draftKey, top: 0 });
-  const draftEmpty = prompt === "";
-  useLayoutEffect(() => {
-    // A late persistence key still describes this draft; only its identity or clear resets reading.
-    if (previewPosition.current.draftKey !== draftKey || draftEmpty) {
-      previewPosition.current = { draftKey, top: 0 };
-    }
-    if (previewRef.current !== null) previewRef.current.scrollTop = previewPosition.current.top;
-  }, [draftKey, draftEmpty, previewVisible, editorExpanded, reviewActive]);
   const collapseEditor = () => {
     setEditorExpanded(false);
     editorRef.current?.focus();
@@ -152,7 +140,6 @@ export function Composer({
   const [formatOpen, setFormatOpen] = useState(false);
   useEffect(() => { if (hidden) setFormatOpen(false); }, [hidden]);
   const appleShortcuts = typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
-  const previewText = useDeferredValue(prompt);
   const previousStorageKey = useRef(storageKey);
   useLayoutEffect(() => {
     if (previousStorageKey.current === storageKey) return;
@@ -211,7 +198,6 @@ export function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const suggestionListId = `${useId()}-suggestions`;
-  const previewId = `${useId()}-preview`;
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
@@ -573,41 +559,7 @@ export function Composer({
           </div>
         ) : null}
         {draftUnsaved ? <small role="status" className="composer-draft-warning">{t("draftNotSaved")}</small> : null}
-        {hidden ? null : <div className="composer-editing-tools">
-          {onPickImage !== undefined ? <IconButton
-            type="button"
-            aria-label={imageBusy ? t("attachingImage") : t("attachImage")}
-            title={imageBusy ? t("attachingImage") : t("attachImage")}
-            aria-busy={imageBusy || undefined}
-            disabled={active || submitting || imageBusy}
-            onClick={() => void addImage(onPickImage)}
-            icon={<Icon name="image" />}
-          /> : null}
-          <Popover label={t("markdownFormat")} accessibleLabel={t("markdownFormat")} className="composer-format" open={formatOpen} onOpenChange={setFormatOpen} align="start">
-            <div className="composer-format-actions">
-              {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => {
-                const shortcut = formatShortcuts[format];
-                return <Button type="button" variant="quiet" key={format}
-                  aria-keyshortcuts={shortcut === undefined ? undefined : `${appleShortcuts ? "Meta" : "Control"}+${shortcut}`}
-                  onClick={() => {
-                    setFormatOpen(false);
-                    editorRef.current?.format(format);
-                    setPreviewVisible(true);
-                  }}>
-                  <span>{t(formatLabels[format])}</span>
-                  {shortcut === undefined ? null : <kbd aria-hidden="true">{appleShortcuts ? `⌘${shortcut}` : `Ctrl+${shortcut}`}</kbd>}
-                </Button>;
-              })}
-            </div>
-          </Popover>
-          <Button type="button" variant="quiet" aria-pressed={previewVisible} aria-controls={previewVisible ? previewId : undefined} onClick={() => setPreviewVisible((visible) => !visible)}>{t("markdownPreview")}</Button>
-          <Button type="button" variant="quiet" aria-expanded={editorExpanded} onClick={() => {
-            setEditorExpanded((expanded) => !expanded);
-            editorRef.current?.focus();
-          }}>{t(editorExpanded ? "collapseEditor" : "expandEditor")}</Button>
-          <small className="composer-editing-hint">{t("markdownSendHint")}</small>
-        </div>}
-        <div className="composer-document" data-preview={previewVisible} data-expanded={editorExpanded} data-review-active={reviewActive}>
+        <div className="composer-document" data-expanded={editorExpanded} data-review-active={reviewActive}>
           {expandedWriting ? suggestionList : null}
           <MarkdownEditor
             ref={editorRef}
@@ -616,6 +568,7 @@ export function Composer({
             label={t("messageSigil")}
             expanded={editorExpanded}
             reviewActive={reviewActive}
+            sourceMode={sourceMode}
             suggestionsOpen={suggestionsOpen}
             suggestionListId={suggestionsOpen ? suggestionListId : undefined}
             activeSuggestionId={suggestionsOpen ? `${suggestionListId}-option-${Math.min(activeSuggestion, suggestions.length - 1)}` : undefined}
@@ -665,13 +618,6 @@ export function Composer({
               void submit();
             }}
           />
-          {previewVisible ? <section ref={previewRef} id={previewId} className="composer-preview" aria-label={t("markdownPreview")} tabIndex={0}
-            onScroll={(event) => {
-              previewPosition.current = { draftKey, top: draftEmpty ? 0 : event.currentTarget.scrollTop };
-            }}>
-            {previewText === "" ? <p className="composer-preview-empty">{t("markdownPreviewEmpty")}</p>
-              : <SafeMarkdown text={previewText} contentId={`composer-preview:${draftKey}`} codeBlockVariant="embedded" />}
-          </section> : null}
         </div>
         {hidden ? null : <div className="composer-toolbar">
           <div className="composer-options">
@@ -745,14 +691,53 @@ export function Composer({
             <ContextUsage context={runContext} loading={runContextBusy} />
           </div>
           <div className="composer-actions">
+            {onPickImage !== undefined ? <IconButton
+              type="button"
+              aria-label={imageBusy ? t("attachingImage") : t("attachImage")}
+              title={imageBusy ? t("attachingImage") : t("attachImage")}
+              aria-busy={imageBusy || undefined}
+              disabled={active || submitting || imageBusy}
+              onClick={() => void addImage(onPickImage)}
+              icon={<Icon name="image" />}
+            /> : null}
+            <Popover label={<><Icon name="edit" /><span>{t("editingTools")}</span></>} accessibleLabel={t("editingOptions")} className="composer-format"
+              open={formatOpen} onOpenChange={setFormatOpen} align="end">
+              <div className="composer-format-actions">
+                {(["bold", "italic", "code", "code_block", "list", "link"] as const).map((format) => {
+                  const shortcut = formatShortcuts[format];
+                  return <Button type="button" variant="quiet" key={format}
+                    aria-keyshortcuts={shortcut === undefined ? undefined : `${appleShortcuts ? "Meta" : "Control"}+${shortcut}`}
+                    onClick={() => {
+                      setFormatOpen(false);
+                      editorRef.current?.format(format);
+                    }}>
+                    <span>{t(formatLabels[format])}</span>
+                    {shortcut === undefined ? null : <kbd aria-hidden="true">{appleShortcuts ? `⌘${shortcut}` : `Ctrl+${shortcut}`}</kbd>}
+                  </Button>;
+                })}
+              </div>
+              <div className="composer-view-actions">
+                <Button type="button" variant="quiet" aria-pressed={sourceMode} onClick={() => {
+                  setSourceMode((visible) => !visible);
+                  setFormatOpen(false);
+                  editorRef.current?.focus();
+                }}>{t("showMarkdownSource")}</Button>
+                <Button type="button" variant="quiet" aria-expanded={editorExpanded} onClick={() => {
+                  setEditorExpanded((expanded) => !expanded);
+                  setFormatOpen(false);
+                  editorRef.current?.focus();
+                }}>{t(editorExpanded ? "collapseEditor" : "expandEditor")}</Button>
+              </div>
+              <small className="composer-editing-hint">{t("markdownSendHint")}</small>
+            </Popover>
+            {queueCount > 0 || queuePaused ? (
             <Popover
               className="composer-queue-popover"
               accessibleLabel={t("openConversationQueueCount", { count: queueCount })}
               align="end"
               label={(
                 <span className={`composer-queue-trigger${queueCount > 0 ? " has-items" : ""}`}>
-                  <Icon name="queue" />
-                  {queueCount > 0 ? <span className="composer-queue-count" aria-hidden="true">{queueCount}</span> : null}
+                  {t("pendingMessages", { count: queueCount })}
                 </span>
               )}
               onOpenChange={(open) => {
@@ -761,6 +746,7 @@ export function Composer({
             >
               {queuePanel}
             </Popover>
+            ) : null}
           {active ? (
             <>
               <Tooltip label={stopControlBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
@@ -778,7 +764,7 @@ export function Composer({
                   className="composer-submit sg-icon-button-primary"
                   type="submit"
                   aria-label={t("queueMessage")}
-                  icon={<Icon name="queue" />}
+                  icon={<Icon name="send" />}
                   disabled={prompt.trim() === "" || submitting || queueBusy}
                   aria-busy={queueBusy || undefined}
                 />
@@ -996,7 +982,7 @@ function CacheUsage({ context, loading }: { context?: RunContext; loading: boole
   return (
     <Tooltip label={diagnostic}>
       <span
-        className={`context-usage cache-usage${usage.providerMissWithoutLocalMutation ? " cache-warning" : ""}`}
+        className="context-usage cache-usage"
         aria-label={t("cacheUsage", { percent: percentLabel })}
       >
         {t("cacheBadge", { percent: percentLabel })}

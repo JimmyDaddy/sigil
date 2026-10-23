@@ -406,6 +406,16 @@ function renderComposer(overrides: {
   };
 }
 
+async function clickEditingControl(user: ReturnType<typeof userEvent.setup>, name: string): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "Editing options" }));
+  await user.click(within(screen.getByRole("dialog", { name: "Editing options" })).getByRole("button", { name }));
+}
+
+function expectEditorExpanded(expanded: boolean): void {
+  const input = screen.getByRole("combobox", { name: "Message Sigil" });
+  expect(input.closest("form")?.getAttribute("data-expanded")).toBe(String(expanded));
+}
+
 describe("structured composer", () => {
   it.each([false, true])("shows recovery guidance only for a typed recovery state (%s)", (readOnlyRecovery) => {
     renderComposer({ submissionBlocked: true, readOnlyRecovery });
@@ -416,16 +426,16 @@ describe("structured composer", () => {
     expect(editorText(editor)).toBe("仍可编辑的草稿");
   });
   it("dismisses composer portals when the user hides the draft, without remounting its editor", async () => {
-    const { bindHidden } = renderComposer({ queuePanel: <span>Pending messages</span> });
+    const { bindHidden } = renderComposer({ queueCount: 1, queuePanel: <span>Pending messages</span> });
     const editor = screen.getByRole("combobox", { name: "Message Sigil" });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Format" }));
-    expect(screen.getByRole("dialog", { name: "Format" })).toBeTruthy();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Editing options" }));
+    expect(screen.getByRole("dialog", { name: "Editing options" })).toBeTruthy();
     bindHidden(true);
     expect(screen.queryByRole("dialog")).toBeNull();
     bindHidden(false);
     expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(editor);
     expect(screen.queryByRole("dialog")).toBeNull();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open follow-up queue, 0 messages" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open follow-up queue, 1 messages" }));
     expect(screen.getByText("Pending messages")).toBeTruthy();
     bindHidden(true);
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -459,7 +469,7 @@ describe("structured composer", () => {
     );
   });
 
-  it("explains a provider-side miss when the local stable prefix did not change", async () => {
+  it("keeps a provider-side cache observation neutral while preserving its diagnostic detail", async () => {
     renderComposer({
       runContext: {
         ...context,
@@ -471,7 +481,8 @@ describe("structured composer", () => {
     });
     await userEvent.setup().click(screen.getByRole("button", { name: "Context and cache details" }));
     const cache = screen.getByLabelText("Prompt cache hit ratio 90%");
-    expect(cache.classList.contains("cache-warning")).toBe(true);
+    expect(cache.className).toBe("context-usage cache-usage");
+    expect(cache.getAttribute("role")).toBeNull();
     const tooltipAnchor = cache.closest(".sg-tooltip-anchor");
     expect(tooltipAnchor).not.toBeNull();
     fireEvent.pointerEnter(tooltipAnchor!);
@@ -1169,147 +1180,82 @@ it.each([true, false])("settles the current draft key when durable identity arri
 });
 
 describe("Markdown writing", () => {
-  it("restores the preview reading offset after hiding it independently of source scrolling and late draft persistence", async () => {
+  it("formats completed Markdown in the same editable region, including after the closing marker", () => {
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "**中文重点** and *emphasis* ";
+    setEditorText(input, source);
+    const view = editorView(input);
+    act(() => view.dispatch({ selection: { anchor: source.length } }));
+    input.focus();
+    expect(input.querySelector("strong")?.textContent).toBe("中文重点");
+    expect(input.querySelector("em")?.textContent).toBe("emphasis");
+    expect(screen.getAllByRole("combobox", { name: "Message Sigil" })).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
+    expect(input.closest(".composer-document")?.querySelector(".composer-preview")).toBeNull();
+    typeEditorText(input, "continue");
+    expect(editorText(input)).toBe(`${source}continue`);
+    expect(editorView(input)).toBe(view);
+  });
+
+  it("switches source presentation without losing the editor, selection, reading offset or late draft identity", async () => {
     const user = userEvent.setup();
     const { bindPersistentDraftKey } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    const source = "# START\n\n" + Array.from({ length: 60 }, (_, index) =>
-      `- [ ] 第${index + 1}项：**重点**，继续阅读 [参考](https://example.test) 与 \`code\`。\n`
-    ).join("\n") + "\nEND\n";
+    const source = "# Draft\n\n**重点** and `code`\n".repeat(40);
     setEditorText(input, source);
     const view = editorView(input);
-    act(() => view.dispatch({ selection: { anchor: source.length - 10, head: source.length } }));
+    act(() => view.dispatch({ selection: { anchor: source.length - 10, head: source.length - 2 } }));
     const selection = view.state.selection;
     view.scrollDOM.scrollTop = 210;
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    let preview = screen.getByRole("region", { name: "Preview" });
-    // JSDOM records offsets; native verification owns actual wrapped line geometry.
-    fireEvent.scroll(preview, { target: { scrollTop: 1320 } });
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
-    bindPersistentDraftKey("late-durable-reading-draft");
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    preview = screen.getByRole("region", { name: "Preview" });
-    expect(preview.scrollTop).toBe(1320);
+    await clickEditingControl(user, "Show Markdown source");
+    expect(input.querySelector("strong,em,.cm-md-heading")).toBeNull();
+    expect(editorText(input)).toBe(source);
     expect(view.scrollDOM.scrollTop).toBe(210);
+    expect(view.state.selection.eq(selection)).toBe(true);
+    bindPersistentDraftKey("late-durable-reading-draft");
+    await clickEditingControl(user, "Show Markdown source");
+    expect(input.querySelector("strong")).not.toBeNull();
     expect(editorView(input)).toBe(view);
     expect(view.state.selection.eq(selection)).toBe(true);
+    expect(window.localStorage.getItem("late-durable-reading-draft")).toBe(source);
+    fireEvent.keyDown(input, { key: "z", code: "KeyZ", ctrlKey: true });
+    expect(editorText(input)).toBe("");
+    fireEvent.keyDown(input, { key: "y", code: "KeyY", ctrlKey: true });
     expect(editorText(input)).toBe(source);
   });
 
-  it("preserves independent preview reading across expanded editing and an arriving review", async () => {
-    const user = userEvent.setup();
-    const { bindReviewActive } = renderComposer({ active: true });
-    const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    setEditorText(input, "## Draft\n\nReading paragraph\n\n".repeat(60));
-    const view = editorView(input);
-    view.scrollDOM.scrollTop = 90;
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    const preview = screen.getByRole("region", { name: "Preview" });
-    fireEvent.scroll(preview, { target: { scrollTop: 960 } });
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    expect(preview.scrollTop).toBe(960);
-    fireEvent.scroll(preview, { target: { scrollTop: 1240 } });
-    bindReviewActive(true);
-    expect(preview.scrollTop).toBe(1240);
-    bindReviewActive(false);
-    await user.click(screen.getByRole("button", { name: "Collapse editor" }));
-    expect(preview.scrollTop).toBe(1240);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(1240);
-    expect(view.scrollDOM.scrollTop).toBe(90);
-    expect(editorView(input)).toBe(view);
-  });
-
-  it.each([true, false])("%s accepted submission resets only the cleared draft's preview reading position", async (accepted) => {
-    const user = userEvent.setup();
-    const { onSubmit } = renderComposer({ onSubmit: vi.fn(async () => accepted) });
-    const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    const source = "A long draft paragraph\n\n".repeat(60);
-    setEditorText(input, source);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 900 } });
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onSubmit).toHaveBeenCalledOnce();
-    await waitFor(() => expect(editorText(input)).toBe(accepted ? "" : source));
-    if (accepted) setEditorText(input, "A different new draft\n\n".repeat(60));
-    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(accepted ? 0 : 900);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(accepted ? 0 : 900);
-  });
-
-  it("does not transfer preview reading to another mounted draft", async () => {
-    const user = userEvent.setup();
-    const first = renderComposer({ draftKey: "workspace:first-session", persistentDraftKey: "first-reading-draft" });
-    setEditorText(screen.getByRole("combobox", { name: "Message Sigil" }), "First draft\n\n".repeat(60));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 1200 } });
-    first.unmount();
-    renderComposer({ draftKey: "workspace:second-session", persistentDraftKey: "second-reading-draft" });
-    setEditorText(screen.getByRole("combobox", { name: "Message Sigil" }), "Second draft\n\n".repeat(60));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(0);
-  });
-
-  it("retains preview reading for later edits when an older submission is accepted", async () => {
-    const user = userEvent.setup();
-    let settle!: (accepted: boolean) => void;
-    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
-    renderComposer({ onSubmit: vi.fn(() => pending) });
-    const input = screen.getByRole("combobox", { name: "Message Sigil" });
-    setEditorText(input, "Submitted draft\n\n".repeat(60));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    const laterDraft = "Later unsent edits\n\n".repeat(60);
-    setEditorText(input, laterDraft);
-    fireEvent.scroll(screen.getByRole("region", { name: "Preview" }), { target: { scrollTop: 750 } });
-    await act(async () => { settle(true); await pending; });
-    expect(editorText(input)).toBe(laterDraft);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(screen.getByRole("region", { name: "Preview" }).scrollTop).toBe(750);
-  });
-
-  it("edits source and renders a live safe preview without remounting the editor or losing history", async () => {
+  it("formats selections and keeps the same undo history through source mode and expansion", async () => {
     const user = userEvent.setup();
     renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     setEditorText(input, "中文 *emphasis*");
     const view = editorView(input);
     act(() => view.dispatch({ selection: { anchor: 0, head: 2 } }));
-    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("button", { name: "Editing options" }));
     await user.click(screen.getByRole("button", { name: /Bold/ }));
     expect(editorText(input)).toBe("**中文** *emphasis*");
     expect(document.activeElement).toBe(input);
-    const preview = screen.getByRole("region", { name: "Preview" });
-    expect(preview.querySelector("strong")?.textContent).toBe("中文");
-    expect(preview.querySelector("em")?.textContent).toBe("emphasis");
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(editorView(screen.getByRole("combobox", { name: "Message Sigil" }))).toBe(view);
-    input.focus();
+    expect(input.querySelector("strong")).not.toBeNull();
+    await clickEditingControl(user, "Expand editor");
+    await clickEditingControl(user, "Show Markdown source");
+    await clickEditingControl(user, "Show Markdown source");
+    expect(editorView(input)).toBe(view);
     fireEvent.keyDown(input, { key: "z", code: "KeyZ", ctrlKey: true });
     expect(editorText(input)).toBe("中文 *emphasis*");
-    await waitFor(() => expect(screen.getByRole("region", { name: "Preview" }).querySelector("strong")).toBeNull());
+    expect(input.querySelector("strong")).toBeNull();
     fireEvent.keyDown(input, { key: "y", code: "KeyY", ctrlKey: true });
     expect(editorText(input)).toBe("**中文** *emphasis*");
   });
 
-  it("retains untrusted Markdown source while the preview cannot create active HTML or remote images", async () => {
-    const user = userEvent.setup();
+  it("keeps untrusted HTML, remote images and links inert while retaining the exact source", () => {
     renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     const source = '<script>alert(1)</script>\n<img src="https://remote.invalid/pixel" onerror="alert(2)">\n![remote](https://remote.invalid/image.png)\n[bad](javascript:alert(3))\n\n**safe**';
     setEditorText(input, source);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    const preview = screen.getByRole("region", { name: "Preview" });
-    expect(preview.querySelector("script,img,iframe,object,[onerror]" )).toBeNull();
-    expect(preview.querySelector('a[href^="javascript:"]')).toBeNull();
-    expect(preview.querySelector("strong")?.textContent).toBe("safe");
+    expect(input.querySelector("script,img[src],iframe,object,a,[src],[href],[onerror]")).toBeNull();
     expect(editorText(input)).toBe(source);
+    expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
   });
 
   it("sends the exact Markdown source, including whitespace and code fences, from expanded editing", async () => {
@@ -1318,8 +1264,10 @@ describe("Markdown writing", () => {
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     const source = "  中文🙂  \r\n```sh\nprintf 'hello'\n```\n  ";
     setEditorText(input, source);
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    await clickEditingControl(user, "Expand editor");
+    await user.click(screen.getByRole("button", { name: "Editing options" }));
     expect(screen.getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
+    await user.keyboard("{Escape}");
     fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
     expect(onSubmit).toHaveBeenCalledWith(source, undefined, undefined);
   });
@@ -1353,16 +1301,17 @@ describe("Markdown writing", () => {
     fireEvent.compositionEnd(input);
   });
 
-  it("keeps the current approval space bounded even when source and preview are expanded", async () => {
+  it("keeps the single editor bounded beside an approval in either presentation mode", async () => {
     const user = userEvent.setup();
     renderComposer({ active: true, reviewActive: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     setEditorText(input, "A long follow-up\n".repeat(30));
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await clickEditingControl(user, "Expand editor");
+    await clickEditingControl(user, "Show Markdown source");
     expect(editorView(input).scrollDOM.style.maxHeight).toBe("88px");
     expect(input.closest(".composer-document")?.getAttribute("data-review-active")).toBe("true");
-    expect(screen.getByRole("region", { name: "Preview" })).toBeTruthy();
+    expect(screen.getAllByRole("combobox", { name: "Message Sigil" })).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
     expect(screen.getByRole("button", { name: "Cancel work" })).toBeTruthy();
   });
 
@@ -1400,7 +1349,7 @@ it("uses Shift+Tab for backward focus without accepting a suggestion, while Tab 
   typeEditorText(input, "/config");
   expect(screen.getByRole("listbox", { name: "Composer suggestions" })).toBeTruthy();
   await user.tab({ shift: true });
-  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Expand editor" }));
+  expect(document.activeElement).not.toBe(input);
   expect(editorText(input)).toBe("/config");
   expect(onOpenSettings).not.toHaveBeenCalled();
   expect(onSubmit).not.toHaveBeenCalled();
@@ -1436,7 +1385,7 @@ describe("expanded composer", () => {
         <button type="button" onClick={retry}>Retry saved messages</button>
         <article aria-label="Running terminal"><button type="button" onClick={stop}>Stop terminal</button></article>
       </> });
-      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      await clickEditingControl(user, "Expand editor");
       expect(getComputedStyle(container.querySelector(".timeline")!).display).not.toBe("none");
       await user.click(screen.getByRole("button", { name: "Retry saved messages" }));
       await user.click(screen.getByRole("button", { name: "Stop terminal" }));
@@ -1456,57 +1405,50 @@ describe("expanded composer", () => {
       const documentArea = input.closest(".composer-document")!;
       setEditorText(input, "/config");
       expect(documentArea.contains(screen.getByRole("listbox", { name: "Composer suggestions" }))).toBe(false);
-      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      await clickEditingControl(user, "Expand editor");
       const list = screen.getByRole("listbox", { name: "Composer suggestions" });
       expect(documentArea.contains(list)).toBe(true);
       expect(screen.getAllByRole("listbox", { name: "Composer suggestions" })).toHaveLength(1);
       expect(getComputedStyle(documentArea).position).toBe("relative");
-      expect(getComputedStyle(list).bottom).toBe("auto");
+      expect(getComputedStyle(list).bottom).toBe("100%");
       await user.click(within(list).getByRole("option", { name: /\/config/ }));
       expect(onOpenSettings).toHaveBeenCalledOnce();
       expect(onSubmit).not.toHaveBeenCalled();
       expect(editorView(input)).toBe(view);
-      expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+      expectEditorExpanded(true);
     } finally { style.remove(); }
   });
 
-  it.each(["empty", "populated"] as const)("allocates remaining conversation space to writing with %s history and restores the normal layout", async (history) => {
+  it.each(["empty", "populated"] as const)("grows only with content and keeps %s history available when expanded", async (history) => {
     const style = loadConversationStyles();
     try {
       const user = userEvent.setup();
       const { onSubmit, container } = renderComposer({ conversationHistory: history });
       const input = screen.getByRole("combobox", { name: "Message Sigil" });
-      const source = "# Long draft\n\n    exact source  \n".repeat(50);
-      setEditorText(input, source);
+      setEditorText(input, "Short draft");
       const view = editorView(input);
       const form = input.closest("form")!;
       const timeline = container.querySelector<HTMLElement>(".timeline")!;
+      await clickEditingControl(user, "Expand editor");
+      // jsdom checks the non-growing layout contract; native verification measures real short/long heights.
       expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
-      await user.click(screen.getByRole("button", { name: "Preview" }));
-      await user.click(screen.getByRole("button", { name: "Expand editor" }));
-      const documentArea = input.closest(".composer-document")!;
-      const preview = screen.getByRole("region", { name: "Preview" });
-      // jsdom has no layout engine: qualify the mounted flex/scroll contract here,
-      // then measure the resulting short-window geometry in the native WebView.
-      expect(Number(getComputedStyle(form).flexGrow)).toBeGreaterThan(Number(getComputedStyle(timeline).flexGrow));
-      expect(Number(getComputedStyle(documentArea).flexGrow)).toBeGreaterThan(0);
-      expect(view.scrollDOM.style.maxHeight).toBe("100%");
-      expect(getComputedStyle(preview).overflow).toBe("auto");
-      expect(getComputedStyle(preview).maxHeight).toBe("100%");
-      if (history === "empty") expect(getComputedStyle(timeline).display).toBe("none");
-      else expect(parseFloat(getComputedStyle(timeline).flexBasis)).toBeGreaterThan(0);
+      expect(getComputedStyle(timeline).display).not.toBe("none");
+      expect(view.scrollDOM.style.maxHeight).toBe("min(280px, 38dvh)");
+      const source = "# Long draft\n\n    exact source  \n".repeat(50);
+      setEditorText(input, source);
+      expect(view.scrollDOM.style.maxHeight).toBe("min(280px, 38dvh)");
       expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
-      await user.click(screen.getByRole("button", { name: "Collapse editor" }));
+      await clickEditingControl(user, "Collapse editor");
       expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
       expect(Number(getComputedStyle(timeline).flexGrow)).toBeGreaterThan(0);
-      expect(getComputedStyle(timeline).display).not.toBe("none");
+      expect(view.scrollDOM.style.maxHeight).toBe("min(176px, 24dvh)");
       expect(editorView(input)).toBe(view);
       expect(editorText(input)).toBe(source);
       expect(onSubmit).not.toHaveBeenCalled();
     } finally { style.remove(); }
   });
 
-  it.each(["source", "preview", "editing tools", "send tools"] as const)("collapses from %s focus across a viewport resize without changing the editor, selection, history or running work", async (target) => {
+  it.each(["source", "source mode", "editing tools", "send tools"] as const)("collapses from %s focus across a viewport resize without changing the editor, selection, history or running work", async (target) => {
     const user = userEvent.setup();
     const onCancel = vi.fn();
     const { onSubmit } = renderComposer({ active: true, onCancel });
@@ -1516,18 +1458,17 @@ describe("expanded composer", () => {
     const view = editorView(input);
     act(() => view.dispatch({ selection: { anchor: 4, head: 12 } }));
     const selection = view.state.selection;
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    const focusTarget = target === "source" ? input : target === "preview"
-      ? screen.getByRole("region", { name: "Preview" }) : target === "editing tools"
-        ? screen.getByRole("button", { name: "Preview" }) : screen.getByRole("button", { name: "Queue message" });
+    if (target === "source mode") await clickEditingControl(user, "Show Markdown source");
+    await clickEditingControl(user, "Expand editor");
+    const focusTarget = target === "source" || target === "source mode" ? input : target === "editing tools"
+        ? screen.getByRole("button", { name: "Editing options" }) : screen.getByRole("button", { name: "Queue message" });
     focusTarget.focus();
     const previousHeight = window.innerHeight;
     try {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: 560 });
       fireEvent.resize(window);
       fireEvent.keyDown(focusTarget, { key: "Escape", code: "Escape" });
-      expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+      expectEditorExpanded(false);
       expect(document.activeElement).toBe(input);
       expect(editorView(input)).toBe(view);
       expect(view.state.selection.eq(selection)).toBe(true);
@@ -1551,19 +1492,19 @@ describe("expanded composer", () => {
       const view = editorView(input);
       const form = input.closest("form")!;
       const timeline = container.querySelector<HTMLElement>(".timeline")!;
-      await user.click(screen.getByRole("button", { name: "Expand editor" }));
-      await user.click(screen.getByRole("button", { name: "Preview" }));
+      await clickEditingControl(user, "Expand editor");
+      await clickEditingControl(user, "Show Markdown source");
       bindReviewActive(true);
       expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
       expect(getComputedStyle(timeline).display).not.toBe("none");
       expect(view.scrollDOM.style.maxHeight).toBe("88px");
-      expect(getComputedStyle(screen.getByRole("region", { name: "Preview" })).maxHeight).toBe("88px");
+      expect(screen.queryByRole("region", { name: "Preview" })).toBeNull();
       expect(screen.getByRole("button", { name: "Cancel work" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Queue message" })).toBeTruthy();
       bindReviewActive(false);
-      expect(Number(getComputedStyle(form).flexGrow)).toBeGreaterThan(0);
-      expect(getComputedStyle(timeline).display).toBe("none");
-      expect(view.scrollDOM.style.maxHeight).toBe("100%");
+      expect(Number(getComputedStyle(form).flexGrow)).toBe(0);
+      expect(getComputedStyle(timeline).display).not.toBe("none");
+      expect(view.scrollDOM.style.maxHeight).toBe("min(280px, 38dvh)");
       expect(editorView(input)).toBe(view);
       expect(editorText(input)).toBe("Approval follow-up\n".repeat(30));
     } finally { style.remove(); }
@@ -1574,15 +1515,15 @@ describe("expanded composer", () => {
     renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     for (const fromToolbar of [false, true]) {
-      await user.click(screen.getByRole("button", { name: "Expand editor" }));
+      await clickEditingControl(user, "Expand editor");
       setEditorText(input, fromToolbar ? "/doctor" : "/config");
-      const target = fromToolbar ? screen.getByRole("button", { name: "Preview" }) : input;
+      const target = fromToolbar ? screen.getByRole("button", { name: "Editing options" }) : input;
       target.focus();
       fireEvent.keyDown(target, { key: "Escape", code: "Escape" });
       expect(screen.queryByRole("listbox", { name: "Composer suggestions" })).toBeNull();
-      expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+      expectEditorExpanded(true);
       fireEvent.keyDown(target, { key: "Escape", code: "Escape" });
-      expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+      expectEditorExpanded(false);
     }
   });
 
@@ -1591,17 +1532,17 @@ describe("expanded composer", () => {
     renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     setEditorText(input, "draft");
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
-    await user.click(screen.getByRole("button", { name: "Format" }));
-    const format = screen.getByRole("button", { name: "Format" });
+    await clickEditingControl(user, "Expand editor");
+    await user.click(screen.getByRole("button", { name: "Editing options" }));
+    const format = screen.getByRole("button", { name: "Editing options" });
     const bold = screen.getByRole("button", { name: /^Bold/ });
     bold.focus();
     fireEvent.keyDown(bold, { key: "Escape", code: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Format" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Editing options" })).toBeNull();
     expect(document.activeElement).toBe(format);
-    expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+    expectEditorExpanded(true);
     fireEvent.keyDown(format, { key: "Escape", code: "Escape" });
-    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    expectEditorExpanded(false);
     expect(document.activeElement).toBe(input);
   });
 
@@ -1612,14 +1553,14 @@ describe("expanded composer", () => {
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
     setEditorText(input, "中文草稿");
     fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
-    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Expand editor" }));
+    expectEditorExpanded(false);
+    await clickEditingControl(user, "Expand editor");
     fireEvent.compositionStart(input);
     fireEvent.keyDown(input, { key: "Escape", code: "Escape", isComposing: true, keyCode: 229 });
-    expect(screen.getByRole("button", { name: "Collapse editor" })).toBeTruthy();
+    expectEditorExpanded(true);
     fireEvent.compositionEnd(input);
     fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
-    expect(screen.getByRole("button", { name: "Expand editor" })).toBeTruthy();
+    expectEditorExpanded(false);
     expect(editorText(input)).toBe("中文草稿");
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onCancel).not.toHaveBeenCalled();
@@ -1627,6 +1568,26 @@ describe("expanded composer", () => {
 });
 
 describe("compact composer presentation", () => {
+  it.each([false, true])("keeps the empty queue out of the default idle/running composer (%s)", (active) => {
+    const { container } = renderComposer({ active });
+    expect(container.querySelector(".composer-editing-tools")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Open follow-up queue/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+    expect(screen.queryByText("Enter to send · Shift+Enter for a new line")).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Permission mode" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Editing options" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: active ? "Queue message" : "Send message" })).toBeTruthy();
+  });
+
+  it("distinguishes the pending-message list from submitting a new follow-up", () => {
+    renderComposer({ active: true, queueCount: 2 });
+    const pending = screen.getByRole("button", { name: "Open follow-up queue, 2 messages" });
+    expect(pending.textContent).toBe("Pending 2");
+    expect(pending.querySelector("svg")).toBeNull();
+    expect(screen.getByRole("button", { name: "Queue message" }).querySelector("svg")).not.toBeNull();
+  });
+
   it("keeps the image picker in the editing toolbar with accessible busy feedback and the exact draft", async () => {
     const user = userEvent.setup();
     let settle!: (image: DraftImage | null) => void;
@@ -1637,9 +1598,9 @@ describe("compact composer presentation", () => {
     const source = "    原始草稿  \n";
     setEditorText(input, source);
     const attach = screen.getByRole("button", { name: "Attach image" });
-    const tools = attach.closest(".composer-editing-tools");
-    expect(tools?.contains(screen.getByRole("button", { name: "Format" }))).toBe(true);
-    expect(tools?.contains(screen.getByRole("button", { name: "Preview" }))).toBe(true);
+    const tools = attach.closest(".composer-toolbar");
+    expect(tools?.contains(screen.getByRole("button", { name: "Editing options" }))).toBe(true);
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
     expect(attach.getAttribute("title")).toBe("Attach image");
     expect(attach.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
     expect(attach.textContent).toBe("");
@@ -1657,45 +1618,20 @@ describe("compact composer presentation", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("uses controlled Markdown typography for preview headings, task lists and quotes without changing source", async () => {
-    const parsed = document.createElement("style");
-    parsed.textContent = readFileSync(resolve(process.cwd(), "src/features/conversation/conversation.css"), "utf8");
-    document.head.append(parsed);
-    const features = Array.from(parsed.sheet!.cssRules).find((rule) =>
-      "name" in rule && rule.name === "features"
-    ) as CSSGroupingRule;
-    const style = document.createElement("style");
-    style.textContent = Array.from(features.cssRules, (rule) => rule.cssText).join("\n");
-    parsed.replaceWith(style);
-    try {
-      const user = userEvent.setup();
-      renderComposer();
-      const input = screen.getByRole("combobox", { name: "Message Sigil" });
-      const source = "# Preview heading\n\nA paragraph.\n\n> A quote.\n\n- [ ] First **重点** [资料](https://example.com/notes) 与 `task-code` 尾部\n  - [x] Nested **完整**\n- [x] Second\n\n`inline`\n\n```text\n  exact code  \n```";
-      setEditorText(input, source);
-      const editor = editorView(input);
-      await user.click(screen.getByRole("button", { name: "Preview" }));
-      const preview = screen.getByRole("region", { name: "Preview" });
-      expect(getComputedStyle(within(preview).getByRole("heading", { level: 1 })).fontSize).toBe("19px");
-      expect(getComputedStyle(preview.querySelector(".contains-task-list")!).listStyle).toBe("none");
-      expect(getComputedStyle(preview.querySelector(".task-list-item")!).display).toBe("list-item");
-      const task = preview.querySelector(".task-list-item")!;
-      expect(task.querySelector("strong")?.textContent).toBe("重点");
-      expect(task.querySelector("a")?.textContent).toBe("资料");
-      expect(task.querySelector("code")?.textContent).toBe("task-code");
-      expect(task.querySelector(":scope > ul > .task-list-item strong")?.textContent).toBe("完整");
-      const checkbox = task.querySelector("input")! as HTMLInputElement;
-      expect(checkbox.disabled).toBe(true);
-      expect(checkbox.getAttribute("aria-label")).toBe("Incomplete task");
-      expect(getComputedStyle(preview.querySelector("blockquote")!).paddingLeft).toBe("10px");
-      expect(getComputedStyle(preview.querySelector("blockquote")!).marginLeft).toBe("0px");
-      expect(preview.querySelector("pre code")?.textContent).toBe("  exact code  \n");
-      expect(getComputedStyle(preview.querySelector("pre code")!).padding).not.toBe("1px 4px");
-      expect(editorText(input)).toBe(source);
-      expect(editorView(input)).toBe(editor);
-    } finally {
-      style.remove();
-    }
+  it("presents headings, quotes, lists and code in the one editor without creating active links or images", () => {
+    renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+    const source = "# Heading\n\n> A quote.\n\n- First **重点** [资料](https://example.com) 与 `code`\n\n```text\n  exact code  \n```";
+    setEditorText(input, source);
+    expect(input.querySelector(".cm-md-h1")?.textContent).toBe("Heading");
+    expect(input.querySelector(".cm-md-quote-line")).not.toBeNull();
+    expect(input.querySelector(".cm-md-list-line .cm-md-bullet")).not.toBeNull();
+    expect(input.querySelector("strong")?.textContent).toBe("重点");
+    expect(input.querySelector(".cm-md-link")?.textContent).toBe("资料");
+    expect(input.querySelector("code")?.textContent).toBe("code");
+    expect(input.querySelector("a,img[src],input")).toBeNull();
+    expect(input.querySelectorAll(".cm-md-code-line")).toHaveLength(3);
+    expect(editorText(input)).toBe(source);
   });
 });
 
@@ -1713,10 +1649,10 @@ describe("compact Markdown format presentation", () => {
       setEditorText(input, "  中文 raw {{unknown}}  ");
       const editor = editorView(input);
       act(() => editor.dispatch({ selection: { anchor: 2, head: 4 } }));
-      await user.click(screen.getByRole("button", { name: "Format" }));
-      const menu = screen.getByRole("dialog", { name: "Format" });
+      await user.click(screen.getByRole("button", { name: "Editing options" }));
+      const menu = screen.getByRole("dialog", { name: "Editing options" });
       const actions = within(menu).getAllByRole("button");
-      expect(actions.map((button) => button.textContent?.replace(/⌘[BIK]|Ctrl\+[BIK]/g, ""))).toEqual(["Bold", "Italic", "Inline code", "Code block", "List", "Link"]);
+      expect(actions.map((button) => button.textContent?.replace(/⌘[BIK]|Ctrl\+[BIK]/g, ""))).toEqual(["Bold", "Italic", "Inline code", "Code block", "List", "Link", "Show Markdown source", "Expand editor"]);
       const bold = within(menu).getByRole("button", { name: "Bold" });
       expect(bold.querySelector("kbd")?.textContent).toBe(shortcut);
       expect(bold.getAttribute("aria-keyshortcuts")).toBe(accessibleShortcut);

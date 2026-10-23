@@ -8,7 +8,13 @@
 
 会话侧栏默认宽 280px，已保存的用户宽度继续使用。小于 900px 时复用导航抽屉，输入区的模型/权限/推理选项允许换行，不靠把文字压到难以阅读解决空间不足。原生窗口最小尺寸由 native 壳另行约束，本轮目标为 840×560；在 native 候选实测前不视为已经资格化，组件响应式检查不能证明原生窗口已经支持对应尺寸。
 
-上下文容量未知或尚在加载时，不显示“—”占位；已知的使用率保留简短入口，缓存与 token 诊断在同一上下文详情中查看。这些辅助观察不成为发送门禁。
+上下文容量未知或尚在加载时，不显示“—”占位；已知的使用率保留简短入口，缓存与 token 诊断在同一上下文详情中查看。provider 缓存未命中只使用中性呈现，原始 token 与诊断保留在详情提示中，不添加无可执行动作的警告颜色。这些辅助观察不成为发送门禁。
+
+默认输入区为正文与底部操作两层。模型和权限保持可见；图片入口及“编辑”位于同一底栏，格式、原文开关、展开与发送键提示按需在“编辑选项”中查看。空队列且未暂停时不显示入口；有待发送内容时以“待发送 N”打开列表，运行中的发送按钮继续提交为后续消息，停止按钮独立保留。附件、已选扩展和真实草稿存储错误按实际状态呈现。
+
+低频的扩展、恢复、意图与已完成的代理/验证入口集中在带文字的“会话工具”菜单，活动代理及未通过的验证继续显示上下文入口；所有菜单支持键盘操作，关闭面板后回到实际入口。每条消息的分支入口位于“消息操作”更多菜单，默认不重复显示整句按钮；鼠标悬停、键盘聚焦与触摸均可访问。
+
+向上阅读后保持当前锚点，显示“回到最新”；新正文或状态到达时改为“有新内容”，不计算流式 chunk 为消息数，也不自动抢走阅读位置。点击后跳到最新并恢复跟随；该提示以 workspace/session 为 scope 清理，不接收前一会话的迟到内容。
 
 设置先呈现连接、默认模型、外观及日常偏好，再呈现插件、MCP 导入和排障。分区使用轻分隔与紧凑布局，空插件目录保留刷新入口；真实错误、清理未确认及有待审查的能力保持可见。
 
@@ -34,18 +40,18 @@
 
 搜索框默认收起，点击搜索入口才展开；Escape 收起输入并返回触发按钮，保留查询。结果标题持续显示正在阅读的内容类型，避免收起输入后失去搜索上下文。切换工具或 artifact identity 会清理对应阅读状态。
 
-## Markdown 编辑与实时预览
+## 单一区域 Markdown 即时编辑
 
-用户选择 Markdown 原文编辑与实时排版预览。输入区使用 CodeMirror 6 的单一原文 editor；不提供 WYSIWYG，也没有隐藏 textarea 或 HTML 正文。`格式`菜单提供粗体、斜体、行内代码、代码块、列表和链接，修改原始字符串并使用同一 transaction history。Cmd/Ctrl-B、I、K 分别插入粗体、斜体和链接；Cmd/Ctrl-Z 撤销，macOS Shift-Cmd-Z、其他平台 Ctrl-Y 重做。真实 WebView 键盘与 IME 仍以最终候选实机为准。
+默认在唯一 CodeMirror 编辑区直接排版 Markdown，输入完成的粗体、斜体、标题、行内代码、列表、引用与链接在原位呈现，不再并排显示原文和预览。原始 Markdown string 始终是唯一正文；HTML、图片和代码 fence 保留惰性 source，不生成远程图片或可导航链接，也不把 DOM/HTML 转回文本。
 
-`预览`是输入区可见的开关，默认收起以保留正文空间；选择格式会打开它。打开后随编辑实时更新，复用 SafeMarkdown 的 CommonMark/GFM、安全 HTTPS、sanitize、数学与 Mermaid 边界，不创建远程图片元素或新增网络/IPC能力。预览可单独滚动；主题、预览和展开不重挂同一 editor，不清选区、撤销历史、附件或草稿 scope。展开用于较长内容，空间受视口限制；当前审批出现时进一步限制 source/preview 高度并保留审批的精确正文和固定决定区。
+排版消费官方 CommonMark/GFM 语法树，通过 mark/line/replace decorations 改变展示，不使用自写正则 parser。光标进入局部节点或选择对应内容时揭示该处标记，闭合标记之后继续输入立即排版；工具菜单聚焦期间保留所选语法，避免浏览器选区塌缩。“编辑选项”的“显示 Markdown 原文”只切换同一 editor 的呈现，不增加第二 pane，不重置 selection、滚动、附件、草稿或撤销历史。
 
-Enter 始终发送（运行中入队），Shift+Enter 换行，代码块和展开态遵循相同规则，输入区显示该提示。中文组合输入的 guard 先于建议选择、格式快捷键和发送；不会阻止浏览器提交组合文字。slash、skill、agent 继续使用原有显式语法，普通 Markdown 连同前后空白、CRLF 和代码 fence 直接发送，不 trim 或把预览 HTML 转回正文。
+格式操作仍提供粗体、斜体、行内代码、代码块、列表和链接，修改同一原始字符串。Cmd/Ctrl-B、I、K 保留；基础 Cmd/Ctrl-Z 与重做只负责误删或格式修改撤回，不增加记录列表或历史按钮。主题、原文模式和展开不重挂 editor。展开只提高长文上限，短文按实际内容高度显示：普通上限 min(176px,24dvh)，展开 min(280px,38dvh)，当前审批时 88px，保留会话正文空间；实际窄窗几何与输入法另行原生确认。
 
-Markdown string 是唯一发送与草稿正文。异步发送只清理原提交 revision；用户后续编辑、开始新的 composition、增删附件都会使该 revision 失效。迟到 durable draft identity 仅迁移存储 key，不重建 editor；新 key 保存失败时保留旧 key。256 KiB 草稿预算或存储失败只提示当前文字尚未保存，保留之前已保存文本，不静默删掉原草稿，不阻止用户编辑或发送。附件继续通过既有受限 native ingress 与 scope 释放机制，不把路径混入正文。
+Enter 发送（运行中入队），Shift+Enter 换行；代码 fence、原文模式和展开态规则一致。组合输入先于建议、格式与发送，期间冻结装饰并映射原范围，浏览器提交后再排版。普通 Markdown 连同空白、CRLF、中文和代码 fence 直接发送，不 trim。异步发送只清理原 revision；后续编辑、composition、附件与迟到 durable draft identity 均保留既有范围。256 KiB 草稿预算或存储失败保留文字和之前已保存值，不阻止编辑或发送。
 
-CodeMirror 自带的运行时样式不在应用 CSS layer 中。`ui/editor` 仅使用其官方 scoped theme adapter 覆盖编辑器默认的光标、焦点、字体和选区，值均来自应用语义 token；工作台与编辑器容器布局仍在原有 layers 中。不全局覆盖第三方样式，也不增加 `!important`。
+样式由官方 scoped theme adapter 消费应用语义 token，不手工改 contentDOM，不添加 `!important`。依赖边界见[供应链台账](../governance/dependency-supply-chain.md#markdown-原位编辑desktop-polish-b3-d012026-10-23-更新)。组件与引擎测试覆盖完成语法即时排版、原文 toggle 不重挂、selection/scroll/history、IME、精确提交、late draft identity、附件和危险内容惰性；jsdom 不代表真实输入法或 native 布局资格化。
 
-依赖与审计边界见[依赖供应链台账](../governance/dependency-supply-chain.md#markdown-原文编辑desktop-polish-b32026-10-21)。组件/引擎测试覆盖格式与 undo/redo、preview toggle 不重挂、真实危险 Markdown 不产生 active HTML/remote image、IME 建议、原文发送、晚 identity/异步发送/附件和存储失败。jsdom 不具备实际排版及原生输入法，840×560、WebKit Cmd-Z / Shift-Cmd-Z 与真实中文输入法仍由后续 native 验收记录。
+官方依据：[Decorations](https://codemirror.net/examples/decoration/)、[StateField / direct decorations](https://codemirror.net/docs/ref/#view.EditorView.decorations)、[Markdown 配置](https://codemirror.net/docs/ref/#lang-markdown.markdown)、[Lezer Markdown](https://code.haverbeke.berlin/lezer/markdown)，访问日期 2026-10-23。
 
 设计依据：[Apple Layout](https://developer.apple.com/design/human-interface-guidelines/layout)、[Typography](https://developer.apple.com/design/human-interface-guidelines/typography)、[Feedback](https://developer.apple.com/design/human-interface-guidelines/feedback)、[W3C Menu Button](https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/) 与 [VS Code Markdown](https://code.visualstudio.com/docs/languages/markdown)，访问日期 2026-10-21。完整原生基线和研究证据保留在本次 repo-local 调研目录，不能代替最终源的真实体验验收。

@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LocaleProvider } from "./i18n";
 import { Message, type MessageView } from "./Message";
@@ -12,6 +12,25 @@ function content(message: MessageView) {
 }
 
 describe("message disclosures", () => {
+  it("keeps branching in a keyboard-accessible message menu and returns focus after dismissing", async () => {
+    const user = userEvent.setup();
+    const onFork = vi.fn();
+    render(<LocaleProvider><Message message={{ key: "answer", kind: "assistant", label: "Sigil", text: "The result" }} onFork={onFork} /></LocaleProvider>);
+    expect(screen.queryByRole("button", { name: "Branch from here" })).toBeNull();
+    await user.tab();
+    const trigger = screen.getByRole("button", { name: "Message actions" });
+    expect(document.activeElement).toBe(trigger);
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menu", { name: "Message actions" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Branch from here" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(onFork).not.toHaveBeenCalled();
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(onFork).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it("keeps a typed approval receipt compact with its audit detail available", async () => {
     const user = userEvent.setup();
     const message: MessageView = { key: "approval-1", kind: "notice", label: "Approved",

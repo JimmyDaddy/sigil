@@ -54,35 +54,25 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 | React / Vite / TypeScript | `19.2.7` / `8.1.6` / `5.9.3` | `apps/desktop` renderer | 构建stateful desktop view；production CSP禁止remote content、object/frame/base/form，renderer只调用窄Tauri IPC bridge | React MIT；Vite MIT；TypeScript Apache-2.0；各官方项目维护 | npm lockfile提交；Node 24 + pnpm 10.30.3在CI执行typecheck/test/build与high-severity audit |
 | `react-markdown` / `remark-gfm` / `rehype-highlight` | `10.1.0` / `4.0.1` / `7.0.2`；ESM runtime | `apps/desktop/SafeMarkdown` | CommonMark+GFM AST渲染与随bundle的37种常用language grammar；不开启raw-HTML插件、remote grammar、auto-detect、remote CSS/font/script或image element | MIT；remarkjs/react-markdown、remarkjs/remark-gfm、rehypejs/rehype-highlight | 第三方API只存在于Sigil-owned renderer；URL二次限制为credential-free HTTPS，其他scheme降级为文本；lockfile、high-severity audit与bundle差异是R48.2 gate |
 | `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
-| Vitest / Testing Library / jsdom | `4.1.11` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
+| Vitest / Testing Library / jsdom | `4.1.12` / `16.3.2` / `29.1.1`，dev-only | `apps/desktop` tests | 验证coarse workspace action、loading/empty/error和后续daily-loop interaction；真实server contract仍由Rust production-binary tests独立证明 | MIT；各上游项目维护 | test adapter不替代native integration evidence；无runtime bundle依赖 |
 
-### Markdown 原文编辑（Desktop polish B3，2026-10-21）
+### Markdown 原位编辑（Desktop polish B3 / D01，2026-10-23 更新）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
-| `@codemirror/state` / `@codemirror/view` / `@codemirror/commands` | `6.7.6` / `6.43.15` / `6.11.1`，精确 npm 版本 | `apps/desktop/src/ui/editor` | 一个 Markdown source document、DOM editor 与 transaction history；格式操作和撤销/重做使用同一引擎，不复制隐藏 textarea、DOM/HTML 正文或第二条发送路径 | MIT；CodeMirror 官方维护，npm registry 与随包 LICENSE | 不启用远程服务、语言服务器、第三方插件或额外 IPC；预览仍复用现有 SafeMarkdown。lockfile 同步，升级时重跑 source/IME/history、草稿与安全预览回归、high-severity audit、构建体积比较和 native WebView 键盘验收 |
+| `@codemirror/state` / `@codemirror/view` / `@codemirror/commands` | `6.7.6` / `6.43.15` / `6.11.1`，精确 npm 版本 | `apps/desktop/src/ui/editor` | 唯一 Markdown document、EditorView 与 transaction history；格式操作、Cmd/Ctrl-Z 和重做使用同一引擎，不增加历史记录面板 | MIT；CodeMirror 官方 npm 包与随包 LICENSE | 本组三个已有直接依赖不升级，不复制 textarea、HTML 正文或第二条发送路径 |
+| `@codemirror/lang-markdown` / `@codemirror/language` | `6.5.2` / `6.13.1`，精确 npm 版本 | `apps/desktop/src/ui/editor/liveMarkdown` | 官方 CommonMark/GFM 增量语法树，通过 StateField 与 mark/line/replace decorations 原位呈现完成节点；language 原为传递依赖，本次显式消费 | MIT；CodeMirror 官方 npm 包，上游已迁至 code.haverbeke.berlin | 禁用 Markdown Enter/Backspace keymap、HTML tag completion 与 URL paste conversion，保留已有发送和精确字符串语义，不装配远程服务或协同编辑 |
+| `@lezer/common` / `@lezer/markdown` | `1.5.4` / `1.8.1`，精确 npm 版本 | 同上 | 消费 SyntaxNode 与官方 GFM 扩展，按真实节点边界排版，不自写正则 Markdown parser | MIT；Lezer 官方 npm 包与随包 LICENSE | common 从既有传递 1.5.3 更新至补丁版并统一图；传递的 HTML/CSS/JavaScript parser、autocomplete/lint 均来自 lang-markdown 官方依赖图，不启用网络或代码执行能力 |
 
-直接依赖只加入这三个包，既有直接依赖与 package manager 声明不升级。`commands` 的官方传递图包含
-`@codemirror/language` 等本地模块；本批不装配语法语言服务、自动补全或协同编辑。编辑器历史属于同一
-mounted input 的内存状态，durable 草稿仍是原有受限 localStorage Markdown string；不持久化 editor state
-或 rendered HTML。预览可关闭，切换和展开不重建 editor。组合输入先于建议、发送和格式快捷键；浏览器
-完成 IME，host 不把 composing Enter 解释为发送。
+用户最新选择为单一区域即时排版，已移除 Composer 的 SafeMarkdown 第二 pane。装饰不改 document；“显示 Markdown 原文”只重配同一 EditorView，不转换 HTML，不重挂 editor，不重置 selection、scroll、undo 或草稿。光标进入局部节点时揭示标记，在闭合节点末端时立即排版；工具菜单聚焦期间仍保留所选语法，避免 blur 隐藏文本导致浏览器选区塌缩。组合输入期间只映射原装饰，浏览器提交后再排版。
 
-官方依据：[CodeMirror system guide](https://codemirror.net/docs/guide/)、
-[transaction API](https://codemirror.net/docs/ref/#state.Transaction)、
-[history](https://codemirror.net/docs/ref/#commands.history)、
-[compositionStarted](https://codemirror.net/docs/ref/#view.EditorView.compositionStarted)，访问日期 2026-10-21。
-2026-10-21 本批 `pnpm audit --audit-level high` 实际发现既有 dev/build graph 的 8 条 high
-advisory（`js-yaml`、`undici`、`brace-expansion`、`source-map-js`、`vite`）；未出现 CodeMirror 路径。
-原始审计结果保留在本轮 repo-local validation ledger，不能把本批记录解释为 high-severity audit 已通过。
-既有版本修复由独立供应链批次处理，本 editor 批次不顺带升级其他直接依赖。
+链接只作为可编辑文本排版，不生成 anchor/href；HTML 和图片保持惰性原文，不加载外部资源，不增加网络、filesystem 或 IPC 能力。CodeMirror 自有无 src 的 widget buffer 不属于用户图片入口。编辑器状态不持久化，durable 草稿仍为原有 localStorage Markdown string。展开为自适应内容高度及视口上限，不挤占全部会话区域。
 
-本批最终 production 主 chunk 为 `1,339.25 kB / 402.85 kB gzip`，相对 B2 的
-`1,062.65 kB / 312.70 kB gzip` 增加 `276.60 kB / 90.15 kB gzip`；已有 500 kB chunk
-warning 仍存在，未调高 warning 阈值。未增加网络资源、remote language service 或运行进程。
+官方依据：[Decorations](https://codemirror.net/examples/decoration/)、[StateField / direct decorations](https://codemirror.net/docs/ref/#view.EditorView.decorations)、[Markdown 配置](https://codemirror.net/docs/ref/#lang-markdown.markdown)、[上游搬迁说明](https://github.com/codemirror/lang-markdown/blob/main/README.md)、[Lezer Markdown](https://code.haverbeke.berlin/lezer/markdown)、[compositionStarted](https://codemirror.net/docs/ref/#view.EditorView.compositionStarted)，访问日期 2026-10-23。网页直读的 403、官方搜索索引与实际官方 npm 类型/source 核对分别留痕，不声称完整读过未取回的页面。
 
-本地引擎测试证明 transaction 与 keyboard binding 行为；macOS WebKit 的真实 Cmd-Z / Shift-Cmd-Z、
-中文 IME 和 840×560 窗口仍需最终候选的 native 资格化，不能由 jsdom 的空布局测量替代。
+本次 production build 主 JS 为 1,636,184 bytes；对照本轮 21:57 已有 dist 的 1,397,395 bytes，增加 238,789 bytes。固定 gzip level 9 比较为 413,181 → 499,870 bytes；Vite 自身口径当前为 508.43 kB gzip，两种压缩口径不混用。旧 dist 不是在相同树新建的反事实构建，因此差值包含并行 UI 调整和安全补丁，不专归新增语法依赖。原有 500 kB chunk 提示阈值未改；bundle manifest 与完整日志留在 repo-local 证据目录。
+
+2026-10-21 引入原文编辑时曾实际发现既有 dev/build graph 的 8 条 high，后由下节补丁处理；当时 B3 主 chunk 为 1339.25 kB / 402.85 kB gzip，相对 B2 增加 276.60 kB / 90.15 kB gzip，属于历史快照，不代表本次候选。2026-10-23 新 audit 又发现既有 DOMPurify/Vitest 的 5 条 advisory，原始失败、最小修复、复扫与本次 bundle 实测另行保留，不能沿用旧日期零告警结论。
 
 ### Conversation Markdown、数学公式与图表（RFC-0054）
 
@@ -91,7 +81,7 @@ warning 仍存在，未调高 warning 阈值。未增加网络资源、remote la
 | `remark-math` / `rehype-katex` / `katex` | `6.0.0` / `7.0.1` / `0.18.2` | `apps/desktop/src/markdown` | 从 Markdown AST 识别 inline/display math，并由 KaTeX 生成本地 HTML/MathML；不开启 `trust`，不允许任意 URL、HTML 或远程字体 | MIT；remarkjs/remark-math、remarkjs/remark-math、KaTeX/KaTeX | 数学渲染独立 lazy chunk；失败局部降级为原始 LaTeX，TUI 不新增数学引擎而显示保真 source |
 | `rehype-sanitize` | `6.0.0` | `apps/desktop/src/markdown` | 在 React 渲染前执行显式 Markdown schema，只允许 Sigil 使用的结构、class 与受限属性；不启用 `rehype-raw` | MIT；rehypejs/rehype-sanitize | 模型、历史 session 和 provider 内容均视为不可信；raw HTML、script、iframe、object 与不受控 URL 不进入 DOM |
 | `mermaid` | `11.16.1` | `apps/desktop/src/markdown` | 只对闭合、限额且通过 admission 的 `mermaid` fence 按需渲染；`securityLevel=strict`、`htmlLabels=false`，不加载 CDN、remote theme、image 或 plugin | MIT；mermaid-js/mermaid | 不进入主 renderer chunk；交互 directive、外链、HTML 标签、control character 与过大输入先拒绝，失败保留源码；TUI 永不执行 Mermaid |
-| `dompurify` | `3.4.16` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
+| `dompurify` | `3.4.17` | `apps/desktop/src/markdown` | 对 Mermaid 生成的 SVG 做第二道净化，删除 script、foreignObject、image、event handler、remote href 与逃逸 CSS，并验证预期 root id | MPL-2.0 OR Apache-2.0；cure53/DOMPurify | 只净化本地 Mermaid 结果，不接受通用 HTML；SVG 不能触发网络、导航或事件回调 |
 
 RFC-0054 没有为 TUI 引入第三方 Markdown、数学或图表 runtime，也不启动额外进程、不创建临时文件、
 不访问网络。Desktop CSP 保持 `default-src 'self'`、`img-src 'self' data:`、`object-src 'none'`、
@@ -151,7 +141,7 @@ reopen仍由launcher/server重新验证。`tempfile`的`rustix`许可已由R44.2
 
 B3 的 28 条既有告警（8 high / 12 moderate / 8 low）已在独立批次处理，不通过提高审计阈值或忽略 advisory 消除。更新后的完整依赖图与 production-only 图均已实际运行 `pnpm audit --json` 并得到零告警；这是该日期的依赖数据库结果，不代表未来不会出现新的 advisory。
 
-| 范围 | 当前锁定 | 原因及边界 |
+| 范围 | 2026-10-21 锁定 | 原因及边界 |
 | --- | --- | --- |
 | 直接 renderer | `dompurify 3.4.16`、`katex 0.18.2` | 修复 SVG 净化与 KaTeX trust 相关 advisory，保留原 sanitize、URL、CSP 与本地资源策略 |
 | 开发构建 | `vite 8.1.6`、`vitest 4.1.11` | 同代补丁，保留现有构建与测试接口，不升级大版本 |
@@ -164,6 +154,14 @@ brace 补丁从 npm 官方精确 tarball 生成前核对 registry SHA-512 integr
 
 官方依据：[KaTeX trust advisory](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7)、[js-yaml merge budget](https://github.com/nodeca/js-yaml/security/advisories/GHSA-2883-xcg3-v3hh)、[undici WebSocket](https://github.com/nodejs/undici/security/advisories/GHSA-3wwx-pv8p-q78v)、[brace-expansion bounds](https://github.com/juliangruber/brace-expansion/security/advisories/GHSA-q2hr-2g5m-vwhr)。advisory 与版本是本轮访问时状态；审计原文、补丁来源与失败历史在 repo-local 验证台账保留。
 
+
+### Desktop 最小安全补丁（2026-10-23）
+
+本轮完整图 audit 报告 1 critical、1 high、2 moderate、1 low，均在既有依赖路径，不位于新 CodeMirror/Lezer 图。保留首次失败后，仅将 `dompurify 3.4.16` 精确更新为 `3.4.17`、`vitest 4.1.11` 精确更新为 `4.1.12`，关联 Vitest 内部包随官方闭包更新；不提高阈值、不忽略 advisory、不扫描式升级其他依赖。安装使用 `--ignore-scripts`。
+
+DOMPurify [3.4.17 release](https://github.com/cure53/DOMPurify/releases/tag/3.4.17)与 [SAFE_FOR_TEMPLATES](https://github.com/cure53/DOMPurify/security/advisories/GHSA-cg2g-xh64-v4q7)、[IN_PLACE](https://github.com/cure53/DOMPurify/security/advisories/GHSA-mrv2-3pqr-j5jr)、[SMIL](https://github.com/cure53/DOMPurify/security/advisories/GHSA-c6gr-qvv4-5v3f)及 registry 精确修复版本一致。Vitest [4.1.12 release](https://github.com/vitest-dev/vitest/releases/tag/v4.1.12)、[manual mock registration](https://github.com/vitest-dev/vitest/security/advisories/GHSA-qxg6-89mg-rqv8)与 [Windows traversal](https://github.com/vitest-dev/vitest/security/advisories/GHSA-xp26-3454-mjgp)均给出 >=4.1.12。新 Vitest 支持现有 Node 22.22.0、Vite 8.1.6、@types/node 26.1.1 的既有范围；DOMPurify 没有 React peer 变化，许可继续 MPL-2.0 OR Apache-2.0，Vitest 为 MIT。
+
+复扫、Markdown 安全语料、编辑器测试与构建体积另保留实际回执；安装成功不能代替最终候选 gate 或 native 资格化。
 
 ## Desktop launcher supervisor（RFC-0044 R44.1）
 

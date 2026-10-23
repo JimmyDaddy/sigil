@@ -1,7 +1,7 @@
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import type { ImageReference } from "./types";
-import { Button } from "./ui/primitives";
+import { Button, Menu, MenuItem } from "./ui/primitives";
 import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { MessageContent } from "./MessageContent";
@@ -38,11 +38,12 @@ export function Message({
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
   readonly onReadContent?: ReadMessageContent;
   readonly onReadImage?: (displayId: string, attachmentId: string) => Promise<string>;
-  readonly onFork?: () => void;
+  readonly onFork?: (trigger: HTMLButtonElement | null) => void;
 }) {
   const { t } = useLocale();
   const streaming = message.status === "streaming";
   const [disclosureOpen, setDisclosureOpen] = useState(false);
+  const messageActionTriggerRef = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
     setDisclosureOpen(false);
   }, [message.key]);
@@ -90,7 +91,11 @@ export function Message({
       data-display-id={displayId}
     >
       <header><span>{message.label}</span>{message.status ? <small>{message.status}</small> : null}
-        {onFork === undefined ? null : <Button type="button" variant="quiet" onClick={onFork}>{t("forkFromMessage")}</Button>}
+        {onFork === undefined ? null : <div className="message-actions">
+          <Menu label={<Icon name="more" />} accessibleLabel={t("messageActions")} triggerRef={messageActionTriggerRef}>
+            <MenuItem onSelect={() => onFork(messageActionTriggerRef.current)}>{t("forkFromMessage")}</MenuItem>
+          </Menu>
+        </div>}
       </header>
       {message.skill !== undefined ? (
         <div

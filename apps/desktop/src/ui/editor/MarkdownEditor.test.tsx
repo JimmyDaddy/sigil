@@ -1,5 +1,5 @@
 import { createRef, useState } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import { editorText, editorView, setEditorText } from "../../test/editor";
@@ -64,5 +64,21 @@ describe("Markdown editor transactions", () => {
     act(() => handle.current?.format("bold"));
     expect(editorText(editor)).toBe("/");
     fireEvent.compositionEnd(editor);
+  });
+  it("lets composition commit before applying inline presentation without replacing the editor", async () => {
+    const onKeyDown = vi.fn();
+    const { editor, handle } = fixture("", onKeyDown);
+    const view = editorView(editor);
+    fireEvent.compositionStart(editor);
+    setEditorText(editor, "**中文**");
+    expect(editor.querySelector("strong")).toBeNull();
+    fireEvent.keyDown(editor, { key: "Enter", code: "Enter", isComposing: true, keyCode: 229 });
+    expect(onKeyDown.mock.calls.at(-1)?.[1]).toBe(true);
+    act(() => handle.current?.format("italic"));
+    expect(editorText(editor)).toBe("**中文**");
+    fireEvent.compositionEnd(editor);
+    await waitFor(() => expect(editor.querySelector("strong")?.textContent).toBe("中文"));
+    expect(editorView(editor)).toBe(view);
+    expect(view.state.selection.main.head).toBe(6);
   });
 });

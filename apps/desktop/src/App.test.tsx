@@ -5212,8 +5212,9 @@ describe("desktop workspace and history shell", () => {
       }
     });
     typeEditorText(composer, "Preserve this draft");
-    const reviewTrigger = await screen.findByRole("button", { name: "Open verification: passed" });
+    const reviewTrigger = screen.getByRole("button", { name: "Conversation tools" });
     await user.click(reviewTrigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Open verification: passed" }));
     const inspector = screen.getByRole("dialog", { name: "Verification" });
     expect(inspector.id).toBe("verification-inspector");
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close Verification" }));
@@ -5228,6 +5229,31 @@ describe("desktop workspace and history shell", () => {
 
     cleanup();
     restoreMedia();
+  });
+
+  it("opens advanced conversation tools by keyboard and returns to the shared trigger without replacing the draft", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    })} />);
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const input = await readyComposer();
+    typeEditorText(input, "Keep this draft");
+    expect(screen.queryByRole("button", { name: "Open skills and agents" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open recovery controls" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Intent Stack" })).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Conversation tools" });
+    trigger.focus();
+    await user.keyboard("{ArrowDown}");
+    const menu = screen.getByRole("menu", { name: "Conversation tools" });
+    expect(document.activeElement).toBe(within(menu).getByRole("menuitem", { name: "Open skills and agents" }));
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Recovery" })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(input);
+    expect(editorText(input)).toBe("Keep this draft");
   });
 
   it("shows durable child Agent activity and confirms its result returned to the conversation", async () => {
@@ -5263,8 +5289,9 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("0 conversations");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const activityTrigger = await screen.findByRole("button", { name: "Open Agent activity" });
-    await user.click(activityTrigger);
+    expect(screen.queryByRole("button", { name: "Open Agent activity" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Open Agent activity" }));
 
     expect(screen.getByRole("dialog", { name: "Agent activity" })).toBeTruthy();
     expect(screen.getByText("Repository review")).toBeTruthy();
@@ -6877,7 +6904,7 @@ describe("desktop workspace and history shell", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "Permission mode" }), "read-only");
     await user.selectOptions(screen.getByRole("combobox", { name: "Reasoning effort" }), "high");
     typeEditorText(composer, "Inspect safely");
-    expect(editorView(composer).scrollDOM.style.maxHeight).toBe("176px");
+    expect(editorView(composer).scrollDOM.style.maxHeight).toBe("min(176px, 24dvh)");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(selectedMode).toBe("read-only");
     expect(selectedEffort).toBe("high");
@@ -7175,10 +7202,19 @@ describe("desktop workspace and history shell", () => {
     fireEvent.wheel(timeline);
     timeline.scrollTop = 100;
     fireEvent.scroll(timeline);
+    expect(screen.getByRole("button", { name: "Back to latest" })).toBeTruthy();
     act(() => {
       eventListener?.({ ...base, sequence: 3, runSequence: "3", provisionalId: "live-scroll-answer", kind: "assistant_message", text: "Second" });
     });
     expect(timeline.scrollTop).toBe(100);
+    const latest = screen.getByRole("button", { name: "New updates" });
+    latest.focus();
+    await user.keyboard("{Enter}");
+    expect(timeline.scrollTop).toBe(600);
+    expect(document.activeElement).toBe(timeline);
+    expect(screen.queryByRole("button", { name: "New updates" })).toBeNull();
+    act(() => eventListener?.({ ...base, sequence: 4, runSequence: "4", provisionalId: "live-scroll-next", kind: "assistant_message", text: "Third" }));
+    expect(timeline.scrollTop).toBe(600);
   });
 
   it("preserves the long-response viewport when focus moves outside the timeline", async () => {
@@ -7243,6 +7279,43 @@ describe("desktop workspace and history shell", () => {
     fireEvent.scroll(timeline);
     fireEvent.focus(composer);
     await waitFor(() => expect(timeline.scrollTop).toBe(360));
+  });
+
+  it("clears a new-content hint when switching conversations and ignores the previous conversation's late content", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let created = 0;
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
+      createSession: async () => {
+        created += 1;
+        return { id: `jump-session-${created}`, durableSessionId: `jump-durable-${created}`, label: `Jump conversation ${created}`, runCount: 0 };
+      },
+    })} />);
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await readyComposer();
+    const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 600 },
+    });
+    const base = { workspaceId: workspace.id, sessionId: "jump-session-1", runId: "jump-run", replayable: false };
+    act(() => eventListener?.({ ...base, sequence: 1, runSequence: "1", provisionalId: "jump-first", kind: "assistant_message", text: "First result" }));
+    fireEvent.wheel(timeline);
+    timeline.scrollTop = 100;
+    fireEvent.scroll(timeline);
+    act(() => eventListener?.({ ...base, sequence: 2, runSequence: "2", provisionalId: "jump-second", kind: "assistant_message", text: "Later result" }));
+    expect(screen.getByRole("button", { name: "New updates" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByRole("heading", { name: "Jump conversation 2" });
+    await readyComposer();
+    expect(screen.queryByRole("button", { name: "New updates" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to latest" })).toBeNull();
+    act(() => eventListener?.({ ...base, sequence: 3, runSequence: "3", provisionalId: "jump-late", kind: "assistant_message", text: "Old late result" }));
+    expect(screen.queryByText("Old late result")).toBeNull();
+    expect(screen.queryByRole("button", { name: "New updates" })).toBeNull();
   });
 
   it("preserves the visible reader offset when canonical refresh reconciles a live item", async () => {
@@ -7597,7 +7670,8 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(eventListener).toBeDefined());
     await readyComposer();
-    await user.click(await screen.findByRole("button", { name: "Open verification: passed" }));
+    await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Open verification: passed" }));
     expect(screen.getByRole("dialog", { name: "Verification" })).toBeTruthy();
     act(() => {
       eventListener?.({
@@ -7643,9 +7717,12 @@ describe("desktop workspace and history shell", () => {
     await user.click(within(approvalDock).getByText("Why this decision is required"));
     expect(within(approvalDock).getByText("workspace code execution requires an explicit decision")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Open verification: passed" }).hasAttribute("disabled")).toBe(true);
     const approvalReview = within(approvalDock).getByRole("region", { name: "Requested action" });
     expect(document.activeElement).toBe(approvalReview);
+    await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+    expect(screen.getByRole("menuitem", { name: "Open verification: passed" }).getAttribute("aria-disabled")).toBe("true");
+    await user.keyboard("{Escape}");
+    approvalReview.focus();
     fireEvent.keyDown(approvalReview, { key: "Escape" });
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Allow for session" }));
@@ -9141,7 +9218,8 @@ it("branches beside a finalized message without checkpoints, keeps failed select
   await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   typeEditorText(await readyComposer(), "Keep this parent draft");
-  await user.click(await screen.findByRole("button", { name: "Branch from here" }));
+  await user.click(await screen.findByRole("button", { name: "Message actions" }));
+  await user.click(screen.getByRole("menuitem", { name: "Branch from here" }));
   const preview = screen.getByRole("dialog", { name: "Branch from here" });
   expect(within(preview).getByText("Source conversation: New conversation")).toBeTruthy();
   expect(within(preview).getByText("Loading…")).toBeTruthy();
@@ -9191,7 +9269,8 @@ it("does not navigate a late message fork over a newly selected conversation", a
   })} />);
   await user.click(await screen.findByRole("button", { name: /^Parent/ }));
   await readyComposer();
-  await user.click(await screen.findByRole("button", { name: "Branch from here" }));
+  await user.click(await screen.findByRole("button", { name: "Message actions" }));
+  await user.click(screen.getByRole("menuitem", { name: "Branch from here" }));
   const preview = screen.getByRole("dialog", { name: "Branch from here" });
   await user.click(await within(preview).findByRole("button", { name: "Fork conversation" }));
   await waitFor(() => expect(commandConversationRecovery).toHaveBeenCalledOnce());
@@ -9224,7 +9303,8 @@ it("reviews outdated recorded lines through the normal run and preserves comment
   await screen.findByText("0 conversations");
   await user.click(screen.getByRole("button", { name: "New conversation" }));
   await readyComposer();
-  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+  await user.click(screen.getByRole("menuitem", { name: "Open recovery controls" }));
   const checkpointsHeading = await screen.findByRole("heading", { name: "Checkpoints" });
   const branchHeading = screen.getByRole("heading", { name: "Branches and conclusions" });
   expect(checkpointsHeading.compareDocumentPosition(branchHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -9266,7 +9346,8 @@ it("imports a branch conclusion during an active run without replacing the draft
   await waitFor(() => expect(editorText(composer)).toBe(""));
   typeEditorText(composer, "An unsent follow-up draft");
   sourcesAvailable = true;
-  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+  await user.click(screen.getByRole("menuitem", { name: "Open recovery controls" }));
   await screen.findByRole("option", { name: "Other investigation" });
   await user.selectOptions(screen.getByRole("combobox", { name: "Source conversation" }), JSON.stringify(["investigation.jsonl", "source-durable"]));
   await user.click(await screen.findByRole("button", { name: "Import conclusion" }));
@@ -9302,7 +9383,8 @@ it.each(["accepted", "failed"] as const)("queues review comments while running a
   await screen.findByRole("button", { name: "Cancel work" });
   await waitFor(() => expect(editorText(composer)).toBe(""));
   typeEditorText(composer, "Keep my unsent draft");
-  await user.click(screen.getByRole("button", { name: "Open recovery controls" }));
+  await user.click(screen.getByRole("button", { name: "Conversation tools" }));
+  await user.click(screen.getByRole("menuitem", { name: "Open recovery controls" }));
   await user.click(await screen.findByRole("button", { name: "Review changes" }));
   const drawer = screen.getByRole("dialog", { name: "Review changes" });
   await user.click(await within(drawer).findByRole("button", { name: "Select src/a.ts new line 1" }));

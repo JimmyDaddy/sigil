@@ -106,7 +106,7 @@ import {
 } from "./features/conversation/taskProjection";
 import { modelOptionIsSelectable } from "./types";
 import { Icon } from "./ui/icons";
-import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
+import { Button, Drawer, IconButton, Menu, MenuItem, Tooltip } from "./ui/primitives";
 import { LoadingState, useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
@@ -207,6 +207,8 @@ export function ConversationPanel({
   const [agentActivityError, setAgentActivityError] = useState(false);
   const [agentActivityReload, setAgentActivityReload] = useState(0);
   const [agentActivityOpen, setAgentActivityOpen] = useState(false);
+  const [agentActivityFromTools, setAgentActivityFromTools] = useState(false);
+  const [verificationFromTools, setVerificationFromTools] = useState(false);
   const [runContext, setRunContext] = useState<RunContext>();
   const [runContextBusy, setRunContextBusy] = useState(false);
   const [runContextError, setRunContextError] = useState(false);
@@ -337,10 +339,14 @@ export function ConversationPanel({
   useEffect(() => () => { changeReviewEpoch.current += 1; }, [workspaceId, session.id]);
   const [messageFork, setMessageFork] = useState<{ sequence: string; point?: ConversationForkPointView; loading: boolean; error?: boolean }>();
   const messageForkEpoch = useRef(0);
+  const messageForkTriggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => () => { messageForkEpoch.current += 1; }, [workspaceId, session.id]);
   const timelineRef = useRef<HTMLDivElement>(null);
   const transcriptStartRef = useRef<HTMLDivElement>(null);
   const timelinePinnedToEnd = useRef(true);
+  const timelineScope = `${workspaceId}\u0000${session.id}`;
+  const [timelineNavigation, setTimelineNavigation] = useState({ scope: timelineScope, away: false, hasNew: false });
+  const timelineTail = useRef<{ scope: string; key: string; text: string; status?: string } | undefined>(undefined);
   const pendingTimelineAnchor = useRef<TimelineAnchor | undefined>(undefined);
   const trustedTimelineViewport = useRef<TimelineViewportSnapshot>({
     pinnedToEnd: true,
@@ -356,10 +362,8 @@ export function ConversationPanel({
   const composerRef = useRef<HTMLElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const taskIntegrationTriggerRef = useRef<HTMLButtonElement>(null);
-  const intentStackTriggerRef = useRef<HTMLButtonElement>(null);
+  const conversationToolsTriggerRef = useRef<HTMLButtonElement>(null);
   const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
-  const extensionTriggerRef = useRef<HTMLButtonElement>(null);
-  const recoveryTriggerRef = useRef<HTMLButtonElement>(null);
   const canonicalRefreshAttempts = useRef(0);
   const canonicalRefreshRunId = useRef<string | undefined>(undefined);
   const olderHistoryQuery = useRef<AbortController | undefined>(undefined);
@@ -394,11 +398,15 @@ export function ConversationPanel({
     if (timeline.hidden) return;
     const pinnedToEnd = isTimelineNearEnd(timeline);
     timelinePinnedToEnd.current = pinnedToEnd;
+    setTimelineNavigation((current) => current.scope === timelineScope
+      && current.away === !pinnedToEnd && (!pinnedToEnd || !current.hasNew)
+      ? current : { scope: timelineScope, away: !pinnedToEnd,
+        hasNew: !pinnedToEnd && current.scope === timelineScope && current.hasNew });
     trustedTimelineViewport.current = {
       pinnedToEnd,
       scrollTop: timeline.scrollTop,
     };
-  }, []);
+  }, [timelineScope]);
   const restoreTrustedTimelineViewport = useCallback(() => {
     const timeline = timelineRef.current;
     if (timeline === null || timeline.hidden) return;
@@ -596,6 +604,7 @@ export function ConversationPanel({
     setChangeReviewDraft(emptyChangeReviewDraft());
     changeReviewEpoch.current += 1;
     setMessageFork(undefined);
+    messageForkTriggerRef.current = null;
     messageForkEpoch.current += 1;
     conversationQueueEpoch.current += 1;
     queuedSuccessorExpected.current = false;
@@ -614,6 +623,8 @@ export function ConversationPanel({
     initialContinuitySessionId.current = undefined;
     initialLoadReportedSessionId.current = undefined;
     timelinePinnedToEnd.current = true;
+    setTimelineNavigation({ scope: timelineScope, away: false, hasNew: false });
+    timelineTail.current = undefined;
     trustedTimelineViewport.current = { pinnedToEnd: true, scrollTop: 0 };
     timelineUserScrollIntentUntil.current = 0;
     if (timelineViewportRestoreFrame.current !== undefined) {
@@ -1533,6 +1544,32 @@ export function ConversationPanel({
   useEffect(() => {
     if (pendingApproval?.approval !== undefined) setInspectorOpen(false);
   }, [pendingApproval?.approval]);
+
+  useLayoutEffect(() => {
+    const scope = `${workspaceId}\u0000${session.id}`;
+    const tail = rows[rows.length - 1];
+    const previous = timelineTail.current;
+    timelineTail.current = tail === undefined ? undefined : { scope, key: tail.key, text: tail.text, status: tail.status };
+    if (!timelinePinnedToEnd.current && tail !== undefined && previous?.scope === scope
+      && (resolveConversationIdentity(continuityState, previous.key) !== tail.key
+        || previous.text !== tail.text || previous.status !== tail.status)) {
+      setTimelineNavigation((current) => current.scope === scope && current.hasNew
+        ? current : { scope, away: true, hasNew: true });
+    }
+  }, [continuityState, rows, session.id, workspaceId]);
+
+  const returnToLatest = () => {
+    const timeline = timelineRef.current;
+    if (timeline === null || timeline.hidden) return;
+    if (timelineViewportRestoreFrame.current !== undefined) {
+      window.cancelAnimationFrame(timelineViewportRestoreFrame.current);
+      timelineViewportRestoreFrame.current = undefined;
+    }
+    timelineViewportRestoring.current = false;
+    timeline.scrollTop = timeline.scrollHeight;
+    rememberTrustedTimelineViewport(timeline);
+    timeline.focus({ preventScroll: true });
+  };
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
@@ -2516,71 +2553,27 @@ export function ConversationPanel({
             labelOverride={normalContinuityLabel}
             t={t}
           />
-          {agentActivity !== undefined && agentActivity.totalAgents > 0 ? (
-            <Tooltip label={t("openAgentActivity")}>
-              <IconButton
-                className={`agent-activity-trigger${agentActivity.activeAgents > 0 ? " is-active" : ""}`}
-                ref={agentActivityTriggerRef}
-                type="button"
-                aria-label={t("openAgentActivity")}
-                aria-controls="agent-activity-inspector"
-                aria-expanded={agentActivityOpen}
-                icon={(
-                  <>
-                    <Icon name="agents" />
-                    <span className="agent-activity-trigger-count" aria-hidden="true">
-                      {agentActivity.activeAgents > 0 ? agentActivity.activeAgents : agentActivity.totalAgents}
-                    </span>
-                  </>
-                )}
-                onClick={() => setAgentActivityOpen(true)}
-              />
-            </Tooltip>
-          ) : null}
-          <Tooltip label={t("openExtensions")}>
-            <IconButton
-              className="extension-trigger"
-              ref={extensionTriggerRef}
-              type="button"
-              aria-label={t("openExtensions")}
-              aria-controls="extension-workbench"
-              aria-expanded={extensionWorkbenchOpen}
-              icon={<Icon name="extensions" />}
-              onClick={() => {
-                setExtensionWorkbenchKind("skills");
-                setExtensionWorkbenchQuery("");
-                setExtensionWorkbenchOpen(true);
-              }}
-            />
-          </Tooltip>
-          <Tooltip label={t("openConversationRecovery")}>
-            <IconButton
-              className="recovery-trigger"
-              ref={recoveryTriggerRef}
-              type="button"
-              aria-label={t("openConversationRecovery")}
-              aria-controls="conversation-recovery-inspector"
-              aria-expanded={conversationRecoveryOpen}
-              icon={<Icon name="history" />}
-              onClick={() => {
-                setConversationRecoveryOpen(true);
-                if (conversationRecovery === undefined) refreshConversationRecovery();
-              }}
-            />
-          </Tooltip>
-          <Tooltip label={t("openIntentStack")}>
-            <IconButton
-              className="intent-stack-trigger"
-              ref={intentStackTriggerRef}
-              type="button"
-              aria-label={t("openIntentStack")}
-              aria-controls="intent-stack-inspector"
-              aria-expanded={intentStackOpen}
-              icon={<Icon name="stack" />}
-              onClick={openIntentStack}
-            />
-          </Tooltip>
-          {verification !== undefined ? (
+          <Menu label={t("conversationTools")} accessibleLabel={t("conversationTools")} triggerRef={conversationToolsTriggerRef}>
+            <MenuItem onSelect={() => {
+              setExtensionWorkbenchKind("skills");
+              setExtensionWorkbenchQuery("");
+              setExtensionWorkbenchOpen(true);
+            }}>{t("openExtensions")}</MenuItem>
+            <MenuItem onSelect={() => {
+              setConversationRecoveryOpen(true);
+              if (conversationRecovery === undefined) refreshConversationRecovery();
+            }}>{t("openConversationRecovery")}</MenuItem>
+            <MenuItem onSelect={openIntentStack}>{t("openIntentStack")}</MenuItem>
+            {agentActivity !== undefined && agentActivity.totalAgents > 0 && agentActivity.activeAgents === 0 ? <MenuItem onSelect={() => {
+              setAgentActivityFromTools(true);
+              setAgentActivityOpen(true);
+            }}>{t("openAgentActivity")}</MenuItem> : null}
+            {verification?.verdict !== "passed" ? null : <MenuItem disabled={pendingApproval?.approval !== undefined} onSelect={() => {
+              setVerificationFromTools(true);
+              setInspectorOpen(true);
+            }}>{t("openVerification", { status: verification.status })}</MenuItem>}
+          </Menu>
+          {verification !== undefined && verification.verdict !== "passed" ? (
             <Tooltip
               label={pendingApproval?.approval !== undefined
                 ? t("resolveApprovalFirst")
@@ -2594,8 +2587,8 @@ export function ConversationPanel({
                 aria-controls="verification-inspector"
                 aria-expanded={inspectorOpen}
                 disabled={pendingApproval?.approval !== undefined}
-                icon={<Icon name={verification.verdict === "passed" ? "check" : "warning"} />}
-                onClick={() => setInspectorOpen(true)}
+                icon={<Icon name="warning" />}
+                onClick={() => { setVerificationFromTools(false); setInspectorOpen(true); }}
               />
             </Tooltip>
           ) : null}
@@ -2607,9 +2600,12 @@ export function ConversationPanel({
       {agentActivity !== undefined && agentActivity.activeAgents > 0 ? (
         <Button
           className="agent-activity-strip sg-bounded-content"
+          ref={agentActivityTriggerRef}
           variant="quiet"
           type="button"
-          onClick={() => setAgentActivityOpen(true)}
+          aria-controls="agent-activity-inspector"
+          aria-expanded={agentActivityOpen}
+          onClick={() => { setAgentActivityFromTools(false); setAgentActivityOpen(true); }}
         >
           <span className="agent-activity-pulse" aria-hidden="true" />
           <strong>{t("agentActiveCount", { count: agentActivity.activeAgents })}</strong>
@@ -2880,6 +2876,7 @@ export function ConversationPanel({
         role="log"
         aria-live="off"
         aria-label={t("conversationTimeline")}
+        tabIndex={-1}
         onPointerDownCapture={markTimelineScrollIntent}
         onWheel={markTimelineScrollIntent}
         onTouchStart={markTimelineScrollIntent}
@@ -2980,7 +2977,10 @@ export function ConversationPanel({
               onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent}
               onReadImage={(displayId, attachmentId) => bridge.messageImage(workspaceId, session.id, displayId, attachmentId)}
               onFork={(row.kind === "user" || row.kind === "assistant") && row.sourceStreamSequence !== undefined
-                ? () => void previewMessageFork(row.sourceStreamSequence!) : undefined} />)
+                ? (trigger) => {
+                  messageForkTriggerRef.current = trigger;
+                  void previewMessageFork(row.sourceStreamSequence!);
+                } : undefined} />)
         ) : null}
         {terminalTasks.filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
           <TerminalTaskCard
@@ -2991,6 +2991,12 @@ export function ConversationPanel({
           />
         ))}
       </div>
+
+      {timelineNavigation.scope === timelineScope && timelineNavigation.away && !timelineHidden ? <div className="timeline-navigation" aria-live="polite" aria-atomic="true">
+        <Button type="button" variant="quiet" leadingIcon={<Icon name="chevron-down" />} onClick={returnToLatest}>
+          {t(timelineNavigation.hasNew ? "timelineNewUpdates" : "timelineBackToLatest")}
+        </Button>
+      </div> : null}
 
       {approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live" ? (
         <ApprovalDock
@@ -3104,7 +3110,7 @@ export function ConversationPanel({
           open={inspectorOpen}
           title={t("verification")}
           description={t("verificationDetail")}
-          returnFocusRef={inspectorTriggerRef}
+          returnFocusRef={verificationFromTools || verification?.verdict === "passed" ? conversationToolsTriggerRef : inspectorTriggerRef}
           onOpenChange={setInspectorOpen}
         >
           <VerificationInspector verification={verification} busy={verificationBusy} runActive={active || submissionBlocked} onRerun={() => void rerunVerification()} />
@@ -3134,7 +3140,7 @@ export function ConversationPanel({
         open={intentStackOpen}
         title={t("intentStack")}
         description={t("intentStackDetail")}
-        returnFocusRef={intentStackTriggerRef}
+        returnFocusRef={conversationToolsTriggerRef}
         onOpenChange={setIntentStackOpen}
       >
         <IntentStackInspector
@@ -3154,6 +3160,7 @@ export function ConversationPanel({
         open={messageFork !== undefined}
         title={t("forkFromMessage")}
         description={t("forkPreviewDetail")}
+        returnFocusRef={messageForkTriggerRef}
         onOpenChange={(open) => { if (!open) { messageForkEpoch.current += 1; setMessageFork(undefined); } }}
       >
         <p>{t("forkSource", { name: session.label ?? session.id })}</p>
@@ -3171,7 +3178,7 @@ export function ConversationPanel({
       </Drawer>
 
       <Drawer id="change-review-inspector" open={changeReviewOpen} title={t("reviewChanges")}
-        description={t("changeReviewDetail")} returnFocusRef={recoveryTriggerRef} onOpenChange={setChangeReviewOpen}>
+        description={t("changeReviewDetail")} returnFocusRef={conversationToolsTriggerRef} onOpenChange={setChangeReviewOpen}>
         {changeReview?.loading ? <p role="status">{t("loading")}</p> : changeReview?.review === undefined ? <>
           <p role="alert">{t("reviewUnavailable")}</p>
           {changeReview === undefined ? null : <Button type="button" onClick={() => void previewChangeReview(changeReview.checkpoint)}>{t("retry")}</Button>}
@@ -3189,7 +3196,7 @@ export function ConversationPanel({
         open={conversationRecoveryOpen}
         title={t("conversationRecovery")}
         description={t("conversationRecoveryDetail")}
-        returnFocusRef={recoveryTriggerRef}
+        returnFocusRef={conversationToolsTriggerRef}
         onOpenChange={setConversationRecoveryOpen}
       >
         <ConversationRecoveryPanel
@@ -3216,7 +3223,7 @@ export function ConversationPanel({
         open={agentActivityOpen}
         title={t("agentActivity")}
         description={t("agentActivityDetail")}
-        returnFocusRef={agentActivityTriggerRef}
+        returnFocusRef={agentActivityFromTools || agentActivity?.activeAgents === 0 ? conversationToolsTriggerRef : agentActivityTriggerRef}
         onOpenChange={setAgentActivityOpen}
       >
         <AgentActivityPanel
@@ -3231,7 +3238,7 @@ export function ConversationPanel({
         open={extensionWorkbenchOpen}
         title={t("extensions")}
         description={t("extensionsDetail")}
-        returnFocusRef={extensionTriggerRef}
+        returnFocusRef={conversationToolsTriggerRef}
         onOpenChange={setExtensionWorkbenchOpen}
       >
         {runContext === undefined ? (
