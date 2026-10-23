@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import type { ThemePreference } from "../../appearance/contract";
@@ -16,7 +16,7 @@ import type {
 } from "../../types";
 import { Icon } from "../../ui/icons";
 import { useNotifications } from "../../ui/feedback";
-import { Button, Checkbox, Select, TextField } from "../../ui/primitives";
+import { Button, Checkbox, Menu, MenuItem, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ProviderSetup } from "./ProviderSetup";
 import { ProviderCredentialForm } from "./ProviderCredentialForm";
@@ -25,14 +25,12 @@ import { McpImportCard } from "./McpImportCard";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
 import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
 import { type ContextWindowDrafts, useContextWindowDrafts } from "./useContextWindowDrafts";
+import { settingsCategories, type SettingsCategory, type SettingsNavigationState } from "./settingsNavigation";
 import {
   connectionMatchesProvider,
   providerConnectionDetail,
   providerConnectionLabel,
 } from "./providerPresentation";
-
-const settingsCategories = ["connections", "preferences", "extensions", "support"] as const;
-type SettingsCategory = typeof settingsCategories[number];
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -61,6 +59,8 @@ export function SettingsPage({
   onDefaultModelChange,
   onBack,
   onOpenSupport,
+  navigationState,
+  onNavigationStateChange,
 }: {
   readonly bridge: DesktopBridge;
   readonly supportAvailable: boolean;
@@ -77,6 +77,8 @@ export function SettingsPage({
   readonly onDefaultModelChange: (modelRef?: ProviderModelRef) => void;
   readonly onBack: () => void;
   readonly onOpenSupport: () => void;
+  readonly navigationState?: SettingsNavigationState;
+  readonly onNavigationStateChange?: (state: SettingsNavigationState) => void;
 }) {
   const appearance = useAppearance();
   const { locale, setLocale, t } = useLocale();
@@ -85,9 +87,26 @@ export function SettingsPage({
   const [providerSetupOpen, setProviderSetupOpen] = useState(false);
   const [credentialConnectionId, setCredentialConnectionId] = useState<string>();
   const credentialTrigger = useRef<HTMLButtonElement | null>(null);
-  const [category, setCategory] = useState<SettingsCategory>("connections");
+  const [category, setCategory] = useState<SettingsCategory>(navigationState?.category ?? "connections");
   const categoryId = useId();
   const sectionsRef = useRef<HTMLDivElement>(null);
+  const navigationSnapshot = useRef<SettingsNavigationState>(navigationState ?? { category: "connections", scrollTop: 0 });
+  const rememberNavigation = (next: Partial<SettingsNavigationState>) => {
+    navigationSnapshot.current = { ...navigationSnapshot.current, ...next };
+    onNavigationStateChange?.(navigationSnapshot.current);
+  };
+  useLayoutEffect(() => {
+    const sections = sectionsRef.current;
+    if (sections === null || navigationState === undefined) return;
+    sections.scrollTop = navigationState.scrollTop;
+    if (navigationState.focusKey === undefined) return;
+    const entry = [...(sections.parentElement?.querySelectorAll<HTMLElement>("[data-settings-focus-key]") ?? [])]
+      .find((candidate) => candidate.dataset.settingsFocusKey === navigationState.focusKey);
+    const trigger = entry?.matches("button") ? entry : entry?.querySelector<HTMLButtonElement>("button");
+    if (trigger?.isConnected && !trigger.matches(":disabled") && trigger.closest("[hidden], [inert]") === null) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, []);
   const providerSetupTrigger = useRef<HTMLButtonElement | null>(null);
   const categoryPanel = (value: SettingsCategory) => ({
     id: `${categoryId}-${value}-panel`,
@@ -281,22 +300,27 @@ export function SettingsPage({
       navigation={{ label: t("backToConversation"), onBack }}
     >
 
-      <div className="settings-workbench">
+      <div className="settings-workbench" onFocusCapture={(event) => {
+        const focusKey = (event.target as HTMLElement).closest<HTMLElement>("[data-settings-focus-key]")?.dataset.settingsFocusKey;
+        if (focusKey !== undefined) rememberNavigation({ focusKey });
+      }}>
         <nav className="settings-navigation" aria-label={t("settingsCategories")}>
           {settingsCategories.map((value) => (
             <Button key={value} id={`${categoryId}-${value}`} type="button"
+              data-settings-focus-key={`category:${value}`}
               variant={category === value ? "secondary" : "quiet"}
               aria-current={category === value ? "page" : undefined}
               aria-controls={`${categoryId}-${value}-panel`}
               onClick={() => {
                 setCategory(value);
+                rememberNavigation({ category: value, scrollTop: 0, focusKey: `category:${value}` });
                 if (sectionsRef.current !== null) sectionsRef.current.scrollTop = 0;
               }}>
               {t(`settingsCategory_${value}`)}
             </Button>
           ))}
         </nav>
-        <div className="settings-sections" ref={sectionsRef}>
+        <div className="settings-sections" ref={sectionsRef} onScroll={(event) => rememberNavigation({ scrollTop: event.currentTarget.scrollTop })}>
         <div className="settings-category" {...categoryPanel("connections")}>
           <section className="settings-section settings-provider" aria-labelledby="settings-provider">
             <div className="settings-section-heading">
@@ -335,36 +359,39 @@ export function SettingsPage({
                                 {" · "}
                                 {connection.endpointDisplay}
                               </span>
-                              <span className="provider-connection-model">
-                                {isDefaultConnection && effectiveDefaultModel !== undefined
-                                  ? t("providerConnectionDefaultModel", {
-                                    model: modelRefLabel(effectiveDefaultModel),
-                                  })
-                                  : t("providerConnectionNotDefault")}
-                              </span>
+                              {!isDefaultConnection || effectiveDefaultModel === undefined ? null : <span className="provider-connection-model">
+                                {t("providerConnectionDefaultModel", { model: modelRefLabel(effectiveDefaultModel) })}
+                              </span>}
                             </div>
                             <div className="provider-connection-actions">
                             <small data-readiness={connection.readiness}>
                               {providerReadinessLabel(connection.readiness, t)}
                             </small>
-                            {connection.readiness === "needs_credential" || connection.readiness === "credential_unavailable" ? (
-                              <Button type="button" variant="quiet" aria-label={t("updateConnectionCredential", { name: connection.label.trim() })}
-                                aria-expanded={credentialConnectionId === connection.id}
-                                onClick={(event) => {
-                                  credentialTrigger.current = event.currentTarget;
+                            {connection.credentialSource !== "none" && connection.readiness !== "invalid" ? (
+                              <CredentialAction connectionId={connection.id} connectionLabel={connection.label.trim()}
+                                credentialSource={connection.credentialSource} readiness={connection.readiness}
+                                expanded={credentialConnectionId === connection.id}
+                                onOpen={(trigger) => {
+                                  credentialTrigger.current = trigger;
                                   setCredentialConnectionId(connection.id);
                                   setProviderSetupOpen(false);
-                                }}>{t("updateCredential")}</Button>
+                                }} />
                             ) : connection.readiness === "invalid" ? (
-                              <Button type="button" variant="quiet" onClick={onOpenSupport}>{t("checkConnectionConfiguration")}</Button>
+                              <Button type="button" variant="quiet" data-settings-focus-key={`connection-support:${connection.id}`} onClick={() => {
+                                rememberNavigation({ focusKey: `connection-support:${connection.id}` });
+                                onOpenSupport();
+                              }}>{t("checkConnectionConfiguration")}</Button>
                             ) : null}
                             </div>
                             {credentialConnectionId === connection.id && workspaceId !== undefined ? (
                               <ProviderCredentialForm key={connection.id} bridge={bridge} workspaceId={workspaceId}
-                                connectionId={connection.id} connectionLabel={connection.label.trim()} active={category === "connections"}
-                                onCancel={closeCredentialForm} onOpenSupport={onOpenSupport} onSaved={(result) => {
+                                connectionId={connection.id} connectionLabel={connection.label.trim()} credentialSource={connection.credentialSource} active={category === "connections"}
+                                onCancel={closeCredentialForm} onOpenSupport={() => {
+                                  rememberNavigation({ focusKey: `credential:${connection.id}` });
+                                  onOpenSupport();
+                                }} onSaved={(result) => {
                                   if (!onProviderInventoryChange(result.inventory)) return;
-                                  setCredentialConnectionId(undefined);
+                                  closeCredentialForm();
                                   void onProviderConfigurationReloaded(workspaceId).then(() => {
                                     if (isWorkspaceActive()) notify({ tone: result.saveWarning ? "warning" : "success", message: t(result.saveWarning ? "defaultModelSaveWarning" : "credentialUpdated") });
                                   }).catch(() => {
@@ -410,7 +437,10 @@ export function SettingsPage({
                         >
                           {providerReloading ? t("loading") : t("recheckProviderConfig")}
                         </Button>
-                        <Button type="button" variant="quiet" onClick={onOpenSupport}>
+                        <Button type="button" variant="quiet" data-settings-focus-key="configuration-support" onClick={() => {
+                          rememberNavigation({ focusKey: "configuration-support" });
+                          onOpenSupport();
+                        }}>
                           {t("openSupport")}
                         </Button>
                       </div>
@@ -658,7 +688,11 @@ export function SettingsPage({
                 variant="secondary"
                 leadingIcon={<Icon name="shield" />}
                 disabled={!supportAvailable}
-                onClick={onOpenSupport}
+                data-settings-focus-key="open-support"
+                onClick={() => {
+                  rememberNavigation({ focusKey: "open-support" });
+                  onOpenSupport();
+                }}
               >
                 {t("openSupport")}
               </Button>
@@ -669,6 +703,35 @@ export function SettingsPage({
       </div>
     </ApplicationPage>
   );
+}
+
+function CredentialAction({ connectionId, connectionLabel, credentialSource, readiness, expanded, onOpen }: {
+  readonly connectionId: string;
+  readonly connectionLabel: string;
+  readonly credentialSource: ProviderCredentialSource;
+  readonly readiness: ProviderConnectionReadiness;
+  readonly expanded: boolean;
+  readonly onOpen: (trigger: HTMLButtonElement) => void;
+}) {
+  const { t } = useLocale();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const label = t(credentialSource === "environment" ? "useStoredCredential" : "updateCredential");
+  const open = () => {
+    const target = trigger.current;
+    if (target?.isConnected && target.closest("[hidden], [inert]") === null) onOpen(target);
+  };
+  return <span className="provider-credential-action" data-settings-focus-key={`credential:${connectionId}`}>
+    {readiness === "needs_credential" || readiness === "credential_unavailable" ? (
+      <Button ref={trigger} type="button" variant="quiet"
+        aria-label={t("updateConnectionCredential", { name: connectionLabel })}
+        aria-expanded={expanded} onClick={open}>{label}</Button>
+    ) : <Menu label={<Icon name="more" />} accessibleLabel={t("manageProviderConnection", { name: connectionLabel })} triggerRef={trigger}>
+      <MenuItem onSelect={() => {
+        // Let the menu finish returning focus before the inline editor takes it.
+        window.requestAnimationFrame(() => window.requestAnimationFrame(open));
+      }}>{label}</MenuItem>
+    </Menu>}
+  </span>;
 }
 
 function providerReadinessLabel(

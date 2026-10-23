@@ -22,7 +22,7 @@ const invalid: CatalogEntry = { ...ready, sessionRef: "invalid.jsonl", sessionId
 function setup(blocked: boolean | ReadonlySet<string> = false, entries = [ready, invalid]) {
   let currentEntries = entries;
   let applied = false;
-  const catalog = vi.fn(async (): Promise<CatalogPage> => ({ workspaceId: "library", generation: 7,
+  const catalog = vi.fn(async (_workspaceId: string, _request?: Parameters<DesktopBridge["catalog"]>[1]): Promise<CatalogPage> => ({ workspaceId: "library", generation: 7,
     reconciledAtUnixMs: 1_784_419_200_000, degradedSourceCount: 1, identityConflictCount: 0,
     truncatedSourceCount: 0, entries: applied ? [] : currentEntries }));
   const planSessionCatalogBatch = vi.fn(async (_workspace: string, request: Parameters<DesktopBridge["planSessionCatalogBatch"]>[1]): Promise<SessionCatalogBatchPlan> => ({
@@ -103,19 +103,62 @@ describe("conversation library contextual batch actions", () => {
   });
 });
 
-it("puts existing filters before records without a duplicate page introduction and keeps all filter actions", async () => {
+it("keeps secondary filters collapsed and retains every filter action without a duplicate introduction", async () => {
   const user = userEvent.setup();
   const { catalog } = setup();
   await screen.findByRole("button", { name: "Ready conversation" });
   expect(screen.getAllByRole("heading", { name: "Conversation Library" })).toHaveLength(1);
   expect(document.querySelector(".application-page-intro")).toBeNull();
   expect(document.querySelector(".application-page-content")?.firstElementChild).toHaveProperty("className", "library-command-surface");
+  expect(screen.queryByRole("textbox", { name: "Provider" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Filters" }));
   await user.type(screen.getByRole("textbox", { name: "Provider" }), "exact-provider");
   await user.selectOptions(screen.getByRole("combobox", { name: "Source state" }), "invalid");
   await user.click(screen.getByRole("checkbox", { name: "Pinned only" }));
   await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "needle");
   await user.click(screen.getByRole("button", { name: "Search" }));
   await waitFor(() => expect(catalog).toHaveBeenLastCalledWith("library", expect.objectContaining({ query: "needle", provider: "exact-provider", state: "invalid", pinned: true })));
+  const applied = screen.getByLabelText("Applied filters");
+  expect(applied.textContent).toContain("Search: needle");
+  expect(applied.textContent).toContain("Provider: exact-provider");
+  expect(applied.textContent).toContain("Invalid");
+  expect(applied.textContent).toContain("Pinned only");
+  await user.click(screen.getByRole("button", { name: "Clear filters" }));
+  await waitFor(() => expect(catalog).toHaveBeenLastCalledWith("library", expect.objectContaining({ query: undefined, provider: undefined, state: undefined, pinned: undefined })));
+  expect(screen.queryByLabelText("Applied filters")).toBeNull();
+  expect((screen.getByRole("textbox", { name: "Search conversations" }) as HTMLInputElement).value).toBe("");
+});
+
+it("clears a zero-result filter in place and returns to the search field", async () => {
+  const user = userEvent.setup();
+  const { catalog } = setup();
+  await screen.findByRole("button", { name: "Ready conversation" });
+  catalog.mockImplementation(async (_workspaceId, request) => ({ workspaceId: "library", generation: 7,
+    reconciledAtUnixMs: 1_784_419_200_000, degradedSourceCount: 0, identityConflictCount: 0,
+    truncatedSourceCount: 0, entries: request?.provider === undefined ? [ready] : [] }));
+  await user.click(screen.getByRole("button", { name: "Filters" }));
+  await user.type(screen.getByRole("textbox", { name: "Provider" }), "unmatched-provider");
+  await screen.findByText("No conversations match these filters.");
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("textbox", { name: "Provider" })).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "1 active filter" }));
+  expect(screen.getAllByRole("button", { name: "Clear filters" })).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Clear filters" }));
+  await screen.findByRole("button", { name: "Ready conversation" });
+  expect(screen.queryByText("No conversations match these filters.")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search conversations" }));
+});
+
+it("distinguishes an empty library from an applied filter with no matches", async () => {
+  const user = userEvent.setup();
+  const { catalog } = setup(false, []);
+  await screen.findByText("No conversations yet.");
+  await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "draft-only");
+  expect(screen.getByText("No conversations yet.")).toBeTruthy();
+  expect(catalog).toHaveBeenCalledOnce();
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  expect(await screen.findByText("No conversations match these filters.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Clear filters" })).toBeTruthy();
 });
 
 
@@ -165,6 +208,7 @@ describe("batch review target and action clarity", () => {
     await user.click(await screen.findByRole("checkbox", { name: "Select conversation: Ready conversation" }));
     await user.click(screen.getByRole("button", { name: "Delete ready (1)" }));
     replaceEntries([{ ...ready, title: "Renamed after preview", sessionId: "changed-session" }]);
+    await user.click(screen.getByRole("button", { name: "Filters" }));
     await user.type(screen.getByRole("textbox", { name: "Provider" }), "changed");
     await screen.findByRole("button", { name: "Renamed after preview" });
     resolvePlan({ planId: "frozen-plan", action: "delete_sessions", generation: 7, total: 1,

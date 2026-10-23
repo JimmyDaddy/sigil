@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
-import type { SessionSummary, SupportDoctorReport, SupportStatus } from "../../types";
+import type { SessionSummary, SupportDoctorReport } from "../../types";
 import { LoadingState, useNotifications } from "../../ui/feedback";
-import { Icon, type IconName } from "../../ui/icons";
+import { Icon } from "../../ui/icons";
 import { Button, Collapsible } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ControlLogRecoveryCard } from "./ControlLogRecoveryCard";
@@ -121,21 +121,20 @@ export function SupportPage({
         </section>
       ) : report === undefined ? null : (
         <>
-          <section className={`support-summary support-${report.summary.overallStatus}`} aria-labelledby="support-summary-title">
-            <div className="support-summary-lead">
-              <span className="support-summary-icon" aria-hidden="true">
-                <Icon name={statusIcon(report.summary.overallStatus)} />
-              </span>
-              <div>
-                <h2 id="support-summary-title">{statusTitle(report.summary.overallStatus, t)}</h2>
-              </div>
-            </div>
+          <section className="support-summary" aria-labelledby="support-summary-title">
+            <h2 id="support-summary-title">{t("diagnosticReportTitle")}</h2>
+            <span className="support-report-time">{new Date(report.generatedAtUnixMs).toLocaleString()}</span>
+          </section>
+
+          <Collapsible className="support-technical-details" label={t("diagnosticTechnicalDetails")}
+            summary={t("diagnosticObservationCount", { count: report.checks.length })}>
+            <p className="support-observation-note">{t("diagnosticObservationDetail")}</p>
+            <p className="support-observation-note">{t("diagnosticStatus")}: <code>{report.summary.overallStatus}</code></p>
             <dl className="support-counts">
               <div><dt>{t("diagnosticOk")}</dt><dd>{report.summary.ok}</dd></div>
               <div><dt>{t("diagnosticWarnings")}</dt><dd>{report.summary.warn}</dd></div>
               <div><dt>{t("diagnosticErrors")}</dt><dd>{report.summary.error}</dd></div>
             </dl>
-          </section>
 
           <section className="support-checks" aria-labelledby="support-checks-title">
             <div className="support-section-heading">
@@ -143,20 +142,14 @@ export function SupportPage({
                 <h2 id="support-checks-title">{t("diagnosticChecks")}</h2>
                 <p>{t("diagnosticChecksDetail")}</p>
               </div>
-              <span>{new Date(report.generatedAtUnixMs).toLocaleString()}</span>
             </div>
-            <SupportChecks checks={report.checks.filter((check) => check.status !== "ok")
-              .sort((a, b) => (a.status === "error" ? 0 : 1) - (b.status === "error" ? 0 : 1))} />
-            {report.checks.some((check) => check.status === "ok") ? (
-              <Collapsible label={t("diagnosticPassedChecks", { count: report.checks.filter((check) => check.status === "ok").length })}>
-                <SupportChecks checks={report.checks.filter((check) => check.status === "ok")} />
-              </Collapsible>
-            ) : null}
+            <SupportChecks checks={report.checks} />
           </section>
 
-          <Collapsible className="support-checks" label={t("cutoverAuthority")} summary={t("cutoverBlockerCount", { count: report.cutover.blockers.length })}>
+          <section className="support-checks" aria-labelledby="support-authority-title">
             <div className="support-section-heading">
               <div>
+                <h2 id="support-authority-title">{t("cutoverAuthority")}</h2>
                 <p>{t("diagnosticBuild", { version: report.version, target: report.target })}</p>
                 <p>{t("cutoverStatus", { epoch: report.cutover.epoch, authority: report.cutover.authority })}</p>
               </div>
@@ -173,25 +166,29 @@ export function SupportPage({
                 ))}
               </ul>
             )}
+          </section>
           </Collapsible>
 
           <section className="support-privacy" aria-labelledby="support-privacy-title">
             <div className="support-section-heading">
               <div>
                 <h2 id="support-privacy-title">{t("supportPrivacy")}</h2>
-                <p>{t("supportPrivacyDetail")}</p>
               </div>
               <Icon name="lock" />
             </div>
+            {report.privacy.reviewBeforeSharing ? <p className="support-review-note">{t("reviewSupportBeforeSharing")}</p> : null}
+            <Collapsible label={t("supportPrivacyScope")}>
+            <p>{t("supportPrivacyDetail")}</p>
             <div className="support-privacy-columns">
               <div><h3>{t("supportIncludes")}</h3><ul>{report.privacy.included.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
               <div><h3>{t("supportExcludes")}</h3><ul>{report.privacy.excluded.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
             </div>
-            {[...report.privacy.included, ...report.privacy.excluded].some((item) => privacyCategories.has(item)) ? <Collapsible label={t("supportPrivacyIdentifiers")}>
+            {[...report.privacy.included, ...report.privacy.excluded].some((item) => privacyCategories.has(item)) ? <div className="support-privacy-identifiers">
+              <h3>{t("supportPrivacyIdentifiers")}</h3>
               <p><strong>{t("supportIncludes")}: </strong><code>{report.privacy.included.join(", ")}</code></p>
               <p><strong>{t("supportExcludes")}: </strong><code>{report.privacy.excluded.join(", ")}</code></p>
-            </Collapsible> : null}
-            {report.privacy.reviewBeforeSharing ? <p className="support-review-note">{t("reviewSupportBeforeSharing")}</p> : null}
+            </div> : null}
+            </Collapsible>
           </section>
         </>
       )}
@@ -202,27 +199,14 @@ export function SupportPage({
   );
 }
 
-function statusIcon(status: SupportStatus): IconName {
-  return status === "ok" ? "check" : "warning";
-}
-
-function statusTitle(status: SupportStatus, t: ReturnType<typeof useLocale>["t"]): string {
-  switch (status) {
-    case "ok": return t("diagnosticHealthy");
-    case "warn": return t("diagnosticNeedsAttention");
-    case "error": return t("diagnosticHasErrors");
-  }
-}
-
 function SupportChecks({ checks }: { readonly checks: SupportDoctorReport["checks"] }) {
   const { t } = useLocale();
   if (checks.length === 0) return null;
   return <ul className="support-check-list">
     {checks.map((check, index) => (
-      <li key={`${check.name}-${index}`} className={`support-check support-${check.status}`}>
-        <span className="support-check-icon" aria-hidden="true"><Icon name={statusIcon(check.status)} /></span>
+      <li key={`${check.name}-${index}`} className="support-check">
         <div>
-          <div className="support-check-title"><strong>{check.name}</strong><span>{statusTitle(check.status, t)}</span></div>
+          <div className="support-check-title"><strong>{check.name}</strong><span aria-label={t("diagnosticStatus")}>{check.status}</span></div>
           <p>{check.summary}</p>
           {check.remediation === undefined ? null : <small>{check.remediation}</small>}
         </div>

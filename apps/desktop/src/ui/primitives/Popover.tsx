@@ -200,11 +200,17 @@ export function Popover({
   );
 }
 
-export function Menu({ label, accessibleLabel, children }: { readonly label: ReactNode; readonly accessibleLabel?: string; readonly children: ReactNode }) {
+export function Menu({ label, accessibleLabel, children, triggerRef: externalTriggerRef }: {
+  readonly label: ReactNode;
+  readonly accessibleLabel?: string;
+  readonly children: ReactNode;
+  readonly triggerRef?: RefObject<HTMLButtonElement | null>;
+}) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const menuLabel = accessibleLabel ?? (typeof label === "string" ? label : undefined);
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const localTriggerRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = externalTriggerRef ?? localTriggerRef;
   const dismiss = () => {
     setOpen(false);
     window.requestAnimationFrame(() => {

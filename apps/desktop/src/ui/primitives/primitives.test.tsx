@@ -172,6 +172,27 @@ describe("Sigil UI primitives", () => {
     expect(document.activeElement?.textContent).toBe("Open");
   });
 
+  it("lets a menu share its actual trigger with a child drawer's focus return", async () => {
+    const user = userEvent.setup();
+    function Fixture() {
+      const trigger = useRef<HTMLButtonElement>(null);
+      const [open, setOpen] = useState(false);
+      return <><Menu label="Conversation tools" triggerRef={trigger}>
+        <MenuItem onSelect={() => setOpen(true)}>Recovery</MenuItem>
+      </Menu><Drawer open={open} title="Recovery" returnFocusRef={trigger} onOpenChange={setOpen}>
+        <button type="button">Preview</button>
+      </Drawer></>;
+    }
+    render(<Fixture />);
+    const trigger = screen.getByRole("button", { name: "Conversation tools" });
+    await user.click(trigger);
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close Recovery" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it("traps modal focus, dismisses with Escape, and restores the trigger", async () => {
     const user = userEvent.setup();
     function Fixture() {

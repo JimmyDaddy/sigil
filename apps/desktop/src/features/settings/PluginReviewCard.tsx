@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
 import type { PluginCatalog, PluginReview } from "../../types";
-import { Button } from "../../ui/primitives";
+import { Button, Collapsible } from "../../ui/primitives";
 
 export function PluginReviewCard({ bridge, workspaceId, sessionId }: {
   readonly bridge: DesktopBridge;
@@ -82,10 +82,15 @@ export function PluginReviewCard({ bridge, workspaceId, sessionId }: {
     }
   };
 
-  if (catalog?.plugins.length === 0 && !error && !saved && !catalog.warningCount) {
+  const discoveryDetails = catalog?.warningCount ? <Collapsible className="plugin-discovery-details" label={t("pluginDiscoveryDetails")}>
+    <p>{t("pluginDiscoveryObservationCount", { count: catalog.warningCount })}</p>
+  </Collapsible> : null;
+
+  if (catalog?.plugins.length === 0 && !error && !saved) {
     return <section className="settings-section settings-extension-empty" aria-label={t("workspacePlugins")}>
       <header><h2>{t("workspacePlugins")}</h2><p>{t("noWorkspacePlugins")}</p></header>
       <Button type="button" variant="quiet" busy={pending} onClick={() => void refresh()}>{t("refreshReview")}</Button>
+      {discoveryDetails}
     </section>;
   }
 
@@ -94,7 +99,7 @@ export function PluginReviewCard({ bridge, workspaceId, sessionId }: {
     <Button type="button" busy={pending} onClick={() => void refresh()}>{t("refreshReview")}</Button>
     {error && <p role="alert">{t("pluginReviewFailed")}</p>}
     {saved && <p role="status">{t("pluginReviewSaved")}</p>}
-    {catalog?.warningCount ? <p>{t("pluginDiscoveryWarnings")} ({catalog.warningCount})</p> : null}
+    {discoveryDetails}
     {catalog?.plugins.length === 0 && <p>{t("noWorkspacePlugins")}</p>}
     {catalog?.plugins.map((plugin) => {
       const cleanup = plugin.processCleanup ?? (plugin.trust === "disabled" ? "unknown" : undefined);

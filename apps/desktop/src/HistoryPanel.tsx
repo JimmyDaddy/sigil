@@ -86,8 +86,7 @@ export function HistoryContent({
   }
   if (state === "idle") return null;
 
-  const hasWarnings = page.degradedSourceCount > 0 || page.identityConflictCount > 0 || page.truncatedSourceCount > 0;
-  const warningCount = page.degradedSourceCount + page.identityConflictCount + page.truncatedSourceCount;
+  const hasDiagnostics = page.degradedSourceCount > 0 || page.identityConflictCount > 0 || page.truncatedSourceCount > 0;
   const groups = groupEntries(page.entries, page.reconciledAtUnixMs);
   return (
     <div className="history-results">
@@ -95,19 +94,18 @@ export function HistoryContent({
         <span>{t("conversationCount", { count: page.entries.length })}</span>
         <span className="history-meta-actions">
           <small>{t("updated", { time: formatTime(page.reconciledAtUnixMs, locale) })}</small>
-          {hasWarnings ? (
+          {hasDiagnostics ? (
             <Popover
               className="catalog-diagnostics"
-              label={<span className="catalog-diagnostics-trigger"><Icon name="warning" /><span>{warningCount}</span></span>}
-              accessibleLabel={t("catalogIssues", { count: warningCount })}
+              label={t("technicalDetailsLabel")}
+              accessibleLabel={t("catalogDiagnostics")}
             >
               <div className="catalog-diagnostics-panel">
                 <strong>{t("catalogDiagnostics")}</strong>
-                <p>{t("catalogAttention")}</p>
                 <ul>
-                  {page.degradedSourceCount > 0 ? <li><span>{t("unavailable")}</span><strong>{page.degradedSourceCount}</strong></li> : null}
-                  {page.identityConflictCount > 0 ? <li><span>{t("changed")}</span><strong>{page.identityConflictCount}</strong></li> : null}
-                  {page.truncatedSourceCount > 0 ? <li><span>{t("tooLarge")}</span><strong>{page.truncatedSourceCount}</strong></li> : null}
+                  {page.degradedSourceCount > 0 ? <li><span>{t("catalogUnavailableSources")}</span><strong>{page.degradedSourceCount}</strong></li> : null}
+                  {page.identityConflictCount > 0 ? <li><span>{t("catalogIdentityConflicts")}</span><strong>{page.identityConflictCount}</strong></li> : null}
+                  {page.truncatedSourceCount > 0 ? <li><span>{t("catalogUnscannedSources")}</span><strong>{page.truncatedSourceCount}</strong></li> : null}
                 </ul>
               </div>
             </Popover>

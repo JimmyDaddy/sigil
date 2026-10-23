@@ -15,7 +15,7 @@ import type {
 import { ErrorCard } from "../../ErrorCard";
 import { LoadingState, PaginationControl, useNotifications } from "../../ui/feedback";
 import { Icon } from "../../ui/icons";
-import { Button, Checkbox, Collapsible, Dialog, Select, TextField } from "../../ui/primitives";
+import { Button, Checkbox, Collapsible, Dialog, Popover, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 
 const EMPTY_PAGE: CatalogPage = {
@@ -60,6 +60,16 @@ export function ConversationLibrary({
   const [plannedEntries, setPlannedEntries] = useState<ReadonlyMap<string, CatalogEntry>>(new Map());
   const [receipt, setReceipt] = useState<SessionCatalogBatchReceipt>();
   const cancelPreviewRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const activeFilterCount = Number(query.trim() !== "") + Number(provider.trim() !== "")
+    + Number(sourceState !== "all") + Number(pinnedOnly);
+  const clearFilters = () => {
+    setQueryDraft("");
+    setQuery("");
+    setProvider("");
+    setSourceState("all");
+    setPinnedOnly(false);
+  };
 
   const request = useCallback((cursor?: string) => ({
     limit: 100,
@@ -182,6 +192,7 @@ export function ConversationLibrary({
       <div className="library-command-surface">
         <form className="library-filter-bar" onSubmit={(event) => { event.preventDefault(); setQuery(queryDraft); }}>
           <TextField
+            ref={searchRef}
             label={t("searchConversations")}
             labelHidden
             placeholder={t("searchConversations")}
@@ -191,28 +202,36 @@ export function ConversationLibrary({
               if (event.currentTarget.value === "") setQuery("");
             }}
           />
-          <TextField
-            label={t("provider")}
-            labelHidden
-            placeholder={t("provider")}
-            value={provider}
-            onChange={(event) => setProvider(event.currentTarget.value)}
-          />
-          <Select
-            label={t("sourceState")}
-            labelHidden
-            value={sourceState}
-            onChange={(event) => setSourceState(event.currentTarget.value as CatalogSourceState | "all")}
-          >
-            <option value="all">{t("allStates")}</option>
-            <option value="ready">{t("ready")}</option>
-            <option value="invalid">{t("invalid")}</option>
-            <option value="oversized">{t("oversized")}</option>
-            <option value="scan_budget_exceeded">{t("scanLimited")}</option>
-          </Select>
-          <Checkbox label={t("pinnedOnly")} checked={pinnedOnly} onChange={(event) => setPinnedOnly(event.currentTarget.checked)} />
           <Button type="submit" leadingIcon={<Icon name="search" />}>{t("search")}</Button>
+          <Popover className="library-filter-popover"
+            accessibleLabel={activeFilterCount === 0 ? t("filters") : activeFilterCount === 1 ? t("activeFilter") : t("activeFilters", { count: activeFilterCount })}
+            label={<span className="library-filter-trigger"><Icon name="filter" />{t("filters")}{activeFilterCount === 0 ? null : <span>{activeFilterCount}</span>}</span>}
+          >
+            <div className="library-filter-panel">
+              <TextField label={t("provider")} placeholder={t("provider")}
+                value={provider} onChange={(event) => setProvider(event.currentTarget.value)} />
+              <Select label={t("sourceState")} value={sourceState}
+                onChange={(event) => setSourceState(event.currentTarget.value as CatalogSourceState | "all")}>
+                <option value="all">{t("allStates")}</option>
+                <option value="ready">{t("ready")}</option>
+                <option value="invalid">{t("invalid")}</option>
+                <option value="oversized">{t("oversized")}</option>
+                <option value="scan_budget_exceeded">{t("scanLimited")}</option>
+              </Select>
+              <Checkbox label={t("pinnedOnly")} checked={pinnedOnly} onChange={(event) => setPinnedOnly(event.currentTarget.checked)} />
+              <Button type="button" variant="quiet" disabled={activeFilterCount === 0} onClick={clearFilters}>{t("clearFilters")}</Button>
+            </div>
+          </Popover>
         </form>
+        {activeFilterCount === 0 ? null : <div className="library-active-filters">
+          <div className="library-filter-values" aria-label={t("appliedLibraryFilters")}>
+            {query.trim() === "" ? null : <span>{t("search")}: {query.trim()}</span>}
+            {provider.trim() === "" ? null : <span>{t("provider")}: {provider.trim()}</span>}
+            {sourceState === "all" ? null : <span>{stateLabel(sourceState, t)}</span>}
+            {pinnedOnly ? <span>{t("pinnedOnly")}</span> : null}
+          </div>
+          {!loading && !error && page.entries.length === 0 ? null : <Button type="button" variant="quiet" onClick={clearFilters}>{t("clearFilters")}</Button>}
+        </div>}
 
         {selectedEntries.length === 0 ? null : <div className="library-selection-bar" aria-live="polite">
           <span>{t("selectedConversationCount", { count: selectedEntries.length })}</span>
@@ -244,7 +263,13 @@ export function ConversationLibrary({
         {loading ? <LoadingState label={t("loadingConversations")} /> : error ? (
           <ErrorCard title={t("historyUnavailable")} message={t("historyUnavailableDetail")} actionLabel={t("refreshConversations")} onAction={() => void load()} />
         ) : page.entries.length === 0 ? (
-          <div className="library-empty"><p>{t("noLibraryMatch")}</p></div>
+          <div className="library-empty">
+            <p>{t(activeFilterCount > 0 ? "noLibraryMatch" : "noLibraryConversations")}</p>
+            {activeFilterCount === 0 ? null : <Button type="button" variant="secondary" onClick={() => {
+              clearFilters();
+              searchRef.current?.focus();
+            }}>{t("clearFilters")}</Button>}
+          </div>
         ) : (
           <table className="library-table">
             <thead>
@@ -276,7 +301,13 @@ export function ConversationLibrary({
                       {entry.sourceState === "ready" ? (
                         <Button className="library-title-button" variant="quiet" type="button" onClick={() => onOpen(entry)}>{title}</Button>
                       ) : <span>{title}</span>}
-                      <small>{entry.modelName ?? entry.sessionRef}</small>
+                      {entry.modelName === undefined ? null : <small>{entry.modelName}</small>}
+                      <small className="library-compact-meta">
+                        {entry.providerName === undefined ? null : <span>{entry.providerName}</span>}
+                        <span>{t("conversationMessageCount", { count: entry.userMessageCount + entry.assistantMessageCount })}
+                          {" · "}{t("conversationToolResultCount", { count: entry.toolResultCount })}</span>
+                        <span>{formatDate(entry.sourceModifiedAtUnixMs, locale)}</span>
+                      </small>
                     </th>
                     <td>
                       <span className={`library-state state-${entry.sourceState}`}>{stateLabel(entry.sourceState, t)}</span>

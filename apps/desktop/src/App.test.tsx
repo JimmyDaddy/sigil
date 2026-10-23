@@ -1464,6 +1464,55 @@ describe("desktop workspace and history shell", () => {
     expect(editorText(screen.getByLabelText("Message Sigil"))).toBe("Keep this draft");
   });
 
+  it.each([false, true])("reattaches the active conversation after credential rotation without leaving Settings (filtered=%s)", async (filtered) => {
+    const user = userEvent.setup();
+    const entry: CatalogEntry = {
+      sessionRef: "rotation-session.jsonl", sessionId: "rotation-durable", sourceState: "ready",
+      sourceBytes: 128, sourceModifiedAtUnixMs: 1_784_419_100_000,
+      title: "Retained conversation", userMessageCount: 1, assistantMessageCount: 1,
+      toolResultCount: 0, pinned: false,
+    };
+    writeLastSession(workspace.id, { sessionRef: entry.sessionRef, sessionId: entry.sessionId!, label: entry.title });
+    const modelRef = { connectionId: "rotation", modelId: "flash" };
+    const inventory: ProviderConnectionInventory = {
+      configMode: "v2", defaultModel: modelRef, issues: [], connections: [{
+        id: "rotation", label: "Rotation", providerLabel: "Custom", protocolLabel: "Chat Completions",
+        endpointDisplay: "provider.example", credentialSource: "stored", readiness: "ready", defaultModel: modelRef,
+      }],
+    };
+    let attachGeneration = 0;
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async () => ({
+      id: `rotation-http-${++attachGeneration}`, durableSessionId: entry.sessionId, label: entry.title, runCount: 1,
+    }));
+    const catalog = vi.fn<DesktopBridge["catalog"]>(async (_workspace, request) => ({
+      ...emptyCatalog, entries: request.query ? [] : [entry],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog, openSession, providerConnections: async () => inventory,
+      updateProviderConnectionCredential: async () => ({ defaultModel: modelRef, inventory, saveWarning: false }),
+    })} />);
+    setEditorText(await readyComposer(), "Keep the exact conversation draft");
+    if (filtered) {
+      await user.type(screen.getByRole("textbox", { name: "Search conversations" }), "unrelated");
+      await user.click(screen.getByRole("button", { name: "Search" }));
+      await waitFor(() => expect(catalog.mock.calls.some(([, request]) => request.query === "unrelated")).toBe(true));
+    }
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Manage Rotation" }));
+    await user.click(screen.getByRole("menuitem", { name: "Update credential" }));
+    const form = await screen.findByRole("form", { name: "Update credential for Rotation" });
+    await user.type(within(form).getByLabelText("API key"), "fixture-rotated-key");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+    expect(openSession).toHaveBeenLastCalledWith(workspace.id, { sessionRef: entry.sessionRef, sessionId: entry.sessionId, recoveryBinding: undefined });
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connections & models" }).getAttribute("aria-current")).toBe("page");
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    expect(editorText(await readyComposer())).toBe("Keep the exact conversation draft");
+    expect(screen.getByRole("heading", { name: entry.title })).toBeTruthy();
+  });
+
   it("opens explicit provider setup from Settings without an existing conversation", async () => {
     const user = userEvent.setup();
     render(<App bridge={bridgeWith({
@@ -1480,7 +1529,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Add connection" }));
 
     expect(await screen.findByRole("heading", { name: "Add connection" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /DeepSeek/ })).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Add connection" })).getByRole("button", { name: /DeepSeek/ })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("heading", { name: "Add connection" })).toBeNull();
   });
@@ -1605,7 +1654,7 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByRole("heading", { name: "Support & diagnostics" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to settings" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open settings" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Diagnostic report" })).toBeTruthy();
     expect(screen.getByText("Review one setting.")).toBeTruthy();
     expect(screen.getByText("credentials")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Save private report" }));
@@ -1613,6 +1662,8 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText("Support report saved")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back to settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Support" }).getAttribute("aria-current")).toBe("page");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open support and diagnostics" }));
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
   });
@@ -3177,7 +3228,7 @@ describe("desktop workspace and history shell", () => {
       items: [{ sessionRef: entry.sessionRef, sessionId: entry.sessionId }],
     }));
     expect(await screen.findByRole("heading", { name: "Latest batch result" })).toBeTruthy();
-    expect(await screen.findByText("No conversations match these filters.")).toBeTruthy();
+    expect(await screen.findByText("No conversations yet.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await waitFor(() => expect(screen.queryByText("Batch ready session")).toBeNull());
   });
@@ -9571,7 +9622,9 @@ describe("workspace activation persistence", () => {
       })} />);
       await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
       await user.click(screen.getByRole("button", { name: "Beta" }));
-      expect((await screen.findAllByText("Beta is ready, but the recent-workspace list could not be updated.")).length).toBeGreaterThan(0);
+      expect((await screen.findAllByText("Opened Beta. You may need to choose its folder again next time.")).length).toBeGreaterThan(0);
+      expect(document.querySelector(".sg-toast-warning")).toBeNull();
+      expect(document.querySelector(".sg-toast-info")).toBeTruthy();
       expect(screen.getByRole("button", { name: "Switch workspace: Beta" })).toBeTruthy();
       expect((screen.getByRole("button", { name: "Start a conversation" }) as HTMLButtonElement).disabled).toBe(false);
     },
@@ -9586,7 +9639,7 @@ describe("workspace activation persistence", () => {
     await user.click(await screen.findByRole("button", { name: "Switch workspace: Alpha" }));
     await user.click(screen.getByRole("button", { name: "Beta" }));
     expect((await screen.findAllByText("Beta runtime unavailable")).length).toBeGreaterThan(0);
-    expect(screen.queryByText("Beta is ready, but the recent-workspace list could not be updated.")).toBeNull();
+    expect(screen.queryByText("Opened Beta. You may need to choose its folder again next time.")).toBeNull();
   });
 
   it.each(["success", "failure"] as const)("does not let a late picker %s replace a newer open-workspace choice", async (outcome) => {

@@ -120,10 +120,10 @@ describe("desktop UI catalog contract", () => {
     );
 
     expect(screen.queryByText("Some sources need attention")).toBeNull();
-    const disclosure = screen.getByRole("button", { name: "Catalog diagnostics, 4 issues" });
+    const disclosure = screen.getByRole("button", { name: "Conversation list details" });
     fireEvent.click(disclosure);
-    expect(screen.getByRole("dialog", { name: "Catalog diagnostics, 4 issues" })).toBeTruthy();
-    expect(screen.getByText("Too large to inspect")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Conversation list details" })).toBeTruthy();
+    expect(screen.getByText("Sources outside this scan")).toBeTruthy();
   });
 
   it("carries the complete adaptive domain-state evidence matrix", () => {

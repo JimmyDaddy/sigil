@@ -24,11 +24,8 @@
   .history-meta { display: flex; min-height: 26px; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-2); padding: 0 4px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
   .history-meta-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 4px; }
   .history-meta-actions > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .catalog-diagnostics .sg-popover-trigger { min-height: 24px; padding: 2px 5px; border-color: transparent; color: var(--sg-domain-color-on-warning); background: transparent; }
-  .catalog-diagnostics-trigger { display: inline-flex; align-items: center; gap: 3px; }
-  .catalog-diagnostics-trigger .sg-icon { width: 14px; height: 14px; }
+  .catalog-diagnostics .sg-popover-trigger { min-height: 28px; padding: 2px 5px; border-color: transparent; color: var(--sg-sys-color-on-surface-subtle); background: transparent; font-size: 11px; }
   .catalog-diagnostics-panel { display: grid; gap: var(--sg-sys-space-2); }
-  .catalog-diagnostics-panel > p { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 11px; line-height: 1.45; }
   .catalog-diagnostics-panel ul { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
   .catalog-diagnostics-panel li { display: flex; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); color: var(--sg-sys-color-on-surface-variant); font-size: 11px; }
   .history-groups { display: grid; gap: 6px; }

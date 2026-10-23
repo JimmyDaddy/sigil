@@ -25,6 +25,50 @@ it("keeps an empty catalog compact but exposes a refresh failure", async () => {
   expect(region.classList.contains("settings-extension-empty")).toBe(false);
 });
 
+it.each([{ plugins: [] }, { plugins: [plugin] }])("keeps discovery observations in neutral optional details for catalog $plugins", async ({ plugins }) => {
+  const user = userEvent.setup();
+  const commandConversationRecovery = vi.fn();
+  const bridge = { pluginCatalog: async () => ({ plugins, warningCount: 3 }), commandConversationRecovery } as unknown as DesktopBridge;
+  render(<LocaleProvider><PluginReviewCard bridge={bridge} workspaceId="workspace" sessionId="session" /></LocaleProvider>);
+  const observation = await screen.findByText("Plugin discovery observations: 3");
+  const details = observation.closest("details")!;
+  const summary = details.querySelector("summary")!;
+  expect(details.open).toBe(false);
+  expect(summary.textContent).toBe("Technical details");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(commandConversationRecovery).not.toHaveBeenCalled();
+  const region = screen.getByRole("region", { name: "Workspace plugins" });
+  expect(region.classList.contains("settings-extension-empty")).toBe(plugins.length === 0);
+  if (plugins.length === 0) {
+    expect(screen.queryByText(/Review each plugin/)).toBeNull();
+  } else {
+    expect((screen.getByRole("button", { name: "Trust and enable" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/Approval: ask/)).toBeTruthy();
+  }
+  await user.click(summary);
+  expect(details.open).toBe(true);
+  expect(details.textContent).toContain("Plugin discovery observations: 3");
+  expect((screen.getByRole("button", { name: "Refresh source" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("retains discovery observations during a failed refresh and removes them only after a successful refresh", async () => {
+  const user = userEvent.setup();
+  const pluginCatalog = vi.fn().mockResolvedValueOnce({ plugins: [], warningCount: 2 })
+    .mockRejectedValueOnce(new Error("unavailable"))
+    .mockResolvedValueOnce({ plugins: [], warningCount: 0 });
+  const bridge = { pluginCatalog } as unknown as DesktopBridge;
+  render(<LocaleProvider><PluginReviewCard bridge={bridge} workspaceId="workspace" sessionId="session" /></LocaleProvider>);
+  await screen.findByText("Plugin discovery observations: 2");
+  await user.click(screen.getByRole("button", { name: "Refresh source" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("Refresh the declaration and retry");
+  expect(screen.getByText("Plugin discovery observations: 2")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Refresh source" }));
+  await screen.findByText("No workspace plugins were found.");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText("Technical details")).toBeNull();
+  expect(pluginCatalog).toHaveBeenCalledTimes(3);
+});
+
 it("uses the exact displayed declaration and retains ordinary approvals", async () => {
   const user = userEvent.setup();
   const pluginCatalog = vi.fn().mockResolvedValue({ plugins: [plugin], warningCount: 0 });

@@ -11,6 +11,7 @@ import { ConversationLibrary } from "./features/sessions/ConversationLibrary";
 import { findCreatedSessionEntry } from "./features/sessions/createdSessionIdentity";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { useContextWindowDrafts } from "./features/settings/useContextWindowDrafts";
+import { useSettingsNavigation } from "./features/settings/settingsNavigation";
 import { ProviderSetup } from "./features/settings/ProviderSetup";
 import { SupportPage } from "./features/support/SupportPage";
 import { DESKTOP_ROUTE_MAP, useDesktopRouter } from "./features/navigation/useDesktopRouter";
@@ -122,6 +123,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
+  const settingsNavigation = useSettingsNavigation(activeWorkspaceId);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [message, setMessage] = useState(() => t("startingSigil"));
   const [workspaceRecovery, setWorkspaceRecovery] = useState<WorkspaceRecoveryState>();
@@ -546,7 +548,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
           name: selection.workspace.displayName,
         });
         setMessage(degradedMessage);
-        notify({ message: degradedMessage, tone: "warning" });
+        notify({ message: degradedMessage, tone: "info" });
       } else {
         const readyMessage = t("workspaceReady", { name: selection.workspace.displayName });
         setMessage(readyMessage);
@@ -601,7 +603,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         const degradedMessage = t("workspaceReadyRecentPersistenceDegraded", { name: existing.displayName });
         setLoadState("ready");
         setMessage(degradedMessage);
-        notify({ message: degradedMessage, tone: "warning" });
+        notify({ message: degradedMessage, tone: "info" });
         return;
       }
       setLoadState("error");
@@ -764,10 +766,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
-  const openSession = async (entry: SessionOpenTarget, recoveryBinding?: string): Promise<boolean> => {
+  const openSession = async (entry: SessionOpenTarget, recoveryBinding?: string, options: { reattach?: boolean } = {}): Promise<boolean> => {
     if (activeWorkspaceId === undefined || entry.sessionId === undefined) return false;
     if (
-      recoveryBinding === undefined
+      !options.reattach && recoveryBinding === undefined
       && entry.sessionId === selectedDurableSessionId
       && selectedSession !== undefined
     ) {
@@ -848,17 +850,36 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const reloadConversationAfterProviderRestart = useCallback(async (workspaceId: string) => {
     if (workspaceId !== activeWorkspaceIdRef.current) return;
     const durableSessionId = selectedDurableSessionId;
+    const selectionEpoch = ++sessionSelectionEpoch.current;
+    const isCurrent = () => workspaceId === activeWorkspaceIdRef.current
+      && selectionEpoch === sessionSelectionEpoch.current;
+    const retainRecoveryTarget = () => {
+      const saved = readLastSession(workspaceId);
+      setFailedSessionEntry(saved?.sessionId === durableSessionId ? saved : undefined);
+      setSessionActionState("error");
+      setSessionMessage(t("conversationOpenFailed"));
+    };
     setSelectedSession(undefined);
     if (durableSessionId === undefined) return;
     const page = await loadHistory(workspaceId);
-    if (workspaceId !== activeWorkspaceIdRef.current) return;
-    const entry = page?.entries.find((candidate) => candidate.sessionId === durableSessionId);
-    if (entry === undefined) {
-      setSelectedDurableSessionId(undefined);
-      return;
+    if (!isCurrent()) return;
+    let entry = page?.entries.find((candidate) => candidate.sessionId === durableSessionId);
+    try {
+      entry ??= await findCreatedSessionEntry(bridge, workspaceId, durableSessionId, isCurrent);
+    } catch (error) {
+      if (!isCurrent()) return;
+      retainRecoveryTarget();
+      throw error;
     }
-    await openSession(entry);
-  }, [loadHistory, openSession, selectedDurableSessionId]);
+    if (!isCurrent()) return;
+    if (entry === undefined) {
+      retainRecoveryTarget();
+      throw new Error("conversation identity unavailable after provider reload");
+    }
+    if (!await openSession(entry, undefined, { reattach: true })) {
+      throw new Error("conversation reattach failed after provider reload");
+    }
+  }, [bridge, loadHistory, openSession, selectedDurableSessionId, t]);
 
   const openForkSession = async (sessionRef: string, sessionId: string, title = t("forkCreated")) => {
     if (activeWorkspaceId === undefined) return;
@@ -1211,6 +1232,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               bridge={bridge}
               supportAvailable={activeWorkspace !== undefined}
               workspaceId={activeWorkspace?.id}
+              navigationState={settingsNavigation.value}
+              onNavigationStateChange={settingsNavigation.remember}
               sessionId={selectedSession?.id}
               isWorkspaceActive={() =>
                 activeWorkspace !== undefined

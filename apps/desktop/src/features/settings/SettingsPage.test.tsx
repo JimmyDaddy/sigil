@@ -67,16 +67,18 @@ function modelContext(connectionId: string): RunContext {
   };
 }
 
-function settings(context?: RunContext) {
+function settings(context?: RunContext, connections = inventory.connections) {
   const saveProviderDefaultModel = vi.fn(async (
     _workspaceId: string,
     modelRef: { connectionId: string; modelId: string },
   ) => ({ defaultModel: modelRef, inventory, saveWarning: false }));
+  const updateProviderConnectionCredential = vi.fn(async () => ({ defaultModel: inventory.defaultModel!, inventory, saveWarning: false }));
   const bridge = {
     updateState: async () => ({ phase: "unsupported", channel: "beta", currentVersion: "test", downloadedBytes: 0 }),
     subscribeUpdate: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,
     saveProviderDefaultModel,
+    updateProviderConnectionCredential,
   } as unknown as DesktopBridge;
   render(
     <LocaleProvider>
@@ -87,7 +89,7 @@ function settings(context?: RunContext) {
             supportAvailable={false}
             workspaceId="fixture-workspace"
             isWorkspaceActive={() => true}
-            providerInventory={inventory}
+            providerInventory={{ ...inventory, connections }}
             modelContext={context}
             defaultModel={context?.modelRef ?? inventory.defaultModel}
             onProviderInventoryChange={() => true}
@@ -100,7 +102,7 @@ function settings(context?: RunContext) {
       </ThemeProvider>
     </LocaleProvider>,
   );
-  return { saveProviderDefaultModel };
+  return { saveProviderDefaultModel, updateProviderConnectionCredential };
 }
 
 describe("settings provider identity labels", () => {
@@ -140,5 +142,64 @@ describe("settings provider identity labels", () => {
     await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenCalledExactlyOnceWith(
       "fixture-workspace", { connectionId: "team-route", modelId: "flash" },
     ));
+  });
+});
+
+describe("existing connection credential management", () => {
+  it("lets a ready saved-key connection rotate its key by exact ID and returns Cancel focus", async () => {
+    const user = userEvent.setup();
+    const { updateProviderConnectionCredential, saveProviderDefaultModel } = settings();
+    const trigger = screen.getByRole("button", { name: "Manage DeepSeek" });
+    expect(screen.queryByRole("button", { name: "Update credential for DeepSeek" })).toBeNull();
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Update credential" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    await user.keyboard("{Enter}");
+    await user.keyboard("{Enter}");
+    const input = await screen.findByLabelText("API key");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    await user.type(input, "not-submitted-key");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(updateProviderConnectionCredential).not.toHaveBeenCalled();
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitem", { name: "Update credential" }));
+    expect((await screen.findByLabelText("API key") as HTMLInputElement).value).toBe("");
+    await user.type(screen.getByLabelText("API key"), "fixture-replacement-key");
+    await user.click(within(screen.getByRole("form", { name: "Update credential for DeepSeek" })).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(updateProviderConnectionCredential).toHaveBeenCalledExactlyOnceWith(
+      "fixture-workspace", { connectionId: "deepseek-default", apiKey: "fixture-replacement-key" },
+    ));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(saveProviderDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it.each(["ready", "unverified"] as const)("makes replacing a %s environment reference explicit and does not add authentication to a none connection", async (readiness) => {
+    const user = userEvent.setup();
+    const { updateProviderConnectionCredential } = settings(undefined, [...inventory.connections.map((connection) => ({ ...connection, readiness })), {
+      ...inventory.connections[0], id: "local-none", label: "Local server", credentialSource: "none",
+    }]);
+    expect(screen.queryByRole("button", { name: "Update credential for Local server" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Manage Local server" })).toBeNull();
+    const environment = screen.getByRole("button", { name: "Manage Team gateway" });
+    await user.click(environment);
+    await user.click(screen.getByRole("menuitem", { name: "Use a saved API key" }));
+    expect(await screen.findByText("This connection will use the new saved API key instead of its environment variable.")).toBeTruthy();
+    await user.type(screen.getByLabelText("API key"), "fixture-environment-replacement");
+    await user.click(within(screen.getByRole("form", { name: "Update credential for Team gateway" })).getByRole("button", { name: "Use a saved API key" }));
+    await waitFor(() => expect(updateProviderConnectionCredential).toHaveBeenCalledExactlyOnceWith(
+      "fixture-workspace", { connectionId: "team-route", apiKey: "fixture-environment-replacement" },
+    ));
+  });
+
+  it.each(["needs_credential", "credential_unavailable"] as const)("keeps %s repair visible without a management-menu detour", async (readiness) => {
+    const user = userEvent.setup();
+    settings(undefined, [{ ...inventory.connections[0], readiness }]);
+    expect(screen.queryByRole("button", { name: "Manage DeepSeek" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Update credential for DeepSeek" }));
+    expect(document.activeElement).toBe(screen.getByLabelText("API key"));
   });
 });
