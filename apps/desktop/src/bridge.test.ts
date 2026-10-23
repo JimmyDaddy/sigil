@@ -7,6 +7,14 @@ import { desktopBridge } from "./bridge";
 
 beforeEach(() => { invoke.mockReset(); });
 
+it("updates credentials through the exact native connection command", async () => {
+  invoke.mockResolvedValue({});
+  await desktopBridge.updateProviderConnectionCredential("workspace", { connectionId: "existing-connection", apiKey: "fixture-key" });
+  expect(invoke).toHaveBeenCalledWith("desktop_update_provider_connection_credential", {
+    workspaceId: "workspace", input: { connectionId: "existing-connection", apiKey: "fixture-key" },
+  });
+});
+
 it("sends command-history recovery only through its narrow native command", async () => {
   invoke.mockResolvedValue({ Preview: {} });
   await desktopBridge.recoverControlLog("workspace", "session", "Preview");

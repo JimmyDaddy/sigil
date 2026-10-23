@@ -666,6 +666,327 @@ credential = { source = "environment", name = "SIGIL_OPENAI_COMPATIBLE_API_KEY" 
 }
 
 #[tokio::test]
+async fn provider_connection_credential_update_preserves_identity_options_and_default() {
+    use sigil_runtime::provider_connections::{
+        ConfiguredProviderCredentialStore, CredentialRefConfig, ProviderCredentialStore,
+        load_provider_connections,
+    };
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+[workspace]
+root = "."
+[agent]
+connection = "alpha"
+model = "alpha-model"
+[connections.alpha]
+label = "Alpha"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:41001/v1"
+credential = { source = "none" }
+[connections.beta]
+label = "Beta gateway"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "https://127.0.0.1:41002/custom/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_COMPATIBLE_API_KEY" }
+model_context_windows = { "beta-model" = 131072 }
+options = { organization = "fixture-team", project = "fixture-project" }
+"#,
+    )
+    .expect("configuration");
+    let initial = sigil_kernel::RootConfig::load(&config_path).expect("initial root");
+    let before = load_provider_connections(&initial);
+    let beta_id = sigil_kernel::ConnectionId::new("beta").expect("beta id");
+    let alpha_id = sigil_kernel::ConnectionId::new("alpha").expect("alpha id");
+    assert!(
+        before.issues.is_empty(),
+        "valid fixture connections: {:?}",
+        before.issues
+    );
+    let beta_before = before.connections[&beta_id].config.clone();
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let before_source = fs::read(&config_path).expect("initial source");
+    for (id, key, expected) in [("absent", "test-do-not-log", 404), ("beta", "   ", 422)] {
+        let (status, rejected) = http_raw_request(
+            address,
+            http_put(
+                "/settings/provider-connections/credential",
+                Some("secret-token"),
+                &json!({"connection_id": id, "api_key": key}).to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, expected);
+        assert!(!rejected.to_string().contains("test-do-not-log"));
+        if expected == 404 {
+            assert_eq!(rejected["error"]["code"], "provider_connection_not_found");
+        }
+        assert_eq!(
+            fs::read(&config_path).expect("unchanged source"),
+            before_source
+        );
+    }
+    let (unauthorized, _) = http_raw_request(
+        address,
+        http_put(
+            "/settings/provider-connections/credential",
+            None,
+            &json!({"connection_id": "beta", "api_key": "test-do-not-log"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(unauthorized, 401);
+    assert_eq!(
+        fs::read(&config_path).expect("unchanged source"),
+        before_source
+    );
+    let (status, saved) = http_raw_request(address, http_put(
+        "/settings/provider-connections/credential", Some("secret-token"),
+        &json!({"connection_id": "beta", "api_key": " test-beta-original ", "future_option": true}).to_string(),
+    )).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(
+        saved["default_model"],
+        json!({"connection_id":"alpha", "model_id":"alpha-model"})
+    );
+    assert_eq!(
+        saved["inventory"]["connections"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(saved["inventory"]["connections"][1]["id"], "beta");
+    assert_eq!(saved["inventory"]["connections"][1]["readiness"], "ready");
+    assert!(!saved.to_string().contains("test-beta-original"));
+    let persisted = sigil_kernel::RootConfig::load(&config_path).expect("persisted root");
+    let after = load_provider_connections(&persisted);
+    assert_eq!(after.default_model, before.default_model);
+    assert_eq!(
+        after.connections[&alpha_id].config,
+        before.connections[&alpha_id].config
+    );
+    let beta_after = &after.connections[&beta_id].config;
+    let mut expected_beta = beta_before;
+    expected_beta.credential = beta_after.credential.clone();
+    assert_eq!(beta_after, &expected_beta);
+    let CredentialRefConfig::Stored { id: old_id } = &beta_after.credential else {
+        panic!("updated credential should be securely stored");
+    };
+    let store = ConfiguredProviderCredentialStore::from_root_config(&persisted);
+    let old_record = store
+        .load(old_id)
+        .await
+        .expect("load stored credential")
+        .expect("stored record");
+    assert_eq!(old_record.secret().expose_secret(), "test-beta-original");
+    assert!(
+        !fs::read_to_string(&config_path)
+            .expect("source")
+            .contains("test-beta-original")
+    );
+    let (status, saved_again) = http_raw_request(
+        address,
+        http_post(
+            "/v1/private/borrowed/configuration/provider-connection-credential",
+            Some("secret-token"),
+            &json!({
+                "schema_version": 1,
+                "capsule_id": "desktop-credential-repair-test-1",
+                "request": {"connection_id":"beta", "api_key":"test-beta-replacement"}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{saved_again}");
+    assert!(saved_again["receipt"]["subject_ref"].as_str().is_some());
+    assert!(!saved_again.to_string().contains("test-beta-replacement"));
+    assert!(
+        store
+            .load(old_id)
+            .await
+            .expect("old credential cleanup")
+            .is_none()
+    );
+    let replaced = sigil_kernel::RootConfig::load(&config_path).expect("replaced root");
+    assert_eq!(
+        load_provider_connections(&replaced).default_model,
+        before.default_model
+    );
+    assert!(
+        !fs::read_to_string(&config_path)
+            .expect("source")
+            .contains("test-beta-replacement")
+    );
+    shutdown_tx.send(()).expect("shutdown");
+    serving.await.expect("join").expect("clean shutdown");
+}
+
+#[test]
+fn provider_connection_credential_update_does_not_persist_environment_overrides() {
+    const CHILD_ENV: &str = "SIGIL_CREDENTIAL_UPDATE_ENV_TEST_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::provider_connection_credential_update_does_not_persist_environment_overrides",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env("SIGIL_MODEL_REQUEST_TIMEOUT_SECS", "31")
+            .env("SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS", "37")
+            .env("SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS", "41")
+            .status()
+            .expect("isolated child test should launch");
+        assert!(
+            status.success(),
+            "credential environment override regression failed"
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+[agent]
+connection = "alpha"
+model = "alpha-model"
+[model_request]
+request_timeout_secs = 101
+stream_idle_timeout_secs = 103
+stream_total_timeout_secs = 107
+[connections.alpha]
+label = "Alpha"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "https://127.0.0.1:41001/v1"
+credential = { source = "none" }
+"#,
+    )
+    .expect("persisted fixture");
+    let initial = sigil_kernel::RootConfig::load_persisted(&config_path).expect("persisted root");
+    let effective = sigil_kernel::RootConfig::load(&config_path).expect("effective root");
+    assert_eq!(effective.model_request.request_timeout_secs, 31);
+    assert_eq!(effective.model_request.stream_idle_timeout_secs, 37);
+    assert_eq!(effective.model_request.stream_total_timeout_secs, Some(41));
+    let context = HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    );
+    let saved = context
+        .update_provider_connection_credential(
+            crate::HttpProviderConnectionCredentialUpdateRequest {
+                connection_id: "alpha".to_owned(),
+                api_key: "fixture-only-secret".to_owned(),
+            },
+        )
+        .expect("exact credential update");
+    assert_eq!(saved.default_model.connection_id, "alpha");
+    let persisted =
+        sigil_kernel::RootConfig::load_persisted(&config_path).expect("updated persisted root");
+    assert_eq!(persisted.model_request, initial.model_request);
+    assert!(
+        !fs::read_to_string(&config_path)
+            .expect("source")
+            .contains("fixture-only-secret")
+    );
+}
+
+#[tokio::test]
+async fn provider_connection_credential_update_rejects_invalid_config_without_replacement() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let config_path = temp.path().join("sigil.toml");
+    let original = b"invalid = [ this is not TOML";
+    fs::write(&config_path, original).expect("invalid fixture");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let (status, response) = http_raw_request(address, http_put(
+        "/settings/provider-connections/credential", Some("secret-token"),
+        &json!({"connection_id":"alpha", "api_key":"test-do-not-log", "replace_invalid_config":true}).to_string(),
+    )).await;
+    assert_eq!(status, 422);
+    assert!(!response.to_string().contains("test-do-not-log"));
+    assert_eq!(fs::read(&config_path).expect("source"), original);
+    let unrouted = r#"config_version = 2
+[connections.alpha]
+label = "Alpha"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:41001/v1"
+credential = { source = "none" }
+"#;
+    fs::write(&config_path, unrouted).expect("unrouted source");
+    let (status, _) = http_raw_request(
+        address,
+        http_put(
+            "/settings/provider-connections/credential",
+            Some("secret-token"),
+            &json!({"connection_id":"alpha", "api_key":"test-do-not-log"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status, 422,
+        "credential repair must not invent a default route"
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("unrouted source"),
+        unrouted
+    );
+    shutdown_tx.send(()).expect("shutdown");
+    serving.await.expect("join").expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn provider_setup_requires_explicit_intent_to_replace_an_invalid_config() {
     let (provider_base_url, _, provider_server) =
         spawn_provider_catalog_server(200, r#"{"data":[{"id":"repair-coder"}]}"#).await;
@@ -4819,6 +5140,15 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(
         document["paths"]["/settings/provider-connections/catalog"]["post"]["responses"]["200"]
             .is_object()
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections/credential"]["put"]["responses"]["200"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ProviderConnectionCredentialUpdateRequest"]["properties"]
+            ["api_key"]["writeOnly"],
+        true
     );
     assert!(
         document["paths"]["/settings/provider-connections/default-model"]["put"]["responses"]

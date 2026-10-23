@@ -348,6 +348,25 @@ pub(crate) struct DesktopProviderSetupSaveInput {
     replace_invalid_config: bool,
 }
 
+/// Secret-bearing renderer input scoped to an existing connection identity.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderConnectionCredentialUpdateInput {
+    connection_id: String,
+    api_key: String,
+}
+
+impl DesktopProviderConnectionCredentialUpdateInput {
+    pub(crate) fn into_native(
+        self,
+    ) -> sigil_desktop::DesktopProviderConnectionCredentialUpdateRequest {
+        sigil_desktop::DesktopProviderConnectionCredentialUpdateRequest {
+            connection_id: self.connection_id,
+            api_key: self.api_key,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderDefaultModelSaveInput {

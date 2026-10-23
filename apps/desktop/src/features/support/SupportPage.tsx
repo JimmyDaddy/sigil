@@ -25,7 +25,8 @@ export function SupportPage({
 }) {
   const { t } = useLocale();
   const { notify } = useNotifications();
-  const [report, setReport] = useState<SupportDoctorReport>();
+  const [diagnosis, setDiagnosis] = useState<{ workspaceId: string; report: SupportDoctorReport }>();
+  const report = diagnosis?.workspaceId === workspaceId ? diagnosis.report : undefined;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -34,11 +35,10 @@ export function SupportPage({
   const load = useCallback(async () => {
     const current = ++request.current;
     setLoading(true);
-    setReport(undefined);
     setError(false);
     try {
       const next = await bridge.supportDoctor(workspaceId);
-      if (current === request.current) setReport(next);
+      if (current === request.current) setDiagnosis({ workspaceId, report: next });
     } catch {
       if (current === request.current) setError(true);
     } finally {
@@ -80,6 +80,11 @@ export function SupportPage({
       title={t("supportDiagnostics")}
       navigation={{ label: t("backToSettings"), onBack }}
       aside={<div className="support-header-actions">
+          {!error || report !== undefined ? (
+            <Button type="button" variant="quiet" busy={loading} onClick={() => void load()}>
+              {loading ? t("runningDiagnostics") : t("recheckDiagnostics")}
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="secondary"
@@ -100,11 +105,12 @@ export function SupportPage({
         </div>}
     >
 
-      {loading ? (
+      {error && report !== undefined ? <p role="alert">{t("diagnosticsRefreshFailed")}</p> : null}
+      {loading && report === undefined ? (
         <div className="application-page-loading">
           <LoadingState label={t("runningDiagnostics")} detail={t("runningDiagnosticsDetail")} />
         </div>
-      ) : error ? (
+      ) : error && report === undefined ? (
         <section className="support-empty" role="alert">
           <Icon name="warning" />
           <div>

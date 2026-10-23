@@ -301,6 +301,16 @@ pub struct DesktopProviderSetupSaveRequest {
     pub replace_invalid_config: bool,
 }
 
+/// Secret-bearing exact connection credential update admitted by the native boundary.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Deserialize`.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopProviderConnectionCredentialUpdateRequest {
+    pub connection_id: String,
+    pub api_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupSaveResult {

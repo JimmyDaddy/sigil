@@ -1464,6 +1464,11 @@ export interface ProviderSetupSaveResult {
     saveWarning: boolean;
 }
 
+export interface ProviderConnectionCredentialInput {
+  connectionId: string;
+  apiKey: string;
+}
+
 export interface ProviderDefaultModelSaveResult {
   defaultModel: ProviderModelRef;
   inventory: ProviderConnectionInventory;

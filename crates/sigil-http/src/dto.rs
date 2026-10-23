@@ -454,6 +454,16 @@ pub struct HttpProviderSetupSaveRequest {
     pub replace_invalid_config: bool,
 }
 
+/// Replaces only one existing connection's stored API key.
+///
+/// Deliberately does not implement `Debug`, `Clone`, or `Serialize`.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpProviderConnectionCredentialUpdateRequest {
+    pub connection_id: String,
+    pub api_key: String,
+}
+
 /// Secret-free result after atomically publishing one connection and saved default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

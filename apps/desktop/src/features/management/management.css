@@ -289,6 +289,7 @@
 }
 .provider-connection-list li {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   align-items: center;
   justify-content: space-between;
@@ -298,6 +299,9 @@
 }
 .provider-connection-list li + li { border-top: 1px solid var(--sg-sys-color-outline-variant); }
 .provider-connection-list li > div { display: grid; min-width: 0; gap: 3px; }
+.provider-connection-list li > div:first-child { flex: 1 1 12rem; }
+.provider-connection-list .provider-connection-actions { justify-items: end; flex: 0 0 auto; }
+.provider-credential-form { flex-basis: 100%; width: 100%; display: grid; gap: var(--sg-sys-space-3); }
 .provider-connection-list strong,
 .provider-connection-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .provider-connection-list span { color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }

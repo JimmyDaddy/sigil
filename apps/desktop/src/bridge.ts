@@ -46,6 +46,7 @@ import type {
   RunAttachment,
   PermissionMode,
   ProviderConnectionInventory,
+  ProviderConnectionCredentialInput,
   ProviderDefaultModelSaveResult,
   ProviderModelRef,
   ProviderSetupCatalog,
@@ -106,6 +107,7 @@ export interface DesktopBridge {
   recoverControlLog(workspaceId: string, sessionId: string, action: ControlLogRecoveryAction): Promise<ControlLogRecoveryOutcome>;
   exportSupportBundle(workspaceId: string, rendererTimings?: import("./features/support/runTimings").RendererRunTiming[]): Promise<SupportSaveSummary>;
   providerConnections(workspaceId: string): Promise<ProviderConnectionInventory>;
+  updateProviderConnectionCredential(workspaceId: string, input: ProviderConnectionCredentialInput): Promise<ProviderSetupSaveResult>;
   providerSetupCatalog(
     workspaceId: string,
     input: ProviderSetupCatalogInput,
@@ -366,6 +368,8 @@ export const desktopBridge: DesktopBridge = {
     invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId, rendererTimings }),
   providerConnections: (workspaceId) =>
     invoke<ProviderConnectionInventory>("desktop_provider_connections", { workspaceId }),
+  updateProviderConnectionCredential: (workspaceId, input) =>
+    invoke<ProviderSetupSaveResult>("desktop_update_provider_connection_credential", { workspaceId, input }),
   providerSetupCatalog: (workspaceId, input) =>
     invoke<ProviderSetupCatalog>("desktop_provider_setup_catalog", { workspaceId, input }),
   saveProviderSetup: (workspaceId, input) =>

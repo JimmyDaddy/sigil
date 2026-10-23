@@ -398,6 +398,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       }],
       issues: [],
     }),
+    updateProviderConnectionCredential: async () => { throw new Error("credential fixture not configured"); },
     providerSetupCatalog: async () => ({
       connectionId: "deepseek-1",
       providerLabel: "DeepSeek",
@@ -804,6 +805,30 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     ...remainingOverrides,
   };
 }
+
+it("recovers a failed provider inventory directly in Settings", async () => {
+  const user = userEvent.setup();
+  const inventory = await bridgeWith().providerConnections(workspace.id);
+  const retryInventory = deferred<ProviderConnectionInventory>();
+  const providerConnections = vi.fn().mockRejectedValueOnce(new Error("inventory unavailable"))
+    .mockImplementation(() => retryInventory.promise);
+  render(<App bridge={bridgeWith({ bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }), providerConnections })} />);
+  await screen.findByRole("heading", { name: "Provider settings are unavailable" });
+  await user.click(screen.getByRole("button", { name: "Open settings" }));
+  const connections = screen.getByRole("heading", { name: "Provider connections" }).closest("section")!;
+  expect(within(connections).getByRole("alert").textContent).toContain("Provider settings are unavailable");
+  expect(within(connections).queryByText("Loading provider connections…")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Default model for new conversations" })).toBeNull();
+  expect(screen.queryByText("Add or repair a provider connection above. Its exact model catalog becomes available during setup.")).toBeNull();
+  await user.click(within(connections).getByRole("button", { name: "Retry" }));
+  expect(within(connections).getByRole("status").textContent).toBe("Loading provider connections…");
+  expect(screen.queryByRole("heading", { name: "Default model for new conversations" })).toBeNull();
+  await act(async () => retryInventory.resolve(inventory));
+  expect(await within(connections).findByRole("button", { name: "Add connection" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Default model for new conversations" })).toBeTruthy();
+  expect(providerConnections).toHaveBeenCalledTimes(2);
+  expect(within(connections).queryByRole("alert")).toBeNull();
+});
 
 async function readyComposer(): Promise<HTMLElement> {
   const composer = await screen.findByRole("combobox", { name: "Message Sigil" });

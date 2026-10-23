@@ -2819,6 +2819,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/provider-connections/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one existing connection credential
+         * @description Stores an API key for the exact existing connection through the configured secure credential backend. Preserves all connection options, sibling connections, and the saved default model. Unknown connection identifiers are rejected; no connection is created.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderConnectionCredentialUpdateRequest"];
+                };
+            };
+            responses: {
+                /** @description Updated credential and refreshed secret-free inventory */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderSetupSaveResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                422: components["responses"]["BadRequest"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/settings/provider-connections/default-model": {
         parameters: {
             query?: never;
@@ -4449,6 +4497,11 @@ export interface components {
         });
         /** @enum {string} */
         ProviderConfigMode: "v2" | "invalid";
+        ProviderConnectionCredentialUpdateRequest: {
+            /** Format: password */
+            api_key: string;
+            connection_id: string;
+        };
         ProviderConnectionEntry: {
             credential_source: components["schemas"]["ProviderCredentialSource"];
             default_model?: components["schemas"]["ProviderModelRef"] | null;

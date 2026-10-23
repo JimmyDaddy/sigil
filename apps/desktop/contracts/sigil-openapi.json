@@ -6889,6 +6889,25 @@
         ],
         "type": "string"
       },
+      "ProviderConnectionCredentialUpdateRequest": {
+        "properties": {
+          "api_key": {
+            "format": "password",
+            "maxLength": 16384,
+            "minLength": 1,
+            "type": "string",
+            "writeOnly": true
+          },
+          "connection_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "api_key"
+        ],
+        "type": "object"
+      },
       "ProviderConnectionEntry": {
         "properties": {
           "credential_source": {
@@ -14739,6 +14758,49 @@
           }
         },
         "summary": "Load an exact connection-scoped provider model catalog"
+      }
+    },
+    "/settings/provider-connections/credential": {
+      "put": {
+        "description": "Stores an API key for the exact existing connection through the configured secure credential backend. Preserves all connection options, sibling connections, and the saved default model. Unknown connection identifiers are rejected; no connection is created.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderConnectionCredentialUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSetupSaveResult"
+                }
+              }
+            },
+            "description": "Updated credential and refreshed secret-free inventory"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Replace one existing connection credential"
       }
     },
     "/settings/provider-connections/default-model": {

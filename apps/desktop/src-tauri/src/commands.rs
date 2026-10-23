@@ -44,27 +44,27 @@ use crate::{
         DesktopIntentDropExecutionSummary, DesktopIntentDropInput, DesktopIntentDropPreviewInput,
         DesktopIntentDropPreviewSummary, DesktopIntentStackSummary, DesktopPlanDecisionActionInput,
         DesktopPlanDecisionInput, DesktopPlanDecisionSummary, DesktopPlanDetailInput,
-        DesktopPlanReviewDetailSummary, DesktopProviderConnectionInventorySummary,
-        DesktopProviderDefaultModelSaveInput, DesktopProviderDefaultModelSaveSummary,
-        DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
-        DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
-        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
-        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
-        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
-        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
-        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
-        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
-        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
-        DesktopSessionRenameInput, DesktopSessionRouteRecoverySummary, DesktopSessionSummary,
-        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTaskContinuationInput,
-        DesktopTaskExecutionBindingInput, DesktopTaskIntegrationAcceptInput,
-        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
-        DesktopTaskPauseInput, DesktopTerminalTaskCancelInput, DesktopTerminalTaskCancelSummary,
-        DesktopToolArtifactPage, DesktopToolArtifactReadInput, DesktopToolArtifactSelector,
-        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopUserInputDecisionInput,
-        DesktopUserInputDecisionSummary, DesktopUserInputReadInput, DesktopUserInputRequestSummary,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
-        desktop_session_route_recovery_summary,
+        DesktopPlanReviewDetailSummary, DesktopProviderConnectionCredentialUpdateInput,
+        DesktopProviderConnectionInventorySummary, DesktopProviderDefaultModelSaveInput,
+        DesktopProviderDefaultModelSaveSummary, DesktopProviderSetupCatalogInput,
+        DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
+        DesktopProviderSetupSaveSummary, DesktopRunAttachInput, DesktopRunAttachment,
+        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
+        DesktopSessionCatalogBatchExecuteInput, DesktopSessionCatalogBatchPlanInput,
+        DesktopSessionCatalogBatchPlanSummary, DesktopSessionCatalogBatchReceiptSummary,
+        DesktopSessionCreateInput, DesktopSessionDeleteInput,
+        DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
+        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
+        DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
+        DesktopSessionRouteRecoverySummary, DesktopSessionSummary, DesktopSupportDoctorSummary,
+        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskExecutionBindingInput,
+        DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
+        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopTerminalTaskCancelInput,
+        DesktopTerminalTaskCancelSummary, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
+        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopUserInputDecisionInput, DesktopUserInputDecisionSummary, DesktopUserInputReadInput,
+        DesktopUserInputRequestSummary, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection, desktop_session_route_recovery_summary,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -231,6 +231,29 @@ pub(crate) async fn desktop_save_provider_setup(
         .restart(&workspace_id)
         .await
         .map_err(project_manager_error)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_update_provider_connection_credential(
+    workspace_id: String,
+    input: DesktopProviderConnectionCredentialUpdateInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderSetupSaveSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = configuration_change_client(&state.manager, &workspace_id).await?;
+    ensure_workspace_restart_safe(&client).await?;
+    state.run_streams.stop_workspace(&workspace_id).await;
+    let result = client
+        .update_provider_connection_credential_host_private(input.into_native())
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)?;
+    state
+        .manager
+        .restart(&workspace_id)
+        .await
+        .map_err(project_credential_saved_reload_error)?;
     Ok(result)
 }
 
@@ -2823,6 +2846,24 @@ const fn bundled_sigil_binary_name() -> &'static str {
     } else {
         "sigil-runtime"
     }
+}
+
+fn project_credential_saved_reload_error(
+    error: DesktopWorkspaceManagerError,
+) -> DesktopCommandError {
+    let cause = project_manager_error(error);
+    DesktopCommandError::new(
+        "credential_saved_workspace_reload_failed",
+        format!(
+            "The credential was saved, but the workspace could not be reloaded. Reopen the workspace or run diagnostics. {}",
+            cause.message,
+        ),
+    )
+    .with_recovery_actions([
+        DesktopRecoveryAction::OpenAnotherWorkspace,
+        DesktopRecoveryAction::OpenDiagnostics,
+        DesktopRecoveryAction::ShowDetails,
+    ])
 }
 
 fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandError {

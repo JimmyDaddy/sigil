@@ -21,12 +21,12 @@ use crate::{
         DesktopConversationRecoveryView, DesktopErrorResponse, DesktopIntentDropCommandReceipt,
         DesktopIntentDropPreviewRequest, DesktopIntentDropRequest, DesktopIntentOperationKind,
         DesktopIntentOperationPreview, DesktopIntentSource, DesktopIntentStackState,
-        DesktopIntentVersionRef, DesktopProviderConnectionInventory,
-        DesktopProviderDefaultModelSaveRequest, DesktopProviderDefaultModelSaveResult,
-        DesktopProviderSetupCatalog, DesktopProviderSetupCatalogRequest,
-        DesktopProviderSetupSaveRequest, DesktopProviderSetupSaveResult,
-        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
-        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopIntentVersionRef, DesktopProviderConnectionCredentialUpdateRequest,
+        DesktopProviderConnectionInventory, DesktopProviderDefaultModelSaveRequest,
+        DesktopProviderDefaultModelSaveResult, DesktopProviderSetupCatalog,
+        DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
+        DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
+        DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
         DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
         DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
@@ -284,6 +284,54 @@ impl DesktopHttpClient {
             StatusCode::CREATED,
         )
         .await
+    }
+
+    /// Replaces one existing connection's credential without changing its route or options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport failure, a rejected update, or an invalid response.
+    pub async fn update_provider_connection_credential(
+        &self,
+        request: DesktopProviderConnectionCredentialUpdateRequest,
+    ) -> Result<DesktopProviderSetupSaveResult, DesktopClientError> {
+        self.put_json(
+            self.route(["settings", "provider-connections", "credential"])?,
+            &request,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    /// Replaces one exact connection's credential through an authority-verified capsule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport failure, a rejected update, or a mismatched receipt.
+    pub async fn update_provider_connection_credential_host_private(
+        &self,
+        request: DesktopProviderConnectionCredentialUpdateRequest,
+    ) -> Result<DesktopProviderSetupSaveResult, DesktopClientError> {
+        let capsule_id = format!("desktop-configuration-{}", Uuid::new_v4());
+        let response: DesktopBorrowedConfigurationResponse<DesktopProviderSetupSaveResult> = self
+            .post_json(
+                self.route([
+                    "v1",
+                    "private",
+                    "borrowed",
+                    "configuration",
+                    "provider-connection-credential",
+                ])?,
+                &DesktopBorrowedConfigurationRequest {
+                    schema_version: BORROWED_CONFIGURATION_SCHEMA_VERSION,
+                    capsule_id: capsule_id.clone(),
+                    request,
+                },
+                StatusCode::OK,
+            )
+            .await?;
+        validate_configuration_receipt(&response.receipt, &capsule_id)?;
+        Ok(response.result)
     }
 
     /// Atomically selects an existing exact route as the shared default for future sessions.

@@ -1912,6 +1912,117 @@ async fn save_provider_default_model_uses_the_exact_put_route_and_compound_ident
 }
 
 #[tokio::test]
+async fn provider_connection_credential_update_uses_exact_routes_and_verifies_capsule_receipts() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        for (private, invalid_receipt) in [(false, false), (true, false), (true, true)] {
+            let (mut stream, _) = listener.accept().await.expect("connection");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1_024];
+            let header_end = loop {
+                let read = stream.read(&mut buffer).await.expect("request");
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).expect("headers");
+            let expected_route = if private {
+                "POST /v1/private/borrowed/configuration/provider-connection-credential HTTP/1.1\r\n"
+            } else {
+                "PUT /settings/provider-connections/credential HTTP/1.1\r\n"
+            };
+            assert!(headers.starts_with(expected_route));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer ")
+            );
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::parse::<usize>)
+                })
+                .expect("content length")
+                .expect("numeric length");
+            while request.len() - header_end < length {
+                let read = stream.read(&mut buffer).await.expect("request body");
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end..header_end + length]).expect("JSON");
+            let input = if private { &body["request"] } else { &body };
+            assert_eq!(
+                input,
+                &serde_json::json!({"connection_id":"gateway-beta", "api_key":"fixture-only-secret"})
+            );
+            let result = serde_json::json!({
+                "default_model": {"connection_id":"gateway-alpha", "model_id":"current-model"},
+                "inventory": {"config_mode":"v2", "default_model":{"connection_id":"gateway-alpha", "model_id":"current-model"}, "connections":[], "issues":[]},
+                "save_warning":false,
+            });
+            let response_body = if private {
+                assert_eq!(body["schema_version"], 1);
+                assert!(body["capsule_id"].as_str().expect("capsule id").starts_with("desktop-configuration-"));
+                serde_json::json!({
+                    "result":result,
+                    "receipt": {
+                        "schema_version":1,
+                        "capsule_id":if invalid_receipt {serde_json::json!("unrelated-capsule")} else {body["capsule_id"].clone()},
+                        "subject_ref":"opaque-config", "observation_generation":1,
+                        "operation":"versioned_replace", "previous_identity":"before", "committed_identity":"after",
+                        "previous_version":1, "committed_version":2,
+                    }
+                })
+            } else { result }.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response");
+        }
+    });
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token")),
+    );
+    let request = || crate::DesktopProviderConnectionCredentialUpdateRequest {
+        connection_id: "gateway-beta".to_owned(),
+        api_key: "fixture-only-secret".to_owned(),
+    };
+    let direct = client
+        .update_provider_connection_credential(request())
+        .await
+        .expect("public update");
+    assert_eq!(direct.default_model.connection_id, "gateway-alpha");
+    let private = client
+        .update_provider_connection_credential_host_private(request())
+        .await
+        .expect("private update");
+    assert_eq!(private.default_model.connection_id, "gateway-alpha");
+    assert!(matches!(
+        client
+            .update_provider_connection_credential_host_private(request())
+            .await,
+        Err(DesktopClientError::InvalidResponse)
+    ));
+    server.await.expect("server");
+}
+
+#[tokio::test]
 async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 

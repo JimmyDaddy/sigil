@@ -135,6 +135,28 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/settings/provider-connections/credential": {
+                "put": {
+                    "summary": "Replace one existing connection credential",
+                    "description": "Stores an API key for the exact existing connection through the configured secure credential backend. Preserves all connection options, sibling connections, and the saved default model. Unknown connection identifiers are rejected; no connection is created.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ProviderConnectionCredentialUpdateRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "Updated credential and refreshed secret-free inventory", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderSetupSaveResult" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "422": { "$ref": "#/components/responses/BadRequest" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/settings/provider-connections/default-model": {
                 "put": {
                     "summary": "Set the shared default model route",
@@ -1565,6 +1587,14 @@ pub fn http_openapi_document() -> Value {
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32", "minimum": 1 },
                         "label": { "type": ["string", "null"], "maxLength": 160 },
                         "replace_invalid_config": { "type": "boolean", "default": false }
+                    }
+                },
+                "ProviderConnectionCredentialUpdateRequest": {
+                    "type": "object",
+                    "required": ["connection_id", "api_key"],
+                    "properties": {
+                        "connection_id": { "type": "string" },
+                        "api_key": { "type": "string", "format": "password", "minLength": 1, "maxLength": 16384, "writeOnly": true }
                     }
                 },
                 "ProviderSetupSaveResult": {

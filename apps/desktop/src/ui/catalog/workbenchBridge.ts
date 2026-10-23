@@ -525,6 +525,7 @@ export function createCatalogWorkbenchBridge(
     exportSupportBundle: async () => ({ cancelled: false, fileName: "sigil-support-catalog.json" }),
     recoverControlLog: async () => { throw new Error("Command history recovery is unavailable in the component catalog."); },
     providerConnections: async () => providerInventory(runContext.modelRef),
+    updateProviderConnectionCredential: async () => { throw new Error("Credential updates are unavailable in the component catalog."); },
     providerSetupCatalog: async () => ({
       connectionId: runContext.modelRef.connectionId,
       providerLabel: "DeepSeek",

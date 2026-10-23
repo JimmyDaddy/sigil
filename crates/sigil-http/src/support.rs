@@ -38,7 +38,8 @@ use sigil_runtime::{
 };
 
 use crate::dto::{
-    HttpOrchestrationRolloutSummary, HttpProviderConfigMode, HttpProviderConnectionEntry,
+    HttpOrchestrationRolloutSummary, HttpProviderConfigMode,
+    HttpProviderConnectionCredentialUpdateRequest, HttpProviderConnectionEntry,
     HttpProviderConnectionInventory, HttpProviderConnectionIssue, HttpProviderConnectionReadiness,
     HttpProviderCredentialSource, HttpProviderDefaultModelSaveRequest,
     HttpProviderDefaultModelSaveResult, HttpProviderModelRef, HttpProviderSetupCatalog,
@@ -63,6 +64,8 @@ pub struct HttpSupportContext {
 pub(crate) enum HttpProviderSetupFailure {
     #[error("provider setup is invalid")]
     Invalid,
+    #[error("provider connection was not found")]
+    ConnectionNotFound,
 }
 
 impl fmt::Debug for HttpSupportContext {
@@ -307,6 +310,102 @@ impl HttpSupportContext {
             HttpProviderSetupSaveResult {
                 default_model: project_model_ref(draft.default_model),
                 inventory,
+                save_warning,
+            },
+            receipt,
+        ))
+    }
+
+    /// Replaces the credential for one exact existing connection without changing routing.
+    pub(crate) fn update_provider_connection_credential(
+        &self,
+        request: HttpProviderConnectionCredentialUpdateRequest,
+    ) -> std::result::Result<HttpProviderSetupSaveResult, HttpProviderSetupFailure> {
+        self.update_provider_connection_credential_with_capsule(
+            request,
+            configuration_capsule("http-provider-credential"),
+        )
+        .map(|(result, _receipt)| result)
+    }
+
+    pub(crate) fn update_provider_connection_credential_with_capsule(
+        &self,
+        request: HttpProviderConnectionCredentialUpdateRequest,
+        capsule_id: OpaqueRegistrationCapsuleId,
+    ) -> std::result::Result<
+        (
+            HttpProviderSetupSaveResult,
+            sigil_resource_authority::configuration::BorrowedConfigurationReceiptV1,
+        ),
+        HttpProviderSetupFailure,
+    > {
+        let source = fs::read(&self.config_path).map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let current = RootConfig::parse_persisted(
+            std::str::from_utf8(&source).map_err(|_| HttpProviderSetupFailure::Invalid)?,
+        )
+        .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let loaded = load_provider_connections(&current);
+        if loaded.mode != ConfigMode::V2 || !loaded.issues.is_empty() {
+            return Err(HttpProviderSetupFailure::Invalid);
+        }
+        let connection_id = ConnectionId::new(request.connection_id)
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let connection = loaded
+            .connections
+            .get(&connection_id)
+            .ok_or(HttpProviderSetupFailure::ConnectionNotFound)?;
+        let api_key = request.api_key.trim();
+        if api_key.is_empty() || api_key.len() > 16 * 1024 {
+            return Err(HttpProviderSetupFailure::Invalid);
+        }
+        let prepared = PreparedCredential::api_key(connection.config.provider, api_key.to_owned());
+        let default_model = loaded
+            .default_model
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        let draft = ConnectionSaveDraft {
+            connections: loaded
+                .connections
+                .into_iter()
+                .map(|(id, connection)| (id, connection.config))
+                .collect(),
+            default_model: default_model.clone(),
+            credential_updates: vec![ConnectionCredentialUpdate {
+                connection_id,
+                prepared,
+            }],
+        };
+        let credential_store = ConfiguredProviderCredentialStore::from_root_config(&current);
+        let service = self
+            .borrowed_configuration_service
+            .clone()
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        let expected_current_hash = configuration_digest(&source);
+        let publisher =
+            BorrowedConfigurationPublisher::new(service, capsule_id, Some(expected_current_hash));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let outcome = runtime
+            .block_on(save_connection_config(
+                &current,
+                &self.config_path,
+                draft,
+                &credential_store,
+                &publisher,
+            ))
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let save_warning = outcome.old_credential_cleanup_warning
+            || outcome.publish_outcome != ConfigPublishOutcome::Published;
+        let receipt = publisher
+            .take_receipt()
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        Ok((
+            HttpProviderSetupSaveResult {
+                default_model: project_model_ref(default_model),
+                inventory: project_provider_connections(connection_inventory_native(
+                    &outcome.root_config,
+                )),
                 save_warning,
             },
             receipt,

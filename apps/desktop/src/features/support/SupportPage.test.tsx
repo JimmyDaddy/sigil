@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { DesktopBridge } from "../../bridge";
@@ -22,6 +22,27 @@ const report: SupportDoctorReport = {
   ],
   privacy: { included: ["redacted build metadata"], excluded: ["credentials", "conversation content"], reviewBeforeSharing: true },
 };
+
+it("keeps the previous diagnosis visible during a recheck and preserves it after a failed refresh", async () => {
+  let finish!: (value: SupportDoctorReport) => void;
+  const supportDoctor = vi.fn().mockResolvedValueOnce(report)
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+    .mockRejectedValueOnce(new Error("unavailable"));
+  render(<LocaleProvider><NotificationProvider><SupportPage bridge={{ supportDoctor } as unknown as DesktopBridge} workspaceId="workspace" onBack={vi.fn()} /></NotificationProvider></LocaleProvider>);
+  await screen.findByText("First independent error.");
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(screen.getByText("First independent error.")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Checking Sigil…" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => finish({ ...report, generatedAtUnixMs: report.generatedAtUnixMs + 60_000,
+    checks: [{ status: "warn", name: "Fresh check", summary: "Fresh result." }] }));
+  expect(await screen.findByText("Fresh result.")).toBeTruthy();
+  expect(screen.queryByText("First independent error.")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("previous result"));
+  expect(screen.getByText("Fresh result.")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Check again" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(supportDoctor).toHaveBeenCalledTimes(3);
+});
 
 it("prioritizes errors and warnings before optional healthy and recovery facts without changing export privacy", async () => {
   const exportSupportBundle = vi.fn().mockResolvedValue({ cancelled: false, fileName: "private-report.json" });

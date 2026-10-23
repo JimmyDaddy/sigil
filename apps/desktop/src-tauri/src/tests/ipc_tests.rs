@@ -347,3 +347,30 @@ fn conversation_recovery_action_labels_cover_two_stage_compaction() {
         "apply_standalone_tool_output_shrink"
     );
 }
+
+#[test]
+fn provider_connection_credential_update_projects_only_exact_identity_and_key() {
+    let input: DesktopProviderConnectionCredentialUpdateInput =
+        serde_json::from_value(serde_json::json!({
+            "connectionId":"gateway-beta", "apiKey":"fixture-only-secret",
+            "endpoint":"https://must-not-be-used.invalid", "defaultModel":"must-not-be-used",
+        }))
+        .expect("credential input");
+    let native = input.into_native();
+    assert_eq!(native.connection_id, "gateway-beta");
+    assert_eq!(native.api_key, "fixture-only-secret");
+    assert_eq!(
+        serde_json::to_value(native).expect("native transport"),
+        serde_json::json!({
+            "connection_id":"gateway-beta", "api_key":"fixture-only-secret"
+        })
+    );
+    assert!(
+        serde_json::from_value::<DesktopProviderConnectionCredentialUpdateInput>(
+            serde_json::json!({
+                "connectionId":"gateway-beta"
+            })
+        )
+        .is_err()
+    );
+}

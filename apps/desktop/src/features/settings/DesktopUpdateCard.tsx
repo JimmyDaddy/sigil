@@ -59,7 +59,9 @@ export function DesktopUpdateCard({ bridge }: { readonly bridge: DesktopBridge }
   };
 
   const phase = snapshot?.phase;
-  const status = updateStatus(phase, t);
+  const status = loadingFailed && snapshot === undefined
+    ? updateStatus("error", t)
+    : updateStatus(phase, t);
   const downloadable = phase === "available";
   const restartable = phase === "ready_to_restart";
   const operationRunning =
@@ -122,9 +124,11 @@ export function DesktopUpdateCard({ bridge }: { readonly bridge: DesktopBridge }
             variant={downloadable || restartable ? "primary" : "secondary"}
             leadingIcon={<Icon name={restartable ? "play" : "download"} />}
             busy={actionBusy || operationRunning}
-            disabled={snapshot === undefined || phase === "unsupported"}
+            disabled={(snapshot === undefined && !loadingFailed) || phase === "unsupported"}
             onClick={() => {
-              if (downloadable) {
+              if (snapshot === undefined) {
+                void runAction(() => bridge.updateState());
+              } else if (downloadable) {
                 void runAction(() => bridge.downloadAndInstallUpdate());
               } else if (restartable) {
                 void runAction(() => bridge.restartAfterUpdate());
@@ -133,7 +137,7 @@ export function DesktopUpdateCard({ bridge }: { readonly bridge: DesktopBridge }
               }
             }}
           >
-            {updateActionLabel(phase, t)}
+            {snapshot === undefined && loadingFailed ? t("retry") : updateActionLabel(phase, t)}
           </Button>
         </div>
       </div>

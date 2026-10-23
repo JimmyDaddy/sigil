@@ -30,14 +30,15 @@ use crate::{
         HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest,
         HttpConversationQueueCommandRequest, HttpConversationRecoveryCommandAction,
         HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpPlanDecisionRequest,
-        HttpProviderDefaultModelSaveRequest, HttpProviderSetupCatalogRequest,
-        HttpProviderSetupSaveRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
-        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
-        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
-        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpTerminalTaskCancelRequest,
-        HttpToolArtifactReadRequest, HttpUserInputDecisionRequest, HttpVerificationRerunRequest,
+        HttpProviderConnectionCredentialUpdateRequest, HttpProviderDefaultModelSaveRequest,
+        HttpProviderSetupCatalogRequest, HttpProviderSetupSaveRequest, HttpRunCancelRequest,
+        HttpRunStartRequest, HttpServerInfo, HttpSessionCatalogBatchExecuteRequest,
+        HttpSessionCatalogBatchPlanRequest, HttpSessionCreateRequest, HttpSessionDeleteRequest,
+        HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
+        HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
+        HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
+        HttpTaskPauseRequest, HttpTerminalTaskCancelRequest, HttpToolArtifactReadRequest,
+        HttpUserInputDecisionRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -669,6 +670,47 @@ fn route_http_request(
         };
     }
 
+    if request.method == "POST"
+        && request.path == "/v1/private/borrowed/configuration/provider-connection-credential"
+    {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "borrowed_configuration_unavailable",
+                "host-private configuration is unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<
+            PrivateBorrowedConfigurationRequest<HttpProviderConnectionCredentialUpdateRequest>,
+        >(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "invalid host-private configuration registration capsule",
+            );
+        };
+        if body.schema_version
+            != sigil_resource_authority::configuration::BORROWED_CONFIGURATION_SCHEMA_VERSION
+        {
+            return http_error_response(
+                400,
+                "invalid_borrowed_configuration_request",
+                "unsupported host-private configuration schema",
+            );
+        }
+        return match support_context
+            .update_provider_connection_credential_with_capsule(body.request, body.capsule_id)
+        {
+            Ok((result, receipt)) => {
+                json_response(200, json!({ "result": result, "receipt": receipt }))
+            }
+            Err(error) => provider_setup_error_response(
+                error,
+                "the connection credential could not be saved; review the API key and retry",
+            ),
+        };
+    }
+
     if request.method == "PUT" && request.path == "/v1/private/borrowed/configuration/default-model"
     {
         let Some(support_context) = support_context else {
@@ -806,6 +848,32 @@ fn route_http_request(
             Err(error) => provider_setup_error_response(
                 error,
                 "provider setup could not be saved; review provider, authentication, endpoint, and model",
+            ),
+        };
+    }
+
+    if request.method == "PUT" && request.path == "/settings/provider-connections/credential" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_setup_unavailable",
+                "provider settings are unavailable",
+            );
+        };
+        let Ok(body) =
+            parse_json_body::<HttpProviderConnectionCredentialUpdateRequest>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "invalid_provider_connection_credential_request",
+                "invalid provider connection credential body",
+            );
+        };
+        return match support_context.update_provider_connection_credential(body) {
+            Ok(result) => json_response(200, json!(result)),
+            Err(error) => provider_setup_error_response(
+                error,
+                "the connection credential could not be saved; review the API key and retry",
             ),
         };
     }
@@ -2004,6 +2072,11 @@ fn provider_setup_error_response(
         HttpProviderSetupFailure::Invalid => {
             http_error_response(422, "provider_setup_invalid", invalid_message)
         }
+        HttpProviderSetupFailure::ConnectionNotFound => http_error_response(
+            404,
+            "provider_connection_not_found",
+            "the selected provider connection no longer exists",
+        ),
     }
 }
 

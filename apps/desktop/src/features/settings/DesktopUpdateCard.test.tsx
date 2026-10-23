@@ -35,6 +35,22 @@ function updateBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
 }
 
 describe("DesktopUpdateCard", () => {
+  it("retries a failed initial state read in place without checking, installing, or restarting", async () => {
+    const updateState = vi.fn().mockRejectedValueOnce(new Error("unavailable")).mockResolvedValue(available);
+    const checkForUpdate = vi.fn();
+    const downloadAndInstallUpdate = vi.fn();
+    const restartAfterUpdate = vi.fn();
+    render(<LocaleProvider><DesktopUpdateCard bridge={updateBridge({ updateState, checkForUpdate, downloadAndInstallUpdate, restartAfterUpdate })} /></LocaleProvider>);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.setup().click(retry);
+    expect(await screen.findByText("Update available")).toBeTruthy();
+    expect(updateState).toHaveBeenCalledTimes(2);
+    expect(checkForUpdate).not.toHaveBeenCalled();
+    expect(downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(restartAfterUpdate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
   it("requires an explicit download/install action and keeps restart explicit", async () => {
     const downloadAndInstallUpdate = vi.fn(updateBridge().downloadAndInstallUpdate);
     const restartAfterUpdate = vi.fn(async () => undefined);

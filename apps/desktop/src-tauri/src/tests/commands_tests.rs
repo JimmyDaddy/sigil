@@ -59,6 +59,55 @@ fn control_log_recovery_errors_use_only_typed_status_and_preserve_generic_projec
 }
 
 #[test]
+fn provider_credential_saved_reload_error_preserves_committed_state_and_safe_cause() {
+    for (error, expected_cause) in [
+        (
+            DesktopWorkspaceManagerError::WorkspaceUnavailable,
+            "The workspace server is unavailable.",
+        ),
+        (
+            DesktopWorkspaceManagerError::Launch(DesktopLaunchError::StartupRejected(
+                DesktopStartupFailure::WorkspaceBusy,
+            )),
+            "Another Sigil process is using this workspace service state.",
+        ),
+        (
+            DesktopWorkspaceManagerError::Launch(DesktopLaunchError::InvalidRequest(
+                "fixture-only-secret /private/credential-input",
+            )),
+            "The workspace server could not be started.",
+        ),
+    ] {
+        let projected = project_credential_saved_reload_error(error);
+        assert_eq!(projected.code, "credential_saved_workspace_reload_failed");
+        assert!(projected.message.contains("The credential was saved"));
+        assert!(projected.message.contains(expected_cause));
+        assert!(
+            projected
+                .message
+                .contains("Reopen the workspace or run diagnostics")
+        );
+        assert_eq!(
+            projected.recovery_actions,
+            [
+                DesktopRecoveryAction::OpenAnotherWorkspace,
+                DesktopRecoveryAction::OpenDiagnostics,
+                DesktopRecoveryAction::ShowDetails,
+            ]
+        );
+        assert!(projected.route_recovery.is_none());
+        let value = serde_json::to_value(projected).expect("saved credential reload error");
+        assert_eq!(value["code"], "credential_saved_workspace_reload_failed");
+        assert!(!value.to_string().contains("fixture-only-secret"));
+        assert!(!value.to_string().contains("/private/credential-input"));
+        assert_eq!(
+            value["recoveryActions"],
+            serde_json::json!(["open_another_workspace", "open_diagnostics", "show_details"])
+        );
+    }
+}
+
+#[test]
 fn workspace_identity_validation_is_strict_and_path_free() {
     assert!(valid_workspace_id("workspace-0123456789ab"));
     assert!(!valid_workspace_id("../workspace"));

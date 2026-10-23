@@ -1216,6 +1216,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 activeWorkspace !== undefined
                 && activeWorkspace.id === activeWorkspaceIdRef.current}
               providerInventory={providerInventory}
+              providerInventoryState={providerInventoryState}
               onProviderInventoryChange={(inventory) => {
                 if (activeWorkspace === undefined || activeWorkspace.id !== activeWorkspaceIdRef.current) return false;
                 setProviderInventory(inventory);

@@ -19,6 +19,7 @@ import { useNotifications } from "../../ui/feedback";
 import { Button, Checkbox, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ProviderSetup } from "./ProviderSetup";
+import { ProviderCredentialForm } from "./ProviderCredentialForm";
 import { PluginReviewCard } from "./PluginReviewCard";
 import { McpImportCard } from "./McpImportCard";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
@@ -51,6 +52,7 @@ export function SettingsPage({
   sessionId,
   isWorkspaceActive,
   providerInventory,
+  providerInventoryState,
   onProviderInventoryChange,
   onProviderConfigurationReloaded,
   modelContext,
@@ -66,6 +68,7 @@ export function SettingsPage({
   readonly sessionId?: string;
   readonly isWorkspaceActive: () => boolean;
   readonly providerInventory?: ProviderConnectionInventory;
+  readonly providerInventoryState?: "idle" | "loading" | "ready" | "error";
   readonly onProviderInventoryChange: (inventory: ProviderConnectionInventory) => boolean;
   readonly onProviderConfigurationReloaded: (workspaceId: string) => Promise<void>;
   readonly modelContext?: RunContext;
@@ -80,6 +83,8 @@ export function SettingsPage({
   const { notify } = useNotifications();
   const [reopenLastWorkspace, setReopenLastWorkspace] = useState(readReopenLastWorkspace);
   const [providerSetupOpen, setProviderSetupOpen] = useState(false);
+  const [credentialConnectionId, setCredentialConnectionId] = useState<string>();
+  const credentialTrigger = useRef<HTMLButtonElement | null>(null);
   const [category, setCategory] = useState<SettingsCategory>("connections");
   const categoryId = useId();
   const sectionsRef = useRef<HTMLDivElement>(null);
@@ -100,7 +105,15 @@ export function SettingsPage({
       }
     });
   };
+  const closeCredentialForm = () => {
+    setCredentialConnectionId(undefined);
+    window.requestAnimationFrame(() => {
+      const target = credentialTrigger.current;
+      if (target?.isConnected && target.closest("[hidden], [inert]") === null) target.focus({ preventScroll: true });
+    });
+  };
   const [providerReloading, setProviderReloading] = useState(false);
+  const [providerLoadFailed, setProviderLoadFailed] = useState(false);
   const [defaultModelSaving, setDefaultModelSaving] = useState(false);
   const effectiveDefaultModel = defaultModel ?? providerInventory?.defaultModel;
   const defaultModelConnection = providerInventory?.connections.find(
@@ -242,12 +255,14 @@ export function SettingsPage({
     }
   };
   const reloadProviderConfiguration = async () => {
-    if (workspaceId === undefined) return;
+    if (workspaceId === undefined || providerReloading) return;
     setProviderReloading(true);
+    setProviderLoadFailed(false);
     try {
       onProviderInventoryChange(await bridge.providerConnections(workspaceId));
     } catch {
       if (isWorkspaceActive()) {
+        setProviderLoadFailed(true);
         notify({ tone: "error", message: t("providerConnectionsUnavailable") });
       }
     } finally {
@@ -295,7 +310,12 @@ export function SettingsPage({
               {workspaceId === undefined ? (
                 <p className="settings-control-unavailable">{t("providerWorkspaceRequired")}</p>
               ) : providerInventory === undefined ? (
-                <p className="settings-control-unavailable">{t("loadingProviderConnections")}</p>
+                !providerReloading && (providerInventoryState === "error" || providerLoadFailed) ? (
+                  <div className="provider-setup-error" role="alert">
+                    <p>{t("providerConnectionsUnavailable")}</p>
+                    <Button type="button" variant="secondary" onClick={() => void reloadProviderConfiguration()}>{t("retry")}</Button>
+                  </div>
+                ) : <p className="settings-control-unavailable" role="status">{t("loadingProviderConnections")}</p>
               ) : (
                 <>
                   {providerInventory.connections.length === 0 ? (
@@ -323,9 +343,35 @@ export function SettingsPage({
                                   : t("providerConnectionNotDefault")}
                               </span>
                             </div>
+                            <div className="provider-connection-actions">
                             <small data-readiness={connection.readiness}>
                               {providerReadinessLabel(connection.readiness, t)}
                             </small>
+                            {connection.readiness === "needs_credential" || connection.readiness === "credential_unavailable" ? (
+                              <Button type="button" variant="quiet" aria-label={t("updateConnectionCredential", { name: connection.label.trim() })}
+                                aria-expanded={credentialConnectionId === connection.id}
+                                onClick={(event) => {
+                                  credentialTrigger.current = event.currentTarget;
+                                  setCredentialConnectionId(connection.id);
+                                  setProviderSetupOpen(false);
+                                }}>{t("updateCredential")}</Button>
+                            ) : connection.readiness === "invalid" ? (
+                              <Button type="button" variant="quiet" onClick={onOpenSupport}>{t("checkConnectionConfiguration")}</Button>
+                            ) : null}
+                            </div>
+                            {credentialConnectionId === connection.id && workspaceId !== undefined ? (
+                              <ProviderCredentialForm key={connection.id} bridge={bridge} workspaceId={workspaceId}
+                                connectionId={connection.id} connectionLabel={connection.label.trim()} active={category === "connections"}
+                                onCancel={closeCredentialForm} onOpenSupport={onOpenSupport} onSaved={(result) => {
+                                  if (!onProviderInventoryChange(result.inventory)) return;
+                                  setCredentialConnectionId(undefined);
+                                  void onProviderConfigurationReloaded(workspaceId).then(() => {
+                                    if (isWorkspaceActive()) notify({ tone: result.saveWarning ? "warning" : "success", message: t(result.saveWarning ? "defaultModelSaveWarning" : "credentialUpdated") });
+                                  }).catch(() => {
+                                    if (isWorkspaceActive()) notify({ tone: "error", message: t("providerSetupRestartFailed") });
+                                  });
+                                }} />
+                            ) : null}
                           </li>
                         );
                       })}
@@ -398,6 +444,9 @@ export function SettingsPage({
               ) : null}
           </section>
 
+          {providerInventory !== undefined
+            && providerInventoryState !== "loading"
+            && providerInventoryState !== "error" ? (
           <section className="settings-section" aria-labelledby="settings-model">
             <div className="settings-section-heading">
               <Icon name="model" />
@@ -494,6 +543,7 @@ export function SettingsPage({
               )}
               </div>
           </section>
+          ) : null}
 
         </div>
         <div className="settings-category" {...categoryPanel("preferences")}>
