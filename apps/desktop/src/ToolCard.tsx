@@ -11,13 +11,15 @@ import type {
   UserInputReceipt,
 } from "./types";
 import { Icon, type IconName } from "./ui/icons";
-import { Button, Collapsible, TextField } from "./ui/primitives";
+import { Button, IconButton, TextField, Tooltip } from "./ui/primitives";
 
 const MAX_VISIBLE_OUTPUT_LINES = 240;
 const OUTPUT_PREVIEW_LINES = 3;
 const OUTPUT_PREVIEW_CHARACTERS = 480;
 const MAX_SUMMARY_CHARACTERS = 280;
 const SHORT_OUTPUT_BYTES = 4_096;
+const ARTIFACT_CACHE_MAX_PAGES = 8;
+const ARTIFACT_CACHE_MAX_BYTES = 64 * 1_024;
 
 export interface ToolView {
   key: string;
@@ -88,6 +90,18 @@ interface OutputPreview {
   readonly truncated: boolean;
 }
 
+interface ArtifactReadingPosition {
+  readonly readerOpen: boolean;
+  readonly page?: ToolArtifactPage;
+  readonly previousSelectors: readonly ToolArtifactSelector[];
+  readonly scrollTop: number;
+}
+
+interface CachedArtifactPage {
+  readonly page: ToolArtifactPage;
+  readonly bodyBytes: number;
+}
+
 export function ToolCard({
   tool,
   displayId,
@@ -109,12 +123,22 @@ export function ToolCard({
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
-  // Search and paging replace artifactPage; retain only the bounded original for inline reading.
-  const [inlineArtifactPage, setInlineArtifactPage] = useState<ToolArtifactPage>();
+  const [artifactPreviousSelectors, setArtifactPreviousSelectors] = useState<readonly ToolArtifactSelector[]>([]);
+  const artifactReadingPosition = useRef<ArtifactReadingPosition | undefined>(undefined);
+  const artifactPageCache = useRef(new Map<string, CachedArtifactPage>());
+  const artifactCurrentPosition = useRef<ArtifactReadingPosition>({ readerOpen: false, previousSelectors: [], scrollTop: 0 });
+  const artifactContent = useRef<HTMLDivElement>(null);
+  const artifactScrollTop = useRef(0);
+  const artifactRestoreFocus = useRef(false);
   const [artifactBusy, setArtifactBusy] = useState(false);
   const [artifactError, setArtifactError] = useState(false);
   const [artifactQuery, setArtifactQuery] = useState("");
   const [artifactSearchOpen, setArtifactSearchOpen] = useState(false);
+  const [artifactReaderOpen, setArtifactReaderOpen] = useState(false);
+  const artifactReaderId = useId();
+  const artifactReaderToggle = useRef<HTMLButtonElement>(null);
+  artifactCurrentPosition.current = { readerOpen: artifactReaderOpen, page: artifactPage,
+    previousSelectors: artifactPreviousSelectors, scrollTop: artifactContent.current?.scrollTop ?? artifactScrollTop.current };
   const artifactSearchId = useId();
   const artifactSearchInput = useRef<HTMLInputElement>(null);
   const artifactSearchToggle = useRef<HTMLButtonElement>(null);
@@ -130,34 +154,55 @@ export function ToolCard({
     artifactReadGeneration.current += 1;
     artifactReadBusy.current = false;
     setArtifactPage(undefined);
-    setInlineArtifactPage(undefined);
+    setArtifactPreviousSelectors([]);
+    artifactReadingPosition.current = undefined;
+    artifactPageCache.current.clear();
+    artifactScrollTop.current = 0;
+    artifactRestoreFocus.current = false;
     setArtifactBusy(false);
     setArtifactError(false);
     setArtifactQuery("");
     setArtifactSearchOpen(false);
+    setArtifactReaderOpen(false);
     return () => {
       artifactReadGeneration.current += 1;
       artifactReadBusy.current = false;
     };
-  }, [tool.key, tool.artifactRef, canReadArtifact]);
+  }, [tool.key, tool.artifactRef, tool.artifactAvailability, canReadArtifact]);
   useEffect(() => {
     if (artifactSearchOpen) artifactSearchInput.current?.focus();
   }, [artifactSearchOpen]);
-  const readArtifact = useCallback((selector: ToolArtifactSelector) => {
+  useLayoutEffect(() => {
+    if (artifactContent.current === null) return;
+    if (artifactRestoreFocus.current) artifactContent.current.focus({ preventScroll: true });
+    artifactContent.current.scrollTop = artifactScrollTop.current;
+    artifactRestoreFocus.current = false;
+  }, [artifactPage, artifactReaderOpen]);
+  const readArtifact = useCallback((selector: ToolArtifactSelector, navigation: "replace" | "next" | "previous" = "replace") => {
     const read = readArtifactRef.current;
     if (!canReadArtifact || read === undefined || artifactReadBusy.current) return;
+    setArtifactReaderOpen(true);
     const generation = ++artifactReadGeneration.current;
     artifactReadBusy.current = true;
     setArtifactBusy(true);
     setArtifactError(false);
+    const previous = { ...artifactCurrentPosition.current, scrollTop: artifactContent.current?.scrollTop ?? artifactScrollTop.current };
+    const cached = navigation === "replace" ? undefined : artifactPageCache.current.get(artifactSelectorKey(selector));
     void (async () => {
       try {
-        const page = await read(selector);
+        const page = cached?.page ?? await read(selector);
         if (generation === artifactReadGeneration.current) {
-          setArtifactPage(page);
-          if (selector.kind === "byte_slice" && selector.offset === 0 && page.returnedBytes <= SHORT_OUTPUT_BYTES) {
-            setInlineArtifactPage(page);
+          if (selector.kind === "search_literal" && previous.page?.selector.kind !== "search_literal") {
+            artifactReadingPosition.current = previous;
+          } else if (selector.kind !== "search_literal" && navigation === "replace") {
+            artifactReadingPosition.current = undefined;
           }
+          cacheArtifactPage(artifactPageCache.current, page, artifactReadingPosition.current?.page);
+          artifactScrollTop.current = 0;
+          setArtifactPage(page);
+          setArtifactPreviousSelectors(navigation === "next" && previous.page !== undefined
+            ? [...previous.previousSelectors, previous.page.selector]
+            : navigation === "previous" ? previous.previousSelectors.slice(0, -1) : []);
         }
       } catch {
         if (generation === artifactReadGeneration.current) setArtifactError(true);
@@ -182,11 +227,26 @@ export function ToolCard({
     if (!shortOutput) return;
     return readArtifact({ kind: "byte_slice", offset: 0, limit: SHORT_OUTPUT_BYTES });
   }, [shortOutput, tool.key, tool.artifactRef, readArtifact]);
-  const completeInlineOutput = shortOutput && isCompleteInlineOutput(inlineArtifactPage, tool)
-    ? inlineArtifactPage : undefined;
-  const visibleShortPage = completeInlineOutput ?? artifactPage;
+  const readingPage = artifactPage?.selector.kind === "search_literal" ? artifactReadingPosition.current?.page : artifactPage;
+  const completeInlineOutput = shortOutput && isCompleteInlineOutput(readingPage, tool) ? readingPage : undefined;
   const compactSearch = completeInlineOutput !== undefined
     && presentation.tone === "success" && tool.artifactHasMore !== true;
+  const returnToReading = () => {
+    const position = artifactReadingPosition.current;
+    if (artifactReadBusy.current || position === undefined) return;
+    artifactScrollTop.current = position.scrollTop;
+    artifactRestoreFocus.current = position.readerOpen && position.page !== undefined;
+    setArtifactReaderOpen(position.readerOpen);
+    if (position.page !== undefined) cacheArtifactPage(artifactPageCache.current, position.page);
+    setArtifactPage(position.page);
+    setArtifactPreviousSelectors(position.previousSelectors);
+    setArtifactError(false);
+    artifactReadingPosition.current = undefined;
+    if ((!position.readerOpen || position.page === undefined) && !shortOutput) {
+      setArtifactReaderOpen(false);
+      artifactReaderToggle.current?.focus();
+    }
+  };
   const artifactSearchForm = (
     <form onSubmit={(event) => {
       event.preventDefault();
@@ -198,36 +258,67 @@ export function ToolCard({
       <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>{t("search")}</Button>
     </form>
   );
-  const artifactResults = <>
-    {artifactPage === undefined || (shortOutput && artifactPage === visibleShortPage) ? null : artifactPage.bodyEncoding === "utf8" ? (
-      <HighlightedCode text={artifactPage.body} ariaLabel={`${tool.toolName} saved output ${artifactPage.selector.kind === "search_literal" ? "search results" : "page"}`} />
-    ) : <small>{t("savedOutputBinary")}</small>}
-    {artifactPage?.nextSelector === undefined ? null : (
-      <Button type="button" variant="quiet" busy={artifactBusy}
-        onClick={() => void readArtifact(artifactPage.nextSelector!)}>{t("nextOutputPage")}</Button>
+  const searching = artifactPage?.selector.kind === "search_literal";
+  const showPageContext = artifactPage !== undefined && (!compactSearch || searching);
+  const showArtifactPage = artifactPage !== undefined && (shortOutput || artifactReaderOpen);
+  const artifactResults = <div className="tool-artifact-reader" aria-busy={artifactBusy}>
+    {showPageContext ? <header className="tool-artifact-context">
+      <div>
+        <strong>{artifactPage.selector.kind === "search_literal"
+          ? t("savedOutputSearchTitle", { query: artifactPage.selector.query }) : t("savedOutput")}</strong>
+        <small>{artifactPageRange(artifactPage, tool.artifactPersistedBytes, t)}
+          {searching ? ` · ${t("savedOutputMatchCount", { count: artifactPage.matchCount })}` : ""}</small>
+      </div>
+      {searching ? <Button type="button" variant="quiet" disabled={artifactBusy}
+        onClick={returnToReading}>{t("returnToOutput")}</Button> : null}
+    </header> : null}
+    <div className="tool-artifact-content" ref={artifactContent} tabIndex={artifactPage === undefined ? undefined : 0}
+      aria-label={t("savedOutputReadingArea")}>
+      {artifactPage === undefined ? null : artifactPage.bodyEncoding !== "utf8" ? <p>{t("savedOutputBinary")}</p>
+        : artifactPage.selector.kind === "search_literal" && artifactPage.matchCount === 0 ? (
+          <p role="status">{t(artifactPage.nextSelector !== undefined ? "savedOutputNoMatchesInRange"
+            : artifactPreviousSelectors.length > 0 ? "savedOutputNoMoreMatches" : "savedOutputNoMatches")}</p>
+        ) : artifactPage.body === "" ? <p>{t("noToolOutput")}</p> : (
+          <HighlightedCode text={artifactPage.body} ariaLabel={`${tool.toolName} saved output ${searching ? "search results" : "page"}`} />
+        )}
+    </div>
+    {artifactBusy ? <small role="status">{t("savedOutputLoading")}</small> : null}
+    {artifactPage === undefined || (!showPageContext && artifactPage.nextSelector === undefined) ? null : (
+      <nav className="tool-artifact-pagination" aria-label={t("savedOutputNavigation")}>
+        {artifactPreviousSelectors.length === 0 ? null : <Button type="button" variant="quiet" disabled={artifactBusy}
+          onClick={() => void readArtifact(artifactPreviousSelectors[artifactPreviousSelectors.length - 1]!, "previous")}>{t("previousOutputPage")}</Button>}
+        {artifactPage.nextSelector === undefined ? artifactPage.eof ? <small>{t(searching ? "savedOutputSearchEnd" : "savedOutputEnd")}</small> : null : (
+          <Button type="button" variant="quiet" busy={artifactBusy}
+            onClick={() => void readArtifact(artifactPage.nextSelector!, "next")}>{t("nextOutputPage")}</Button>
+        )}
+      </nav>
     )}
     {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
-  </>;
+  </div>;
   const artifactSearchButton = (
-    <Button ref={artifactSearchToggle} type="button" variant="quiet" leadingIcon={<Icon name="search" />}
-      aria-expanded={artifactSearchOpen} aria-controls={artifactSearchId}
-      onClick={() => setArtifactSearchOpen((open) => !open)}>{t("searchSavedOutput")}</Button>
+    <Tooltip label={t("searchSavedOutput")}>
+      <IconButton ref={artifactSearchToggle} type="button" className="tool-artifact-search-toggle"
+        icon={<Icon name="search" />} aria-label={t("searchSavedOutput")}
+        aria-expanded={artifactSearchOpen} aria-controls={artifactSearchId}
+        onClick={() => setArtifactSearchOpen((open) => !open)} />
+    </Tooltip>
   );
   const artifactSearchPanel = artifactSearchOpen ? (
-    <div id={artifactSearchId} className="tool-card-body" onKeyDown={(event) => {
+    <div id={artifactSearchId} className="tool-artifact-search-panel" onKeyDown={(event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
       setArtifactSearchOpen(false);
       artifactSearchToggle.current?.focus();
     }}>
-      <div className="tool-artifact-actions">{artifactSearchForm}</div>
-      {compactSearch ? artifactResults : null}
+      {artifactSearchForm}
     </div>
   ) : null;
   const artifactPresentation = tool.artifactAvailability === undefined
     ? undefined
     : presentArtifactStatus(tool.artifactAvailability, t);
+  const showSummary = presentation.summary !== undefined && !(presentation.tone === "success"
+    && (shortOutput || (canReadArtifact && showArtifactPage && !questionReceipt && presentation.detailKind !== "diff")));
   return (
     <article
       className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined ? " tool-card-compact" : ""}`}
@@ -248,12 +339,12 @@ export function ToolCard({
       {onCancelExecution === undefined ? null : (
         <Button type="button" variant="quiet" busy={cancelling} onClick={onCancelExecution}>{t("toolNameStopCommand")}</Button>
       )}
-      {presentation.input === undefined && presentation.summary === undefined ? null : (
+      {presentation.input === undefined && !showSummary ? null : (
         <div className="tool-card-main">
           {presentation.input === undefined ? null : (
             <ToolInput key={tool.key} toolName={tool.toolName} input={presentation.input} language={inputLanguage} />
           )}
-          {presentation.summary === undefined || (shortOutput && presentation.tone === "success") ? null : (
+          {!showSummary ? null : (
             <div className="tool-result">
               <small>{t(presentation.tone === "danger" || presentation.tone === "warning" ? "toolStatusLabel" : "toolResultLabel")}</small>
               <p>{presentation.summary}</p>
@@ -261,24 +352,44 @@ export function ToolCard({
           )}
         </div>
       )}
-      {shortOutput ? (
-        visibleShortPage?.bodyEncoding === "utf8" ? (
-          visibleShortPage.body === "" ? <p>{t("noToolOutput")}</p>
-            : <HighlightedCode text={visibleShortPage.body} ariaLabel={`${tool.toolName} saved output page`} />
-        ) : artifactError ? (
-          <p role="alert">{t("artifactReadFailed")}</p>
-        ) : artifactBusy ? (
-          <p role="status">{t("savedOutputLoading")}</p>
-        ) : artifactPage === undefined ? null : <p>{t("savedOutputBinary")}</p>
+      {canReadArtifact ? (
+        <section className="tool-artifact-retrieval" aria-label={t("savedOutput")}>
+          <div className="tool-artifact-toolbar">
+            {!shortOutput || artifactPage === undefined ? (
+              <Button ref={artifactReaderToggle} type="button" variant="quiet" className="tool-artifact-disclosure"
+                leadingIcon={<Icon name={showArtifactPage ? "chevron-up" : "chevron-down"} />}
+                aria-expanded={showArtifactPage} aria-controls={artifactReaderId}
+                busy={artifactBusy && artifactPage === undefined}
+                onClick={() => {
+                  if (showArtifactPage) {
+                    artifactScrollTop.current = artifactContent.current?.scrollTop ?? 0;
+                    setArtifactReaderOpen(false);
+                    setArtifactSearchOpen(false);
+                  } else {
+                    setArtifactReaderOpen(true);
+                    if (artifactPage === undefined) void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 });
+                    else artifactRestoreFocus.current = true;
+                  }
+                }}>{t(showArtifactPage ? "collapseSavedOutput" : "viewSavedOutput")}</Button>
+            ) : null}
+            {showArtifactPage && !compactSearch ? <Button type="button" variant="quiet" disabled={artifactBusy}
+              onClick={() => void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 })}>{t("restartSavedOutput")}</Button> : null}
+            {artifactSearchButton}
+          </div>
+          {artifactSearchPanel}
+          <div id={artifactReaderId} className="tool-artifact-display">
+            {!shortOutput && !showArtifactPage && presentation.detailKind === "output" ? (
+              <ToolOutputPanel key={tool.key} toolName={tool.toolName} text={presentation.detailText ?? ""}
+                language={presentation.detailLanguage} streaming={presentation.streaming} allowExpand={false} />
+            ) : null}
+            {shortOutput || artifactReaderOpen ? artifactResults : null}
+          </div>
+        </section>
       ) : presentation.detailKind === "output" ? (
-        <ToolOutputPanel
-          key={tool.key}
-          toolName={tool.toolName}
-          text={presentation.detailText ?? ""}
-          language={presentation.detailLanguage}
-          streaming={presentation.streaming}
-        />
-      ) : presentation.detailKind === undefined ? null : (
+        <ToolOutputPanel key={tool.key} toolName={tool.toolName} text={presentation.detailText ?? ""}
+          language={presentation.detailLanguage} streaming={presentation.streaming} />
+      ) : null}
+      {presentation.detailKind === undefined || presentation.detailKind === "output" ? null : (
         <details className="tool-details">
           <summary>
             <span>{presentation.detailLabel}</span>
@@ -311,28 +422,7 @@ export function ToolCard({
           </div>
         </details>
       )}
-      {canReadArtifact && compactSearch ? (
-        <div className="tool-details tool-artifact-search">
-          {artifactSearchButton}
-          {artifactSearchPanel}
-        </div>
-      ) : canReadArtifact ? (
-        <Collapsible className="tool-artifact-retrieval" label={t("savedOutputDetails")}>
-          <div className="tool-artifact-actions">
-            <Button
-              type="button"
-              variant="quiet"
-              busy={artifactBusy && artifactPage === undefined}
-              onClick={() => void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 })}
-            >
-              {artifactPage === undefined ? t("viewSavedOutput") : t("restartSavedOutput")}
-            </Button>
-            {artifactSearchButton}
-          </div>
-          {artifactSearchPanel}
-          {artifactResults}
-        </Collapsible>
-      ) : artifactPresentation !== undefined ? (
+      {!canReadArtifact && artifactPresentation !== undefined ? (
         <section
           className={`tool-artifact-status tool-status-${artifactPresentation.status}`}
           data-artifact-product-status={artifactPresentation.status}
@@ -355,6 +445,47 @@ function isCompleteInlineOutput(page: ToolArtifactPage | undefined, tool: ToolVi
     && page.selector.kind === "byte_slice" && page.selector.offset === 0 && page.eof
     && page.nextSelector === undefined && page.returnedBytes === tool.artifactPersistedBytes
     && page.returnedBytes <= SHORT_OUTPUT_BYTES;
+}
+
+function artifactPageRange(page: ToolArtifactPage, totalBytes: number | undefined, t: Translate): string {
+  const selector = page.selector;
+  if (selector.kind === "line_page") {
+    return t("savedOutputLineStart", { start: selector.startLine + 1 });
+  }
+  if (selector.kind === "search_literal") {
+    const end = page.nextSelector?.kind === "search_literal" ? page.nextSelector.startOffset
+      : page.eof ? totalBytes : undefined;
+    return end === undefined ? t("savedOutputSearchFrom", { start: selector.startOffset + 1 })
+      : t("savedOutputByteRange", { start: Math.min(selector.startOffset + 1, end), end });
+  }
+  return t("savedOutputByteRange", {
+    start: selector.offset + (page.returnedBytes > 0 ? 1 : 0), end: selector.offset + page.returnedBytes,
+  });
+}
+
+function artifactSelectorKey(selector: ToolArtifactSelector): string {
+  switch (selector.kind) {
+    case "byte_slice": return JSON.stringify([selector.kind, selector.offset, selector.limit]);
+    case "line_page": return JSON.stringify([selector.kind, selector.startLine, selector.lineCount]);
+    case "search_literal": return JSON.stringify([selector.kind, selector.query, selector.startOffset, selector.maxMatches, selector.contextLines]);
+  }
+}
+
+function cacheArtifactPage(cache: Map<string, CachedArtifactPage>, page: ToolArtifactPage, readingPage?: ToolArtifactPage) {
+  const key = artifactSelectorKey(page.selector);
+  const bodyBytes = new TextEncoder().encode(page.body).length;
+  cache.delete(key);
+  if (bodyBytes > ARTIFACT_CACHE_MAX_BYTES) return;
+  cache.set(key, { page, bodyBytes });
+  const readingKey = readingPage === undefined ? undefined : artifactSelectorKey(readingPage.selector);
+  let retainedBytes = Array.from(cache.values()).reduce((bytes, entry) => bytes + entry.bodyBytes, 0);
+  for (const [cachedKey, entry] of cache) {
+    if (cache.size <= ARTIFACT_CACHE_MAX_PAGES && retainedBytes <= ARTIFACT_CACHE_MAX_BYTES) break;
+    if (cachedKey === key || cachedKey === readingKey) continue;
+    cache.delete(cachedKey);
+    retainedBytes -= entry.bodyBytes;
+  }
+  if (cache.size > ARTIFACT_CACHE_MAX_PAGES || retainedBytes > ARTIFACT_CACHE_MAX_BYTES) cache.delete(key);
 }
 
 function ToolInput({ toolName, input, language }: {
@@ -382,11 +513,13 @@ function ToolOutputPanel({
   text,
   language,
   streaming,
+  allowExpand = true,
 }: {
   readonly toolName: string;
   readonly text: string;
   readonly language?: string;
   readonly streaming: boolean;
+  readonly allowExpand?: boolean;
 }) {
   const { t } = useLocale();
   const [expanded, setExpanded] = useState(streaming);
@@ -397,16 +530,17 @@ function ToolOutputPanel({
   const preview = outputPreview(bounded.text);
   const structured = language === "json";
   const expandable = structured || preview.truncated;
-  const visibleText = expanded || !expandable ? bounded.text : preview.text;
+  const showExpanded = allowExpand && expanded;
+  const visibleText = showExpanded || !expandable ? bounded.text : preview.text;
   const showOutput = visibleText.trim() !== "";
   const lineCount = text.split("\n").length;
   const metadata = detailMetadata(language, lineCount);
   return (
     <section
-      className={`tool-output-section${expanded ? " is-expanded" : ""}`}
+      className={`tool-output-section${showExpanded ? " is-expanded" : ""}`}
       aria-label={`${toolName} output`}
     >
-      {expandable ? (
+      {expandable && allowExpand ? (
         <Button
           type="button"
           variant="quiet"
@@ -434,7 +568,7 @@ function ToolOutputPanel({
           ariaLabel={`${toolName} output content`}
         />
       ) : null}
-      {expanded && bounded.omittedLines > 0 ? (
+      {showExpanded && bounded.omittedLines > 0 ? (
         <small>{bounded.omittedLines} output line{bounded.omittedLines === 1 ? "" : "s"} omitted from this view.</small>
       ) : null}
     </section>

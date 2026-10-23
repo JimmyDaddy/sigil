@@ -46,8 +46,7 @@ it.each(["tool key", "artifact ref"])("ignores a late manual output after changi
   const tool = { key: "previous-call", toolName: "exec_command", text: "bounded preview",
     status: "succeeded", artifactRef, artifactAvailability: "available" as const, artifactPersistedBytes: 32_000 };
   const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
-  await user.click(screen.getByText("Full output and search"));
-  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  await user.click(screen.getByRole("button", { name: "View full output" }));
   expect(previous.read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 16_384 });
 
   view.rerender(<ToolCard tool={{ ...tool,
@@ -72,14 +71,13 @@ it("keeps the current read busy when an obsolete manual request fails", async ()
   const tool = { key: "previous-call", toolName: "exec_command", text: "bounded preview",
     status: "succeeded", artifactRef, artifactAvailability: "available" as const, artifactPersistedBytes: 32_000 };
   const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
-  await user.click(screen.getByText("Full output and search"));
-  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  await user.click(screen.getByRole("button", { name: "View full output" }));
   view.rerender(<ToolCard tool={{ ...tool, key: "next-call", artifactRef: nextArtifactRef, artifactPersistedBytes: 32 }} onReadArtifact={next.read} />);
   await waitFor(() => expect(next.read).toHaveBeenCalledOnce());
   await act(async () => { previous.fail(); await previous.pending.catch(() => {}); });
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByText("Loading output…")).toBeTruthy();
-  expect((screen.getByRole("button", { name: "View saved output" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "View full output" }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => { next.complete("Current output B"); await next.pending; });
   expect((await screen.findByLabelText("exec_command saved output page")).textContent).toContain("Current output B");
 });
@@ -95,8 +93,7 @@ it("ignores an obsolete automatic read after a newer manual output succeeds", as
   const view = render(<ToolCard tool={tool} onReadArtifact={previous.read} />);
   await waitFor(() => expect(previous.read).toHaveBeenCalledOnce());
   view.rerender(<ToolCard tool={{ ...tool, key: "next-call", artifactRef: nextArtifactRef, artifactPersistedBytes: 32_000 }} onReadArtifact={next.read} />);
-  await user.click(screen.getByText("Full output and search"));
-  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  await user.click(screen.getByRole("button", { name: "View full output" }));
   await act(async () => { next.complete("Current output B"); await next.pending; });
   expect((await screen.findByLabelText("exec_command saved output page")).textContent).toContain("Current output B");
   await act(async () => { previous.complete("Obsolete output A"); await previous.pending; });
@@ -122,7 +119,7 @@ it("shows complete short UTF8 output directly with only a secondary search discl
   const search = screen.getByRole("button", { name: "Search saved tool output" });
   expect(search.getAttribute("aria-expanded")).toBe("false");
   expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Restart saved output", hidden: true })).toBeNull();
+  expect(screen.queryByRole("button", { name: "From start", hidden: true })).toBeNull();
   expect(screen.queryByText(/saved bytes are available|bounded pages/)).toBeNull();
 });
 
@@ -140,7 +137,7 @@ describe("compact saved output search", () => {
     artifactRef, artifactAvailability: "available" as const, artifactHasMore: false,
     artifactPersistedBytes: new TextEncoder().encode(source).length };
 
-  it("keeps the exact original visible while literal search results and their next page change independently", async () => {
+  it("uses one reading area for search and returns to the exact original without another read", async () => {
     const user = userEvent.setup();
     const nextSelector: ToolArtifactSelector = { kind: "search_literal", query: "社团", startOffset: 12, maxMatches: 20, contextLines: 2 };
     const read = vi.fn(async (selector: ToolArtifactSelector) => selector.kind !== "search_literal"
@@ -157,13 +154,21 @@ describe("compact saved output search", () => {
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain("first matching line");
     expect(read).toHaveBeenNthCalledWith(2, { kind: "search_literal", query: "社团", startOffset: 0, maxMatches: 20, contextLines: 2 });
-    expect(screen.getByLabelText("read_file saved output page")).toBe(original);
-    expect(original.textContent).toBe(originalText);
+    expect(screen.queryByLabelText("read_file saved output page")).toBeNull();
+    expect(screen.getByText("Results for “社团”")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
+    expect(screen.getByLabelText("read_file saved output search results").textContent).toContain("first matching line");
     await user.click(screen.getByRole("button", { name: "Next page" }));
     expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain("second matching line");
     expect(read).toHaveBeenLastCalledWith(nextSelector);
-    expect(original.textContent).toBe(originalText);
     expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
+    expect(screen.getByText("Search complete")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Return to output" }));
+    expect(screen.getByLabelText("read_file saved output page").textContent).toBe(originalText);
+    expect(read).toHaveBeenCalledTimes(3);
+    await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
+    expect((screen.getByRole("textbox", { name: "Search saved tool output" }) as HTMLInputElement).value).toBe("社团");
   });
 
   it.each(["failed", "paged", "binary", "more"] as const)("retains full retrieval for a %s output even when its stored size is small", async (mode) => {
@@ -176,10 +181,9 @@ describe("compact saved output search", () => {
         ? JSON.stringify({ status: "error", error: { message: "Read permission failed" } }) : tool.text }} onReadArtifact={read} />);
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
-    expect(screen.getByText("Full output and search").closest("details")?.classList.contains("sg-collapsible")).toBe(true);
+    expect(screen.queryByText("Full output and search")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
-    await user.click(screen.getByText("Full output and search"));
-    expect(screen.getByRole("button", { name: "Restart saved output" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "From start" })).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
     const search = screen.getByRole("button", { name: "Search saved tool output" });
     await user.click(search);
@@ -202,14 +206,13 @@ describe("compact saved output search", () => {
     render(<ToolCard tool={tool} onReadArtifact={read} />);
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
     expect(screen.getAllByRole("alert").length).toBeGreaterThan(0);
-    await user.click(screen.getByText("Full output and search"));
-    await user.click(screen.getByRole("button", { name: "View saved output" }));
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain("社团🌿");
     expect(screen.getByRole("button", { name: "Search saved tool output" })).toBeTruthy();
     expect(screen.queryByText("Full output and search")).toBeNull();
   });
 
-  it("shows a search failure beside its retry without replacing the complete original", async () => {
+  it("retains the complete original on a search failure and only replaces it after a successful retry", async () => {
     const user = userEvent.setup();
     let searches = 0;
     const read = vi.fn(async (selector: ToolArtifactSelector) => {
@@ -227,7 +230,9 @@ describe("compact saved output search", () => {
     expect(original.textContent).toBe(text);
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain("retry match");
-    expect(original.textContent).toBe(text);
+    expect(screen.queryByLabelText("read_file saved output page")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Return to output" }));
+    expect(screen.getByLabelText("read_file saved output page").textContent).toBe(text);
   });
 
   it.each(["tool key", "artifact ref"])("clears cached original and ignores a late search after the %s changes", async (scope) => {

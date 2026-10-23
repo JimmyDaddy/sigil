@@ -32,8 +32,7 @@ it("shows a typed question receipt without automatically reading its short JSON 
   await user.click(screen.getByText("Original request and receipt"));
   expect(details.open).toBe(true);
   expect(read).not.toHaveBeenCalled();
-  await user.click(screen.getByText("Full output and search"));
-  await user.click(screen.getByRole("button", { name: "View saved output" }));
+  await user.click(screen.getByRole("button", { name: "View full output" }));
   expect(read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 16_384 });
   expect(await screen.findByRole("alert")).toBeTruthy();
 });

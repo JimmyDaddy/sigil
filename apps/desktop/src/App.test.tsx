@@ -1000,8 +1000,7 @@ describe("desktop coding-agent components", () => {
     );
 
     expect(screen.queryByText(/saved bytes are available/)).toBeNull();
-    await user.click(screen.getByText("Full output and search"));
-    await user.click(screen.getByRole("button", { name: "View saved output" }));
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     expect((await screen.findByLabelText("shell saved output page")).textContent).toContain("saved page");
     expect(readArtifact).toHaveBeenNthCalledWith(1, {
       kind: "byte_slice",
@@ -1053,7 +1052,7 @@ describe("desktop coding-agent components", () => {
 
     expect(screen.getByText("bounded durable summary")).toBeTruthy();
     expect(screen.getByText("Saved output is not currently available.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "View saved output" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View full output" })).toBeNull();
     expect(readArtifact).not.toHaveBeenCalled();
   });
 

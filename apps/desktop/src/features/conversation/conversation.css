@@ -452,16 +452,35 @@
 .tool-output { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); white-space: pre; }
 .tool-output code { color: inherit; font-family: ui-monospace, "SFMono-Regular", monospace; font-size: 12px; line-height: 1.55; }
 .tool-card-body > small { color: var(--sg-sys-color-on-surface-subtle); }
-.tool-artifact-retrieval { display: grid; min-width: 0; gap: 6px; margin: 7px 0 0 30px; padding-top: 6px; border-top: 1px solid var(--sg-sys-color-outline); }
-.tool-artifact-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
-.tool-artifact-actions form { display: flex; min-width: min(100%, 320px); flex: 1; align-items: center; gap: 5px; }
-.tool-artifact-search > .sg-button { margin: 3px 0; }
-.tool-artifact-search-field { min-width: 80px; flex: 1; }
-.tool-artifact-actions input { min-height: 28px; padding: 4px 7px; }
-.tool-artifact-retrieval > small, .tool-artifact-unavailable { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
-.tool-artifact-retrieval .syntax-highlight { max-height: 320px; overflow: auto; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-input); }
-.tool-artifact-retrieval pre { margin: 0; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
-.tool-artifact-unavailable { display: block; margin: 6px 0 0 30px; }
+.tool-artifact-retrieval { display: grid; min-width: 0; gap: 6px; margin: 6px 0 0 30px; padding-top: 5px; border-top: 1px solid var(--sg-sys-color-outline-variant); }
+.tool-artifact-toolbar { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
+.tool-artifact-toolbar .sg-button { min-width: 0; min-height: 28px; padding: 3px 6px; border: 0; border-radius: var(--sg-sys-radius-sm); font-size: 11px; font-weight: 500; }
+.tool-artifact-toolbar .tool-artifact-disclosure { padding-left: 0; color: var(--sg-sys-color-on-surface-variant); }
+.tool-artifact-toolbar .sg-icon { width: 14px; height: 14px; }
+.tool-artifact-toolbar .sg-tooltip-anchor { margin-left: auto; }
+.tool-artifact-toolbar .tool-artifact-search-toggle { width: 28px; min-width: 28px; min-height: 28px; border: 0; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface-subtle); background: transparent; }
+.tool-artifact-toolbar button:hover:not(:disabled) { background: var(--sg-sys-color-surface-hover); }
+.tool-artifact-toolbar button:focus-visible { outline: 2px solid var(--sg-sys-color-focus); outline-offset: 2px; }
+.tool-artifact-search-panel form { display: flex; width: min(100%, 420px); min-width: 0; align-items: center; gap: 6px; }
+.tool-artifact-search-panel .sg-button { min-width: 0; min-height: 28px; padding: 3px 7px; font-size: 11px; font-weight: 500; }
+.tool-artifact-search-field { min-width: 0; flex: 1; }
+.tool-artifact-search-panel input { min-height: 28px; padding: 4px 7px; }
+.tool-artifact-display, .tool-artifact-reader { display: grid; min-width: 0; gap: 6px; }
+.tool-artifact-display .tool-output-section { margin: 0; padding: 0; border: 0; }
+.tool-artifact-display .tool-output-section .syntax-highlight { border: 0; }
+.tool-artifact-context { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.tool-artifact-context > div { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; }
+.tool-artifact-context strong { color: var(--sg-sys-color-on-surface-variant); font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.tool-artifact-context small, .tool-artifact-pagination small, .tool-artifact-reader > small { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; overflow-wrap: anywhere; }
+.tool-artifact-content { min-width: 0; max-height: 320px; overflow: auto; border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-input); }
+.tool-artifact-content:empty { display: none; }
+.tool-artifact-content:focus-visible { outline: 2px solid var(--sg-sys-color-focus); outline-offset: 2px; }
+.tool-artifact-reader .tool-artifact-content .syntax-highlight { max-height: none; overflow: visible; border: 0; background: transparent; }
+.tool-artifact-content pre { margin: 0; padding: 7px 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
+.tool-artifact-content > p { margin: 0; padding: 9px; color: var(--sg-sys-color-on-surface-variant); font-size: 11px; overflow-wrap: anywhere; }
+.tool-artifact-pagination { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tool-artifact-pagination .sg-button, .tool-artifact-context .sg-button { min-width: 0; min-height: 26px; padding: 2px 5px; font-size: 11px; font-weight: 500; }
+.tool-artifact-unavailable { display: block; margin: 6px 0 0 30px; color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
 .diff-viewer { margin: 0; overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-input); }
 .diff-viewer figcaption { display: flex; justify-content: space-between; padding: 7px 9px; color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface); font-size: 11px; }
 .diff-viewer pre { max-height: 300px; margin: 0; padding: 8px 0; overflow: auto; }
