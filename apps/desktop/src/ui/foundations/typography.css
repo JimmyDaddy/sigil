@@ -9,6 +9,10 @@
   --sg-sys-type-body-line-height: 24px;
   --sg-sys-type-label-size: 12px;
   --sg-sys-type-label-line-height: 16px;
+  --sg-sys-type-caption-size: 11px;
+  --sg-sys-type-caption-line-height: 16px;
+  --sg-sys-type-detail-size: 13px;
+  --sg-sys-type-detail-line-height: 20px;
   --sg-sys-type-title-size: 16px;
   --sg-sys-type-title-line-height: 24px;
 }
@@ -17,6 +21,11 @@ body {
   background: var(--sg-sys-color-canvas);
   font-size: var(--sg-sys-type-body-size);
   line-height: var(--sg-sys-type-body-line-height);
+}
+
+small {
+  font-size: var(--sg-sys-type-caption-size);
+  line-height: var(--sg-sys-type-caption-line-height);
 }
 
 button:focus-visible,

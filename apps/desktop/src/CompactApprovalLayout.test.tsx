@@ -94,7 +94,7 @@ it("reserves the short approval budget without changing idle or tall-window spac
 
   for (const [reviewActive, shortViewport] of [[false, true], [true, false]]) {
     rendered.rerender(view(reviewActive, shortViewport));
-    expect(getComputedStyle(panel).gap).toBe("14px");
+    expect(getComputedStyle(panel).gap).toBe("var(--sg-sys-space-3)");
     expect(getComputedStyle(composer).paddingTop).toBe("4px");
     expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(editor);
     expect(editorText(editor)).toBe(draft);
