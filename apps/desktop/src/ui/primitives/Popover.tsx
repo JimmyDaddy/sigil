@@ -84,8 +84,28 @@ export function Popover({
     if (!open) return;
     const ownsInteraction = () => isActiveModalOwner(modalOwner)
       && popoverPanels[popoverPanels.length - 1] === panelRef.current;
+    const editableTarget = (event: Event) => event.target instanceof Element
+      ? event.target.closest("input, textarea, [contenteditable='true']") : null;
+    let composingTarget: Element | null = null;
+    let compositionEnd: { target: Element; at: number } | undefined;
+    const handleCompositionStart = (event: CompositionEvent) => {
+      composingTarget = ownsInteraction() ? editableTarget(event) : null;
+      compositionEnd = undefined;
+    };
+    const handleCompositionEnd = (event: CompositionEvent) => {
+      const target = editableTarget(event);
+      composingTarget = null;
+      compositionEnd = ownsInteraction() && target !== null ? { target, at: Date.now() } : undefined;
+    };
+    const handleKeyUp = () => { compositionEnd = undefined; };
+    const handleFocus = (event: FocusEvent) => {
+      const target = editableTarget(event);
+      if (target !== composingTarget) composingTarget = null;
+      if (target !== compositionEnd?.target) compositionEnd = undefined;
+    };
     const handlePointer = (event: PointerEvent) => {
       if (!ownsInteraction()) return;
+      compositionEnd = undefined;
       if (
         event.target instanceof Node
         && !rootRef.current?.contains(event.target)
@@ -95,15 +115,36 @@ export function Popover({
       }
     };
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !ownsInteraction()) return;
+      if (!ownsInteraction()) return;
+      const ended = compositionEnd;
+      compositionEnd = undefined;
+      if (event.key !== "Escape") return;
+      const target = editableTarget(event);
+      // Like CodeMirror's WebKit guard, allow one key after a same-input
+      // compositionend: Safari may deliver it before the cancelling keydown.
+      const sinceEnd = ended === undefined ? -1 : Date.now() - ended.at;
+      if (event.isComposing || event.keyCode === 229 || (target !== null && target === composingTarget)
+        || (target !== null && target === ended?.target && sinceEnd >= 0 && sinceEnd < 100)) {
+        // Keep native IME cancellation, but do not route it to a parent modal.
+        event.stopImmediatePropagation();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       updateOpen(false);
     };
     document.addEventListener("pointerdown", handlePointer);
+    document.addEventListener("compositionstart", handleCompositionStart, true);
+    document.addEventListener("compositionend", handleCompositionEnd, true);
+    document.addEventListener("keyup", handleKeyUp, true);
+    document.addEventListener("focusin", handleFocus, true);
     document.addEventListener("keydown", handleKey, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointer);
+      document.removeEventListener("compositionstart", handleCompositionStart, true);
+      document.removeEventListener("compositionend", handleCompositionEnd, true);
+      document.removeEventListener("keyup", handleKeyUp, true);
+      document.removeEventListener("focusin", handleFocus, true);
       document.removeEventListener("keydown", handleKey, true);
     };
   }, [modalOwner, open, updateOpen]);

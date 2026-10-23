@@ -247,3 +247,141 @@ describe("Sigil UI primitives", () => {
     expect(screen.getByRole("dialog", { name: "Navigation" }).classList.contains("sg-modal-side-end")).toBe(true);
   });
 });
+
+describe("Popover IME cancellation", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function fixture() {
+    render(<><Popover label="Editing"><button type="button">Bold</button></Popover>
+      <div role="textbox" aria-label="Draft" contentEditable suppressContentEditableWarning>**你吗**</div><input aria-label="Other input" /></>);
+    const trigger = screen.getByRole("button", { name: "Editing" });
+    fireEvent.click(trigger);
+    const input = screen.getByRole("textbox", { name: "Draft" });
+    input.focus();
+    return { input };
+  }
+
+  function escape(target: HTMLElement | Document, options: KeyboardEventInit = {}) {
+    const event = new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true, ...options });
+    fireEvent(target, event);
+    return event;
+  }
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("leaves native cancellation and input focus intact for %j", (options) => {
+    const { input } = fixture();
+    expect(escape(input, options).defaultPrevented).toBe(false);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    expect(document.activeElement).toBe(input);
+    expect(input.textContent).toBe("**你吗**");
+  });
+
+  it("tracks composition when key flags are absent and closes on the next physical Escape", () => {
+    const { input } = fixture();
+    fireEvent.compositionStart(input);
+    expect(escape(input).defaultPrevented).toBe(false);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    fireEvent.compositionEnd(input);
+    fireEvent.keyUp(input, { key: "Escape", code: "Escape" });
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+    expect(input.textContent).toBe("**你吗**");
+  });
+
+  it("protects one same-input Escape after WebKit compositionend-before-keydown ordering", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const { input } = fixture();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    now.mockReturnValue(1_099);
+    expect(escape(input).defaultPrevented).toBe(false);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    expect(document.activeElement).toBe(input);
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+  });
+
+  it("does not keep an expired compositionend key guard", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const { input } = fixture();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    now.mockReturnValue(1_100);
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+  });
+
+  it("consumes the compositionend guard on an ordinary following key", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const { input } = fixture();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "a", code: "KeyA" });
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+  });
+
+  it("does not reuse a composition guard after focus moves to another input", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const { input } = fixture();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    screen.getByRole("textbox", { name: "Other input" }).focus();
+    input.focus();
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+  });
+
+  it("binds composition events on nested content to the same editable host", () => {
+    render(<><Popover label="Editing"><button type="button">Bold</button></Popover>
+      <div role="textbox" aria-label="Draft" contentEditable suppressContentEditableWarning><span>中文</span></div></>);
+    fireEvent.click(screen.getByRole("button", { name: "Editing" }));
+    const input = screen.getByRole("textbox", { name: "Draft" });
+    input.focus();
+    fireEvent.compositionStart(screen.getByText("中文"));
+    expect(escape(input).defaultPrevented).toBe(false);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    expect(document.activeElement).toBe(input);
+    expect(input.textContent).toBe("中文");
+  });
+
+  it("clears a pending composition key when the user clicks within the popover", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    render(<Popover label="Editing"><textarea aria-label="Draft" defaultValue="中文" /></Popover>);
+    fireEvent.click(screen.getByRole("button", { name: "Editing" }));
+    const input = screen.getByRole("textbox", { name: "Draft" });
+    input.focus();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    fireEvent.pointerDown(input);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    expect(escape(input).defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+  });
+
+  it("keeps both a popover and its parent drawer open during native cancellation", () => {
+    function Fixture() {
+      const [open, setOpen] = useState(true);
+      return <Drawer open={open} title="Navigation" onOpenChange={setOpen}>
+        <Popover label="Editing"><textarea aria-label="Draft" defaultValue="中文" /></Popover>
+      </Drawer>;
+    }
+    render(<Fixture />);
+    const trigger = screen.getByRole("button", { name: "Editing" });
+    fireEvent.click(trigger);
+    const input = screen.getByRole("textbox", { name: "Draft" }) as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.compositionStart(input);
+    fireEvent.compositionEnd(input);
+    expect(escape(input).defaultPrevented).toBe(false);
+    expect(screen.getByRole("dialog", { name: "Editing" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Navigation" })).toBeTruthy();
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("中文");
+    fireEvent.keyUp(input, { key: "Escape" });
+    escape(input);
+    expect(screen.queryByRole("dialog", { name: "Editing" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Navigation" })).toBeTruthy();
+    escape(document);
+    expect(screen.queryByRole("dialog", { name: "Navigation" })).toBeNull();
+  });
+});

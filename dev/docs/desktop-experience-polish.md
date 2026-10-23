@@ -60,9 +60,9 @@
 
 格式操作仍提供粗体、斜体、行内代码、代码块、列表和链接，修改同一原始字符串。Cmd/Ctrl-B、I、K 保留；基础 Cmd/Ctrl-Z 与重做只负责误删或格式修改撤回，不增加记录列表或历史按钮。主题、原文模式和展开不重挂 editor。展开只提高长文上限，短文按实际内容高度显示：普通上限 min(176px,24dvh)，展开 min(280px,38dvh)，当前审批时 88px，保留会话正文空间；实际窄窗几何与输入法另行原生确认。
 
-Enter 发送（运行中入队），Shift+Enter 换行；代码 fence、原文模式和展开态规则一致。组合输入先于建议、格式与发送，期间冻结装饰并映射原范围，浏览器提交后再排版。普通 Markdown 连同空白、CRLF、中文和代码 fence 直接发送，不 trim。异步发送只清理原 revision；后续编辑、composition、附件与迟到 durable draft identity 均保留既有范围。256 KiB 草稿预算或存储失败保留文字和之前已保存值，不阻止编辑或发送。
+Enter 发送（运行中入队），Shift+Enter 换行；代码 fence、原文模式和展开态规则一致。组合输入先于建议、格式与发送，期间冻结装饰并映射原范围，浏览器提交后再排版。编辑弹层打开时，Escape 优先取消输入法候选，不关闭弹层或移动编辑焦点；随后普通 Escape 才关闭弹层。普通 Markdown 连同空白、CRLF、中文和代码 fence 直接发送，不 trim。异步发送只清理原 revision；后续编辑、composition、附件与迟到 durable draft identity 均保留既有范围。256 KiB 草稿预算或存储失败保留文字和之前已保存值，不阻止编辑或发送。
 
-样式由官方 scoped theme adapter 消费应用语义 token，不手工改 contentDOM，不添加 `!important`。依赖边界见[供应链台账](../governance/dependency-supply-chain.md#markdown-原位编辑desktop-polish-b3-d012026-10-23-更新)。组件与引擎测试覆盖完成语法即时排版、原文 toggle 不重挂、selection/scroll/history、IME、精确提交、late draft identity、附件和危险内容惰性；jsdom 不代表真实输入法或 native 布局资格化。
+样式由官方 scoped theme adapter 消费应用语义 token，不手工改 contentDOM，不添加 `!important`。依赖边界见[供应链台账](../governance/dependency-supply-chain.md#markdown-原位编辑desktop-polish-b3-d012026-10-23-更新)。组件与引擎测试覆盖完成语法即时排版、原文 toggle 不重挂、selection/scroll/history、合成 composition 事件、精确提交、late draft identity、附件和危险内容惰性；jsdom 不代表真实输入法或 native 布局资格化。
 
 官方依据：[Decorations](https://codemirror.net/examples/decoration/)、[StateField / direct decorations](https://codemirror.net/docs/ref/#view.EditorView.decorations)、[Markdown 配置](https://codemirror.net/docs/ref/#lang-markdown.markdown)、[Lezer Markdown](https://code.haverbeke.berlin/lezer/markdown)，访问日期 2026-10-23。
 
