@@ -1,6 +1,6 @@
 import type { Translate } from "../../i18n";
 import type { MessageView } from "../../Message";
-import type { ToolArtifactAvailability } from "../../types";
+import type { ToolArtifactAvailability, UserInputReceipt } from "../../types";
 import type { ConversationTimelineItem, LiveConversationDisplayItem } from "./continuityReducer";
 import {
   compareRunSequence,
@@ -34,6 +34,7 @@ export type ConversationTimelineRow =
       artifactAvailability?: ToolArtifactAvailability;
       artifactHasMore?: boolean;
       artifactPersistedBytes?: number;
+      userInputReceipt?: UserInputReceipt;
     });
 
 export function projectConversationRows(
@@ -267,6 +268,7 @@ function projectDisplayItem(
         artifactAvailability: content.artifactAvailability,
         artifactHasMore: content.hasMore,
         artifactPersistedBytes: content.persistedBytes,
+        userInputReceipt: content.userInputReceipt,
       }];
     case "approval": {
       const approved = item.status === "approved";

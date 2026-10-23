@@ -127,6 +127,13 @@
 .batch-receipt ul { display: grid; gap: 8px; max-height: 220px; margin: 0 0 var(--sg-sys-space-3); padding: 0; overflow: auto; list-style: none; }
 .batch-preview-list li,
 .batch-receipt li { display: flex; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); }
+.batch-preview-list li { align-items: start; padding: var(--sg-sys-space-2); border-bottom: 1px solid var(--sg-sys-color-outline-variant); }
+.batch-target-copy { display: grid; min-width: 0; gap: var(--sg-sys-space-1); }
+.batch-target-copy strong { overflow-wrap: anywhere; }
+.batch-target-copy small { color: var(--sg-sys-color-on-surface-variant); }
+.batch-target-copy .sg-collapsible { font-size: 12px; }
+.batch-preview-list .batch-target-copy code { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.batch-preview-list li > span { flex-shrink: 0; max-width: 40%; overflow-wrap: anywhere; }
 .batch-preview-list code,
 .batch-receipt code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -262,6 +269,8 @@
   align-items: end;
   gap: var(--sg-sys-space-2);
 }
+.settings-context-window-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: var(--sg-sys-space-1); }
+.settings-draft-status { color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
 .settings-control-unavailable { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 13px; line-height: 1.5; }
 .settings-inline-error { display: flex; grid-column: 2; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); color: var(--sg-sys-color-error); }
 .settings-boundary { grid-template-columns: minmax(0, 1fr); }

@@ -2,12 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
-import { useLocale } from "./i18n";
+import { translateEnglish, useLocale, type Translate } from "./i18n";
 import { presentArtifactStatus } from "./statusPresentation";
 import type {
   ToolArtifactAvailability,
   ToolArtifactPage,
   ToolArtifactSelector,
+  UserInputReceipt,
 } from "./types";
 import { Icon, type IconName } from "./ui/icons";
 import { Button, Collapsible, TextField } from "./ui/primitives";
@@ -32,6 +33,7 @@ export interface ToolView {
   artifactAvailability?: ToolArtifactAvailability;
   artifactHasMore?: boolean;
   artifactPersistedBytes?: number;
+  userInputReceipt?: UserInputReceipt;
 }
 
 
@@ -100,7 +102,9 @@ export function ToolCard({
   readonly cancelling?: boolean;
 }) {
   const { t } = useLocale();
-  const presentation = presentTool(tool);
+  const presentation = presentTool(tool, t);
+  const questionReceipt = tool.toolName === "request_user_input"
+    && tool.userInputReceipt !== undefined && statusTone(tool.status) === "success";
   const duration = useCommandDuration(tool);
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
@@ -163,7 +167,7 @@ export function ToolCard({
       setArtifactBusy(false);
     };
   }, [canReadArtifact]);
-  const shortOutput = canReadArtifact
+  const shortOutput = !questionReceipt && canReadArtifact
     && tool.artifactPersistedBytes !== undefined
     && tool.artifactPersistedBytes <= SHORT_OUTPUT_BYTES;
   useEffect(() => {
@@ -212,12 +216,12 @@ export function ToolCard({
           {presentation.tone === "success" ? null : <small>{presentation.status}</small>}
         </span>
         <span className="tool-card-meta">
-          {duration === undefined ? null : <small aria-label="Execution elapsed">{duration}</small>}
+          {duration === undefined ? null : <small aria-label={t("toolExecutionElapsed")}>{duration}</small>}
           {tool.risk === undefined ? null : <small className="tool-risk">{tool.risk} risk</small>}
         </span>
       </header>
       {onCancelExecution === undefined ? null : (
-        <Button type="button" variant="quiet" busy={cancelling} onClick={onCancelExecution}>Stop command</Button>
+        <Button type="button" variant="quiet" busy={cancelling} onClick={onCancelExecution}>{t("toolNameStopCommand")}</Button>
       )}
       {presentation.input === undefined && presentation.summary === undefined ? null : (
         <div className="tool-card-main">
@@ -226,7 +230,7 @@ export function ToolCard({
           )}
           {presentation.summary === undefined || (shortOutput && presentation.tone === "success") ? null : (
             <div className="tool-result">
-              <small>{presentation.tone === "danger" || presentation.tone === "warning" ? "Status" : "Result"}</small>
+              <small>{t(presentation.tone === "danger" || presentation.tone === "warning" ? "toolStatusLabel" : "toolResultLabel")}</small>
               <p>{presentation.summary}</p>
             </div>
           )}
@@ -259,6 +263,11 @@ export function ToolCard({
             )}</small>
           </summary>
           <div className="tool-card-body">
+            {questionReceipt && tool.input !== undefined ? <>
+              <small>{t("questionOriginalInput")}</small>
+              <HighlightedCode text={tool.input} language="json" ariaLabel={t("questionOriginalInput")} />
+              <small>{t("questionOriginalReceipt")}</small>
+            </> : null}
             {presentation.detailKind === "diff" ? (
               <DiffViewer diff={presentation.detailText ?? ""} />
             ) : (
@@ -330,6 +339,7 @@ function ToolInput({ toolName, input, language }: {
   readonly input: string;
   readonly language?: string;
 }) {
+  const { t } = useLocale();
   const [expanded, setExpanded] = useState(false);
   const preview = language === undefined ? { text: input, truncated: false } : outputPreview(input);
   return (
@@ -337,7 +347,7 @@ function ToolInput({ toolName, input, language }: {
       <HighlightedCode text={expanded ? input : preview.text} language={language} ariaLabel={`${toolName} input`} />
       {preview.truncated ? (
         <Button type="button" variant="quiet" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-          {expanded ? "Collapse command" : "Show full command"}
+          {t(expanded ? "toolCollapseCommand" : "toolExpandCommand")}
         </Button>
       ) : null}
     </div>
@@ -355,6 +365,7 @@ function ToolOutputPanel({
   readonly language?: string;
   readonly streaming: boolean;
 }) {
+  const { t } = useLocale();
   const [expanded, setExpanded] = useState(streaming);
   useLayoutEffect(() => {
     setExpanded(streaming);
@@ -383,13 +394,13 @@ function ToolOutputPanel({
         >
           <span className="tool-output-disclosure-title">
             <Icon name={expanded ? "chevron-up" : "chevron-down"} />
-            <strong>Output</strong>
+            <strong>{t("toolOutputLabel")}</strong>
           </span>
           <small>{metadata}</small>
         </Button>
       ) : (
         <header>
-          <strong>Output</strong>
+          <strong>{t("toolOutputLabel")}</strong>
           <small>{metadata}</small>
         </header>
       )}
@@ -407,7 +418,24 @@ function ToolOutputPanel({
   );
 }
 
-export function presentTool(tool: ToolView): ToolPresentation {
+export function presentTool(tool: ToolView, t: Translate = translateEnglish): ToolPresentation {
+  const receipt = tool.toolName === "request_user_input" && statusTone(tool.status) === "success"
+    ? tool.userInputReceipt : undefined;
+  if (receipt !== undefined) {
+    const submitted = receipt.decision === "submitted";
+    return {
+      displayName: humanizeToolName(tool.toolName, t),
+      status: t(submitted ? "toolStatusCompleted" : receipt.decision === "declined" ? "questionDeclined" : "toolStatusCancelled"),
+      tone: submitted ? "success" : "warning",
+      summary: submitted ? t("questionReceiptSubmitted", { count: receipt.answeredCount })
+        : t(receipt.decision === "declined" ? "questionReceiptDeclined" : "questionReceiptCancelled"),
+      detailKind: tool.text !== "" || tool.input !== undefined ? "raw" : undefined,
+      detailLabel: t("questionReceiptDetails"),
+      detailText: tool.text,
+      detailLanguage: "json",
+      streaming: false,
+    };
+  }
   const structured = parseStructuredOutput(tool.text);
   const status = tool.status ?? structured?.status ?? "recorded";
   const tone = statusTone(status);
@@ -421,7 +449,7 @@ export function presentTool(tool: ToolView): ToolPresentation {
       structured?.language,
     );
   const summary = structured?.summary
-    ?? (diff ? "File changes are ready to review." : outputPresentation?.summary);
+    ?? (diff ? t("toolChangesReady") : outputPresentation?.summary);
   const detailKind = diff
     ? "diff" as const
     : structured?.hasError
@@ -430,13 +458,13 @@ export function presentTool(tool: ToolView): ToolPresentation {
       ? "output" as const
       : undefined;
   return {
-    displayName: humanizeToolName(tool.toolName),
-    status: humanizeStatus(status),
+    displayName: humanizeToolName(tool.toolName, t),
+    status: humanizeStatus(status, t),
     tone,
     summary,
     input: tool.input ?? structured?.input,
     detailKind,
-    detailLabel: detailKind === "diff" ? "Review changes" : detailKind === "raw" ? "Raw details" : undefined,
+    detailLabel: detailKind === "diff" ? t("toolReviewChanges") : detailKind === "raw" ? t("toolRawDetails") : undefined,
     detailText: detailKind === "raw"
       ? tool.text
       : detailKind === undefined ? undefined : outputPresentation?.detailText ?? tool.text,
@@ -678,7 +706,7 @@ function normalizeLanguage(value: string | undefined): string | undefined {
 
 function detailMetadata(language: string | undefined, lineCount: number): string {
   const lines = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
-  return language === undefined ? lines : `${humanizeStatus(language)} · ${lines}`;
+  return language === undefined ? lines : `${language.charAt(0).toUpperCase()}${language.slice(1)} · ${lines}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -711,30 +739,52 @@ function boundedSummary(value: string): string {
   return `${value.slice(0, MAX_SUMMARY_CHARACTERS - 1).trimEnd()}…`;
 }
 
-function humanizeToolName(value: string): string {
-  if (value === "exec_command") return "Command";
-  const words = value.replace(/[_-]+/g, " ").trim();
-  if (words === "") return "Tool";
-  return `${words.charAt(0).toLocaleUpperCase()}${words.slice(1)}`;
+const TOOL_LABEL_KEYS = {
+  exec_command: "toolNameCommand", exec_read: "toolNameReadCommand", exec_wait: "toolNameWaitCommand",
+  exec_input: "toolNameInputCommand", exec_resize: "toolNameResizeCommand", exec_cancel: "toolNameStopCommand",
+  read_file: "toolNameReadFile", write_file: "toolNameWriteFile", edit_file: "toolNameEditFile",
+  delete_file: "toolNameDeleteFile", ls: "toolNameListFiles", glob: "toolNameFindFiles", grep: "toolNameSearchText",
+  apply_changeset: "toolNameApplyChanges", vcs_inspect: "toolNameInspectChanges", read_tool_artifact: "toolNameReadOutput",
+  request_user_input: "toolNameAskQuestion", request_plan_review: "toolNameReviewPlan", start_task: "toolNameStartTask",
+  spawn_agent: "toolNameStartAgent", spawn_agents: "toolNameStartAgents", wait_agent: "toolNameWaitAgent",
+  read_agent_result: "toolNameReadAgent", message_agent: "toolNameMessageAgent", list_agents: "toolNameListAgents",
+  cancel_agent: "toolNameCancelAgent", close_agent: "toolNameCloseAgent", integrate_agent_changes: "toolNameIntegrateAgent",
+} as const;
+
+const STATUS_LABEL_KEYS = {
+  recorded: "toolStatusRecorded", pending: "toolStatusPending", requested: "toolStatusRequested",
+  starting: "toolStatusStarting", running: "toolStatusRunning", streaming: "toolStatusRunning", progress: "toolStatusRunning",
+  waiting_for_approval: "toolStatusApproval", awaiting_approval: "toolStatusApproval", approval: "toolStatusApproval",
+  awaiting_user_input: "toolStatusInput", approved: "toolStatusApproved", denied: "toolStatusDenied",
+  completed: "toolStatusCompleted", succeeded: "toolStatusSucceeded", success: "toolStatusSucceeded", ok: "toolStatusSucceeded",
+  failed: "toolStatusFailed", error: "toolStatusFailed", cancelled: "toolStatusCancelled", interrupted: "toolStatusInterrupted",
+  paused: "toolStatusPaused", blocked: "toolStatusBlocked", expired: "toolStatusExpired", timed_out: "toolStatusTimeout",
+  cleanup_incomplete: "toolStatusCleanup", warning: "toolStatusWarning",
+} as const;
+
+function humanizeToolName(value: string, t: Translate): string {
+  if (!Object.hasOwn(TOOL_LABEL_KEYS, value)) return value;
+  const key = TOOL_LABEL_KEYS[value as keyof typeof TOOL_LABEL_KEYS];
+  return key === undefined ? value : t(key);
 }
 
-function humanizeStatus(value: string): string {
-  const words = value.replace(/[_-]+/g, " ").trim();
-  if (words === "") return "Recorded";
-  return `${words.charAt(0).toLocaleUpperCase()}${words.slice(1)}`;
+function humanizeStatus(value: string, t: Translate): string {
+  if (!Object.hasOwn(STATUS_LABEL_KEYS, value)) return value;
+  const key = STATUS_LABEL_KEYS[value as keyof typeof STATUS_LABEL_KEYS];
+  return key === undefined ? value : t(key);
 }
 
 function statusTone(value?: string): ToolTone {
-  const status = value?.toLocaleLowerCase() ?? "";
-  if (/failed|failure|error|crash|invalid/.test(status)) return "danger";
-  if (/denied|cancel|blocked|warning|expired/.test(status)) return "warning";
-  if (/^ok$|success|succeeded|complete|completed|ready|finished|passed/.test(status)) return "success";
-  if (/streaming|running|progress|pending|starting|waiting/.test(status)) return "info";
+  const status = value ?? "";
+  if (["failed", "error", "timed_out", "cleanup_incomplete"].includes(status)) return "danger";
+  if (["denied", "cancelled", "blocked", "warning", "expired", "interrupted", "paused"].includes(status)) return "warning";
+  if (["ok", "success", "succeeded", "completed", "approved"].includes(status)) return "success";
+  if (["streaming", "running", "progress", "pending", "starting", "requested", "waiting_for_approval", "awaiting_approval", "approval", "awaiting_user_input"].includes(status)) return "info";
   return "neutral";
 }
 
 function isStreamingStatus(value?: string): boolean {
-  return /streaming|running|progress|starting/.test(value?.toLocaleLowerCase() ?? "");
+  return ["streaming", "running", "progress", "starting"].includes(value ?? "");
 }
 
 function toneIcon(tone: ToolTone): IconName {

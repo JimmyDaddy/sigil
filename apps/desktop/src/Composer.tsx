@@ -42,8 +42,10 @@ export function Composer({
   persistentDraftKey,
   active,
   submissionBlocked,
+  readOnlyRecovery = false,
   stopControlBlocked = false,
   reviewActive = false,
+  hidden = false,
   submitting,
   controlBusy,
   composerRef,
@@ -84,8 +86,10 @@ export function Composer({
   persistentDraftKey?: string;
   active: boolean;
   submissionBlocked: boolean;
+  readOnlyRecovery?: boolean;
   stopControlBlocked?: boolean;
   reviewActive?: boolean;
+  hidden?: boolean;
   submitting: boolean;
   controlBusy: boolean;
   composerRef: RefObject<HTMLElement | null>;
@@ -146,6 +150,7 @@ export function Composer({
     editorRef.current?.focus();
   };
   const [formatOpen, setFormatOpen] = useState(false);
+  useEffect(() => { if (hidden) setFormatOpen(false); }, [hidden]);
   const appleShortcuts = typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
   const previewText = useDeferredValue(prompt);
   const previousStorageKey = useRef(storageKey);
@@ -486,6 +491,7 @@ export function Composer({
   return (
     <>
     <form
+      hidden={hidden}
       className={`composer${activity === undefined || !showActivity
         ? ""
         : ` has-activity${activityState === undefined ? "" : ` activity-${activityState}`}`}`}
@@ -567,7 +573,7 @@ export function Composer({
           </div>
         ) : null}
         {draftUnsaved ? <small role="status" className="composer-draft-warning">{t("draftNotSaved")}</small> : null}
-        <div className="composer-editing-tools">
+        {hidden ? null : <div className="composer-editing-tools">
           {onPickImage !== undefined ? <IconButton
             type="button"
             aria-label={imageBusy ? t("attachingImage") : t("attachImage")}
@@ -600,7 +606,7 @@ export function Composer({
             editorRef.current?.focus();
           }}>{t(editorExpanded ? "collapseEditor" : "expandEditor")}</Button>
           <small className="composer-editing-hint">{t("markdownSendHint")}</small>
-        </div>
+        </div>}
         <div className="composer-document" data-preview={previewVisible} data-expanded={editorExpanded} data-review-active={reviewActive}>
           {expandedWriting ? suggestionList : null}
           <MarkdownEditor
@@ -628,7 +634,7 @@ export function Composer({
               setActiveSuggestion(0);
               setDraftUnsaved(!writeDraft(storageKeyRef.current, value));
             }}
-            placeholder={active ? t("activePrompt") : submissionBlocked ? t("readOnlyRecoveryPrompt") : t("prompt")}
+            placeholder={active ? t("activePrompt") : readOnlyRecovery ? t("readOnlyRecoveryPrompt") : t("prompt")}
             onKeyDown={(event, composing) => {
               if (composing) return;
               if (suggestionsOpen) {
@@ -667,7 +673,7 @@ export function Composer({
               : <SafeMarkdown text={previewText} contentId={`composer-preview:${draftKey}`} codeBlockVariant="embedded" />}
           </section> : null}
         </div>
-        <div className="composer-toolbar">
+        {hidden ? null : <div className="composer-toolbar">
           <div className="composer-options">
             <Tooltip label={modelTooltip}>
               <div className="composer-model">
@@ -791,7 +797,7 @@ export function Composer({
             </Tooltip>
           )}
           </div>
-        </div>
+        </div>}
       </div>
     </form>
     </>

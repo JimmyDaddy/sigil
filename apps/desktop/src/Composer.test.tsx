@@ -279,6 +279,7 @@ function renderComposer(overrides: {
   active?: boolean;
   reviewActive?: boolean;
   submissionBlocked?: boolean;
+  readOnlyRecovery?: boolean;
   queueCount?: number;
   queuePaused?: boolean;
   queueBusy?: boolean;
@@ -329,7 +330,7 @@ function renderComposer(overrides: {
     credentialSource: "environment",
     readiness: "ready",
   }];
-  const content = (persistentDraftKey = overrides.persistentDraftKey, reviewActive = overrides.reviewActive) => {
+  const content = (persistentDraftKey = overrides.persistentDraftKey, reviewActive = overrides.reviewActive, hidden = false) => {
     const composer = (
     <LocaleProvider>
       <Composer
@@ -337,7 +338,9 @@ function renderComposer(overrides: {
         persistentDraftKey={persistentDraftKey}
         active={overrides.active ?? false}
         reviewActive={reviewActive}
+        hidden={hidden}
         submissionBlocked={overrides.submissionBlocked ?? false}
+        readOnlyRecovery={overrides.readOnlyRecovery}
         submitting={false}
         controlBusy={false}
         composerRef={createRef<HTMLTextAreaElement>()}
@@ -388,6 +391,7 @@ function renderComposer(overrides: {
     ...rendered,
     bindPersistentDraftKey: (key: string) => rendered.rerender(content(key)),
     bindReviewActive: (active: boolean) => rendered.rerender(content(overrides.persistentDraftKey, active)),
+    bindHidden: (hidden: boolean) => rendered.rerender(content(overrides.persistentDraftKey, overrides.reviewActive, hidden)),
     onSubmit,
     onOpenQueue,
     onReasoningEffortChange,
@@ -403,6 +407,44 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
+  it.each([false, true])("shows recovery guidance only for a typed recovery state (%s)", (readOnlyRecovery) => {
+    renderComposer({ submissionBlocked: true, readOnlyRecovery });
+    const editor = screen.getByRole("combobox", { name: "Message Sigil" });
+    expect(editor.getAttribute("aria-placeholder")).toBe(translateEnglish(readOnlyRecovery ? "readOnlyRecoveryPrompt" : "prompt"));
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    typeEditorText(editor, "仍可编辑的草稿");
+    expect(editorText(editor)).toBe("仍可编辑的草稿");
+  });
+  it("dismisses composer portals when the user hides the draft, without remounting its editor", async () => {
+    const { bindHidden } = renderComposer({ queuePanel: <span>Pending messages</span> });
+    const editor = screen.getByRole("combobox", { name: "Message Sigil" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Format" }));
+    expect(screen.getByRole("dialog", { name: "Format" })).toBeTruthy();
+    bindHidden(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    bindHidden(false);
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(editor);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open follow-up queue, 0 messages" }));
+    expect(screen.getByText("Pending messages")).toBeTruthy();
+    bindHidden(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    bindHidden(false);
+    expect(screen.queryByText("Pending messages")).toBeNull();
+  });
+  it("preserves the mounted draft and undo history while an attention form hides the composer", () => {
+    const { bindHidden } = renderComposer();
+    const editor = screen.getByRole("combobox", { name: "Message Sigil" });
+    typeEditorText(editor, "保留草稿 🙂");
+    bindHidden(true);
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    expect(editor.isConnected).toBe(true);
+    bindHidden(false);
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(editor);
+    expect(editorText(editor)).toBe("保留草稿 🙂");
+    fireEvent.keyDown(editor, { key: "z", ctrlKey: true });
+    expect(editorText(editor)).toBe("");
+  });
   it("keeps provider-neutral cache diagnostics in the context detail popover", async () => {
     renderComposer();
     expect(screen.queryByLabelText("Prompt cache hit ratio 90%")).toBeNull();

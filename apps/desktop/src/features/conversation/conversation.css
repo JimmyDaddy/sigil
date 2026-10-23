@@ -3,6 +3,13 @@
 .conversation-panel { --conversation-content-max-width: 820px; --conversation-content-gutter: clamp(4px, 2vw, 24px); display: grid; gap: 14px; min-width: 0; margin-top: var(--sg-sys-space-3); padding: 12px var(--sg-sys-space-4) var(--sg-sys-space-3); background: var(--sg-sys-color-canvas); }
 .conversation-layout > .conversation-panel { display: flex; min-height: 0; flex-direction: column; margin: 0; }
 .conversation-layout .timeline { min-height: 0; max-height: none; flex: 1; }
+.conversation-attention { display: flex; min-height: 100px; flex: 1 1 0; overflow: hidden; }
+.conversation-attention > .user-input-card { width: 100%; min-height: 0; max-height: 100%; }
+.conversation-panel[data-user-input-active="true"] { overflow-y: auto; }
+.conversation-panel[data-user-input-active="true"] > .timeline { flex: 0 1 120px; }
+.conversation-panel[data-user-input-active="true"] > .timeline:has(> .timeline-empty:only-child) { display: none; }
+.conversation-attention[hidden], .composer[hidden], .timeline[hidden] { display: none; }
+.attention-secondary-actions { display: flex; flex: 0 0 auto; align-self: center; gap: var(--sg-sys-space-2); }
 .conversation-layout > .conversation-panel:has(> .composer[data-expanded="true"][data-review-active="false"]) > .timeline { flex: 0 1 72px; }
 .conversation-layout > .conversation-panel:has(> .composer[data-expanded="true"][data-review-active="false"]) > .timeline:has(> .timeline-empty:only-child) { display: none; }
 .inspector-empty { display: grid; gap: 6px; margin-top: 18px; padding: 14px; border: 1px dashed var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); color: var(--sg-sys-color-on-surface-variant); }

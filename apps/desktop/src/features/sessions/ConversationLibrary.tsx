@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
@@ -15,7 +15,7 @@ import type {
 import { ErrorCard } from "../../ErrorCard";
 import { LoadingState, PaginationControl, useNotifications } from "../../ui/feedback";
 import { Icon } from "../../ui/icons";
-import { Button, Checkbox, Dialog, Select, TextField } from "../../ui/primitives";
+import { Button, Checkbox, Collapsible, Dialog, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 
 const EMPTY_PAGE: CatalogPage = {
@@ -57,7 +57,9 @@ export function ConversationLibrary({
   const [executing, setExecuting] = useState(false);
   const [plan, setPlan] = useState<SessionCatalogBatchPlan>();
   const [plannedItems, setPlannedItems] = useState<SessionCatalogBatchItem[]>([]);
+  const [plannedEntries, setPlannedEntries] = useState<ReadonlyMap<string, CatalogEntry>>(new Map());
   const [receipt, setReceipt] = useState<SessionCatalogBatchReceipt>();
+  const cancelPreviewRef = useRef<HTMLButtonElement>(null);
 
   const request = useCallback((cursor?: string) => ({
     limit: 100,
@@ -127,10 +129,12 @@ export function ConversationLibrary({
 
   const prepare = async (action: SessionCatalogBatchAction, entries: CatalogEntry[]) => {
     const items = entries.map((entry) => batchItem(action, entry));
+    const entrySnapshot = new Map(entries.map((entry) => [entry.sessionRef, { ...entry }]));
     setPlanning(true);
     try {
       const next = await bridge.planSessionCatalogBatch(workspaceId, { action, items });
       setPlannedItems(items);
+      setPlannedEntries(entrySnapshot);
       setPlan(next);
     } catch {
       notify({ tone: "error", message: t("batchPlanFailed") });
@@ -281,7 +285,8 @@ export function ConversationLibrary({
                       )}
                     </td>
                     <td>{entry.providerName ?? "—"}</td>
-                    <td>{entry.userMessageCount + entry.assistantMessageCount} · {entry.toolResultCount}</td>
+                    <td>{t("conversationMessageCount", { count: entry.userMessageCount + entry.assistantMessageCount })}
+                      {" · "}{t("conversationToolResultCount", { count: entry.toolResultCount })}</td>
                     <td>{formatDate(entry.sourceModifiedAtUnixMs, locale)}</td>
                   </tr>
                 );
@@ -302,8 +307,10 @@ export function ConversationLibrary({
 
       <Dialog
         open={plan !== undefined}
-        title={t("batchPreview")}
-        description={t("batchPreviewDetail")}
+        destructive
+        initialFocusRef={cancelPreviewRef}
+        title={plan === undefined ? t("batchPreview") : batchActionTitle(plan.action, plan.total, t)}
+        description={plan === undefined ? undefined : batchActionImpact(plan.action, t)}
         onOpenChange={(open) => { if (!open && !executing) setPlan(undefined); }}
       >
         {plan === undefined ? null : (
@@ -312,17 +319,32 @@ export function ConversationLibrary({
               <strong>{t("batchExecutable", { count: plan.executable })}</strong>
               <span>{t("batchBlocked", { count: plan.blocked })}</span>
             </div>
-            {plan.blocked === 0 ? null : (
-              <ul className="batch-preview-list">
-                {plan.items.filter((item) => item.status === "blocked").map((item) => (
-                  <li key={item.sessionRef}><code>{item.sessionRef}</code><span>{reasonLabel(item.reason, t)}</span></li>
-                ))}
-              </ul>
-            )}
+            <ul className="batch-preview-list" aria-label={t("batchTargets")}>
+              {plan.items.map((item, index) => {
+                const entry = plannedEntries.get(item.sessionRef);
+                const title = entry?.title?.trim() || t("untitledConversation");
+                const showIdentity = !entry?.title?.trim() || [...plannedEntries.values()].filter(
+                  (candidate) => candidate.title?.trim() === entry.title?.trim(),
+                ).length > 1;
+                return <li key={`${item.sessionRef}:${index}`}>
+                  <div className="batch-target-copy">
+                    <strong>{title}</strong>
+                    <small>{entry?.modelName ?? t("batchModelUnknown")} · {formatDate(entry?.sourceModifiedAtUnixMs ?? 0, locale)}</small>
+                    {showIdentity ? <code>{item.sessionRef}</code> : <Collapsible label={t("batchTargetIdentity")}>
+                      <code>{item.sessionRef}</code>
+                    </Collapsible>}
+                  </div>
+                  <span>{item.status === "blocked" ? reasonLabel(item.reason, t) : t("batchTargetExecutable")}</span>
+                </li>;
+              })}
+            </ul>
             <p className="destructive-explanation">{t("batchBestEffort")}</p>
             <div className="confirmation-actions">
-              <Button type="button" disabled={executing} onClick={() => setPlan(undefined)}>{t("cancel")}</Button>
-              <Button type="button" variant="danger" busy={executing} disabled={plan.executable === 0} onClick={() => void execute()}>{t("executeBatch")}</Button>
+              <Button ref={cancelPreviewRef} type="button" disabled={executing} onClick={() => setPlan(undefined)}>{t("cancel")}</Button>
+              <Button type="button" variant={plan.action === "quarantine_invalid_sources" ? "primary" : "danger"}
+                busy={executing} disabled={plan.executable === 0} onClick={() => void execute()}>
+                {batchActionConfirm(plan.action, plan.executable, t)}
+              </Button>
             </div>
           </div>
         )}
@@ -339,13 +361,49 @@ function BatchReceipt({ receipt }: { readonly receipt: SessionCatalogBatchReceip
         <h2 id="batch-receipt-title">{t("batchReceipt")}</h2>
         <p>{t("batchCompleted", { count: receipt.completed })} · {t("batchFailed", { count: receipt.failed })} · {t("batchSkipped", { count: receipt.skipped })}</p>
       </div>
-      <ul>
-        {receipt.items.filter((item) => item.outcome !== "completed").map((item) => (
-          <li key={item.sessionRef}><code>{item.sessionRef}</code><span>{item.outcome}: {reasonLabel(item.reason, t)}</span></li>
-        ))}
-      </ul>
+      <Collapsible label={t("batchReceiptDetails")}>
+        <ul>
+          {receipt.items.map((item, index) => (
+            <li key={`${item.sessionRef}:${index}`}><code>{item.sessionRef}</code>
+              <span>{batchOutcomeLabel(item.outcome, t)}{item.reason === undefined ? "" : ` · ${reasonLabel(item.reason, t)}`}</span>
+            </li>
+          ))}
+        </ul>
+      </Collapsible>
     </section>
   );
+}
+
+function batchActionTitle(action: SessionCatalogBatchAction, count: number, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (action) {
+    case "delete_sessions": return t("batchDeleteSessionsTitle", { count });
+    case "quarantine_invalid_sources": return t("batchQuarantineSourcesTitle", { count });
+    case "delete_invalid_sources": return t("batchDeleteSourcesTitle", { count });
+  }
+}
+
+function batchActionImpact(action: SessionCatalogBatchAction, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (action) {
+    case "delete_sessions": return t("deleteConversationDetail");
+    case "quarantine_invalid_sources": return t("quarantineConversationDetail");
+    case "delete_invalid_sources": return t("deleteInvalidSourceDetail");
+  }
+}
+
+function batchActionConfirm(action: SessionCatalogBatchAction, count: number, t: ReturnType<typeof useLocale>["t"]): string {
+  switch (action) {
+    case "delete_sessions": return t("batchDeleteSessionsConfirm", { count });
+    case "quarantine_invalid_sources": return t("batchQuarantineSourcesConfirm", { count });
+    case "delete_invalid_sources": return t("batchDeleteSourcesConfirm", { count });
+  }
+}
+
+function batchOutcomeLabel(outcome: SessionCatalogBatchReceipt["items"][number]["outcome"], t: ReturnType<typeof useLocale>["t"]): string {
+  switch (outcome) {
+    case "completed": return t("batchOutcomeCompleted");
+    case "failed": return t("batchOutcomeFailed");
+    case "skipped": return t("batchOutcomeSkipped");
+  }
 }
 
 function batchItem(action: SessionCatalogBatchAction, entry: CatalogEntry): SessionCatalogBatchItem {

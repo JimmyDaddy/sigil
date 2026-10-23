@@ -257,6 +257,12 @@ export function ConversationPanel({
   const durableUserInput = durableUserInputs.find(
     (request) => userInputKey(request) === selectedUserInputKey,
   ) ?? durableUserInputs[0];
+  const hasPendingUserInput = durableUserInput !== undefined && durableUserInput.status !== "resolved";
+  const attentionKey = hasPendingUserInput ? userInputKey(durableUserInput) : undefined;
+  const [collapsedAttentionDraft, setCollapsedAttentionDraft] = useState<string>();
+  const attentionDraftExpanded = attentionKey !== undefined && collapsedAttentionDraft !== attentionKey;
+  const [expandedAttentionHistory, setExpandedAttentionHistory] = useState<string>();
+  const attentionHistoryExpanded = attentionKey !== undefined && expandedAttentionHistory === attentionKey;
   const reconcileDurableUserInputs = (page: ConversationDisplayPage) => {
     const requests = page.userInputs?.length
       ? page.userInputs
@@ -385,6 +391,7 @@ export function ConversationPanel({
       window.performance.now() + TIMELINE_USER_SCROLL_INTENT_MS;
   }, []);
   const rememberTrustedTimelineViewport = useCallback((timeline: HTMLDivElement) => {
+    if (timeline.hidden) return;
     const pinnedToEnd = isTimelineNearEnd(timeline);
     timelinePinnedToEnd.current = pinnedToEnd;
     trustedTimelineViewport.current = {
@@ -394,7 +401,7 @@ export function ConversationPanel({
   }, []);
   const restoreTrustedTimelineViewport = useCallback(() => {
     const timeline = timelineRef.current;
-    if (timeline === null) return;
+    if (timeline === null || timeline.hidden) return;
     const snapshot = trustedTimelineViewport.current;
     const maximumScrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     const nextScrollTop = snapshot.pinnedToEnd
@@ -1503,6 +1510,8 @@ export function ConversationPanel({
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
   const submissionBlocked = continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
+  const timelineHidden = hasPendingUserInput && !attentionHistoryExpanded
+    && !displayError && continuityState.contractError === undefined;
   const stopControlBlocked = !active
     || run.sessionId !== session.id
     || run.id !== activeRunIdRef.current;
@@ -1527,7 +1536,7 @@ export function ConversationPanel({
 
   useLayoutEffect(() => {
     const timeline = timelineRef.current;
-    if (timeline === null) return;
+    if (timeline === null || timeline.hidden) return;
     const anchor = pendingTimelineAnchor.current;
     if (anchor !== undefined) {
       // `refresh_started` deliberately changes reducer state before the
@@ -1549,7 +1558,13 @@ export function ConversationPanel({
       timeline.scrollTop = timeline.scrollHeight;
       rememberTrustedTimelineViewport(timeline);
     }
-  }, [continuityState, rememberTrustedTimelineViewport, rows]);
+  }, [continuityState, rememberTrustedTimelineViewport, rows, timelineHidden]);
+  const previousTimelineHidden = useRef(timelineHidden);
+  useLayoutEffect(() => {
+    const wasHidden = previousTimelineHidden.current;
+    previousTimelineHidden.current = timelineHidden;
+    if (wasHidden && !timelineHidden) restoreTrustedTimelineViewport();
+  }, [restoreTrustedTimelineViewport, timelineHidden]);
 
   useEffect(() => () => {
     olderHistoryQuery.current?.abort();
@@ -1587,6 +1602,7 @@ export function ConversationPanel({
     const sentinel = transcriptStartRef.current;
     if (
       timeline === null
+      || timeline.hidden
       || sentinel === null
       || continuityState.nextCursor === undefined
       || displayBusy
@@ -1605,7 +1621,7 @@ export function ConversationPanel({
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [continuityState.nextCursor, displayBusy, displayError, loadEarlier]);
+  }, [continuityState.nextCursor, displayBusy, displayError, loadEarlier, timelineHidden]);
 
   useEffect(() => {
     const timeline = timelineRef.current;
@@ -1613,6 +1629,7 @@ export function ConversationPanel({
     const tail = timelineItems?.[timelineItems.length - 1];
     if (timeline === null || tail === undefined || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
+      if (timeline.hidden) return;
       if (timelinePinnedToEnd.current) {
         timeline.scrollTop = timeline.scrollHeight;
         rememberTrustedTimelineViewport(timeline);
@@ -2445,6 +2462,10 @@ export function ConversationPanel({
   };
 
   const continuityLoading = conversationLoadingCopy(continuityState.lifecycle, t);
+  const normalContinuityLabel = continuityState.lifecycle === "finalizing"
+    ? t("runFinishedAnnouncement")
+    : continuityState.lifecycle === "checking_owner" || continuityState.lifecycle === "attaching_run"
+      ? t("syncingConversation") : undefined;
   const canonicalRouteRecovery = runContext === undefined
     ? session.routeRecovery
     : runContext.routeRecovery;
@@ -2471,6 +2492,7 @@ export function ConversationPanel({
     <div className="conversation-layout">
       <section
         className="conversation-panel"
+        data-user-input-active={hasPendingUserInput}
         aria-labelledby="conversation-title"
         data-workspace-id={workspaceId}
         data-session-id={session.id}
@@ -2491,6 +2513,7 @@ export function ConversationPanel({
           <ConversationActivity
             state={streamStatus?.state}
             presentation={composerStatusPresentation}
+            labelOverride={normalContinuityLabel}
             t={t}
           />
           {agentActivity !== undefined && agentActivity.totalAgents > 0 ? (
@@ -2622,7 +2645,7 @@ export function ConversationPanel({
           && userInputKey(request) === userInputKey(durableUserInput);
         if (request.status === "resolved") return null;
         return (
-          <div key={userInputKey(request)} hidden={!selected}>
+          <div className="conversation-attention" key={userInputKey(request)} hidden={!selected}>
             <UserInputCard
               request={request}
               busy={selected && userInputBusy}
@@ -2786,7 +2809,7 @@ export function ConversationPanel({
         </section>
       )}
 
-      {continuityLoading === undefined ? null : (
+      {continuityLoading === undefined || continuityState.lifecycle !== "loading_transcript" ? null : (
         <LoadingState
           className="conversation-continuity-loading sg-bounded-content"
           label={continuityLoading.label}
@@ -2852,6 +2875,7 @@ export function ConversationPanel({
 
       <div
         className="timeline sg-bounded-content"
+        hidden={timelineHidden}
         ref={timelineRef}
         role="log"
         aria-live="off"
@@ -2864,7 +2888,7 @@ export function ConversationPanel({
         }}
         onScroll={(event) => {
           const timeline = event.currentTarget;
-          if (timelineViewportRestoring.current) return;
+          if (timeline.hidden || timelineViewportRestoring.current) return;
           const activeElement = document.activeElement;
           const focusWithinTimeline =
             activeElement instanceof Node && timeline.contains(activeElement);
@@ -2936,6 +2960,7 @@ export function ConversationPanel({
                   artifactAvailability: row.artifactAvailability,
                   artifactHasMore: row.artifactHasMore,
                   artifactPersistedBytes: row.artifactPersistedBytes,
+                  userInputReceipt: row.userInputReceipt,
                 }}
                 onReadArtifact={row.artifactRef === undefined
                   ? undefined
@@ -2979,13 +3004,31 @@ export function ConversationPanel({
         />
       ) : null}
 
+      {hasPendingUserInput ? (
+        <div className="attention-secondary-actions">
+        {displayError || continuityState.contractError !== undefined ? null : <Button type="button" variant="quiet" aria-expanded={attentionHistoryExpanded}
+          onClick={() => setExpandedAttentionHistory(attentionHistoryExpanded ? undefined : attentionKey)}>
+          {t(attentionHistoryExpanded ? "hideAttentionHistory" : "showAttentionHistory")}
+        </Button>}
+        <Button type="button" variant="quiet"
+          aria-expanded={attentionDraftExpanded}
+          onClick={() => {
+            setCollapsedAttentionDraft(attentionDraftExpanded ? attentionKey : undefined);
+            if (!attentionDraftExpanded) requestAnimationFrame(() => composerRef.current?.focus());
+          }}>
+          {t(attentionDraftExpanded ? "hideAttentionDraft" : "showAttentionDraft")}
+        </Button>
+        </div>
+      ) : null}
       <Composer
         key={draftStorageKey(workspaceId, session.id)}
         draftKey={draftStorageKey(workspaceId, session.id)}
         persistentDraftKey={draftSessionId === undefined ? undefined : draftStorageKey(workspaceId, draftSessionId)}
         active={active}
-        reviewActive={approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live"}
+        hidden={hasPendingUserInput && !attentionDraftExpanded}
+        reviewActive={hasPendingUserInput || (approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live")}
         submissionBlocked={submissionBlocked}
+        readOnlyRecovery={continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only" || continuityState.contractError !== undefined}
         stopControlBlocked={stopControlBlocked}
         submitting={submitting}
         controlBusy={controlBusy}
@@ -3256,18 +3299,20 @@ function compactionErrorMessage(error: unknown, t: Translate): string {
 function ConversationActivity({
   state,
   presentation,
+  labelOverride,
   t,
 }: {
   readonly state?: RunStreamState;
   readonly presentation?: ProductStatusPresentation;
+  readonly labelOverride?: string;
   readonly t: Translate;
 }) {
   const transportState = state ?? "idle";
-  if ((transportState === "idle" || transportState === "terminal") && presentation === undefined) return null;
+  if ((transportState === "idle" || transportState === "terminal") && presentation === undefined && labelOverride === undefined) return null;
   const effectiveState = transportState === "idle" || transportState === "terminal"
     ? presentation?.status === "failed" ? "error" : "connecting"
     : transportState;
-  const label = presentation?.label ?? (() => {
+  const label = labelOverride ?? presentation?.label ?? (() => {
     switch (effectiveState) {
       case "connecting": return t("conversationConnecting");
       case "live": return t("conversationLive");
@@ -3279,6 +3324,7 @@ function ConversationActivity({
     <span
       className={`conversation-activity stream-${effectiveState}`}
       role={effectiveState === "error" ? "alert" : "status"}
+      aria-label={label}
       aria-live={effectiveState === "error" ? "assertive" : "polite"}
       aria-atomic="true"
       data-conversation-product-status={presentation?.status}
@@ -3350,7 +3396,7 @@ function canonicalPageCoversTerminal(
 }
 
 function captureTimelineAnchor(timeline: HTMLDivElement | null): TimelineAnchor | undefined {
-  if (timeline === null) return undefined;
+  if (timeline === null || timeline.hidden) return undefined;
   const timelineTop = timeline.getBoundingClientRect().top;
   const element = [...timeline.querySelectorAll<HTMLElement>("[data-display-id]")]
     .find((candidate) => candidate.getBoundingClientRect().bottom >= timelineTop);

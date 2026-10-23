@@ -1085,7 +1085,7 @@ describe("desktop coding-agent components", () => {
     const tool = { key: "denied", toolName: "write_file", text };
     expect(presentTool(tool)).toMatchObject({
       displayName: "Write file",
-      status: "Error",
+      status: "Failed",
       tone: "danger",
       summary: "Denied in Sigil Desktop",
       detailKind: "raw",
@@ -1108,7 +1108,7 @@ describe("desktop coding-agent components", () => {
 
     expect(presentTool(tool)).toMatchObject({
       displayName: "Read file",
-      status: "Ok",
+      status: "Succeeded",
       tone: "success",
       summary: "1 line read.",
       detailKind: "output",
@@ -1140,8 +1140,8 @@ describe("desktop coding-agent components", () => {
     const tool = { key: "empty-grep", toolName: "grep", text };
 
     expect(presentTool(tool)).toMatchObject({
-      displayName: "Grep",
-      status: "Ok",
+      displayName: "Search text",
+      status: "Succeeded",
       tone: "success",
       summary: "No matches found.",
       input: "path=crates/sigil-kernel/src pattern=unwrap",
@@ -1582,6 +1582,26 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     expect(await screen.findByRole("heading", { name: "No conversations yet" })).toBeTruthy();
+  });
+
+  it("retains the unsaved context window after leaving and reopening Settings", async () => {
+    const user = userEvent.setup();
+    const saveProviderDefaultModel = vi.fn();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      saveProviderDefaultModel,
+    })} />);
+
+    await screen.findByRole("heading", { name: "No conversations yet" });
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.type(screen.getByLabelText("Context window"), "65536");
+    expect(screen.getByText("Unsaved")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    expect(screen.queryByLabelText("Context window")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect((screen.getByLabelText("Context window") as HTMLInputElement).value).toBe("65536");
+    expect(screen.getByText("Unsaved")).toBeTruthy();
+    expect(saveProviderDefaultModel).not.toHaveBeenCalled();
   });
 
   it("shows the first-run path before a workspace is selected", async () => {
@@ -2226,7 +2246,7 @@ describe("desktop workspace and history shell", () => {
     const saveProviderDefaultModel = vi.fn(async (_workspaceId: string, modelRef: {
       connectionId: string;
       modelId: string;
-    }) => ({
+    }, contextWindowTokens?: number) => ({
       defaultModel: modelRef,
       inventory: {
         configMode: "v2" as const,
@@ -2240,6 +2260,7 @@ describe("desktop workspace and history shell", () => {
           credentialSource: "environment" as const,
           readiness: "ready" as const,
           defaultModel: modelRef,
+          modelContextWindows: contextWindowTokens === undefined ? {} : { [modelRef.modelId]: contextWindowTokens },
         }],
         issues: [],
       },
@@ -3111,12 +3132,12 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select conversation: Batch ready session" }));
     await user.click(screen.getByRole("button", { name: "Delete ready (1)" }));
 
-    expect(await screen.findByRole("dialog", { name: "Review batch action" })).toBeTruthy();
+    expect(await screen.findByRole("alertdialog", { name: "Delete conversations (1)?" })).toBeTruthy();
     expect(planSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
       action: "delete_sessions",
       items: [{ sessionRef: entry.sessionRef, sessionId: entry.sessionId }],
     });
-    await user.click(screen.getByRole("button", { name: "Apply action" }));
+    await user.click(screen.getByRole("button", { name: "Permanently delete conversations (1)" }));
     await waitFor(() => expect(executeSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
       planId: "sha256:batch-ready",
       action: "delete_sessions",
@@ -3190,8 +3211,15 @@ describe("desktop workspace and history shell", () => {
         sourceModifiedAtUnixMs: entry.sourceModifiedAtUnixMs,
       }],
     });
-    await user.click(await screen.findByRole("button", { name: "Apply action" }));
-    expect(await screen.findByText("failed: In use by another Sigil instance")).toBeTruthy();
+    await user.click(await screen.findByRole("button", { name: "Permanently delete sources (1)" }));
+    await waitFor(() => expect(executeSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
+      planId: "sha256:invalid-delete", action: "delete_invalid_sources",
+      items: [{ sessionRef: entry.sessionRef, sourceBytes: entry.sourceBytes, sourceModifiedAtUnixMs: entry.sourceModifiedAtUnixMs }],
+    }));
+    const results = await screen.findByText("View individual results");
+    expect((results.closest("details") as HTMLDetailsElement).open).toBe(false);
+    await user.click(results);
+    expect(await screen.findByText("Failed · In use by another Sigil instance")).toBeTruthy();
   });
 
   it("stores the startup restore preference and honors it on the next bootstrap", async () => {
@@ -3297,12 +3325,12 @@ describe("desktop workspace and history shell", () => {
       });
     });
     await waitFor(() => expect(continuity).toHaveBeenCalledOnce());
-    expect(within(workspaceRegion).getByRole("status", { name: "Checking conversation continuity" })).toBeTruthy();
+    expect(within(workspaceRegion).getAllByRole("status", { name: "Syncing conversation…" })).toHaveLength(1);
 
     await act(async () => {
       resolveRunContext?.(defaultRunContext);
     });
-    expect(within(workspaceRegion).getByRole("status", { name: "Checking conversation continuity" })).toBeTruthy();
+    expect(within(workspaceRegion).getAllByRole("status", { name: "Syncing conversation…" })).toHaveLength(1);
 
     await act(async () => {
       resolveContinuity?.({
@@ -3312,7 +3340,7 @@ describe("desktop workspace and history shell", () => {
       });
     });
     expect(await within(workspaceRegion).findByRole("heading", { name: "Loading state session" })).toBeTruthy();
-    expect(within(workspaceRegion).queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
+    expect(within(workspaceRegion).queryByRole("status", { name: "Syncing conversation…" })).toBeNull();
     expect((within(workspaceRegion).getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("deepseek-default/deepseek-v4-flash");
     expect(within(workspaceRegion).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
     await user.click(within(workspaceRegion).getByRole("button", { name: "Context and cache details" }));
@@ -8433,6 +8461,60 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     const select = await screen.findByRole("combobox", { name: "Which mode should Sigil use?" });
+    const conversationHistory = screen.getByRole("log", { hidden: true }) as HTMLDivElement;
+    let browserScrollTop = 0;
+    const hiddenScrollWrites: number[] = [];
+    Object.defineProperties(conversationHistory, {
+      clientHeight: { configurable: true, get: () => conversationHistory.hidden ? 0 : 200 },
+      scrollHeight: { configurable: true, get: () => conversationHistory.hidden ? 0 : 1_200 },
+      scrollTop: {
+        configurable: true,
+        get: () => browserScrollTop,
+        set: (value: number) => {
+          browserScrollTop = value;
+          if (conversationHistory.hidden) hiddenScrollWrites.push(value);
+        },
+      },
+    });
+    expect(screen.queryByRole("log")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "View conversation" }));
+    expect(screen.getByRole("log")).toBe(conversationHistory);
+    await act(async () => {
+      for (let frame = 0; frame < 5; frame += 1) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+    });
+    fireEvent.wheel(conversationHistory);
+    conversationHistory.scrollTop = 360;
+    fireEvent.scroll(conversationHistory);
+    await user.click(screen.getByRole("button", { name: "Hide conversation" }));
+    expect(screen.getByRole("log", { hidden: true })).toBe(conversationHistory);
+    expect(conversationHistory.hidden).toBe(true);
+    // WebKit can expose zero geometry and reset its scroll offset while hidden.
+    browserScrollTop = 0;
+    fireEvent.pointerDown(select);
+    fireEvent.focus(select);
+    fireEvent.scroll(conversationHistory);
+    await act(async () => {
+      for (let frame = 0; frame < 5; frame += 1) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+    });
+    expect(conversationHistory.clientHeight).toBe(0);
+    expect(conversationHistory.scrollHeight).toBe(0);
+    expect(hiddenScrollWrites).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "View conversation" }));
+    expect(screen.getByRole("log")).toBe(conversationHistory);
+    await waitFor(() => expect(conversationHistory.scrollTop).toBe(360));
+    await user.click(screen.getByRole("button", { name: "Hide conversation" }));
+    const otherDraft = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(otherDraft, "先保留这份草稿 🙂");
+    await user.click(screen.getByRole("button", { name: "Hide message draft" }));
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Write another message" }));
+    expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(otherDraft);
+    expect(editorText(otherDraft)).toBe("先保留这份草稿 🙂");
+    await user.click(screen.getByRole("button", { name: "Hide message draft" }));
     await user.selectOptions(select, "__other__");
     await user.click(screen.getByRole("button", { name: "Submit and continue" }));
 
@@ -8452,6 +8534,94 @@ describe("desktop workspace and history shell", () => {
       "manual",
     ));
   });
+
+  it.each(["display", "contract"] as const)(
+    "reveals collapsed question history and its retry action after a %s failure", async (failure) => {
+      const user = userEvent.setup();
+      const olderPage = deferred<ConversationDisplayPage>();
+      const request: UserInputRequest = {
+        identity: {
+          sessionScopeId: "http-session-new", rootLogicalRunId: "root-history-question",
+          sourceThreadId: "thread-history-question", requestId: "history-question", generation: 1,
+          sourceBindingHash: `sha256:${"6".repeat(64)}`,
+        },
+        requestHash: `sha256:${"7".repeat(64)}`,
+        source: { kind: "agent" }, purpose: "choice", prompt: "Choose how to continue",
+        questions: [{ id: "mode", question: "Which history mode?", required: true,
+          options: [{ id: "safe", label: "Safe" }], multiple: false }],
+        allowedActions: ["submit"], requestedAtUnixMs: 1, status: "requested",
+      };
+      const page: ConversationDisplayPage = {
+        schemaVersion: 1, requestScope: "http-session-new", throughSessionStreamSequence: "11",
+        totalItems: "2", items: [{
+          schemaVersion: 1, displayId: "question-stable-message",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "question-stable-event", kind: "user_message", source: "durable_transcript",
+          status: "recorded", content: { type: "message", role: "user", text: "Trusted saved history",
+            imageAttachmentCount: 0, truncated: false, originalContentBytes: 21 },
+        }],
+        terminalFrontier: { runId: "root-history-question", sessionStreamSequence: "11", status: "awaiting_user_input" },
+        hasMore: true, nextCursor: "older-question-history", gapFacts: [], userInput: request,
+      };
+      const display = vi.fn<DesktopBridge["display"]>()
+        .mockResolvedValueOnce(page)
+        .mockReturnValueOnce(olderPage.promise)
+        .mockResolvedValue({ ...page, hasMore: false, nextCursor: undefined });
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        display,
+      })} />);
+      await screen.findByText("No matching conversation.");
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await screen.findByRole("combobox", { name: "Which history mode?" });
+      const timeline = screen.getByRole("log", { hidden: true }) as HTMLDivElement;
+      const composer = screen.getByRole("combobox", { name: "Message Sigil" });
+      setEditorText(composer, "保留重试前的草稿 🙂");
+      expect(timeline.hidden).toBe(true);
+      await user.click(screen.getByRole("button", { name: "View conversation" }));
+      await act(async () => {
+        for (let frame = 0; frame < 5; frame += 1) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
+      });
+      fireEvent.wheel(timeline);
+      timeline.scrollTop = 0;
+      fireEvent.scroll(timeline);
+      await waitFor(() => expect(display).toHaveBeenCalledTimes(2));
+      await user.click(screen.getByRole("button", { name: "Hide conversation" }));
+      expect(timeline.hidden).toBe(true);
+
+      if (failure === "display") {
+        await act(async () => olderPage.reject(new Error("saved history unavailable")));
+      } else {
+        const original = page.items[0];
+        await act(async () => olderPage.resolve({
+          ...page, hasMore: false, nextCursor: undefined,
+          items: [{ ...original, content: { type: "message", role: "user", text: "Conflicting saved history",
+            imageAttachmentCount: 0, truncated: false, originalContentBytes: 25 } }],
+        }));
+      }
+
+      const retry = await screen.findByRole("button", { name: "Retry messages" });
+      expect(screen.getByRole("log")).toBe(timeline);
+      expect(timeline.hidden).toBe(false);
+      expect(within(timeline).getByText("Saved messages are unavailable")).toBeTruthy();
+      if (failure === "contract") {
+        expect(within(timeline).getByText(/question-stable-message was reused with different content/)).toBeTruthy();
+      }
+      expect(within(timeline).getByRole("button", { name: "Retry messages" })).toBe(retry);
+      expect(retry.hasAttribute("disabled")).toBe(false);
+      expect(screen.queryByRole("button", { name: "Hide conversation" })).toBeNull();
+      expect(within(timeline).getByText("Trusted saved history")).toBeTruthy();
+      expect(within(timeline).queryByText("Conflicting saved history")).toBeNull();
+      expect(screen.getByRole("combobox", { name: "Message Sigil" })).toBe(composer);
+      expect(editorText(composer)).toBe("保留重试前的草稿 🙂");
+      await user.click(retry);
+      await waitFor(() => expect(display).toHaveBeenCalledTimes(3));
+      expect(screen.getByRole("log", { hidden: true })).toBe(timeline);
+      expect(editorText(composer)).toBe("保留重试前的草稿 🙂");
+    },
+  );
 
   it("stops a persistent terminal task with its exact run and generation binding", async () => {
     const user = userEvent.setup();

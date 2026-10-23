@@ -157,7 +157,7 @@ describe("desktop UI catalog contract", () => {
     expect(tool).toBeDefined();
     render(createElement(ToolCard, { tool: tool! }));
     expect(screen.queryByText(/duration not recorded|risk not classified/i)).toBeNull();
-    expect(screen.getByText("Shell")).toBeTruthy();
+    expect(screen.getByText("shell")).toBeTruthy();
   });
 
   it("renders an empty structured tool result without raw brackets or a redundant disclosure", () => {

@@ -9,6 +9,17 @@ import nativeCanonicalApproval from "./fixtures/native-canonical-pending-approva
 import type { ConversationDisplayPage, TimelineEvent } from "../../types";
 
 describe("canonical conversation rows", () => {
+  it("preserves an authoritative typed question receipt without parsing its JSON output", () => {
+    const entry: ConversationTimelineItem = { identity: "typed-question", source: "durable", item: {
+      schemaVersion: 1, displayId: "typed-question", displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+      sourceEventId: "typed-question-event", source: "durable_transcript", kind: "tool", status: "completed",
+      content: { type: "tool", toolName: "request_user_input", output: '{"decision":"submitted"}',
+        userInputReceipt: { decision: "declined", answeredCount: 0 }, truncated: false, originalContentBytes: 24 },
+    } };
+    expect(projectConversationRows([entry], [], translateEnglish)[0]).toMatchObject({
+      kind: "tool", userInputReceipt: { decision: "declined", answeredCount: 0 }, text: '{"decision":"submitted"}',
+    });
+  });
   it("coalesces the real native canonical pending output and preserves missing or mismatched source identity", () => {
     const page = nativeCanonicalApproval.canonicalPage as ConversationDisplayPage;
     const entries = page.items.map((item): ConversationTimelineItem => {

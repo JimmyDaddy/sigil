@@ -23,6 +23,7 @@ import { PluginReviewCard } from "./PluginReviewCard";
 import { McpImportCard } from "./McpImportCard";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
 import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
+import { type ContextWindowDrafts, useContextWindowDrafts } from "./useContextWindowDrafts";
 import {
   connectionMatchesProvider,
   providerConnectionDetail,
@@ -54,6 +55,7 @@ export function SettingsPage({
   onProviderConfigurationReloaded,
   modelContext,
   defaultModel,
+  contextWindowDrafts,
   onDefaultModelChange,
   onBack,
   onOpenSupport,
@@ -68,6 +70,7 @@ export function SettingsPage({
   readonly onProviderConfigurationReloaded: (workspaceId: string) => Promise<void>;
   readonly modelContext?: RunContext;
   readonly defaultModel?: ProviderModelRef;
+  readonly contextWindowDrafts?: ContextWindowDrafts;
   readonly onDefaultModelChange: (modelRef?: ProviderModelRef) => void;
   readonly onBack: () => void;
   readonly onOpenSupport: () => void;
@@ -107,17 +110,27 @@ export function SettingsPage({
     label: defaultModelConnection?.label ?? modelContext?.modelRef.connectionId ?? "",
     providerLabel: defaultModelConnection?.providerLabel ?? modelContext?.providerName ?? "",
   };
-  const [contextWindowTokens, setContextWindowTokens] = useState("");
+  const localContextWindowDrafts = useContextWindowDrafts();
+  const drafts = contextWindowDrafts ?? localContextWindowDrafts;
+  const contextWindowScope = workspaceId === undefined || effectiveDefaultModel === undefined
+    ? undefined
+    : JSON.stringify([workspaceId, effectiveDefaultModel.connectionId, effectiveDefaultModel.modelId]);
+  const configuredContextWindow = effectiveDefaultModel === undefined
+    ? ""
+    : defaultModelConnection?.modelContextWindows?.[effectiveDefaultModel.modelId]?.toString() ?? "";
+  const contextWindowTokens = contextWindowScope === undefined
+    ? configuredContextWindow
+    : drafts.values[contextWindowScope] ?? configuredContextWindow;
   const contextWindowValue = contextWindowTokens.trim();
+  const contextWindowDirty = contextWindowValue !== configuredContextWindow;
   const contextWindowValid = contextWindowValue === ""
-    || (/^\d+$/.test(contextWindowValue) && Number(contextWindowValue) > 0);
+    || (/^\d+$/.test(contextWindowValue)
+      && Number.isSafeInteger(Number(contextWindowValue))
+      && Number(contextWindowValue) > 0);
 
   useEffect(() => {
-    const configured = effectiveDefaultModel === undefined
-      ? undefined
-      : defaultModelConnection?.modelContextWindows?.[effectiveDefaultModel.modelId];
-    setContextWindowTokens(configured?.toString() ?? "");
-  }, [defaultModelConnection, effectiveDefaultModel]);
+    if (contextWindowScope !== undefined && !contextWindowDirty) drafts.discard(contextWindowScope);
+  }, [contextWindowDirty, contextWindowScope, drafts.discard]);
 
   const updateStartup = (enabled: boolean) => {
     if (!writeReopenLastWorkspace(enabled)) {
@@ -202,6 +215,7 @@ export function SettingsPage({
     if (
       workspaceId === undefined
       || effectiveDefaultModel === undefined
+      || contextWindowScope === undefined
       || !contextWindowValid
     ) return;
     setDefaultModelSaving(true);
@@ -214,6 +228,7 @@ export function SettingsPage({
       if (!onProviderInventoryChange(result.inventory)) return;
       onDefaultModelChange(result.defaultModel);
       await onProviderConfigurationReloaded(workspaceId);
+      drafts.discard(contextWindowScope, contextWindowTokens);
       notify({
         tone: result.saveWarning ? "warning" : "success",
         message: result.saveWarning ? t("defaultModelSaveWarning") : t("contextWindowSaved"),
@@ -453,17 +468,28 @@ export function SettingsPage({
                     value={contextWindowTokens}
                     placeholder={t("automatic")}
                     error={contextWindowValid ? undefined : t("contextWindowInvalid")}
-                    disabled={defaultModelSaving}
-                    onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
+                    disabled={defaultModelSaving || contextWindowScope === undefined}
+                    onChange={(event) => {
+                      if (contextWindowScope !== undefined) {
+                        drafts.update(contextWindowScope, event.currentTarget.value, configuredContextWindow);
+                      }
+                    }}
                   />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={defaultModelSaving || !contextWindowValid}
-                    onClick={() => void saveContextWindow()}
-                  >
-                    {defaultModelSaving ? t("savingProvider") : t("save")}
-                  </Button>
+                  <div className="settings-context-window-actions">
+                    {contextWindowDirty ? <span className="settings-draft-status" role="status">{t("settingsUnsavedChanges")}</span> : null}
+                    {contextWindowDirty ? <Button type="button" variant="quiet" disabled={defaultModelSaving}
+                      onClick={() => { if (contextWindowScope !== undefined) drafts.discard(contextWindowScope); }}>
+                      {t("settingsDiscardChanges")}
+                    </Button> : null}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={defaultModelSaving || !contextWindowValid || !contextWindowDirty}
+                      onClick={() => void saveContextWindow()}
+                    >
+                      {defaultModelSaving ? t("savingProvider") : t("save")}
+                    </Button>
+                  </div>
                 </div>
               )}
               </div>

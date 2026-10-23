@@ -10,6 +10,7 @@ import { SessionRail } from "./features/sessions/SessionRail";
 import { ConversationLibrary } from "./features/sessions/ConversationLibrary";
 import { findCreatedSessionEntry } from "./features/sessions/createdSessionIdentity";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { useContextWindowDrafts } from "./features/settings/useContextWindowDrafts";
 import { ProviderSetup } from "./features/settings/ProviderSetup";
 import { SupportPage } from "./features/support/SupportPage";
 import { DESKTOP_ROUTE_MAP, useDesktopRouter } from "./features/navigation/useDesktopRouter";
@@ -140,6 +141,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [providerInventoryState, setProviderInventoryState] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
   const [defaultModel, setDefaultModel] = useState<ProviderModelRef>();
+  const contextWindowDrafts = useContextWindowDrafts();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
   const [sessionMessage, setSessionMessage] = useState<string>();
@@ -1223,6 +1225,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               onProviderConfigurationReloaded={reloadConversationAfterProviderRestart}
               modelContext={workspaceRunContext}
               defaultModel={defaultModel}
+              contextWindowDrafts={contextWindowDrafts}
               onDefaultModelChange={setDefaultModel}
               onBack={back}
               onOpenSupport={() => {
@@ -1233,6 +1236,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
             <SupportPage bridge={bridge} workspaceId={activeWorkspace.id} session={selectedSession} onBack={back} />
           ) : desktopView === "library" && activeWorkspace !== undefined ? (
             <ConversationLibrary
+              key={activeWorkspace.id}
               bridge={bridge}
               workspaceId={activeWorkspace.id}
               onBack={() => {

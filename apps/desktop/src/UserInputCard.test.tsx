@@ -90,6 +90,26 @@ function renderRequested(request: UserInputRequest, locale: Locale = "en") {
 }
 
 describe("UserInputCard question presentation and local validation", () => {
+  it.each(["en", "zh-CN"] as const)("localizes only a typed host question-group heading in %s", (locale) => {
+    const request = requestedRequest();
+    request.prompt = "Please answer the following questions before continuing.";
+    request.promptOrigin = "host_question_group";
+    request.questions.push({ id: "details", question: "第二个问题保留原文", required: false, options: [], multiple: false });
+    const view = renderRequested(request, locale);
+    const heading = locale === "zh-CN" ? "请回答以下问题后继续" : "Please answer these questions to continue";
+    expect(screen.getByRole("heading", { name: heading })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "第二个问题保留原文" })).toBeTruthy();
+    view.rerender(<LocaleProvider><UserInputCard request={{ ...request, promptOrigin: undefined }} busy={false} failure={false} onDecision={vi.fn()} /></LocaleProvider>);
+    expect(screen.getByRole("heading", { name: request.prompt })).toBeTruthy();
+  });
+
+  it("retains an external prompt that happens to equal a former host heading", () => {
+    const request = requestedRequest();
+    request.prompt = "Please answer the following questions before continuing.";
+    request.promptOrigin = "question_text";
+    renderRequested(request, "zh-CN");
+    expect(screen.getByRole("heading", { name: request.prompt })).toBeTruthy();
+  });
   it.each(["en", "zh-CN"] as const)("shows one visible identical single question with an accessible required select in %s", async (locale) => {
     const user = userEvent.setup();
     const request = requestedRequest();

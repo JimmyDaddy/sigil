@@ -77,6 +77,7 @@ export function UserInputCard({
     onDecision({ kind: "submitted", answers });
   };
   const waitingForContinuation = request.status !== "requested";
+  const prompt = request.promptOrigin === "host_question_group" ? t("questionGroupHeading") : request.prompt;
   const singleQuestionMatchesPrompt = request.questions.length === 1
     && request.questions[0].question === request.prompt;
 
@@ -85,10 +86,10 @@ export function UserInputCard({
       className={`user-input-card sg-bounded-content${waitingForContinuation ? " user-input-card-answered" : ""}`}
       aria-labelledby={titleId}
     >
-      {waitingForContinuation ? <h3 id={titleId} className="sr-only">{request.prompt}</h3> : <header>
+      {waitingForContinuation ? <h3 id={titleId} className="sr-only">{prompt}</h3> : <header>
         <div>
           <span className="plan-card-eyebrow">{t("userInputRequired")}</span>
-          <h3 id={titleId}>{request.prompt}</h3>
+          <h3 id={titleId}>{prompt}</h3>
         </div>
         <span className="user-input-status">{t(`userInputPurpose_${request.purpose}`)}</span>
       </header>}
