@@ -704,6 +704,122 @@ fn real_untrusted_tui_ctrl_c_exits_without_materializing_a_session() -> Result<(
 }
 
 #[test]
+fn real_tui_first_run_cancelled_after_review_does_not_save_config() -> Result<()> {
+    let workspace = test_workspace()?;
+    let config_path = workspace.join(".process-home/.sigil/sigil.toml");
+
+    run_tui_process_with_optional_config(
+        None,
+        &workspace,
+        "1/4 · Choose a provider",
+        false,
+        TuiProcessExit::CtrlC,
+        |output, writer| {
+            configure_first_run_loopback_connection(output, writer, "http://127.0.0.1:1/v1")?;
+            let review_offset = captured_len(output);
+            write_input(writer, b"\x1b[B\x1b[B\r")?;
+            wait_for_text_after(output, review_offset, "Trust this folder, save and start")?;
+            assert!(
+                !config_path.exists(),
+                "review must not publish configuration"
+            );
+            Ok(())
+        },
+    )?;
+
+    assert!(
+        !config_path.exists(),
+        "cancelling setup must not save configuration"
+    );
+    Ok(())
+}
+
+fn configure_first_run_loopback_connection(
+    output: &Arc<Mutex<Vec<u8>>>,
+    writer: &mut dyn Write,
+    base_url: &str,
+) -> Result<()> {
+    // Select Custom endpoint, continue to Connection, then edit its endpoint. The
+    // local endpoint keeps this process fixture independent of credentials and TLS policy.
+    let endpoint_offset = captured_len(output);
+    write_input(writer, b"\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\r")?;
+    wait_for_text_after(output, endpoint_offset, "Custom Endpoint")?;
+    write_input(writer, &[0x15])?;
+    write_input(writer, base_url.as_bytes())?;
+
+    // Apply the endpoint, choose no authentication, and continue to the Model step.
+    let model_offset = captured_len(output);
+    write_input(writer, b"\r\x1b[B\x1b[C\x1b[B\r")?;
+    wait_for_text_after(output, model_offset, "[choose · type ID]")?;
+    wait_for_text_after(output, model_offset, "[Review and start]")?;
+    Ok(())
+}
+
+fn wait_for_finalized_first_run(
+    workspace: &Path,
+    root: &RootConfig,
+    output: &Arc<Mutex<Vec<u8>>>,
+) -> Result<()> {
+    let process_home = workspace.join(".process-home");
+    let paths = sigil_runtime::resolve_sigil_paths_with_env(
+        &root.storage,
+        &root.session,
+        workspace,
+        &sigil_runtime::PathResolverEnv {
+            platform: sigil_runtime::PathResolverEnv::current().platform,
+            home_dir: Some(process_home.clone()),
+            sigil_state_home: None,
+            sigil_cache_home: None,
+            xdg_state_home: Some(process_home.join(".local/state")),
+            xdg_cache_home: Some(process_home.join(".cache")),
+            local_app_data: Some(process_home.join("AppData/Local")),
+        },
+    );
+    let session_root = paths.state_root.join("managed/session-log");
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    loop {
+        if session_root.exists() {
+            for entry in walkdir::WalkDir::new(&session_root) {
+                let entry = entry?;
+                if !entry.file_type().is_file() || entry.file_name() != "records.jsonl" {
+                    continue;
+                }
+                let records = JsonlSessionStore::read_event_records(entry.path())?;
+                let Some(finalized) = records
+                    .iter()
+                    .map(|record| record.stored_event())
+                    .find(|event| event.event_type == DurableEventType::RunFinalized.as_str())
+                else {
+                    continue;
+                };
+                assert_eq!(finalized.payload["run_status"], "completed");
+                assert_eq!(finalized.payload["terminal_reason"], "final_answer");
+                let final_message_id = finalized.payload["final_message_id"]
+                    .as_str()
+                    .context("first run finalized without a final message identity")?;
+                let entries = JsonlSessionStore::read_entries(entry.path())?;
+                assert!(entries.iter().any(|entry| matches!(
+                    entry,
+                    sigil_kernel::SessionLogEntry::Assistant(message)
+                        if message.id == final_message_id
+                            && message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+                            && message.content.as_deref() == Some("FIRST-RUN-CANARY")
+                )));
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "first user request did not durably finalize under {}; captured={}",
+                session_root.display(),
+                captured_text(output)
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
 fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -717,36 +833,12 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
     let result = (|| -> Result<()> {
         run_tui_process_with_default_config(
             &workspace,
-            "Set up a model connection",
+            "1/4 · Choose a provider",
             |output, writer| {
-                wait_for_text(output, "Set up a model connection")?;
-
-                // Use an explicit custom connection so this real-process fixture can exercise a
-                // loopback Chat Completions endpoint without weakening hosted-provider HTTPS
-                // policy or requiring a credential.
-                for _ in 0..4 {
-                    write_input(writer, b"\x1b[B")?;
-                    thread::sleep(Duration::from_millis(50));
-                }
-                write_input(writer, b"\r")?;
-                thread::sleep(Duration::from_millis(150));
-
-                write_input(writer, b"\x1b[B\r")?;
-                thread::sleep(Duration::from_millis(100));
-                write_input(writer, &[0x7f; 64])?;
-                write_input(writer, fixture.base_url.as_bytes())?;
-                write_input(writer, b"\r")?;
-                // Ratatui may redraw only the changed suffix after the modal closes, so there is no
-                // stable full-line marker to await here. The later persisted-config and live-request
-                // assertions verify that this endpoint submission actually took effect.
-                thread::sleep(Duration::from_millis(150));
-
-                let authentication_offset = captured_len(output);
-                write_input(writer, b"\x1b[B\x1b[C")?;
-                wait_for_text_after(output, authentication_offset, "no authentication")?;
+                configure_first_run_loopback_connection(output, writer, &fixture.base_url)?;
 
                 let catalog_loading_offset = captured_len(output);
-                write_input(writer, b"\x1b[B\r")?;
+                write_input(writer, b"\r")?;
                 wait_for_text_after(
                     output,
                     catalog_loading_offset,
@@ -763,17 +855,17 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                     thread::sleep(Duration::from_millis(25));
                 }
                 wait_for_text_after(output, catalog_loading_offset, " · unverified]")?;
-                let model_apply_offset = captured_len(output);
-                write_input(writer, b"\r")?;
-                // Closing the model picker redraws only changed cells; the unchanged provider
-                // label need not be emitted again. Await the setup footer, then prove the chosen
-                // model through the persisted configuration and the first real provider request.
-                wait_for_text_after(output, model_apply_offset, "Ctrl-S save · Ctrl-C quit")?;
-
-                // Context window and max output tokens are optional. Leave both automatic and
-                // move from the model row to the save action.
+                let review_offset = captured_len(output);
+                // Apply the unverified model, leave model options automatic, and review before
+                // the separate explicit action that trusts this folder and saves configuration.
+                write_input(writer, b"\r\x1b[B\x1b[B\r")?;
+                wait_for_text_after(output, review_offset, "Trust this folder, save and start")?;
+                assert!(
+                    !config_path.exists(),
+                    "review must not publish configuration"
+                );
                 let setup_complete_offset = captured_len(output);
-                write_input(writer, b"\x1b[B\x1b[B\x1b[B\r")?;
+                write_input(writer, b"\r")?;
 
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
                 while !config_path.exists() {
@@ -797,6 +889,10 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 assert!(fixture.generation_responded.load(Ordering::Acquire));
 
                 let root = RootConfig::load(&config_path)?;
+                // Streamed text alone is not completion. Await its durable final answer and the
+                // UI's fresh idle footer before the process helper sends the quit gesture.
+                wait_for_finalized_first_run(&workspace, &root, output)?;
+                wait_for_text_after(output, first_request_offset, "Enter send")?;
                 assert_eq!(root.config_version, sigil_kernel::CONFIG_VERSION_V2);
                 assert_eq!(
                     root.agent.connection.as_ref().map(|id| id.as_str()),
@@ -805,6 +901,14 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 assert_eq!(root.agent.model, "gpt-4.1");
                 assert!(root.agent.runtime_provider.is_empty());
                 assert!(root.connections.contains_key("custom-default"));
+                let connections =
+                    sigil_runtime::provider_connections::load_provider_connections(&root);
+                let connection = &connections.default_connection()?.config;
+                assert_eq!(connection.base_url, fixture.base_url);
+                assert!(matches!(
+                    connection.credential,
+                    sigil_runtime::provider_connections::CredentialRefConfig::None
+                ));
                 assert_eq!(
                     fs::metadata(&config_path)?.permissions().mode() & 0o777,
                     0o600
