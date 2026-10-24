@@ -118,11 +118,11 @@ export function HistoryContent({
                 {group.entries.map((entry) => {
                   const canOpen = entry.sourceState === "ready" && entry.sessionId !== undefined;
                   const providerContext = [entry.providerName, entry.modelName].filter(Boolean).join(" · ");
-                  const managementLabel = entry.title ?? entry.sessionRef;
+                  const displayTitle = entry.title ?? t("untitledConversation");
                   const content = (
                     <>
                       <span className="session-row-title">
-                        <strong>{entry.title ?? t("untitledConversation")}</strong>
+                        <strong>{displayTitle}</strong>
                         {entry.pinned ? <span className="pin-indicator" aria-label={t("pinned")}><Icon name="pin" /></span> : null}
                         {entry.sourceState === "ready" ? null : <span className={`source-badge source-${entry.sourceState}`}>{sourceLabel(entry.sourceState, t)}</span>}
                       </span>
@@ -150,7 +150,7 @@ export function HistoryContent({
                             {content}
                           </Button>
                           <Menu
-                            accessibleLabel={t("manageConversation", { name: managementLabel })}
+                            accessibleLabel={t("manageConversation", { name: displayTitle })}
                             label={<Icon name="more" />}
                           >
                             <MenuItem onSelect={() => onRename(entry)}>{t("rename")}</MenuItem>
@@ -163,7 +163,7 @@ export function HistoryContent({
                         <div className="session-row-shell" onContextMenu={openContextMenu}>
                           <div className="session-row session-row-unavailable" aria-disabled="true" title={providerContext || undefined}>{content}</div>
                           <Menu
-                            accessibleLabel={t("manageConversation", { name: managementLabel })}
+                            accessibleLabel={t("manageConversation", { name: displayTitle })}
                             label={<Icon name="more" />}
                           >
                             <MenuItem
