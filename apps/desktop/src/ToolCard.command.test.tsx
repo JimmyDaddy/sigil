@@ -130,6 +130,46 @@ function savedPage(artifactRef: string, selector: ToolArtifactSelector, body: st
     eof: true, matchCount: 0, ...patch };
 }
 
+it.each(["failed", "warning"])("keeps a short %s diagnostic once until its exact output or search is requested", async (status) => {
+  const user = userEvent.setup();
+  const artifactRef = `ta1_${"a".repeat(32)}`;
+  const diagnostic = "invalid tool arguments for mcp_activate_server: mcp_command_resolution_failed for MCP server r12_missing_executable: stdio command does not resolve to an existing file";
+  const read = vi.fn(async (selector: ToolArtifactSelector) => savedPage(artifactRef, selector, diagnostic,
+    selector.kind === "search_literal" ? { matchCount: 1 } : {}));
+  render(<ToolCard tool={{ key: "failed-activation", toolName: "mcp_activate_server", text: diagnostic,
+    status, artifactRef, artifactAvailability: "available", artifactPersistedBytes: new TextEncoder().encode(diagnostic).length,
+  }} onReadArtifact={read} />);
+  expect(screen.getAllByText(diagnostic)).toHaveLength(1);
+  expect(screen.queryByLabelText("mcp_activate_server saved output page")).toBeNull();
+  expect(read).not.toHaveBeenCalled();
+  const output = screen.getByRole("button", { name: "View full output" });
+  expect(output.getAttribute("aria-expanded")).toBe("false");
+  await user.click(output);
+  expect((await screen.findByLabelText("mcp_activate_server saved output page")).textContent).toBe(`${diagnostic}\n`);
+  expect(read).toHaveBeenCalledExactlyOnceWith({ kind: "byte_slice", offset: 0, limit: 16_384 });
+  await user.click(screen.getByRole("button", { name: "Collapse output" }));
+  expect(screen.queryByLabelText("mcp_activate_server saved output page")).toBeNull();
+  expect(screen.getAllByText(diagnostic)).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
+  expect(read).toHaveBeenCalledOnce();
+  await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "mcp_command_resolution_failed");
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  expect((await screen.findByLabelText("mcp_activate_server saved output search results")).textContent).toBe(`${diagnostic}\n`);
+  expect(read).toHaveBeenLastCalledWith({ kind: "search_literal", query: "mcp_command_resolution_failed", startOffset: 0, maxMatches: 20, contextLines: 2 });
+});
+
+it.each(["failed", "warning"])("keeps a multiline %s output preview behind the reading action", (status) => {
+  const body = "Exact diagnostic\nAdditional detail";
+  const read = vi.fn();
+  render(<ToolCard tool={{ key: "multiline-diagnostic", toolName: "exec_command", text: body, status,
+    artifactRef: `ta1_${"a".repeat(32)}`, artifactAvailability: "available", artifactPersistedBytes: body.length,
+  }} onReadArtifact={read} />);
+  expect(read).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("exec_command output content")).toBeNull();
+  expect(screen.queryByLabelText("exec_command saved output page")).toBeNull();
+  expect(screen.getByRole("button", { name: "View full output" }).getAttribute("aria-expanded")).toBe("false");
+});
+
 describe("compact saved output search", () => {
   const artifactRef = `ta1_${"a".repeat(32)}`;
   const source = "  # 社团🌿\r\nsecond line  \n";
@@ -181,7 +221,8 @@ describe("compact saved output search", () => {
     render(<ToolCard tool={{ ...tool, status: mode === "failed" ? "failed" : tool.status,
       artifactHasMore: mode === "more", text: mode === "failed"
         ? JSON.stringify({ status: "error", error: { message: "Read permission failed" } }) : tool.text }} onReadArtifact={read} />);
-    if (mode !== "failed") await user.click(screen.getByRole("button", { name: "View full output" }));
+    expect(read).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
     expect(screen.queryByText("Full output and search")).toBeNull();

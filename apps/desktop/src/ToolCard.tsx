@@ -222,7 +222,8 @@ export function ToolCard({
       setArtifactBusy(false);
     };
   }, [canReadArtifact]);
-  const shortOutput = !compactCompletedRead && !questionReceipt && canReadArtifact
+  const diagnosticOutput = presentation.tone === "danger" || presentation.tone === "warning";
+  const shortOutput = !diagnosticOutput && !compactCompletedRead && !questionReceipt && canReadArtifact
     && tool.artifactPersistedBytes !== undefined
     && tool.artifactPersistedBytes <= SHORT_OUTPUT_BYTES;
   useEffect(() => {
@@ -380,7 +381,7 @@ export function ToolCard({
           </div>
           {artifactSearchPanel}
           <div id={artifactReaderId} className="tool-artifact-display">
-            {!compactCompletedRead && !shortOutput && !showArtifactPage && presentation.detailKind === "output" ? (
+            {!diagnosticOutput && !compactCompletedRead && !shortOutput && !showArtifactPage && presentation.detailKind === "output" ? (
               <ToolOutputPanel key={tool.key} toolName={tool.toolName} text={presentation.detailText ?? ""}
                 language={presentation.detailLanguage} streaming={presentation.streaming} allowExpand={false} />
             ) : null}
