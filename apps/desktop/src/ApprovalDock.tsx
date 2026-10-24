@@ -1,7 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
-import { useLocale } from "./i18n";
+import { useLocale, type Translate } from "./i18n";
 import { presentDeliveryStatus } from "./statusPresentation";
 import type {
   ApprovalAction,
@@ -65,6 +65,10 @@ export function ApprovalDock({
       code === "unsupported_syntax" || code === "invalid_syntax"
     ) === true;
   const commandReview = frozenCommandReview(approval);
+  const fileActionTitle = fileActionLabel(approval.operation, t);
+  const reviewSummary = [approval.previewSummary, approval.safeSummaryDetail]
+    .find((summary) => summary !== undefined && summary.trim() !== "")
+    ?? t("reviewExactToolAction");
   const deliveryPresentation = presentDeliveryStatus(phase, t);
   if (phase === "accepted") {
     return (
@@ -125,10 +129,11 @@ export function ApprovalDock({
       }}
     >
       <header>
-        <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{commandReview ? t("approvalCommandTitle") : approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
-        <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
+        <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{commandReview ? t("approvalCommandTitle") : fileActionTitle ?? approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
+        <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{riskLabel(approval.risk, t)}</span>
       </header>
       <div ref={reviewRef} className="approval-review" role="region" aria-label={t("requestedAction")} tabIndex={0}>
+      {fileActionTitle && approval.subjects?.length ? <p>{approval.subjects.join(" · ")}</p> : null}
       {approval.toolInput && !approval.previewBody?.trim() ? (
         <div className="approval-command">
           <strong>{t("requestedAction")}</strong>
@@ -140,19 +145,25 @@ export function ApprovalDock({
         <pre className="approval-exact-command" role="textbox" aria-label={t("approvalCompleteCommand")}
           aria-readonly="true" aria-multiline="true" tabIndex={0}><code>{commandReview.command}</code></pre>
         <Collapsible key={approval.approvalRequestId} label={t("approvalExecutionContext")} className="approval-execution-context">
-          <pre>{commandReview.context}</pre>
+          <dl>{commandReview.context.split("\n").map((line, index) => <div key={index}>
+            <dt>{t((["approvalWorkingDirectory", "approvalShell", "approvalTerminalIo", "approvalRuntimeLimit"] as const)[index]!)}</dt>
+            <dd>{index === 0 ? line.slice(line.indexOf(":") + 1).trim()
+              : line.slice(line.indexOf(":") + 1).trim() === "no explicit deadline" ? t("approvalNoRuntimeLimit")
+              : line.slice(line.indexOf(":") + 1).trim()}</dd>
+          </div>)}</dl>
         </Collapsible>
       </> : approval.previewBody ? (
         isUnifiedDiff(approval.previewBody)
           ? <DiffViewer diff={approval.previewBody} />
           : <pre>{approval.previewBody}</pre>
       ) : null}
-      <p>{approval.previewSummary ?? approval.safeSummaryDetail ?? t("reviewExactToolAction")}</p>
+      <p>{reviewSummary}</p>
       {approval.analysisStatus === "conservative" && !unsupportedShellAnalysis ? (
         <p className="approval-risk-notice" role="note">{t("approvalConservativeNotice")}</p>
       ) : null}
       <Collapsible label={t("technicalDetailsLabel")} className="approval-technical-details">
       <dl>
+        <div><dt>{t("approvalRisk")}</dt><dd>{approval.risk ?? t("notClassified")}</dd></div>
         <div><dt>{t("approvalTool")}</dt><dd>{approval.toolName}</dd></div>
         <div><dt>{t("approvalAction")}</dt><dd>{approval.operation ?? t("notDescribed")}</dd></div>
         {approval.effects?.length ? <div><dt>{t("approvalEffects")}</dt><dd>{approval.effects.join(", ")}</dd></div> : null}
@@ -162,6 +173,7 @@ export function ApprovalDock({
         <div><dt>{t("fileSnapshot")}</dt><dd>{approval.snapshotRequired ? t("required") : t("notRequired")}</dd></div>
         <div><dt>{t("decisionExpires")}</dt><dd>{expires}</dd></div>
       </dl>
+      {!reviewUnavailable && !approval.sessionGrantAvailable ? <p>{t(sessionGrantUnavailableMessageKey(approval.sessionGrantUnavailableReason?.code))}</p> : null}
       {approval.analysisReasons?.length || approval.decisionReasons?.length ? (
         <div className="approval-reasons">
           <strong>{t("approvalWhy")}</strong>
@@ -193,11 +205,7 @@ export function ApprovalDock({
           </div>
           <Button variant="quiet" type="button" onClick={onOpenSupport}>{t("openSupport")}</Button>
         </aside>
-      ) : <small>
-        {approval.sessionGrantAvailable
-          ? t("approveSessionDetail")
-          : t(sessionGrantUnavailableMessageKey(approval.sessionGrantUnavailableReason?.code))}
-      </small>}
+      ) : approval.sessionGrantAvailable ? <small>{t("approveSessionDetail")}</small> : null}
       </div>
       {expired ? <div className="approval-expired" role="alert">{t("approvalExpired")}</div> : null}
       <div className="approval-actions">
@@ -212,6 +220,30 @@ export function ApprovalDock({
       </div>
     </section>
   );
+}
+
+function riskLabel(risk: string | undefined, t: Translate): string {
+  switch (risk) {
+    case "low": return t("approvalRiskLow");
+    case "medium": return t("approvalRiskMedium");
+    case "high": return t("approvalRiskHigh");
+    case "destructive": return t("approvalRiskDestructive");
+    default: return t("notClassified");
+  }
+}
+
+function fileActionLabel(operation: string | undefined, t: Translate): string | undefined {
+  switch (operation) {
+    case "create_file": return t("approvalCreateFile");
+    case "edit_file": return t("approvalEditFile");
+    case "overwrite_file": return t("approvalOverwriteFile");
+    case "delete_file": return t("approvalDeleteFile");
+    case "rename_path": return t("approvalRenamePath");
+    case "create_directory": return t("approvalCreateDirectory");
+    case "delete_directory": case "recursive_delete": return t("approvalDeleteDirectory");
+    case "apply_change_set": return t("approvalApplyChanges");
+    default: return undefined;
+  }
 }
 
 function frozenCommandReview(approval: TimelineApproval): {

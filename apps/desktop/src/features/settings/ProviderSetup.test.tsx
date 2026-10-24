@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -6,8 +6,23 @@ import type { DesktopBridge } from "../../bridge";
 import { LocaleProvider } from "../../i18n";
 import type { ProviderConnectionInventory, ProviderSetupCatalog } from "../../types";
 import { ProviderSetup } from "./ProviderSetup";
+import { providerEndpointIssue } from "./providerEndpoint";
 
 afterEach(cleanup);
+
+it.each([
+  ["not-a-url", "none", "providerEndpointInvalid"],
+  ["file:///tmp/config", "none", "providerEndpointInvalid"],
+  ["https://user:secret@example.test/v1", "secure_store", "providerEndpointUserinfo"],
+  ["https://example.test/v1?key=secret", "secure_store", "providerEndpointSuffix"],
+  ["https://example.test/v1#fragment", "secure_store", "providerEndpointSuffix"],
+  ["http://example.test/v1", "secure_store", "providerEndpointHttps"],
+  ["https://example.test/v1", "none", "providerEndpointLoopback"],
+  ["http://127.0.0.1:60433/v1", "none", undefined],
+  ["https://example.test/v1", "environment", undefined],
+] as const)("validates endpoint structure without fetching: %s (%s)", (endpoint, source, issue) => {
+  expect(providerEndpointIssue(endpoint, source)).toBe(issue);
+});
 
 const inventory: ProviderConnectionInventory = {
   configMode: "v2",
@@ -41,6 +56,58 @@ function setup(
 }
 
 describe("provider setup when catalog discovery fails", () => {
+  it("keeps an invalid endpoint beside its correction and retains the authentication draft", async () => {
+    const user = userEvent.setup();
+    const catalog = vi.fn().mockRejectedValue(new Error("offline"));
+    setup(catalog);
+    await user.click(screen.getByRole("button", { name: /OpenAI-compatible/ }));
+    await user.type(screen.getByLabelText("API endpoint"), "not-a-url");
+    await user.type(screen.getByLabelText("API key"), "retained-key");
+    await user.keyboard("{Enter}");
+    expect(screen.getByText("Enter a complete http:// or https:// address.")).toBeTruthy();
+    expect(screen.getByLabelText("API endpoint").getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByLabelText("API key").getAttribute("type")).toBe("password");
+    expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("retained-key");
+    expect(catalog).not.toHaveBeenCalled();
+    await user.clear(screen.getByLabelText("API endpoint"));
+    await user.type(screen.getByLabelText("API endpoint"), "https://example.test/v1");
+    expect(screen.queryByText("Enter a complete http:// or https:// address.")).toBeNull();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByLabelText("Model ID")).toBeTruthy();
+    expect(catalog).toHaveBeenCalledOnce();
+  });
+
+  it.each(["during", "end-before-enter"] as const)("preserves native IME confirmation and advances on the next Enter (%s)", async (ordering) => {
+    const user = userEvent.setup();
+    const catalog = vi.fn().mockRejectedValue(new Error("offline"));
+    setup(catalog);
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    const key = screen.getByLabelText("API key");
+    await user.type(key, "fixture-key");
+    fireEvent.compositionStart(key);
+    if (ordering === "end-before-enter") fireEvent.compositionEnd(key, { data: "你" });
+    expect(fireEvent.keyDown(key, { key: "Enter", keyCode: ordering === "during" ? 229 : 13,
+      isComposing: ordering === "during" })).toBe(true);
+    expect(catalog).not.toHaveBeenCalled();
+    if (ordering === "during") fireEvent.compositionEnd(key, { data: "你" });
+    fireEvent.keyUp(key, { key: "Enter" });
+    fireEvent.keyDown(key, { key: "Enter", keyCode: 13 });
+    await screen.findByLabelText("Model ID");
+    expect(catalog).toHaveBeenCalledOnce();
+  });
+
+  it("does not advance on modified Enter and explains a missing required API key", async () => {
+    const user = userEvent.setup();
+    const catalog = vi.fn();
+    setup(catalog);
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    const key = screen.getByLabelText("API key");
+    fireEvent.keyDown(key, { key: "Enter", shiftKey: true });
+    expect(screen.queryByText("Enter an API key or choose another authentication method.")).toBeNull();
+    fireEvent.keyDown(key, { key: "Enter" });
+    expect(screen.getByText("Enter an API key or choose another authentication method.")).toBeTruthy();
+    expect(catalog).not.toHaveBeenCalled();
+  });
   it("focuses and scrolls the first control on user-driven step changes", async () => {
     const user = userEvent.setup();
     const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");

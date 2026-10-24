@@ -13,6 +13,69 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+it.each(["", " \n "])("shows the actual impact when the preview has no summary (%j)", (previewSummary) => {
+  const boundary = "External directory access for exec_command\n/approved external/project\n\n";
+  const context = "Working directory (relative to workspace unless absolute): /approved external/project\nShell: sh (posix)\nTerminal I/O: pipe\nMaximum runtime: 7 seconds";
+  const command = "printf 'exact action'  \n";
+  const impact = "This command requires destructive confirmation; the external target remains constrained.";
+  const approval: TimelineApproval = { callId: "empty-summary", toolName: "exec_command",
+    approvalRequestId: "empty-summary-request", toolCallHash: "b".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false,
+    operation: "execute_destructive_command", risk: "destructive", analysisStatus: "conservative",
+    previewSummary, safeSummaryDetail: impact, previewBody: `${boundary}${context}\n\nCommand:\n${command}` };
+  const onDecision = vi.fn();
+  render(<LocaleProvider><ApprovalDock approval={approval} phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={onDecision}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} /></LocaleProvider>);
+  expect(screen.getByText(impact).closest("details")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Complete command" }).textContent).toBe(command);
+  expect(document.querySelector(".approval-external-boundary")?.textContent).toBe(boundary);
+  expect(screen.getByText("Destructive").closest("details")).toBeNull();
+  expect(screen.getByText("Some effects could not be identified. Check the exact action and its targets before approving.")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(onDecision).not.toHaveBeenCalled();
+});
+
+it("preserves a nonempty unknown summary and uses localized guidance only when both summaries are empty", () => {
+  const note = "  Additional service-specific impact must remain visible.  ";
+  const approval: TimelineApproval = { callId: "unknown-summary", toolName: "custom_tool",
+    approvalRequestId: "unknown-summary-request", toolCallHash: "c".repeat(64), policyVersion: "manual",
+    expiresAtMs: Number.MAX_SAFE_INTEGER, snapshotRequired: false,
+    previewSummary: note, safeSummaryDetail: "A different structured impact", previewBody: "Exact custom action" };
+  const props = { phase: "pending" as const, busy: false, composerRef: createRef<HTMLTextAreaElement>(),
+    onDecision: vi.fn(), onOpenSettings: vi.fn(), onOpenSupport: vi.fn() };
+  const view = render(<LocaleProvider><ApprovalDock {...props} approval={approval} /></LocaleProvider>);
+  const review = screen.getByRole("region", { name: "Requested action" });
+  expect(review.querySelector("p")?.textContent).toBe(note);
+  expect(review.querySelector("p")?.closest("details")).toBeNull();
+  view.rerender(<LocaleProvider><ApprovalDock {...props} approval={{ ...approval,
+    previewSummary: "", safeSummaryDetail: " \n " }} /></LocaleProvider>);
+  expect(screen.getByText("Review this exact tool action before the run can continue.").closest("details")).toBeNull();
+  expect(props.onDecision).not.toHaveBeenCalled();
+});
+
+it("localizes destructive file facts while keeping exact impact and snapshot binding available", () => {
+  window.localStorage.setItem("sigil.desktop.locale.v1", "zh-CN");
+  const onDecision = vi.fn();
+  const impact = "This replaces the exact existing file; external access remains constrained.";
+  const approval: TimelineApproval = { callId: "file-facts", approvalRequestId: "file-request", toolName: "write_file",
+    toolCallHash: "a".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+    risk: "destructive", operation: "overwrite_file", effects: ["file_write"], subjects: ["README.md"],
+    previewBody: "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+    previewSummary: impact, snapshotRequired: true,
+    sessionGrantAvailable: false, sessionGrantUnavailableReason: { code: "snapshot_required" } };
+  render(<LocaleProvider><ApprovalDock approval={approval} phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={onDecision}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} /></LocaleProvider>);
+  expect(screen.getByRole("heading", { name: "覆盖文件" })).toBeTruthy();
+  expect(screen.getByText("破坏性操作").closest("details")).toBeNull();
+  expect(screen.getByText(impact).closest("details")).toBeNull();
+  const mechanism = screen.getByText("当前决定与文件快照绑定，因此不能在本会话持续授权。");
+  expect(mechanism.closest("details")?.open).toBe(false);
+  expect(screen.queryByRole("button", { name: "本会话允许" })).toBeNull();
+  expect(onDecision).not.toHaveBeenCalled();
+});
+
 it("uses a compact acceptance receipt while keeping uncertain delivery actionable", () => {
   const approval: TimelineApproval = { callId: "receipt-call", toolName: "exec_command",
     approvalRequestId: "receipt-request", toolCallHash: "a".repeat(64), policyVersion: "manual",
@@ -245,7 +308,10 @@ it("puts the complete frozen command first and keeps its exact environment expan
   expect(review.querySelector("p")?.textContent).toBe(approval.previewSummary);
   const environment = screen.getByText("Execution environment").closest("details")!;
   expect(environment.open).toBe(false);
-  expect(environment.querySelector("pre")?.textContent).toBe(context);
+  expect(within(environment).getByText(".")).toBeTruthy();
+  expect(within(environment).getByText("sh (posix)")).toBeTruthy();
+  expect(within(environment).getByText("pipe")).toBeTruthy();
+  expect(within(environment).getByText("No explicit limit")).toBeTruthy();
   expect(screen.queryByText("UNTRUSTED RAW INPUT")).toBeNull();
   expect(screen.getByText("Some effects could not be identified. Check the exact action and its targets before approving.")).toBeTruthy();
   fireEvent.click(within(environment).getByText("Execution environment"));
@@ -278,7 +344,9 @@ it("keeps frozen external targets visible separately from the command environmen
   expect(targets.textContent).toBe(boundary);
   expect(targets.closest("details")).toBeNull();
   expect(screen.getByRole("textbox", { name: "Complete command" }).textContent).toBe(command);
-  expect(screen.getByText("Execution environment").closest("details")?.querySelector("pre")?.textContent).toBe(context);
+  const environment = screen.getByText("Execution environment").closest("details")!;
+  expect(within(environment).getByText("/bin/sh (posix)")).toBeTruthy();
+  expect(within(environment).getByText("120 seconds")).toBeTruthy();
 });
 
 it.each([

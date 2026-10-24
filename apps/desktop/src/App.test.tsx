@@ -67,6 +67,102 @@ const emptyCatalog: CatalogPage = {
   entries: [],
 };
 
+it("opens authentication recovery on the failed connection without mutating credentials or losing the draft", async () => {
+  const user = userEvent.setup();
+  let listener: ((event: TimelineEvent) => void) | undefined;
+  const updateProviderConnectionCredential = vi.fn();
+  const startRun = vi.fn<DesktopBridge["startRun"]>(async (_workspace, sessionId) => ({
+    id: "auth-recovery-run", sessionId, status: "running", permissionMode: "manual", streamSequence: 1,
+  }));
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+    startRun, updateProviderConnectionCredential,
+  })} />);
+  await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+  typeEditorText(await readyComposer(), "Read the project");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(listener).toBeDefined());
+  act(() => listener?.({ workspaceId: workspace.id, sessionId: "http-session-new", runId: "auth-recovery-run",
+    sequence: 5, runSequence: "5", kind: "provider_turn_recovery", replayable: true,
+    providerTurnRecovery: { phase: "blocked", activeRetryCount: 0, activeMaxRetries: 2,
+      retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_authentication_required",
+      failedModelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      availableActions: ["update_connection", "cancel"], userAttentionRequired: true } }));
+  expect(await screen.findByText("Connection authentication failed")).toBeTruthy();
+  typeEditorText(await readyComposer(), "Keep this unsent draft  ");
+  await user.click(screen.getByRole("button", { name: "Review connection" }));
+  await screen.findByRole("heading", { name: "Settings" });
+  expect(screen.getByText(/The failed request used DeepSeek · deepseek-v4-flash/)).toBeTruthy();
+  expect(screen.getByText("Configured")).toBeTruthy();
+  expect(screen.queryByLabelText("API key")).toBeNull();
+  expect(updateProviderConnectionCredential).not.toHaveBeenCalled();
+  expect(startRun).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(document.querySelector('[data-settings-focus-key="credential:deepseek-default"] button'));
+  await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+  expect(editorText(await readyComposer())).toBe("Keep this unsent draft  ");
+  await user.click(screen.getByRole("button", { name: "Open settings" }));
+  expect(screen.queryByText(/The failed request used/)).toBeNull();
+});
+
+it("keeps aggregate connection recovery on the connection category instead of credential editing", async () => {
+  const user = userEvent.setup();
+  let listener: ((event: TimelineEvent) => void) | undefined;
+  const updateProviderConnectionCredential = vi.fn();
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+    updateProviderConnectionCredential,
+  })} />);
+  await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+  typeEditorText(await readyComposer(), "Read the project");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(listener).toBeDefined());
+  act(() => listener?.({ workspaceId: workspace.id, sessionId: "http-session-new", runId: "run-1",
+    sequence: 5, runSequence: "5", kind: "provider_turn_recovery", replayable: true,
+    providerTurnRecovery: { phase: "blocked", activeRetryCount: 0, activeMaxRetries: 2,
+      retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_configuration_or_capacity_required",
+      failedModelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+      availableActions: ["update_connection", "cancel"], userAttentionRequired: true } }));
+  await user.click(await screen.findByRole("button", { name: "Review connection" }));
+  await screen.findByRole("heading", { name: "Settings" });
+  expect(document.activeElement).toBe(document.querySelector('[data-settings-focus-key="category:connections"]'));
+  expect(document.activeElement).not.toBe(document.querySelector('[data-settings-focus-key="credential:deepseek-default"] button'));
+  expect(screen.queryByText("Connection authentication failed")).toBeNull();
+  expect(screen.queryByLabelText("API key")).toBeNull();
+  expect(screen.getByRole("heading", { name: "Provider connections" })).toBeTruthy();
+  expect(updateProviderConnectionCredential).not.toHaveBeenCalled();
+});
+
+it("shows typed cancellation as neutral before settlement and preserves an actual effect blocker", async () => {
+  const user = userEvent.setup();
+  let listener: ((event: TimelineEvent) => void) | undefined;
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
+  })} />);
+  await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+  typeEditorText(await readyComposer(), "Start a task");
+  await user.click(screen.getByRole("button", { name: "Send message" }));
+  const event: TimelineEvent = { workspaceId: workspace.id, sessionId: "http-session-new", runId: "run-1",
+    sequence: 7, runSequence: "7", kind: "provider_turn_recovery", replayable: true,
+    providerTurnRecovery: { phase: "paused", activeRetryCount: 0, activeMaxRetries: 2,
+      retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_recovery_cancelled",
+      availableActions: ["cancel"], userAttentionRequired: true } };
+  act(() => listener?.(event));
+  const stopping = (await screen.findByText("Stopping the current request")).closest("section")!;
+  expect(stopping.getAttribute("role")).toBe("status");
+  expect(stopping.classList.contains("is-neutral")).toBe(true);
+  expect(screen.queryByText("Model recovery is paused")).toBeNull();
+  act(() => listener?.({ ...event, sequence: 8, runSequence: "8", providerTurnRecovery: {
+    ...event.providerTurnRecovery!, reasonCode: "effect_reconciliation_required", availableActions: ["review_effect"],
+  } }));
+  const effect = (await screen.findByText("Confirm the external operation result")).closest("section")!;
+  expect(effect.getAttribute("role")).toBe("alert");
+  expect(effect.classList.contains("is-neutral")).toBe(false);
+  expect(within(effect).getByRole("button", { name: "Open recovery controls" })).toBeTruthy();
+});
+
 it.each(["owner-first", "events-first"] as const)("continues the same paused Task from actual phase facts and keeps exact pause controls at approval (%s)", async (order) => {
   const user = userEvent.setup();
   let listener: ((event: TimelineEvent) => void) | undefined;
@@ -198,7 +294,7 @@ it.each(["run_finished", "run_cancelled", "run_blocked"] as const)(
       sequence: 16, runSequence: "16", kind }));
     if (attention) {
       expect(screen.getByText(title)).toBeTruthy();
-      expect(screen.getByText("This task is preserved. Resolve the indicated connection or effect boundary before continuing.")).toBeTruthy();
+      expect(screen.getByText("The request could not continue. Review the available recovery options.")).toBeTruthy();
     } else {
       await waitFor(() => expect(screen.queryByText(title)).toBeNull());
       act(() => listener?.(retry));
@@ -238,15 +334,15 @@ it("shows one exact pending review instead of its canonical requested stub and n
   expect(command.getAttribute("aria-multiline")).toBe("true");
   expect(command.textContent?.startsWith("python3 - <<'PY'\n")).toBe(true);
   expect(command.textContent?.endsWith("\nPY")).toBe(true);
-  const context = review.querySelector(".approval-execution-context pre")!;
-  expect(`${context.textContent}\n\nCommand:\n${command.textContent}`)
-    .toBe(nativeCanonicalApproval.pending.display.preview.body);
+  expect(Array.from(review.querySelectorAll(".approval-execution-context dd"), (field) => field.textContent))
+    .toEqual([".", "sh (posix)", "pipe", "60 seconds"]);
+  expect(command.textContent).toBe(nativeCanonicalApproval.pending.display.preview.body.split("\n\nCommand:\n")[1]);
   const timeline = screen.getByRole("log", { name: "Conversation timeline" });
   expect(within(timeline).queryByText("Needs approval")).toBeNull();
   expect(within(timeline).queryByText("Command")).toBeNull();
   expect(within(timeline).queryByText("Show full command")).toBeNull();
   expect(screen.getByRole("button", { name: "Approve once" }).hasAttribute("disabled")).toBe(false);
-  expect(screen.getByText("high")).toBeTruthy();
+  expect(screen.getByText("High risk")).toBeTruthy();
   await waitFor(() => expect(listener).toBeDefined());
   const retry: TimelineEvent = { ...approvalEvent, approval: undefined, kind: "provider_turn_recovery",
     sequence: 4, runSequence: "4", providerTurnRecovery: {
@@ -4913,6 +5009,10 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("Managed conversation");
     const managedRow = screen.getByRole("button", { name: /^Managed conversation/ });
     await user.dblClick(managedRow);
+    await readyComposer();
+    expect(screen.queryByRole("dialog", { name: "Rename conversation" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Manage Managed conversation" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
     expect(screen.getByRole("dialog", { name: "Rename conversation" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename conversation" })).toBeNull());
@@ -7709,12 +7809,12 @@ describe("desktop workspace and history shell", () => {
       });
     });
 
-    const approvalTitle = await screen.findByText("Edit one file");
+    const approvalTitle = await screen.findByRole("heading", { name: "Edit file" });
     const approvalDock = approvalTitle.closest("section") as HTMLElement;
     expect(within(approvalDock).getByText("file_write, execute_workspace_code")).toBeTruthy();
-    expect(within(approvalDock).getByText("workspace:README.md")).toBeTruthy();
+    expect(within(approvalDock).getAllByText("workspace:README.md")).toHaveLength(2);
     expect(within(approvalDock).getByText("filesystem=workspace_write · network=deny")).toBeTruthy();
-    await user.click(within(approvalDock).getByText("Why this decision is required"));
+    await user.click(within(approvalDock).getByText("Technical detail"));
     expect(within(approvalDock).getByText("workspace code execution requires an explicit decision")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
     const approvalReview = within(approvalDock).getByRole("region", { name: "Requested action" });

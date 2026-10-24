@@ -801,6 +801,11 @@ EffectReconciliationTerminalV1 { ... }
 8. restart repair 不得为同一 schedule 启动两个 attempt。
 9. `ProviderGenerationDiscardedV1` 只可引用未 durable surface commit、无 effect 的 attempt。
 10. recovery/exhausted/blocker 不能包含 raw prompt、secret、provider body、URL query 或 tool output body。
+11. 恢复事件可附带可选的 `failed_model_ref`，只包含 provider-neutral 的 connection/model 引用，
+    在失败运行的 owner 中冻结。旧记录缺失时保持 `None`；恢复读取不得用后来默认路由补造失败来源。
+    公共与 Desktop 投影只允许同一安全引用，导航不改变默认路由、认证来源或配置。
+12. `Authentication` 使用独立 machine reason `provider_authentication_required`；其它配置、配额与容量
+    仍保留各自既有恢复规则。该原因表示认证未通过，不等同密钥错误，也不承诺配置已就绪的连接请求必然成功。
 
 ### 13.3 Projection
 

@@ -1854,6 +1854,8 @@ export interface TimelineProviderTurnRecovery {
   maxTransportRetries: number;
   nextRetryUnixMs?: number;
   reasonCode?: string;
+  /** Exact failed run route; absence stays unknown rather than falling back to a new default. */
+  failedModelRef?: ProviderModelRef;
   availableActions: ProviderTurnRecoveryAction[];
   userAttentionRequired: boolean;
 }

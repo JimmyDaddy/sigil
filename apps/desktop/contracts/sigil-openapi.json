@@ -7330,6 +7330,23 @@
         ],
         "type": "string"
       },
+      "ProviderTurnRecoveryChangedEvent": {
+        "additionalProperties": true,
+        "properties": {
+          "recovery": {
+            "$ref": "#/components/schemas/PublicProviderTurnRecoveryView"
+          },
+          "type": {
+            "const": "provider_turn_recovery_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "recovery"
+        ],
+        "type": "object"
+      },
       "PublicAssistantMessage": {
         "properties": {
           "assistant_kind": {
@@ -7361,6 +7378,72 @@
           "id",
           "content",
           "tool_calls"
+        ],
+        "type": "object"
+      },
+      "PublicProviderTurnRecoveryView": {
+        "properties": {
+          "active_max_retries": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "active_retry_count": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "available_actions": {
+            "items": {
+              "enum": [
+                "retry_now",
+                "update_connection",
+                "review_effect",
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "failed_model_ref": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
+          "max_transport_retries": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "next_retry_unix_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "phase": {
+            "enum": [
+              "waiting",
+              "recovering",
+              "blocked",
+              "paused"
+            ],
+            "type": "string"
+          },
+          "reason_code": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "retry_count": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "user_attention_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "phase",
+          "active_retry_count",
+          "active_max_retries",
+          "retry_count",
+          "max_transport_retries",
+          "available_actions",
+          "user_attention_required"
         ],
         "type": "object"
       },
@@ -7398,6 +7481,9 @@
       },
       "PublicRunEventPayload": {
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/ProviderTurnRecoveryChangedEvent"
+          },
           {
             "$ref": "#/components/schemas/RouteTransitionEvent"
           },

@@ -244,6 +244,8 @@
 .continuity-recovery p { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--sg-sys-color-on-surface-subtle); font-size: var(--sg-sys-type-label-size); line-height: 1.45; }
 .continuity-recovery { grid-template-columns: auto minmax(0, 1fr) auto; border-color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); }
 .continuity-recovery.is-read-only { border-color: var(--sg-sys-color-outline-variant); background: var(--sg-sys-color-surface-container-low); }
+.continuity-recovery.is-neutral { border-color: var(--sg-sys-color-outline-variant); background: var(--sg-sys-color-surface-container-low); }
+.continuity-recovery.is-neutral .continuity-recovery-icon { color: var(--sg-sys-color-on-surface-variant); }
 .continuity-recovery-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: var(--sg-sys-radius-full); color: var(--sg-domain-color-on-warning); background: var(--sg-sys-color-surface-container-high); }
 .continuity-recovery-icon .sg-icon { width: 16px; height: 16px; }
 .continuity-recovery-copy { min-width: 0; }

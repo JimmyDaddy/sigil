@@ -4912,6 +4912,25 @@ fn public_event_schemas() -> Map<String, Value> {
             }
         }),
     );
+    schemas.insert(
+        "PublicProviderTurnRecoveryView".to_owned(),
+        json!({
+            "type": "object",
+            "required": ["phase", "active_retry_count", "active_max_retries", "retry_count", "max_transport_retries", "available_actions", "user_attention_required"],
+            "properties": {
+                "phase": { "type": "string", "enum": ["waiting", "recovering", "blocked", "paused"] },
+                "active_retry_count": { "type": "integer", "format": "uint32" },
+                "active_max_retries": { "type": "integer", "format": "uint32" },
+                "retry_count": { "type": "integer", "format": "uint32" },
+                "max_transport_retries": { "type": "integer", "format": "uint32" },
+                "next_retry_unix_ms": { "type": "integer", "format": "uint64" },
+                "reason_code": { "type": "string", "maxLength": 512 },
+                "failed_model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
+                "available_actions": { "type": "array", "maxItems": 8, "items": { "type": "string", "enum": ["retry_now", "update_connection", "review_effect", "cancel"] } },
+                "user_attention_required": { "type": "boolean" }
+            }
+        }),
+    );
     let event_variants = public_event_variants();
     schemas.insert(
         "PublicRunEventPayload".to_owned(),
@@ -5061,6 +5080,17 @@ fn public_event_schemas() -> Map<String, Value> {
 
 fn public_event_variants() -> Vec<(&'static str, Value)> {
     vec![
+        (
+            "ProviderTurnRecoveryChangedEvent",
+            public_event_variant(
+                "provider_turn_recovery_changed",
+                &["recovery"],
+                json_properties(
+                    json!({ "recovery": { "$ref": "#/components/schemas/PublicProviderTurnRecoveryView" } }),
+                ),
+                true,
+            ),
+        ),
         (
             "RouteTransitionEvent",
             public_event_variant(

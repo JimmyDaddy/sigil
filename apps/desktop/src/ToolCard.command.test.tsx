@@ -146,6 +146,8 @@ describe("compact saved output search", () => {
         matchCount: 1, ...(selector.startOffset === 0 ? { eof: false, nextSelector } : {}),
       }));
     render(<ToolCard tool={tool} onReadArtifact={read} />);
+    expect(read).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     const original = await screen.findByLabelText("read_file saved output page");
     const originalText = original.textContent;
     expect(originalText).toContain("  # 社团🌿\r\nsecond line  ");
@@ -179,6 +181,7 @@ describe("compact saved output search", () => {
     render(<ToolCard tool={{ ...tool, status: mode === "failed" ? "failed" : tool.status,
       artifactHasMore: mode === "more", text: mode === "failed"
         ? JSON.stringify({ status: "error", error: { message: "Read permission failed" } }) : tool.text }} onReadArtifact={read} />);
+    if (mode !== "failed") await user.click(screen.getByRole("button", { name: "View full output" }));
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
     expect(screen.queryByText("Full output and search")).toBeNull();
@@ -199,11 +202,13 @@ describe("compact saved output search", () => {
     }
   });
 
-  it("retains full retry controls until an automatic read succeeds, then exposes secondary search", async () => {
+  it("retains retry controls after a requested read fails, then exposes secondary search", async () => {
     const user = userEvent.setup();
     const read = vi.fn(async (selector: ToolArtifactSelector) => savedPage(artifactRef, selector, source));
     read.mockRejectedValueOnce(new Error("read failed"));
     render(<ToolCard tool={tool} onReadArtifact={read} />);
+    await user.click(screen.getByRole("button", { name: "View full output" }));
+    await screen.findByRole("alert");
     await waitFor(() => expect(screen.queryByText("Loading output…")).toBeNull());
     expect(screen.getAllByRole("alert").length).toBeGreaterThan(0);
     await user.click(screen.getByRole("button", { name: "View full output" }));
@@ -220,6 +225,7 @@ describe("compact saved output search", () => {
       return savedPage(artifactRef, selector, selector.kind === "byte_slice" ? source : "retry match", { matchCount: 1 });
     });
     render(<ToolCard tool={tool} onReadArtifact={read} />);
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     const original = await screen.findByLabelText("read_file saved output page");
     const text = original.textContent;
     const toggle = screen.getByRole("button", { name: "Search saved tool output" });
@@ -241,6 +247,7 @@ describe("compact saved output search", () => {
     const pending = new Promise<ToolArtifactPage>((resolve) => { completeSearch = resolve; });
     const read = vi.fn(async (selector: ToolArtifactSelector) => selector.kind === "byte_slice" ? savedPage(artifactRef, selector, source) : pending);
     const view = render(<ToolCard tool={tool} onReadArtifact={read} />);
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     await screen.findByLabelText("read_file saved output page");
     await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
     await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "社团");
@@ -250,6 +257,8 @@ describe("compact saved output search", () => {
     const nextRead = vi.fn(async (selector: ToolArtifactSelector) => savedPage(nextRef, selector, nextSource));
     view.rerender(<ToolCard tool={{ ...tool, key: scope === "tool key" ? "next-call" : tool.key,
       artifactRef: nextRef, artifactPersistedBytes: nextSource.length }} onReadArtifact={nextRead} />);
+    expect(nextRead).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "View full output" }));
     expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain(nextSource);
     expect(screen.queryByRole("textbox", { name: "Search saved tool output" })).toBeNull();
     await act(async () => { completeSearch(savedPage(artifactRef, read.mock.calls[1]![0], "obsolete search match")); await pending; });

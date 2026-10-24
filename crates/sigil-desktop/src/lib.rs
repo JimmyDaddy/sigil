@@ -163,12 +163,12 @@ pub use events::{
     DesktopPublicSessionRouteTransitionView, DesktopPublicTaskChecklistItem,
     DesktopPublicTaskPhase, DesktopPublicTaskPlanStep, DesktopPublicToolCall,
     DesktopPublicToolPreview, DesktopPublicToolProgress, DesktopPublicToolResult,
-    DesktopRouteRecoveryAction, DesktopRouteRecoveryCode, DesktopRouteTransitionKind,
-    DesktopTimelineApproval, DesktopTimelineEvent, DesktopTimelineEventKind,
-    DesktopTimelineLivePreview, DesktopTimelineProviderTurnRecovery, DesktopTimelineRouteRecovery,
-    DesktopTimelineRouteTransition, DesktopTimelineTask, DesktopTimelineTaskChecklistItem,
-    DesktopTimelineTaskExecutionBinding, DesktopTimelineTaskPlanStep, DesktopTimelineTerminalTask,
-    DesktopTimelineToolExecution,
+    DesktopRecoveryModelRef, DesktopRouteRecoveryAction, DesktopRouteRecoveryCode,
+    DesktopRouteTransitionKind, DesktopTimelineApproval, DesktopTimelineEvent,
+    DesktopTimelineEventKind, DesktopTimelineLivePreview, DesktopTimelineProviderTurnRecovery,
+    DesktopTimelineRouteRecovery, DesktopTimelineRouteTransition, DesktopTimelineTask,
+    DesktopTimelineTaskChecklistItem, DesktopTimelineTaskExecutionBinding,
+    DesktopTimelineTaskPlanStep, DesktopTimelineTerminalTask, DesktopTimelineToolExecution,
 };
 pub use launcher::{
     DesktopLaunchError, DesktopLaunchRequest, DesktopLauncher, DesktopServerProcess,

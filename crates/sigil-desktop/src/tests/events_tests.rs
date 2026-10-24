@@ -267,6 +267,7 @@ fn provider_turn_recovery_projects_typed_actions_without_attempt_identity() {
         .expect("typed provider recovery is forwarded");
     assert_eq!(recovery.retry_count, 2);
     assert_eq!(recovery.active_max_retries, 2);
+    assert_eq!(recovery.failed_model_ref, None);
     assert_eq!(
         recovery.available_actions,
         vec![
@@ -276,6 +277,50 @@ fn provider_turn_recovery_projects_typed_actions_without_attempt_identity() {
     );
     let encoded = serde_json::to_string(&timeline).expect("timeline serializes");
     assert!(!encoded.contains("physical_attempt"));
+}
+
+#[test]
+fn authentication_recovery_forwards_a_bounded_failed_route_without_private_material() {
+    for (connection, model, valid) in [
+        (
+            "original-connection".to_owned(),
+            "original-model".to_owned(),
+            true,
+        ),
+        (
+            "https://private.example".to_owned(),
+            "model".to_owned(),
+            false,
+        ),
+        ("c".repeat(65), "model".to_owned(), false),
+        ("connection".to_owned(), "m".repeat(257), false),
+        ("connection".to_owned(), "model\nprivate".to_owned(), false),
+    ] {
+        let event = envelope(
+            DesktopProtocolEventClass::Durable,
+            json!({
+                "type": "provider_turn_recovery_changed", "recovery": {
+                    "phase": "blocked", "retry_count": 0, "max_transport_retries": 2,
+                    "reason_code": "provider_authentication_required",
+                    "failed_model_ref": { "connection_id": connection, "model_id": model,
+                        "endpoint": "https://private.example", "credential": "private-secret" },
+                    "available_actions": ["update_connection", "cancel"], "user_attention_required": true
+                }
+            }),
+        );
+        let result = event.into_timeline("workspace-1", "session-1", "run-1", "http-session-1");
+        assert_eq!(result.is_ok(), valid);
+        if let Ok(timeline) = result {
+            let encoded = serde_json::to_value(&timeline).expect("serializable");
+            assert_eq!(
+                encoded["providerTurnRecovery"]["failedModelRef"]["connectionId"],
+                "original-connection"
+            );
+            let text = encoded.to_string();
+            assert!(!text.contains("private.example"));
+            assert!(!text.contains("private-secret"));
+        }
+    }
 }
 
 #[test]

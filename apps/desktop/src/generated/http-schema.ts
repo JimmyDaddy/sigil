@@ -4598,12 +4598,37 @@ export interface components {
         };
         /** @enum {string} */
         ProviderSetupTemplate: "deep_seek" | "open_ai" | "anthropic" | "gemini" | "open_ai_compatible";
+        ProviderTurnRecoveryChangedEvent: {
+            recovery: components["schemas"]["PublicProviderTurnRecoveryView"];
+            /** @constant */
+            type: "provider_turn_recovery_changed";
+        } & {
+            [key: string]: unknown;
+        };
         PublicAssistantMessage: {
             /** @enum {string} */
             assistant_kind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
             content: string | null;
             id: string;
             tool_calls: components["schemas"]["PublicToolCall"][];
+        };
+        PublicProviderTurnRecoveryView: {
+            /** Format: uint32 */
+            active_max_retries: number;
+            /** Format: uint32 */
+            active_retry_count: number;
+            available_actions: ("retry_now" | "update_connection" | "review_effect" | "cancel")[];
+            failed_model_ref?: components["schemas"]["ProviderModelRef"];
+            /** Format: uint32 */
+            max_transport_retries: number;
+            /** Format: uint64 */
+            next_retry_unix_ms?: number;
+            /** @enum {string} */
+            phase: "waiting" | "recovering" | "blocked" | "paused";
+            reason_code?: string;
+            /** Format: uint32 */
+            retry_count: number;
+            user_attention_required: boolean;
         };
         PublicRunEvent: {
             event: components["schemas"]["PublicRunEventPayload"];
@@ -4614,7 +4639,7 @@ export interface components {
             sequence: number;
             session_id: string;
         };
-        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["RunAwaitingUserInputEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["ConversationRouteChangedEvent"] | components["schemas"]["PlanReviewChangedEvent"] | components["schemas"]["UserInputChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskExecutionAdmittedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskChecklistUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunBlockedEvent"] | components["schemas"]["RunPausedEvent"] | components["schemas"]["RunInterruptedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicRunEventPayload: components["schemas"]["ProviderTurnRecoveryChangedEvent"] | components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["RunAwaitingUserInputEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["ConversationRouteChangedEvent"] | components["schemas"]["PlanReviewChangedEvent"] | components["schemas"]["UserInputChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskExecutionAdmittedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskChecklistUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunBlockedEvent"] | components["schemas"]["RunPausedEvent"] | components["schemas"]["RunInterruptedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
         PublicSessionRouteTransitionView: {
             connection_id: string | null;
             /** @enum {string} */

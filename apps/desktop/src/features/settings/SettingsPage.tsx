@@ -26,6 +26,7 @@ import { DesktopUpdateCard } from "./DesktopUpdateCard";
 import { DefaultModelRouteForm } from "./DefaultModelRouteForm";
 import { type ContextWindowDrafts, useContextWindowDrafts } from "./useContextWindowDrafts";
 import { settingsCategories, type SettingsCategory, type SettingsNavigationState } from "./settingsNavigation";
+import type { ProviderRecoverySettingsContext } from "../conversation/providerRecovery";
 import {
   connectionMatchesProvider,
   providerConnectionDetail,
@@ -60,6 +61,7 @@ export function SettingsPage({
   onBack,
   onOpenSupport,
   navigationState,
+  recoveryContext,
   onNavigationStateChange,
 }: {
   readonly bridge: DesktopBridge;
@@ -78,6 +80,7 @@ export function SettingsPage({
   readonly onBack: () => void;
   readonly onOpenSupport: () => void;
   readonly navigationState?: SettingsNavigationState;
+  readonly recoveryContext?: ProviderRecoverySettingsContext;
   readonly onNavigationStateChange?: (state: SettingsNavigationState) => void;
 }) {
   const appearance = useAppearance();
@@ -331,6 +334,18 @@ export function SettingsPage({
               </div>
             </div>
             <div className="provider-connection-settings">
+              {recoveryContext?.reasonCode === "provider_authentication_required" ? <div className="provider-setup-note" role="status">
+                <strong>{t("providerRecoveryAuthentication")}</strong>
+                {(() => {
+                  const failed = recoveryContext.failedModelRef;
+                  const connection = providerInventory?.connections.find((candidate) => candidate.id === failed?.connectionId);
+                  return <p>{failed === undefined ? t("providerRecoveryUnknownConnection")
+                    : connection === undefined ? t("providerRecoveryMissingConnection")
+                    : <>{t("providerRecoveryConnection", { connection: connection.label.trim() || connection.id, model: failed.modelId })}{" "}
+                      {t(connection.credentialSource === "none" ? "providerRecoveryNoAuthentication"
+                        : connection.credentialSource === "environment" ? "providerRecoveryEnvironment" : "providerRecoveryStored")}</>}</p>;
+                })()}
+              </div> : null}
               {workspaceId === undefined ? (
                 <p className="settings-control-unavailable">{t("providerWorkspaceRequired")}</p>
               ) : providerInventory === undefined ? (
@@ -739,7 +754,7 @@ function providerReadinessLabel(
   t: ReturnType<typeof useLocale>["t"],
 ): string {
   switch (readiness) {
-    case "ready": return t("providerReadiness_ready");
+    case "ready": return t("providerConfigurationReady");
     case "needs_credential": return t("providerReadiness_needs_credential");
     case "credential_unavailable": return t("providerReadiness_credential_unavailable");
     case "needs_model": return t("providerReadiness_needs_model");

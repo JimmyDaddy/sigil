@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type CompositionEvent, type KeyboardEvent } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
@@ -15,6 +15,7 @@ import {
   loadAndCacheProviderCatalog,
   readProviderCatalogCache,
 } from "./providerCatalogCache";
+import { providerEndpointIssue } from "./providerEndpoint";
 
 type SetupStep = "provider" | "authentication" | "model";
 type SetupState = "idle" | "loading" | "refreshing" | "saving" | "error";
@@ -52,7 +53,9 @@ export function ProviderSetup({
     useState<ProviderSetupCredentialSource>("secure_store");
   const [protocol, setProtocol] = useState<ProviderSetupProtocol>("chat_completions");
   const [endpoint, setEndpoint] = useState("");
+  const [endpointReviewed, setEndpointReviewed] = useState(false);
   const [apiKey, setApiKey] = useState("");
+  const [apiKeyReviewed, setApiKeyReviewed] = useState(false);
   const [catalog, setCatalog] = useState<ProviderSetupCatalog>();
   const [modelId, setModelId] = useState("");
   const [manualModelId, setManualModelId] = useState("");
@@ -60,6 +63,8 @@ export function ProviderSetup({
   const [error, setError] = useState<string>();
   const catalogRequestRevision = useRef(0);
   const stepRef = useRef<HTMLDivElement>(null);
+  const composingInput = useRef<EventTarget | null>(null);
+  const compositionEnd = useRef<{ target: EventTarget; at: number } | undefined>(undefined);
   useLayoutEffect(() => {
     const content = stepRef.current;
     if (!active || content === null || content.closest("[hidden], [inert]") !== null) return;
@@ -71,6 +76,7 @@ export function ProviderSetup({
   }, [active, step]);
 
   const isCustom = template === "open_ai_compatible";
+  const endpointIssue = isCustom ? providerEndpointIssue(endpoint, credentialSource) : undefined;
   const effectiveModelId = modelId === "__manual__" ? manualModelId.trim() : modelId;
   const contextWindowValue = contextWindowTokens.trim();
   const contextWindowValid = contextWindowValue === ""
@@ -80,7 +86,7 @@ export function ProviderSetup({
     : catalog?.models.find((model) => model.modelId === modelId)?.contextWindowTokens;
   const canLoadModels = template !== undefined
     && (credentialSource !== "secure_store" || apiKey.trim().length > 0)
-    && (!isCustom || endpoint.trim().length > 0);
+    && endpointIssue === undefined;
   const canSave = effectiveModelId.length > 0
     && state !== "saving"
     && canLoadModels
@@ -104,11 +110,15 @@ export function ProviderSetup({
     setTemplate(choice);
     setCredentialSource("secure_store");
     setApiKey("");
+    setApiKeyReviewed(false);
+    setEndpointReviewed(false);
     setStep("authentication");
   };
 
   const loadModels = async () => {
-    if (!canLoadModels || catalogInput === undefined) return;
+    if (isCustom) setEndpointReviewed(true);
+    if (credentialSource === "secure_store") setApiKeyReviewed(true);
+    if (!canLoadModels || catalogInput === undefined || state === "loading" || state === "refreshing") return;
     const requestRevision = ++catalogRequestRevision.current;
     setState("loading");
     setError(undefined);
@@ -153,6 +163,30 @@ export function ProviderSetup({
       setState("error");
       setError(t("providerCatalogLoadFailed"));
     }
+  };
+
+  const continueFromInput = (event: KeyboardEvent<HTMLInputElement>) => {
+    const ended = compositionEnd.current;
+    compositionEnd.current = undefined;
+    if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    const sinceEnd = ended === undefined ? -1 : Date.now() - ended.at;
+    if (event.nativeEvent.isComposing || event.keyCode === 229 || composingInput.current === event.currentTarget
+      || ended?.target === event.currentTarget && sinceEnd >= 0 && sinceEnd < 100) return;
+    event.preventDefault();
+    void loadModels();
+  };
+  const inputComposition = {
+    onCompositionStart: (event: CompositionEvent<HTMLInputElement>) => {
+      composingInput.current = event.currentTarget;
+      compositionEnd.current = undefined;
+    },
+    onCompositionEnd: (event: CompositionEvent<HTMLInputElement>) => {
+      composingInput.current = null;
+      compositionEnd.current = { target: event.currentTarget, at: Date.now() };
+    },
+    onKeyUp: () => { compositionEnd.current = undefined; },
+    onPointerDown: () => { compositionEnd.current = undefined; },
+    onKeyDown: continueFromInput,
   };
 
   function invalidateCatalogDraft() {
@@ -262,6 +296,9 @@ export function ProviderSetup({
               <TextField
                 label={t("providerEndpoint")}
                 description={t("providerEndpointDetail")}
+                error={endpointReviewed && endpointIssue !== undefined ? t(endpointIssue) : undefined}
+                onBlur={() => setEndpointReviewed(true)}
+                {...inputComposition}
                 value={endpoint}
                 placeholder="http://127.0.0.1:11434/v1"
                 onChange={(event) => {
@@ -303,6 +340,8 @@ export function ProviderSetup({
               autoComplete="off"
               spellCheck={false}
               label={t("apiKey")}
+              error={apiKeyReviewed && apiKey.trim() === "" ? t("providerApiKeyRequired") : undefined}
+              {...inputComposition}
               description={t("apiKeySecureStoreDetail")}
               value={apiKey}
               onChange={(event) => {

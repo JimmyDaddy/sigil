@@ -63,6 +63,7 @@ fn schedule() -> ProviderTurnRecoveryScheduledEntry {
         request_envelope_digest: format!("sha256:{}", "a".repeat(64)),
         source_frontier: transport_evidence().source_frontier,
         failure_class: ProviderFailureClassV1::TransportInterrupted,
+        failed_model_ref: None,
         retry_kind: ProviderTurnRecoveryRetryKindV1::Transport,
         not_before_unix_ms: 100,
         retry_after_ms: 50,
@@ -76,6 +77,76 @@ fn schedule() -> ProviderTurnRecoveryScheduledEntry {
         },
         recovery_policy_fingerprint: ProviderTurnRecoveryPolicyV1::default().fingerprint(),
     }
+}
+
+#[test]
+fn recovery_route_reference_is_optional_for_existing_current_schema_records() -> Result<()> {
+    let mut scheduled = serde_json::to_value(schedule())?;
+    scheduled
+        .as_object_mut()
+        .expect("object")
+        .remove("failed_model_ref");
+    let decoded: ProviderTurnRecoveryScheduledEntry = serde_json::from_value(scheduled)?;
+    assert_eq!(decoded.failed_model_ref, None);
+    validate_schedule(&decoded)?;
+    let terminal: ProviderTurnRecoveryExhaustedEntry = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "logical_run_id": "logical-old", "last_physical_attempt_id": "attempt-old",
+        "reason_code": "provider_configuration_or_capacity_required", "budget_snapshot": decoded.budget_snapshot,
+        "terminal_disposition": "blocked"
+    }))?;
+    validate_exhausted(&terminal)?;
+    let view = PublicProviderTurnRecoveryViewV1::terminal(&terminal);
+    assert_eq!(view.failed_model_ref, None);
+    assert!(
+        view.available_actions
+            .contains(&PublicProviderTurnRecoveryActionV1::UpdateConnection)
+    );
+    Ok(())
+}
+
+#[test]
+fn authentication_recovery_exposes_only_the_frozen_safe_reference_and_actions() -> Result<()> {
+    let failed_model_ref = crate::ModelRef::new(
+        crate::ConnectionId::new("original-connection")?,
+        "original-model",
+    )?;
+    let terminal = ProviderTurnRecoveryExhaustedEntry {
+        schema_version: 1,
+        logical_run_id: "logical-auth".to_owned(),
+        last_physical_attempt_id: "physical-private".to_owned(),
+        reason_code: "provider_authentication_required".to_owned(),
+        failed_model_ref: Some(failed_model_ref.clone()),
+        budget_snapshot: RecoveryBudgetProjectionV1::default(),
+        terminal_disposition: ProviderTurnRecoveryTerminalDispositionV1::Blocked,
+    };
+    let persisted = serde_json::to_vec(&terminal)?;
+    let replayed: ProviderTurnRecoveryExhaustedEntry = serde_json::from_slice(&persisted)?;
+    let view = PublicProviderTurnRecoveryViewV1::terminal(&replayed);
+    assert_eq!(view.failed_model_ref, Some(failed_model_ref));
+    assert_eq!(
+        view.reason_code.as_deref(),
+        Some("provider_authentication_required")
+    );
+    assert!(
+        view.available_actions
+            .contains(&PublicProviderTurnRecoveryActionV1::UpdateConnection)
+    );
+    assert!(
+        !view
+            .available_actions
+            .contains(&PublicProviderTurnRecoveryActionV1::ReviewEffect)
+    );
+    let public = serde_json::to_string(&view)?;
+    for private in [
+        "physical-private",
+        "logical-auth",
+        "fingerprint",
+        "credential",
+        "endpoint",
+    ] {
+        assert!(!public.contains(private));
+    }
+    Ok(())
 }
 
 #[test]
@@ -270,7 +341,11 @@ fn recovery_policy_fault_matrix_is_explicit_for_every_typed_failure_family() {
         assert_eq!(
             policy.decide(&evidence, RecoveryBudgetProjectionV1::default(), false),
             RecoveryDispositionV1::Block {
-                reason_code: "provider_configuration_or_capacity_required"
+                reason_code: if class == ProviderFailureClassV1::Authentication {
+                    "provider_authentication_required"
+                } else {
+                    "provider_configuration_or_capacity_required"
+                }
             },
             "{class:?} must ask for configuration or capacity repair"
         );
@@ -348,6 +423,7 @@ fn recovery_projection_rejects_duplicate_logical_terminal() -> Result<()> {
         logical_run_id: "logical-turn-1".to_owned(),
         last_physical_attempt_id: "attempt-1".to_owned(),
         reason_code: "provider_retry_budget_exhausted".to_owned(),
+        failed_model_ref: None,
         budget_snapshot: RecoveryBudgetProjectionV1::default(),
         terminal_disposition: ProviderTurnRecoveryTerminalDispositionV1::Paused,
     };

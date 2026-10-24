@@ -117,6 +117,8 @@ export function ToolCard({
 }) {
   const { t } = useLocale();
   const presentation = presentTool(tool, t);
+  const compactCompletedRead = tool.toolName === "read_file" && presentation.tone === "success"
+    && tool.artifactPersistedBytes !== undefined && tool.artifactPersistedBytes <= SHORT_OUTPUT_BYTES;
   const questionReceipt = tool.toolName === "request_user_input"
     && tool.userInputReceipt !== undefined && statusTone(tool.status) === "success";
   const duration = useCommandDuration(tool);
@@ -220,7 +222,7 @@ export function ToolCard({
       setArtifactBusy(false);
     };
   }, [canReadArtifact]);
-  const shortOutput = !questionReceipt && canReadArtifact
+  const shortOutput = !compactCompletedRead && !questionReceipt && canReadArtifact
     && tool.artifactPersistedBytes !== undefined
     && tool.artifactPersistedBytes <= SHORT_OUTPUT_BYTES;
   useEffect(() => {
@@ -228,7 +230,7 @@ export function ToolCard({
     return readArtifact({ kind: "byte_slice", offset: 0, limit: SHORT_OUTPUT_BYTES });
   }, [shortOutput, tool.key, tool.artifactRef, readArtifact]);
   const readingPage = artifactPage?.selector.kind === "search_literal" ? artifactReadingPosition.current?.page : artifactPage;
-  const completeInlineOutput = shortOutput && isCompleteInlineOutput(readingPage, tool) ? readingPage : undefined;
+  const completeInlineOutput = isCompleteInlineOutput(readingPage, tool) ? readingPage : undefined;
   const compactSearch = completeInlineOutput !== undefined
     && presentation.tone === "success" && tool.artifactHasMore !== true;
   const returnToReading = () => {
@@ -317,11 +319,11 @@ export function ToolCard({
   const artifactPresentation = tool.artifactAvailability === undefined
     ? undefined
     : presentArtifactStatus(tool.artifactAvailability, t);
-  const showSummary = presentation.summary !== undefined && !(presentation.tone === "success"
+  const showSummary = !compactCompletedRead && presentation.summary !== undefined && !(presentation.tone === "success"
     && (shortOutput || (canReadArtifact && showArtifactPage && !questionReceipt && presentation.detailKind !== "diff")));
   return (
     <article
-      className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined ? " tool-card-compact" : ""}`}
+      className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined || compactCompletedRead && !artifactReaderOpen ? " tool-card-compact" : ""}`}
       data-display-id={displayId}
       aria-label={`${presentation.displayName}: ${presentation.status}`}
     >
@@ -367,7 +369,7 @@ export function ToolCard({
                     setArtifactSearchOpen(false);
                   } else {
                     setArtifactReaderOpen(true);
-                    if (artifactPage === undefined) void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 });
+                    if (artifactPage === undefined) void readArtifact({ kind: "byte_slice", offset: 0, limit: compactCompletedRead ? SHORT_OUTPUT_BYTES : 16_384 });
                     else artifactRestoreFocus.current = true;
                   }
                 }}>{t(showArtifactPage ? "collapseSavedOutput" : "viewSavedOutput")}</Button>
@@ -378,7 +380,7 @@ export function ToolCard({
           </div>
           {artifactSearchPanel}
           <div id={artifactReaderId} className="tool-artifact-display">
-            {!shortOutput && !showArtifactPage && presentation.detailKind === "output" ? (
+            {!compactCompletedRead && !shortOutput && !showArtifactPage && presentation.detailKind === "output" ? (
               <ToolOutputPanel key={tool.key} toolName={tool.toolName} text={presentation.detailText ?? ""}
                 language={presentation.detailLanguage} streaming={presentation.streaming} allowExpand={false} />
             ) : null}

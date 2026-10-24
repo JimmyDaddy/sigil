@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MouseEvent } from "react";
+import type { MouseEvent } from "react";
 
 import type { CatalogEntry, CatalogPage, CatalogSourceState } from "./types";
 import { useLocale } from "./i18n";
@@ -45,14 +45,6 @@ export function HistoryContent({
   filtersApplied?: boolean;
 }) {
   const { locale, t } = useLocale();
-  const previousSessionPress = useRef<
-    { readonly key: string; readonly timestamp: number } | undefined
-  >(undefined);
-  const suppressSessionOpen = useRef<string | undefined>(undefined);
-  const pendingSessionOpen = useRef<number | undefined>(undefined);
-  useEffect(() => () => {
-    if (pendingSessionOpen.current !== undefined) window.clearTimeout(pendingSessionOpen.current);
-  }, []);
   if (state === "loading") {
     return (
       <div
@@ -151,50 +143,8 @@ export function HistoryContent({
                             aria-busy={entry.sessionRef === openingSessionRef || undefined}
                             disabled={navigationBusy}
                             title={providerContext || undefined}
-                            onMouseDown={(event) => {
-                              if (event.button !== 0) return;
-                              const entryKey = `${entry.sessionRef}:${entry.sessionId}`;
-                              const previous = previousSessionPress.current;
-                              const timestamp = Date.now();
-                              if (previous?.key === entryKey && timestamp - previous.timestamp <= 500) {
-                                previousSessionPress.current = undefined;
-                                suppressSessionOpen.current = entryKey;
-                                if (pendingSessionOpen.current !== undefined) {
-                                  window.clearTimeout(pendingSessionOpen.current);
-                                  pendingSessionOpen.current = undefined;
-                                }
-                                event.preventDefault();
-                                onRename(entry);
-                                return;
-                              }
-                              previousSessionPress.current = { key: entryKey, timestamp };
-                            }}
                             onClick={(event) => {
-                              const entryKey = `${entry.sessionRef}:${entry.sessionId}`;
-                              if (suppressSessionOpen.current === entryKey || event.detail >= 2) {
-                                suppressSessionOpen.current = undefined;
-                                event.preventDefault();
-                                return;
-                              }
-                              if (event.detail === 0) {
-                                onOpen(entry);
-                                return;
-                              }
-                              if (pendingSessionOpen.current !== undefined) {
-                                window.clearTimeout(pendingSessionOpen.current);
-                              }
-                              pendingSessionOpen.current = window.setTimeout(() => {
-                                pendingSessionOpen.current = undefined;
-                                onOpen(entry);
-                              }, 240);
-                            }}
-                            onDoubleClick={(event) => {
-                              if (pendingSessionOpen.current !== undefined) {
-                                window.clearTimeout(pendingSessionOpen.current);
-                                pendingSessionOpen.current = undefined;
-                              }
-                              event.preventDefault();
-                              onRename(entry);
+                              if (event.detail < 2) onOpen(entry);
                             }}
                           >
                             {content}

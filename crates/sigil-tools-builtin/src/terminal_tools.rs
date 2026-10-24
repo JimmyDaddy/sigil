@@ -597,7 +597,7 @@ impl Tool for TerminalStartTool {
         };
         Ok(Some(ToolPreview {
             title: "Execute a shell command".to_owned(),
-            summary: "Review the complete command and its execution context.".to_owned(),
+            summary: String::new(),
             body: format!(
                 "Working directory (relative to workspace unless absolute): {}\nShell: {} ({})\nTerminal I/O: {}\nMaximum runtime: {}\n\nCommand:\n{}",
                 cwd.display(),

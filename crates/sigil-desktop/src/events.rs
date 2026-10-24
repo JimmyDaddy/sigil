@@ -4,8 +4,9 @@ use sigil_application::LiveRunUpdate;
 use thiserror::Error;
 
 use crate::{
-    DesktopPendingApproval, DesktopSessionGrantUnavailableReason, DesktopTerminalLifecycleView,
-    DesktopTerminalReadinessKind, DesktopTerminalReadinessStatus, DesktopTerminalTaskStatus,
+    DesktopPendingApproval, DesktopProviderModelRef, DesktopSessionGrantUnavailableReason,
+    DesktopTerminalLifecycleView, DesktopTerminalReadinessKind, DesktopTerminalReadinessStatus,
+    DesktopTerminalTaskStatus,
 };
 
 /// Current HTTP protocol-event envelope accepted by the desktop client.
@@ -767,6 +768,8 @@ pub struct DesktopPublicProviderTurnRecoveryView {
     pub next_retry_unix_ms: Option<u64>,
     #[serde(default)]
     pub reason_code: Option<String>,
+    #[serde(default)]
+    pub failed_model_ref: Option<DesktopProviderModelRef>,
     pub available_actions: Vec<DesktopProviderTurnRecoveryAction>,
     pub user_attention_required: bool,
 }
@@ -785,6 +788,13 @@ pub struct DesktopPublicProviderTurnPartialOutputDiscardedView {
 /// raw provider diagnostics while retaining the typed actions required for product parity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DesktopRecoveryModelRef {
+    pub connection_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineProviderTurnRecovery {
     pub phase: DesktopProviderTurnRecoveryPhase,
     pub active_retry_count: u32,
@@ -795,6 +805,8 @@ pub struct DesktopTimelineProviderTurnRecovery {
     pub next_retry_unix_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model_ref: Option<DesktopRecoveryModelRef>,
     pub available_actions: Vec<DesktopProviderTurnRecoveryAction>,
     pub user_attention_required: bool,
 }
@@ -824,6 +836,31 @@ impl TryFrom<&DesktopPublicProviderTurnRecoveryView> for DesktopTimelineProvider
             .as_deref()
             .map(bounded_machine_label)
             .transpose()?;
+        let failed_model_ref = value
+            .failed_model_ref
+            .as_ref()
+            .map(|model| {
+                let connection = &model.connection_id;
+                if connection.is_empty()
+                    || connection.len() > 64
+                    || !connection.as_bytes()[0].is_ascii_lowercase()
+                        && !connection.as_bytes()[0].is_ascii_digit()
+                    || !connection.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'.' | b'_' | b'-')
+                    })
+                    || model.model_id.trim().is_empty()
+                    || model.model_id.len() > 256
+                {
+                    return Err(DesktopProtocolEventError::InvalidPayload);
+                }
+                Ok(DesktopRecoveryModelRef {
+                    connection_id: connection.clone(),
+                    model_id: bounded_machine_label(&model.model_id)?,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             phase: value.phase,
             active_retry_count,
@@ -832,6 +869,7 @@ impl TryFrom<&DesktopPublicProviderTurnRecoveryView> for DesktopTimelineProvider
             max_transport_retries: value.max_transport_retries,
             next_retry_unix_ms: value.next_retry_unix_ms,
             reason_code,
+            failed_model_ref,
             available_actions: value.available_actions.clone(),
             user_attention_required: value.user_attention_required,
         })

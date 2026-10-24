@@ -41,6 +41,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import { workspaceDisplayLabel } from "./features/workspaces/workspacePresentation";
+import type { ProviderRecoverySettingsContext } from "./features/conversation/providerRecovery";
 import { useMediaQuery } from "./useMediaQuery";
 import { Button, Dialog, Drawer, IconButton, TextField, Tooltip } from "./ui/primitives";
 import { LoadingState, NotificationProvider, useNotifications } from "./ui/feedback";
@@ -148,6 +149,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [providerInventoryState, setProviderInventoryState] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
   const [defaultModel, setDefaultModel] = useState<ProviderModelRef>();
+  const [providerRecoveryContext, setProviderRecoveryContext] = useState<ProviderRecoverySettingsContext & { workspaceId: string; sessionId: string }>();
   const contextWindowDrafts = useContextWindowDrafts();
   const [sessionActionState, setSessionActionState] = useState<SessionActionState>("idle");
   const [conversationNavigation, setConversationNavigation] = useState<ConversationNavigationState>();
@@ -166,6 +168,11 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const [navigationOpen, setNavigationOpen] = useState(false);
   const { route: desktopView, navigate, back } = useDesktopRouter();
   const primaryDesktopView = DESKTOP_ROUTE_MAP[desktopView].primary;
+  useEffect(() => {
+    setProviderRecoveryContext((current) => desktopView === "settings"
+      && current?.workspaceId === activeWorkspaceId
+      && current?.sessionId === selectedSession?.id ? current : undefined);
+  }, [desktopView, activeWorkspaceId, selectedSession?.id]);
   const [navigationWidth, setNavigationWidth] = useState(readNavigationWidth);
   const compactNavigation = useMediaQuery("(max-width: 899px)");
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1268,6 +1275,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 && activeWorkspace.id === activeWorkspaceIdRef.current}
               providerInventory={providerInventory}
               providerInventoryState={providerInventoryState}
+              recoveryContext={providerRecoveryContext !== undefined && providerRecoveryContext.workspaceId === activeWorkspaceId
+                && providerRecoveryContext.sessionId === selectedSession?.id ? providerRecoveryContext : undefined}
               onProviderInventoryChange={(inventory) => {
                 if (activeWorkspace === undefined || activeWorkspace.id !== activeWorkspaceIdRef.current) return false;
                 setProviderInventory(inventory);
@@ -1479,6 +1488,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   requestAnimationFrame(() => sessionSearchRef.current?.focus());
                 }}
                 onOpenSettings={() => navigate("settings")}
+                onOpenProviderRecovery={(context) => {
+                  setProviderRecoveryContext({ ...context, workspaceId: activeWorkspace.id, sessionId: selectedSession.id });
+                  settingsNavigation.remember({ category: "connections", scrollTop: 0,
+                    focusKey: context.reasonCode === "provider_authentication_required" && context.failedModelRef !== undefined
+                      ? `credential:${context.failedModelRef.connectionId}` : "category:connections" });
+                  navigate("settings");
+                }}
                 onOpenSupport={() => navigate("support")}
                 onOpenFork={openForkSession}
                 onRetrySessionAttach={async (recoveryBinding) => {

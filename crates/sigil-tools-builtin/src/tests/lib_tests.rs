@@ -5136,6 +5136,7 @@ async fn exec_command_preview_is_pure_complete_and_binds_execution_context() -> 
             )
             .await?
             .expect("frozen command preview");
+        assert!(preview.summary.is_empty());
         assert!(preview.body.ends_with(command));
         assert!(
             preview

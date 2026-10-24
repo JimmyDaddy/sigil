@@ -8,6 +8,7 @@ import { LocaleProvider } from "../../i18n";
 import type { ProviderConnectionInventory, RunContext } from "../../types";
 import { NotificationProvider } from "../../ui/feedback";
 import { SettingsPage } from "./SettingsPage";
+import type { ProviderRecoverySettingsContext } from "../conversation/providerRecovery";
 
 beforeEach(() => window.localStorage.setItem("sigil.desktop.locale.v1", "en"));
 afterEach(() => {
@@ -67,7 +68,7 @@ function modelContext(connectionId: string): RunContext {
   };
 }
 
-function settings(context?: RunContext, connections = inventory.connections) {
+function settings(context?: RunContext, connections = inventory.connections, recoveryContext?: ProviderRecoverySettingsContext) {
   const saveProviderDefaultModel = vi.fn(async (
     _workspaceId: string,
     modelRef: { connectionId: string; modelId: string },
@@ -92,6 +93,7 @@ function settings(context?: RunContext, connections = inventory.connections) {
             providerInventory={{ ...inventory, connections }}
             modelContext={context}
             defaultModel={context?.modelRef ?? inventory.defaultModel}
+            recoveryContext={recoveryContext}
             onProviderInventoryChange={() => true}
             onProviderConfigurationReloaded={async () => undefined}
             onDefaultModelChange={() => undefined}
@@ -104,6 +106,32 @@ function settings(context?: RunContext, connections = inventory.connections) {
   );
   return { saveProviderDefaultModel, updateProviderConnectionCredential };
 }
+
+it.each(["stored", "environment", "none"] as const)("keeps the failed connection distinct from the default and explains its current %s authentication", (source) => {
+  const connections = inventory.connections.map((connection) => connection.id === "team-route"
+    ? { ...connection, credentialSource: source } : connection);
+  const actions = settings(undefined, connections, { runId: "failed-run", reasonCode: "provider_authentication_required",
+    failedModelRef: { connectionId: "team-route", modelId: "failed-model" } });
+  const note = screen.getByText("Connection authentication failed").closest("[role=status]")!;
+  expect(note.textContent).toContain("The failed request used Team gateway · failed-model.");
+  expect(note.textContent).toContain(source === "none" ? "Check whether the service requires it."
+    : source === "environment" ? "environment credential used to start this workspace" : "update its authentication information");
+  expect(screen.getAllByText("Configured")).toHaveLength(2);
+  expect(screen.queryByLabelText("API key")).toBeNull();
+  expect(actions.updateProviderConnectionCredential).not.toHaveBeenCalled();
+  expect(actions.saveProviderDefaultModel).not.toHaveBeenCalled();
+});
+
+it.each([undefined, { connectionId: "deleted-connection", modelId: "model" }])("does not substitute the default when the failed route cannot be located (%s)", (failedModelRef) => {
+  const actions = settings(undefined, inventory.connections, { runId: "unresolved-run", reasonCode: "provider_authentication_required", failedModelRef });
+  expect(screen.getByText(failedModelRef === undefined
+    ? "This request has no identifiable connection. Choose the connection you want to check."
+    : "The connection used by this request is no longer available. Choose another connection.")).toBeTruthy();
+  expect(screen.queryByText(/The failed request used DeepSeek/)).toBeNull();
+  expect(screen.queryByLabelText("API key")).toBeNull();
+  expect(actions.updateProviderConnectionCredential).not.toHaveBeenCalled();
+  expect(actions.saveProviderDefaultModel).not.toHaveBeenCalled();
+});
 
 describe("settings provider identity labels", () => {
   it.each(["deepseek-default", "team-route"])(

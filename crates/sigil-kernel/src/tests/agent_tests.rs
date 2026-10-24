@@ -10484,7 +10484,15 @@ async fn agent_recovers_typed_rate_limit_and_transient_server_failures() -> Resu
             ToolRegistry::new(),
         )
         .with_provider_turn_recovery_policy(policy)?;
-        let mut session = Session::new("mock-classified-provider-failure", "mock-model")
+        let failed_model_ref =
+            crate::ModelRef::new(crate::ConnectionId::new("failed-connection")?, "mock-model")?;
+        let route = crate::ResolvedModelRoute::new(
+            failed_model_ref.clone(),
+            "mock",
+            "chat",
+            "failed-route-fingerprint",
+        )?;
+        let mut session = Session::new_with_route("mock-classified-provider-failure", route)
             .with_store(JsonlSessionStore::new(temp.path().join("session.jsonl"))?);
         let mut handler = RecordingEventHandler::default();
 
@@ -10516,7 +10524,8 @@ async fn agent_recovers_typed_rate_limit_and_transient_server_failures() -> Resu
             recovery
                 .recoveries_for_logical_run_id(&logical_run_id)
                 .iter()
-                .any(|state| state.schedule.failure_class == failure_class)
+                .any(|state| state.schedule.failure_class == failure_class
+                    && state.schedule.failed_model_ref.as_ref() == Some(&failed_model_ref))
         );
     }
     Ok(())
@@ -10527,7 +10536,7 @@ async fn agent_blocks_typed_authentication_and_protocol_failures_without_resend(
     for (failure_class, expected_reason) in [
         (
             ProviderFailureClassV1::Authentication,
-            "provider_configuration_or_capacity_required",
+            "provider_authentication_required",
         ),
         (
             ProviderFailureClassV1::ProtocolViolation,
@@ -10543,7 +10552,15 @@ async fn agent_blocks_typed_authentication_and_protocol_failures_without_resend(
             ToolRegistry::new(),
         );
         let temp = tempfile::tempdir()?;
-        let mut session = Session::new("mock-classified-provider-failure", "mock-model")
+        let failed_model_ref =
+            crate::ModelRef::new(crate::ConnectionId::new("failed-connection")?, "mock-model")?;
+        let route = crate::ResolvedModelRoute::new(
+            failed_model_ref.clone(),
+            "mock",
+            "chat",
+            "failed-route-fingerprint",
+        )?;
+        let mut session = Session::new_with_route("mock-classified-provider-failure", route)
             .with_store(JsonlSessionStore::new(temp.path().join("session.jsonl"))?);
         let mut handler = RecordingEventHandler::default();
 
@@ -10575,8 +10592,15 @@ async fn agent_blocks_typed_authentication_and_protocol_failures_without_resend(
         assert!(
             recovery
                 .terminal_for_logical_run_id(&logical_run_id)
-                .is_some_and(|terminal| terminal.reason_code == expected_reason)
+                .is_some_and(|terminal| terminal.reason_code == expected_reason
+                    && terminal.failed_model_ref.as_ref() == Some(&failed_model_ref))
         );
+        assert!(handler.events.iter().any(|event| matches!(event,
+            RunEvent::ProviderTurnRecovery(view)
+                if view.reason_code.as_deref() == Some(expected_reason)
+                    && view.failed_model_ref.as_ref() == Some(&failed_model_ref)
+                    && view.available_actions.contains(&crate::PublicProviderTurnRecoveryActionV1::UpdateConnection)
+        )));
     }
     Ok(())
 }

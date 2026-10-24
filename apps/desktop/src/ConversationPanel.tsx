@@ -50,7 +50,6 @@ import type {
   PlanDecisionAction,
   PlanReviewDetail,
   ProviderConnectionInventory,
-  ProviderTurnRecoveryPhase,
   ProviderModelRef,
   ReasoningEffort,
   RunContext,
@@ -110,6 +109,7 @@ import { Button, Drawer, IconButton, Menu, MenuItem, Tooltip } from "./ui/primit
 import { LoadingState, useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
+import { providerRecoveryPresentation, type ProviderRecoverySettingsContext } from "./features/conversation/providerRecovery";
 
 interface ConversationPanelProps {
   bridge: DesktopBridge;
@@ -124,6 +124,7 @@ interface ConversationPanelProps {
   onOpenWorkspacePicker: () => void;
   onOpenSessionPicker: (query: string) => void;
   onOpenSettings: () => void;
+  onOpenProviderRecovery?: (context: ProviderRecoverySettingsContext) => void;
   onOpenSupport: () => void;
   onOpenFork: (sessionRef: string, sessionId: string, title?: string) => Promise<void>;
   onRetrySessionAttach?: (recoveryBinding: string) => Promise<boolean>;
@@ -194,6 +195,7 @@ export function ConversationPanel({
   onOpenWorkspacePicker,
   onOpenSessionPicker,
   onOpenSettings,
+  onOpenProviderRecovery,
   onOpenSupport,
   onOpenFork,
   onRetrySessionAttach,
@@ -2525,6 +2527,7 @@ export function ConversationPanel({
   const providerTurnRecovery = recovery !== undefined && !recovery.userAttentionRequired
     && (recovery.phase === "waiting" || recovery.phase === "recovering") && pendingDecisionForRecovery
     ? undefined : recovery;
+  const providerRecoveryCopy = providerTurnRecovery === undefined ? undefined : providerRecoveryPresentation(providerTurnRecovery, t);
   return (
     <div className="conversation-layout">
       <section
@@ -2782,24 +2785,28 @@ export function ConversationPanel({
 
       {providerTurnRecovery === undefined ? null : (
         <section
-          className="continuity-recovery sg-bounded-content"
-          role={providerTurnRecovery.userAttentionRequired ? "alert" : "status"}
+          className={`continuity-recovery sg-bounded-content${providerRecoveryCopy?.neutral ? " is-neutral" : ""}`}
+          role={providerRecoveryCopy?.neutral ? "status" : "alert"}
         >
-          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
+          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name={providerRecoveryCopy?.neutral
+            ? providerTurnRecovery.reasonCode === "provider_recovery_cancelled" ? "stop" : "model" : "warning"} /></span>
           <div className="continuity-recovery-copy">
-            <strong>{t(providerRecoveryTitleKey(providerTurnRecovery.phase))}</strong>
-            <p>{providerTurnRecovery.userAttentionRequired
-              ? t("providerRecoveryNeedsAttention")
-              : t("providerRecoveryAttempt", {
-                  current: String(providerTurnRecovery.activeRetryCount),
-                  total: String(providerTurnRecovery.activeMaxRetries),
-                })}</p>
+            <strong>{providerRecoveryCopy?.title}</strong>
+            <p>{providerRecoveryCopy?.detail}</p>
           </div>
-          {providerTurnRecovery.availableActions.includes("update_connection") ? (
+          {providerTurnRecovery.availableActions.some((action) => action === "update_connection" || action === "review_effect") ? (
             <div className="continuity-recovery-actions">
-              <Button type="button" variant="quiet" onClick={onOpenSettings}>
+              {providerTurnRecovery.availableActions.includes("update_connection") ? <Button type="button" variant="quiet" onClick={() => {
+                if (onOpenProviderRecovery === undefined || providerTurnRecoveryEvent === undefined) onOpenSettings();
+                else onOpenProviderRecovery({ runId: providerTurnRecoveryEvent.runId,
+                  reasonCode: providerTurnRecovery.reasonCode, failedModelRef: providerTurnRecovery.failedModelRef });
+              }}>
                 {t("reviewRoute")}
-              </Button>
+              </Button> : null}
+              {providerTurnRecovery.availableActions.includes("review_effect") ? <Button type="button" variant="quiet" onClick={() => {
+                setConversationRecoveryOpen(true);
+                if (conversationRecovery === undefined) refreshConversationRecovery();
+              }}>{t("openConversationRecovery")}</Button> : null}
             </div>
           ) : null}
         </section>
@@ -3567,15 +3574,4 @@ function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | un
   if (event.kind === "route_recovery_required") return "failed";
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;
-}
-
-function providerRecoveryTitleKey(
-  phase: ProviderTurnRecoveryPhase,
-): "providerRecoveryWaiting" | "providerRecoveryRecovering" | "providerRecoveryBlocked" | "providerRecoveryPaused" {
-  switch (phase) {
-    case "waiting": return "providerRecoveryWaiting";
-    case "recovering": return "providerRecoveryRecovering";
-    case "blocked": return "providerRecoveryBlocked";
-    case "paused": return "providerRecoveryPaused";
-  }
 }

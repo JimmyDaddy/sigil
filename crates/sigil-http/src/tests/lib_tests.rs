@@ -5662,6 +5662,49 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
 }
 
 #[test]
+fn provider_recovery_contract_preserves_the_optional_safe_failed_route() {
+    let document = http_openapi_document();
+    let schema = &document["components"]["schemas"]["PublicProviderTurnRecoveryView"];
+    assert_eq!(
+        schema["properties"]["failed_model_ref"]["$ref"],
+        "#/components/schemas/ProviderModelRef"
+    );
+    assert!(
+        !schema["required"]
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .any(|field| field == "failed_model_ref")
+    );
+    let recovery = serde_json::from_value::<sigil_kernel::PublicProviderTurnRecoveryViewV1>(json!({
+        "phase": "blocked", "active_retry_count": 0, "active_max_retries": 2,
+        "retry_count": 0, "max_transport_retries": 2,
+        "reason_code": "provider_authentication_required",
+        "failed_model_ref": { "connection_id": "failed-connection", "model_id": "failed-model" },
+        "available_actions": ["update_connection", "cancel"], "user_attention_required": true
+    })).expect("safe public view");
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        5,
+        PublicRunEventKind::ProviderTurnRecoveryChanged { recovery },
+    );
+    let sse = public_run_event_to_sse(&event).expect("public recovery frame");
+    let data: Value = serde_json::from_str(sse.data()).expect("frame data");
+    assert_eq!(
+        data["run_event"]["event"]["recovery"]["failed_model_ref"]["connection_id"],
+        "failed-connection"
+    );
+    assert_eq!(
+        data["run_event"]["event"]["recovery"]["reason_code"],
+        "provider_authentication_required"
+    );
+    for private in ["endpoint", "credential", "fingerprint", "physical_attempt"] {
+        assert!(!data.to_string().contains(private));
+    }
+}
+
+#[test]
 fn openapi_conversation_display_status_preserves_every_wire_status() {
     let document = http_openapi_document();
     let statuses = [

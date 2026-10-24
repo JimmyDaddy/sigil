@@ -19,6 +19,29 @@ function page(selector: ToolArtifactSelector, body: string, patch: Partial<ToolA
     artifactSha256: `sha256:${"c".repeat(64)}`, eof: true, matchCount: 0, ...patch };
 }
 
+it("keeps a completed short file read compact until requested and preserves exact text across collapse", async () => {
+  const user = userEvent.setup();
+  const body = "# 项目\n\n" + "读取说明与尾空格。  \n".repeat(6);
+  const read = vi.fn(async (selector: ToolArtifactSelector) => page(selector, body));
+  const current = { ...tool, input: "README.md", text: body, artifactPersistedBytes: new TextEncoder().encode(body).length };
+  render(<ToolCard tool={current} onReadArtifact={read} />);
+  expect(read).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("read_file output content")).toBeNull();
+  expect(screen.queryByLabelText("read_file saved output page")).toBeNull();
+  expect(screen.getByLabelText("read_file input").textContent).toContain("README.md");
+  await user.click(screen.getByRole("button", { name: "View full output" }));
+  // The code renderer separates its final empty line with one display-only newline.
+  expect((await screen.findByLabelText("read_file saved output page")).textContent).toBe(`${body}\n`);
+  expect(screen.getAllByLabelText("Tool output reading area")).toHaveLength(1);
+  screen.getByLabelText("Tool output reading area").scrollTop = 47;
+  await user.click(screen.getByRole("button", { name: "Collapse output" }));
+  expect(screen.queryByLabelText("read_file saved output page")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "View full output" }));
+  expect(screen.getByLabelText("read_file saved output page").textContent).toBe(`${body}\n`);
+  expect(screen.getByLabelText("Tool output reading area").scrollTop).toBe(47);
+  expect(read).toHaveBeenCalledOnce();
+});
+
 it("replaces the preview with one bounded reading area and reuses prior pages when navigating back and forward", async () => {
   const user = userEvent.setup();
   const read = vi.fn(async (selector: ToolArtifactSelector) => selector.kind === "byte_slice" && selector.offset === 0

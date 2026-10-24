@@ -7,9 +7,10 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    EventId, FrozenProviderRequestMaterial, ProviderFailureClassV1, ProviderFailureObservationV1,
-    ProviderRequestReconstructionDispositionV1, ProviderRequestSourceFrontierV1,
-    ProviderTransportFallbackCandidateV1, projection_apply_decision,
+    EventId, FrozenProviderRequestMaterial, ModelRef, ProviderFailureClassV1,
+    ProviderFailureObservationV1, ProviderRequestReconstructionDispositionV1,
+    ProviderRequestSourceFrontierV1, ProviderTransportFallbackCandidateV1,
+    projection_apply_decision,
 };
 
 /// Schema version for durable provider-turn recovery facts.
@@ -302,8 +303,10 @@ impl ProviderTurnRecoveryPolicyV1 {
             };
         }
         match evidence.failure.class {
-            ProviderFailureClassV1::Authentication
-            | ProviderFailureClassV1::BillingOrQuota
+            ProviderFailureClassV1::Authentication => RecoveryDispositionV1::Block {
+                reason_code: "provider_authentication_required",
+            },
+            ProviderFailureClassV1::BillingOrQuota
             | ProviderFailureClassV1::RouteUnavailable
             | ProviderFailureClassV1::ContextCapacity => RecoveryDispositionV1::Block {
                 reason_code: "provider_configuration_or_capacity_required",
@@ -398,6 +401,9 @@ pub struct ProviderTurnRecoveryScheduledEntry {
     pub request_envelope_digest: String,
     pub source_frontier: Option<ProviderRequestSourceFrontierV1>,
     pub failure_class: ProviderFailureClassV1,
+    /// Display-only identity frozen by the failed run owner; never retry authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model_ref: Option<ModelRef>,
     pub retry_kind: ProviderTurnRecoveryRetryKindV1,
     pub not_before_unix_ms: u64,
     pub retry_after_ms: u64,
@@ -482,6 +488,9 @@ pub struct ProviderTurnRecoveryExhaustedEntry {
     pub logical_run_id: String,
     pub last_physical_attempt_id: ProviderPhysicalAttemptId,
     pub reason_code: String,
+    /// Missing in earlier current-schema records; absence must stay unknown on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model_ref: Option<ModelRef>,
     pub budget_snapshot: RecoveryBudgetProjectionV1,
     pub terminal_disposition: ProviderTurnRecoveryTerminalDispositionV1,
 }
@@ -533,6 +542,9 @@ pub struct PublicProviderTurnRecoveryViewV1 {
     pub next_retry_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    /// Safe failed-route identity only. Endpoints, credentials and route fingerprints stay private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model_ref: Option<ModelRef>,
     pub available_actions: Vec<PublicProviderTurnRecoveryActionV1>,
     pub user_attention_required: bool,
 }
@@ -549,6 +561,7 @@ impl PublicProviderTurnRecoveryViewV1 {
             max_transport_retries: schedule.budget_snapshot.max_transport_retries,
             next_retry_unix_ms: Some(schedule.not_before_unix_ms),
             reason_code: None,
+            failed_model_ref: schedule.failed_model_ref.clone(),
             available_actions: vec![
                 PublicProviderTurnRecoveryActionV1::RetryNow,
                 PublicProviderTurnRecoveryActionV1::Cancel,
@@ -568,6 +581,7 @@ impl PublicProviderTurnRecoveryViewV1 {
             max_transport_retries: schedule.budget_snapshot.max_transport_retries,
             next_retry_unix_ms: None,
             reason_code: None,
+            failed_model_ref: schedule.failed_model_ref.clone(),
             available_actions: vec![PublicProviderTurnRecoveryActionV1::Cancel],
             user_attention_required: false,
         }
@@ -594,7 +608,9 @@ impl PublicProviderTurnRecoveryViewV1 {
         }
         if matches!(
             entry.reason_code.as_str(),
-            "provider_configuration_or_capacity_required" | "provider_request_requires_attention"
+            "provider_authentication_required"
+                | "provider_configuration_or_capacity_required"
+                | "provider_request_requires_attention"
         ) {
             available_actions.insert(0, PublicProviderTurnRecoveryActionV1::UpdateConnection);
         }
@@ -606,6 +622,7 @@ impl PublicProviderTurnRecoveryViewV1 {
             max_transport_retries: entry.budget_snapshot.max_transport_retries,
             next_retry_unix_ms: None,
             reason_code: Some(entry.reason_code.clone()),
+            failed_model_ref: entry.failed_model_ref.clone(),
             available_actions,
             user_attention_required: true,
         }
@@ -857,6 +874,9 @@ impl ProviderTurnRecoveryAudit {
             request_envelope_digest: evidence.request_envelope_digest.clone(),
             source_frontier: evidence.source_frontier.clone(),
             failure_class: evidence.failure.class,
+            failed_model_ref: session
+                .resolved_model_route()
+                .map(|route| route.model_ref.clone()),
             retry_kind,
             not_before_unix_ms: scheduled_at.saturating_add(retry_after_ms),
             retry_after_ms,
@@ -1028,6 +1048,9 @@ impl ProviderTurnRecoveryAudit {
             logical_run_id: evidence.logical_run_id.clone(),
             last_physical_attempt_id: evidence.failed_physical_attempt_id.clone(),
             reason_code: reason_code.to_owned(),
+            failed_model_ref: session
+                .resolved_model_route()
+                .map(|route| route.model_ref.clone()),
             budget_snapshot: budget,
             terminal_disposition: disposition,
         };
@@ -1078,6 +1101,7 @@ impl ProviderTurnRecoveryAudit {
             logical_run_id: schedule.logical_run_id.clone(),
             last_physical_attempt_id: schedule.failed_physical_attempt_id.clone(),
             reason_code: reason_code.to_owned(),
+            failed_model_ref: schedule.failed_model_ref.clone(),
             budget_snapshot: schedule.budget_snapshot,
             terminal_disposition: disposition,
         };
@@ -1235,7 +1259,7 @@ pub(crate) fn validate_schedule(entry: &ProviderTurnRecoveryScheduledEntry) -> R
     {
         bail!("provider-turn recovery schedule is malformed");
     }
-    Ok(())
+    validate_failed_model_ref(entry.failed_model_ref.as_ref())
 }
 
 fn is_sha256_digest(value: &str) -> bool {
@@ -1278,6 +1302,16 @@ pub(crate) fn validate_exhausted(entry: &ProviderTurnRecoveryExhaustedEntry) -> 
         || entry.reason_code.trim().is_empty()
     {
         bail!("provider-turn recovery terminal is malformed");
+    }
+    validate_failed_model_ref(entry.failed_model_ref.as_ref())
+}
+
+fn validate_failed_model_ref(model_ref: Option<&ModelRef>) -> Result<()> {
+    if let Some(model_ref) = model_ref {
+        anyhow::ensure!(
+            ModelRef::new(model_ref.connection_id.clone(), &model_ref.model_id)? == *model_ref,
+            "provider-turn recovery failed model reference is not canonical"
+        );
     }
     Ok(())
 }
