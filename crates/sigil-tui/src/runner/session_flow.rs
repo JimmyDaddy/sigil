@@ -67,6 +67,26 @@ impl ManagedTuiArtifactStoreLease {
     ) -> Arc<sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1> {
         Arc::clone(&self.inner)
     }
+
+    pub(super) fn for_session(&self, session: &Session) -> Result<Self> {
+        let source = session
+            .store_path()
+            .ok_or_else(|| anyhow::anyhow!("target artifact session has no durable source"))?;
+        let current = self.store();
+        if source.file_stem() == current.session_log_path().file_stem() {
+            let key = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("managed TUI artifact session key is unavailable")
+                })?;
+            return Ok(Self {
+                inner: Arc::new(self.inner.rebind_session(&self.writer(), key, session)?),
+            });
+        }
+        Self::acquire(self.writer(), source, session.session_scope_id())
+    }
 }
 
 pub(super) fn load_session(

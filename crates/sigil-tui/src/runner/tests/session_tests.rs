@@ -20,7 +20,9 @@ use super::{
     },
     common::{
         PlannedProvider, StreamPlan, routed_session_identity, routed_test_root_config,
-        spawn_test_worker, test_root_config, wait_for_session_entry,
+        routed_unauthenticated_test_root_config, spawn_test_worker,
+        spawn_test_worker_with_existing_authority_composition, test_authority_composition,
+        test_root_config, wait_for_session_entry,
     },
 };
 
@@ -994,6 +996,155 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
         )
     })?;
     worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_managed_sessions_borrows_artifact_owner_and_preserves_both_outputs() -> Result<()> {
+    let fixture = tempdir()?;
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let (composition, authority_root) = test_authority_composition(&workspace)?;
+    let writer = std::sync::Arc::clone(&composition.storage_writer);
+    let mut config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+    config.storage.state_root =
+        StorageRoot::Path(authority_root.path().join("state").display().to_string());
+    config.storage.cache_root =
+        StorageRoot::Path(fixture.path().join("cache").display().to_string());
+    let (_, route) = sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let mut sessions = Vec::new();
+    for key in ["first", "second"] {
+        let lease = writer.acquire_named(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+            key,
+        )?;
+        let path = lease.path().join("records.jsonl");
+        writer.finalize(lease)?;
+        let mut session = sigil_runtime::provider_connections::inspect_session_for_route_resume(
+            &config,
+            &route,
+            JsonlSessionStore::new(&path)?,
+        )?
+        .session;
+        sigil_runtime::bind_session_composition(&mut session, &config)?;
+        session.append_user_message(ModelMessage::user(format!("{key} session")))?;
+        sessions.push(session);
+    }
+    let first_path = sessions[0]
+        .store_path()
+        .expect("first durable source")
+        .to_path_buf();
+    let second_path = sessions[1]
+        .store_path()
+        .expect("second durable source")
+        .to_path_buf();
+    let second_scope = sessions[1].session_scope_id().to_owned();
+    let first_lease = super::super::ManagedTuiArtifactStoreLease::acquire(
+        std::sync::Arc::clone(&writer),
+        &first_path,
+        sessions[0].session_scope_id(),
+    )?;
+    let second_lease = first_lease.for_session(&sessions[1])?;
+    let mut descriptors = Vec::new();
+    for (index, lease) in [&first_lease, &second_lease].into_iter().enumerate() {
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &sigil_kernel::ToolResult::ok(
+                format!("existing-{index}"),
+                "read_file",
+                format!("preserved output {index}"),
+                Default::default(),
+            ),
+            Some(&lease.store()),
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        descriptors.push(
+            recorded
+                .artifact
+                .descriptor()
+                .expect("published output")
+                .clone(),
+        );
+        sessions[index].append(SessionLogEntry::ToolResultV3(recorded))?;
+    }
+    for session in &sessions {
+        let inspected = sigil_runtime::provider_connections::inspect_session_for_route_resume(
+            &config,
+            &route,
+            JsonlSessionStore::new(session.store_path().expect("durable fixture source"))?,
+        )?;
+        assert!(matches!(
+            inspected.plan,
+            sigil_runtime::provider_connections::SessionRouteResumePlan::Exact { .. }
+        ));
+        sigil_runtime::validate_session_composition(&inspected.session, &config)?;
+    }
+    drop(second_lease);
+    drop(first_lease);
+    drop(sessions);
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        first_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace,
+        composition,
+    )?;
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: second_path.clone(),
+        attachment_recovery_binding: None,
+    })?;
+    let outcome = worker.recv_until_with_timeout_diagnostic(
+        "managed session switch",
+        Duration::from_secs(30),
+        |message| {
+            matches!(
+                message,
+                WorkerMessage::SessionSwitched { .. }
+                    | WorkerMessage::SessionSwitchRejected { .. }
+                    | WorkerMessage::SessionRouteRecoveryRequired { .. }
+            )
+        },
+    )?;
+    assert!(
+        matches!(&outcome, WorkerMessage::SessionSwitched { session_id, session_log_path, .. } if session_id == &second_scope && session_log_path == &second_path),
+        "{outcome:?}"
+    );
+    worker.shutdown()?;
+    let first = sigil_kernel::Session::load_from_store(
+        "custom",
+        "planned-model",
+        JsonlSessionStore::new(&first_path)?,
+    )?;
+    let second = sigil_kernel::Session::load_from_store(
+        "custom",
+        "planned-model",
+        JsonlSessionStore::new(&second_path)?,
+    )?;
+    let first_lease = super::super::ManagedTuiArtifactStoreLease::acquire(
+        writer,
+        &first_path,
+        first.session_scope_id(),
+    )?;
+    let second_lease = first_lease.for_session(&second)?;
+    assert_eq!(
+        first_lease.store().read_all(&descriptors[0])?,
+        b"preserved output 0"
+    );
+    assert_eq!(
+        second_lease.store().read_all(&descriptors[1])?,
+        b"preserved output 1"
+    );
+    assert!(
+        first_lease
+            .store()
+            .resolve(&descriptors[1].artifact_ref)
+            .is_err()
+    );
+    assert!(
+        second_lease
+            .store()
+            .resolve(&descriptors[0].artifact_ref)
+            .is_err()
+    );
     Ok(())
 }
 

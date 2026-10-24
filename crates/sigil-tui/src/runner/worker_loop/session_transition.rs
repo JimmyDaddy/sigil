@@ -1,5 +1,4 @@
 use super::*;
-use crate::runner::ManagedTuiArtifactStoreLease;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum SessionTransitionKind {
@@ -352,16 +351,9 @@ where
             session.attach_tool_artifact_store_override(current.store());
             None
         } else {
-            Some(
-                ManagedTuiArtifactStoreLease::acquire(
-                    current.writer(),
-                    &session_log_path,
-                    session.session_scope_id(),
-                )
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to admit target session artifact storage: {error:#}")
-                })?,
-            )
+            Some(current.for_session(&session).map_err(|error| {
+                anyhow::anyhow!("failed to admit target session artifact storage: {error:#}")
+            })?)
         }
     } else {
         None

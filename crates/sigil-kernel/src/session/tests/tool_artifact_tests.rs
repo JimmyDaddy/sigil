@@ -11,6 +11,144 @@ fn store_fixture() -> Result<(tempfile::TempDir, ToolArtifactStore)> {
     Ok((temp, ToolArtifactStore::for_session_store(&session_store)))
 }
 
+#[derive(Debug)]
+struct CombinedPublicationBackend {
+    physical: ToolArtifactStore,
+    calls: std::sync::atomic::AtomicUsize,
+    fail_after_blob: std::sync::atomic::AtomicBool,
+}
+
+impl ToolArtifactStoreBackendV1 for CombinedPublicationBackend {
+    fn publish_artifact(&self, descriptor: &ToolArtifactDescriptorV1, bytes: &[u8]) -> Result<()> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.physical
+            .publish_blob(&descriptor.content_sha256, bytes)?;
+        if self
+            .fail_after_blob
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            bail!("fixture manifest commit failed");
+        }
+        self.physical.publish_descriptor_manifest(descriptor)
+    }
+
+    fn publish_blob(&self, _: &str, _: &[u8]) -> Result<()> {
+        bail!("capture must use the combined publication port")
+    }
+
+    fn publish_descriptor_manifest(&self, _: &ToolArtifactDescriptorV1) -> Result<()> {
+        bail!("capture must use the combined publication port")
+    }
+
+    fn read_blob(&self, hash: &str) -> Result<Vec<u8>> {
+        Ok(fs::read(self.physical.blob_path(hash)?)?)
+    }
+
+    fn resolve(&self, reference: &ToolArtifactRefV1) -> Result<ToolArtifactDescriptorV1> {
+        self.physical.resolve(reference)
+    }
+
+    fn read_page(
+        &self,
+        reference: &ToolArtifactRefV1,
+        selector: ToolArtifactSelectorV1,
+    ) -> Result<ToolArtifactPageV1> {
+        self.physical.read_page(reference, selector)
+    }
+
+    fn manifest_inventory(&self) -> Result<Vec<ToolArtifactManifestEntryV1>> {
+        self.physical.manifest_inventory()
+    }
+
+    fn bind_source_event(&self, reference: &ToolArtifactRefV1, event: &str) -> Result<()> {
+        self.physical.bind_source_event(reference, event)
+    }
+
+    fn source_event_id(&self, reference: &ToolArtifactRefV1) -> Result<String> {
+        self.physical.source_event_id(reference)
+    }
+
+    fn garbage_collect(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now: u64,
+        grace: u64,
+    ) -> Result<ToolArtifactGcReportV1> {
+        self.physical.garbage_collect(roots, now, grace)
+    }
+
+    fn prune_garbage_trash(&self, now: u64, grace: u64) -> Result<ToolArtifactTrashPruneReportV1> {
+        self.physical.prune_garbage_trash(now, grace)
+    }
+
+    fn begin_process_capture(
+        self: Arc<Self>,
+        _: ProcessStreamCaptureConfigV1,
+    ) -> Result<Box<dyn ToolArtifactProcessCaptureBackendV1>> {
+        bail!("fixture does not capture process streams")
+    }
+}
+
+#[test]
+fn capture_and_fork_use_combined_publication_and_propagate_manifest_failure() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let source_backend = Arc::new(CombinedPublicationBackend {
+        physical: ToolArtifactStore::for_session_path(&fixture.path().join("source.jsonl")),
+        calls: Default::default(),
+        fail_after_blob: Default::default(),
+    });
+    let source = ToolArtifactStore::from_backend(
+        source_backend.physical.session_scope_id(),
+        source_backend.clone(),
+    )?;
+    let descriptor = source.capture_text(
+        "capture",
+        "read_file",
+        "complete body",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let target_backend = Arc::new(CombinedPublicationBackend {
+        physical: ToolArtifactStore::for_session_path(&fixture.path().join("target.jsonl")),
+        calls: Default::default(),
+        fail_after_blob: Default::default(),
+    });
+    let target = ToolArtifactStore::from_backend(
+        target_backend.physical.session_scope_id(),
+        target_backend.clone(),
+    )?;
+    let forked = target.fork_descriptor_from(&source, &descriptor)?;
+    assert_eq!(target.read_all(&forked)?, b"complete body");
+    assert_eq!(
+        source_backend
+            .calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        target_backend
+            .calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    target_backend
+        .fail_after_blob
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        target
+            .capture_text(
+                "failed",
+                "read_file",
+                "body without manifest",
+                ToolArtifactSensitivity::Ordinary
+            )
+            .is_err()
+    );
+    assert_eq!(target.manifest_inventory()?.len(), 1);
+    assert_eq!(target.read_all(&forked)?, b"complete body");
+    Ok(())
+}
+
 #[test]
 fn opaque_ref_and_blob_path_do_not_expose_each_other() -> Result<()> {
     let (_temp, store) = store_fixture()?;

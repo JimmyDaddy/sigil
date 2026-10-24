@@ -2667,6 +2667,26 @@ const TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION: u16 = 1;
 /// keeps only this narrow semantic port and never needs to receive an artifact root for the
 /// managed current-schema route.
 pub trait ToolArtifactStoreBackendV1: std::fmt::Debug + Send + Sync {
+    /// Publishes a complete immutable artifact before a caller may report it as available.
+    /// Backends with concurrent reclamation must override this method and serialize the body
+    /// and durable manifest commit against reclamation. The default preserves compatibility
+    /// for backends whose publication and reclamation are already externally coordinated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless both the body and its exact descriptor are durably published.
+    fn publish_artifact(&self, descriptor: &ToolArtifactDescriptorV1, bytes: &[u8]) -> Result<()> {
+        descriptor.validate()?;
+        if bytes.len() > TOOL_ARTIFACT_MAX_BYTES
+            || bytes.len() as u64 != descriptor.persisted_bytes
+            || stable_event_hash(bytes) != descriptor.content_sha256
+        {
+            bail!("tool artifact publication body does not match its descriptor");
+        }
+        self.publish_blob(&descriptor.content_sha256, bytes)?;
+        self.publish_descriptor_manifest(descriptor)
+    }
+
     fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()>;
     fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()>;
     fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>>;
@@ -2970,7 +2990,6 @@ impl ToolArtifactStore {
         {
             bail!("tool artifact source changed while fork was being prepared");
         }
-        self.publish_blob(&source.content_sha256, &bytes)?;
         let descriptor = ToolArtifactDescriptorV1 {
             schema_version: TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION,
             artifact_ref: ToolArtifactRefV1::random(),
@@ -2989,7 +3008,7 @@ impl ToolArtifactStore {
             retrieval_policy: source.retrieval_policy,
         };
         descriptor.validate()?;
-        self.publish_descriptor_manifest(&descriptor)?;
+        self.publish_artifact(&descriptor, &bytes)?;
         Ok(descriptor)
     }
 
@@ -3013,7 +3032,6 @@ impl ToolArtifactStore {
             bail!("tool artifact capture identity is malformed");
         }
         let content_sha256 = stable_event_hash(&bounded.bytes);
-        self.publish_blob(&content_sha256, &bounded.bytes)?;
         let truncation = bounded.truncation(policy_projected_bytes);
         let completeness = match (redaction_count, truncation) {
             (0, None) => ToolArtifactCompleteness::Complete,
@@ -3049,7 +3067,7 @@ impl ToolArtifactStore {
             },
         };
         descriptor.validate()?;
-        self.publish_descriptor_manifest(&descriptor)?;
+        self.publish_artifact(&descriptor, &bounded.bytes)?;
         Ok(descriptor)
     }
 
@@ -3889,6 +3907,27 @@ impl ToolArtifactStore {
         Ok(file)
     }
 
+    fn publish_artifact(&self, descriptor: &ToolArtifactDescriptorV1, bytes: &[u8]) -> Result<()> {
+        descriptor.validate()?;
+        if bytes.len() > TOOL_ARTIFACT_MAX_BYTES
+            || bytes.len() as u64 != descriptor.persisted_bytes
+            || stable_event_hash(bytes) != descriptor.content_sha256
+        {
+            bail!("tool artifact publication body does not match its descriptor");
+        }
+        if let Some(backend) = &self.backend {
+            return backend.publish_artifact(descriptor, bytes);
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        bail!("managed artifact backend is unavailable for publication");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.publish_blob(&descriptor.content_sha256, bytes)?;
+            self.publish_descriptor_manifest(descriptor)
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()> {
         if bytes.len() > TOOL_ARTIFACT_MAX_BYTES {
             bail!("tool artifact blob exceeds its hard limit");
@@ -4054,6 +4093,7 @@ impl ToolArtifactStore {
             .context("failed to publish tool artifact blob usage ledger")
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
         if let Some(backend) = &self.backend {
             return backend.publish_descriptor_manifest(descriptor);

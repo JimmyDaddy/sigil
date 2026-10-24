@@ -32,6 +32,7 @@ use crate::managed_storage_writer::{
 
 /// The paired ArtifactStaging/ArtifactStore lease and its pathless kernel facade.
 pub struct ManagedArtifactStoreLeaseV1 {
+    owner: Arc<ManagedArtifactStoreOwnerV1>,
     backend: Arc<ManagedArtifactStoreBackendV1>,
     store: ToolArtifactStore,
 }
@@ -78,13 +79,21 @@ impl ManagedArtifactStoreLeaseV1 {
             writer,
             staging_lease,
             store_lease,
+            hash_bytes(session_scope_id.as_bytes()),
         ));
+        let owner = Arc::new(ManagedArtifactStoreOwnerV1 {
+            physical: Arc::clone(&backend.physical),
+        });
         let store = ToolArtifactStore::from_backend_with_session_path(
             session_scope_id.to_owned(),
             session_log_path,
             backend.clone(),
         )?;
-        Ok(Self { backend, store })
+        Ok(Self {
+            owner,
+            backend,
+            store,
+        })
     }
 
     #[must_use]
@@ -95,6 +104,49 @@ impl ManagedArtifactStoreLeaseV1 {
     #[must_use]
     pub fn writer(&self) -> Arc<ManagedStorageWriterAdapterV1> {
         Arc::clone(&self.backend.writer)
+    }
+
+    /// Borrows this live paired namespace for an already loaded durable session. The caller
+    /// must have admitted that session's attachment and validated its route before rebinding.
+    /// Each facade retains its own scope; no new storage capability is issued or consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign writer/key, a closed namespace or a non-durable session.
+    pub fn rebind_session(
+        &self,
+        writer: &Arc<ManagedStorageWriterAdapterV1>,
+        key: &str,
+        session: &sigil_kernel::Session,
+    ) -> Result<Self> {
+        let _operation = self
+            .backend
+            .operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact operation lock is poisoned"))?;
+        self.backend.live_roots()?;
+        self.validate_namespace_binding(writer, &[key])?;
+        let source = session
+            .store_path()
+            .context("artifact session has no durable source")?;
+        let metadata = fs::symlink_metadata(source)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("artifact session source must be a regular file");
+        }
+        let backend = Arc::new(ManagedArtifactStoreBackendV1 {
+            physical: Arc::clone(&self.backend.physical),
+            session_scope_id_hash: hash_bytes(session.session_scope_id().as_bytes()),
+        });
+        let store = ToolArtifactStore::from_backend_with_session_path(
+            session.session_scope_id(),
+            source.canonicalize()?,
+            backend.clone(),
+        )?;
+        Ok(Self {
+            owner: Arc::clone(&self.owner),
+            backend,
+            store,
+        })
     }
 
     pub(crate) fn store_for_maintenance(
@@ -110,6 +162,18 @@ impl ManagedArtifactStoreLeaseV1 {
             || fs::canonicalize(self.store.session_log_path())? != source_path
         {
             bail!("held artifact lease does not match the maintenance session source");
+        }
+        self.validate_namespace_binding(writer, namespace_keys)?;
+        Ok(self.store())
+    }
+
+    fn validate_namespace_binding(
+        &self,
+        writer: &Arc<ManagedStorageWriterAdapterV1>,
+        namespace_keys: &[&str],
+    ) -> Result<()> {
+        if !Arc::ptr_eq(writer, &self.backend.writer) {
+            bail!("held artifact lease belongs to a different writer");
         }
         let staging = self
             .backend
@@ -144,17 +208,29 @@ impl ManagedArtifactStoreLeaseV1 {
         {
             bail!("held artifact lease does not match the maintenance namespace");
         }
-        Ok(self.store())
+        Ok(())
     }
 
+    /// Settles this paired namespace when no other session facade owns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while a peer owner remains or if authority settlement fails.
     pub fn finalize(self) -> Result<()> {
-        self.backend.finalize()
+        if Arc::strong_count(&self.owner) != 1 {
+            bail!("managed artifact namespace is still held by another session facade");
+        }
+        self.owner.physical.finalize()
     }
 }
 
-impl Drop for ManagedArtifactStoreLeaseV1 {
+struct ManagedArtifactStoreOwnerV1 {
+    physical: Arc<ManagedArtifactStorePhysicalV1>,
+}
+
+impl Drop for ManagedArtifactStoreOwnerV1 {
     fn drop(&mut self) {
-        if let Err(error) = self.backend.finalize() {
+        if let Err(error) = self.physical.finalize() {
             tracing::error!(%error, "failed to finalize managed artifact namespaces");
         }
     }
@@ -162,6 +238,20 @@ impl Drop for ManagedArtifactStoreLeaseV1 {
 
 #[derive(Debug)]
 struct ManagedArtifactStoreBackendV1 {
+    physical: Arc<ManagedArtifactStorePhysicalV1>,
+    session_scope_id_hash: String,
+}
+
+impl std::ops::Deref for ManagedArtifactStoreBackendV1 {
+    type Target = ManagedArtifactStorePhysicalV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.physical
+    }
+}
+
+#[derive(Debug)]
+struct ManagedArtifactStorePhysicalV1 {
     writer: Arc<ManagedStorageWriterAdapterV1>,
     staging_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
     store_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
@@ -183,19 +273,34 @@ struct ManagedArtifactCaptureUsage {
 const ARTIFACT_CAPTURE_CAPACITY_BATCH_BYTES: u64 = 1024 * 1024;
 
 impl ManagedArtifactStoreBackendV1 {
+    fn commit_manifest_locked(store: &Path, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
+        let body = read_blob_at(store, &descriptor.content_sha256)?;
+        if body.len() as u64 != descriptor.persisted_bytes {
+            bail!("managed artifact body length does not match its manifest");
+        }
+        let refs = store.join("refs");
+        create_private_dir(&refs)?;
+        let path = refs.join(format!("{}.json", descriptor.artifact_ref.artifact_id));
+        publish_noclobber(&refs, &path, &serde_json::to_vec(descriptor)?)
+    }
+
     fn new(
         writer: Arc<ManagedStorageWriterAdapterV1>,
         staging_lease: ManagedStorageWriterLeaseV1,
         store_lease: ManagedStorageWriterLeaseV1,
+        session_scope_id_hash: String,
     ) -> Self {
         Self {
-            writer,
-            staging_lease: Mutex::new(Some(staging_lease)),
-            store_lease: Mutex::new(Some(store_lease)),
-            operation_lock: Mutex::new(()),
-            capture_usage: Mutex::new(None),
-            #[cfg(test)]
-            inventory_scans: std::sync::atomic::AtomicUsize::new(0),
+            physical: Arc::new(ManagedArtifactStorePhysicalV1 {
+                writer,
+                staging_lease: Mutex::new(Some(staging_lease)),
+                store_lease: Mutex::new(Some(store_lease)),
+                operation_lock: Mutex::new(()),
+                capture_usage: Mutex::new(None),
+                #[cfg(test)]
+                inventory_scans: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            session_scope_id_hash,
         }
     }
 
@@ -350,7 +455,9 @@ impl ManagedArtifactStoreBackendV1 {
             .map_err(|error| anyhow::anyhow!("managed artifact store lease rejected: {error}"))?;
         Ok((staging.path().to_path_buf(), store.path().to_path_buf()))
     }
+}
 
+impl ManagedArtifactStorePhysicalV1 {
     fn finalize(&self) -> Result<()> {
         let _operation = self
             .operation_lock
@@ -386,6 +493,17 @@ impl ManagedArtifactStoreBackendV1 {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+impl ManagedArtifactStoreBackendV1 {
+    fn trash_prefix(&self) -> String {
+        format!(
+            "tool-artifact-gc-{}-",
+            self.session_scope_id_hash
+                .strip_prefix("sha256:")
+                .unwrap_or(&self.session_scope_id_hash)
+        )
     }
 
     fn ensure_layout(staging_root: &Path, store_root: &Path) -> Result<()> {
@@ -477,9 +595,17 @@ impl ManagedArtifactStoreBackendV1 {
 }
 
 impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
-    fn publish_blob(&self, content_sha256: &str, bytes: &[u8]) -> Result<()> {
+    fn publish_artifact(&self, descriptor: &ToolArtifactDescriptorV1, bytes: &[u8]) -> Result<()> {
+        descriptor.validate()?;
+        if descriptor.session_scope_id_hash != self.session_scope_id_hash
+            || descriptor.persisted_bytes != bytes.len() as u64
+            || bytes.len() > TOOL_ARTIFACT_MAX_BYTES
+            || descriptor.content_sha256 != hash_bytes(bytes)
+        {
+            bail!("managed artifact publication does not match its session descriptor");
+        }
         let (_operation, staging, store) = self.with_mutation_lock()?;
-        let blob_path = blob_path(&store, content_sha256)?;
+        let blob_path = blob_path(&store, &descriptor.content_sha256)?;
         let extra_store_bytes = match fs::symlink_metadata(&blob_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => 0,
             Ok(_) => bytes.len() as u64,
@@ -488,7 +614,8 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         };
         let publication = (|| -> Result<()> {
             self.reconcile_quota(&staging, &store, extra_store_bytes, extra_store_bytes)?;
-            Self::publish_blob_locked(&staging, &store, content_sha256, bytes)
+            Self::publish_blob_locked(&staging, &store, &descriptor.content_sha256, bytes)?;
+            Self::commit_manifest_locked(&store, descriptor)
         })();
         if let Err(error) = publication {
             // Return unused admission after a denied/failed publication. A remaining partial
@@ -502,14 +629,12 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         self.reconcile_quota(&staging, &store, 0, 0)
     }
 
-    fn publish_descriptor_manifest(&self, descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
-        let (_operation, staging, store) = self.with_mutation_lock()?;
-        let refs = store.join("refs");
-        create_private_dir(&refs)?;
-        let path = refs.join(format!("{}.json", descriptor.artifact_ref.artifact_id));
-        let bytes = serde_json::to_vec(descriptor)?;
-        publish_noclobber(&refs, &path, &bytes)?;
-        self.reconcile_quota(&staging, &store, 0, 0)
+    fn publish_blob(&self, _content_sha256: &str, _bytes: &[u8]) -> Result<()> {
+        bail!("managed artifact publication requires the combined body and manifest port")
+    }
+
+    fn publish_descriptor_manifest(&self, _descriptor: &ToolArtifactDescriptorV1) -> Result<()> {
+        bail!("managed artifact publication requires the combined body and manifest port")
     }
 
     fn read_blob(&self, content_sha256: &str) -> Result<Vec<u8>> {
@@ -601,39 +726,10 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
 
     fn manifest_inventory(&self) -> Result<Vec<ToolArtifactManifestEntryV1>> {
         let (_operation, _staging, store) = self.with_mutation_lock()?;
-        let refs = store.join("refs");
-        let mut entries = Vec::new();
-        let directory = match fs::read_dir(&refs) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-            Err(error) => return Err(error).context("failed to read managed artifact refs"),
-        };
-        for entry in directory {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let metadata = fs::symlink_metadata(&path)?;
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.len() > 16 * 1024
-            {
-                bail!("managed artifact manifest is unsafe");
-            }
-            let descriptor: ToolArtifactDescriptorV1 =
-                serde_json::from_slice(&read_no_follow(&path)?)?;
-            entries.push(ToolArtifactManifestEntryV1 {
-                descriptor,
-                manifest_modified_at_unix_ms: modified_at(&metadata),
-            });
-        }
-        entries.sort_by(|left, right| {
-            left.descriptor
-                .artifact_ref
-                .cmp(&right.descriptor.artifact_ref)
-        });
-        Ok(entries)
+        Ok(manifest_inventory_at(&store)?
+            .into_iter()
+            .filter(|entry| entry.descriptor.session_scope_id_hash == self.session_scope_id_hash)
+            .collect())
     }
 
     fn bind_source_event(
@@ -686,7 +782,8 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         let mut retained_manifests = 0usize;
         for entry in &inventory {
             let descriptor = &entry.descriptor;
-            let protected = roots.contains(&descriptor.artifact_ref)
+            let protected = descriptor.session_scope_id_hash != self.session_scope_id_hash
+                || roots.contains(&descriptor.artifact_ref)
                 || descriptor.retention_class == sigil_kernel::ToolArtifactRetentionClass::Pinned;
             let grace_elapsed =
                 now_unix_ms.saturating_sub(entry.manifest_modified_at_unix_ms) >= orphan_grace_ms;
@@ -710,7 +807,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
         {
             bail!("managed artifact retire frontier does not match the current manifest selection");
         }
-        let tombstone_id = format!("tool-artifact-gc-{}", Uuid::new_v4().simple());
+        let tombstone_id = format!("{}{}", self.trash_prefix(), Uuid::new_v4().simple());
         if candidates.is_empty() {
             self.reconcile_quota(&staging_root, &store_root, 0, 0)?;
             return Ok(ToolArtifactGcReportV1 {
@@ -750,6 +847,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
 
         let mut tombstoned_manifests = 0usize;
         let mut tombstoned_refs = Vec::new();
+        let mut retired_hashes = std::collections::BTreeSet::new();
         let mut skipped_active_reads = 0usize;
         for entry in candidates {
             let artifact_ref = &entry.descriptor.artifact_ref;
@@ -791,6 +889,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             }
             tombstoned_manifests = tombstoned_manifests.saturating_add(1);
             tombstoned_refs.push(artifact_ref.clone());
+            retired_hashes.insert(entry.descriptor.content_sha256.clone());
         }
         sync_parent(&store_root.join("refs"))?;
         sync_parent(&trash_refs)?;
@@ -801,11 +900,14 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             .collect::<std::collections::BTreeSet<_>>();
         let mut tombstoned_blobs = 0usize;
         let mut tombstoned_orphan_blobs = 0usize;
-        let mut tombstoned_staging_files = 0usize;
         let mut tombstoned_bytes = 0_u64;
-        for (source, bytes) in
-            collect_unreferenced_blobs(&store_root, &live_hashes, now_unix_ms, orphan_grace_ms)?
-        {
+        for (source, bytes) in collect_unreferenced_blobs(
+            &store_root,
+            &live_hashes,
+            &retired_hashes,
+            now_unix_ms,
+            orphan_grace_ms,
+        )? {
             let destination = trash_blobs.join(
                 source
                     .file_name()
@@ -816,18 +918,8 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             tombstoned_orphan_blobs = tombstoned_orphan_blobs.saturating_add(1);
             tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
         }
-        for (source, bytes) in
-            collect_old_staging_files(&staging_root.join("staging"), now_unix_ms, orphan_grace_ms)?
-        {
-            let destination = trash_staging.join(
-                source
-                    .file_name()
-                    .context("managed artifact staging file has no file name")?,
-            );
-            fs::rename(&source, &destination)?;
-            tombstoned_staging_files = tombstoned_staging_files.saturating_add(1);
-            tombstoned_bytes = tombstoned_bytes.saturating_add(bytes);
-        }
+        // Staging and unreferenced blobs have no authenticated session binding. Preserve them
+        // rather than letting one facade retire another session's incomplete publication.
         sync_parent(&trash_blobs)?;
         sync_parent(&trash_staging)?;
         sync_parent(&staging_trash_root)?;
@@ -840,7 +932,7 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             tombstoned_manifests,
             tombstoned_blobs,
             tombstoned_orphan_blobs,
-            tombstoned_staging_files,
+            tombstoned_staging_files: 0,
             tombstoned_bytes,
             skipped_active_reads,
             tombstoned_refs,
@@ -865,6 +957,13 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             };
             for entry in entries {
                 let path = entry?.path();
+                if !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&self.trash_prefix()))
+                {
+                    continue;
+                }
                 let metadata = fs::symlink_metadata(&path)?;
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     bail!("managed artifact trash contains an unsafe entry");
@@ -1184,6 +1283,12 @@ fn manifest_inventory_at(store_root: &Path) -> Result<Vec<ToolArtifactManifestEn
             bail!("managed artifact manifest is unsafe");
         }
         let descriptor: ToolArtifactDescriptorV1 = serde_json::from_slice(&read_no_follow(&path)?)?;
+        descriptor.validate()?;
+        if path.file_stem().and_then(|name| name.to_str())
+            != Some(descriptor.artifact_ref.artifact_id.as_str())
+        {
+            bail!("managed artifact manifest file identity does not match its reference");
+        }
         entries.push(ToolArtifactManifestEntryV1 {
             descriptor,
             manifest_modified_at_unix_ms: modified_at(&metadata),
@@ -1200,57 +1305,32 @@ fn manifest_inventory_at(store_root: &Path) -> Result<Vec<ToolArtifactManifestEn
 fn collect_unreferenced_blobs(
     store_root: &Path,
     live_hashes: &std::collections::BTreeSet<String>,
+    retired_hashes: &std::collections::BTreeSet<String>,
     now_unix_ms: u64,
     grace_ms: u64,
 ) -> Result<Vec<(PathBuf, u64)>> {
-    let blobs = store_root.join("blobs");
     let mut candidates = Vec::new();
-    let directories = match fs::read_dir(&blobs) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
-        Err(error) => return Err(error.into()),
-    };
-    for directory in directories {
-        let directory = directory?.path();
-        let metadata = fs::symlink_metadata(&directory)?;
+    for hash in retired_hashes {
+        if live_hashes.contains(hash) {
+            continue;
+        }
+        let path = blob_path(store_root, hash)?;
+        let prefix = path
+            .parent()
+            .context("managed artifact blob has no prefix")?;
+        let metadata = fs::symlink_metadata(prefix)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             bail!("managed artifact blob prefix is unsafe");
         }
-        for entry in fs::read_dir(&directory)? {
-            let path = entry?.path();
-            let metadata = fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("managed artifact blob is unsafe");
-            }
-            let bytes = read_no_follow(&path)?;
-            let hash = hash_bytes(&bytes);
-            if !live_hashes.contains(&hash)
-                && now_unix_ms.saturating_sub(modified_at(&metadata)) >= grace_ms
-            {
-                candidates.push((path, metadata.len()));
-            }
-        }
-    }
-    Ok(candidates)
-}
-
-fn collect_old_staging_files(
-    staging_root: &Path,
-    now_unix_ms: u64,
-    grace_ms: u64,
-) -> Result<Vec<(PathBuf, u64)>> {
-    let entries = match fs::read_dir(staging_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        let metadata = fs::symlink_metadata(&path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("managed artifact staging entry is unsafe");
+            bail!("managed artifact blob is unsafe");
         }
+        read_blob_at(store_root, hash)?;
         if now_unix_ms.saturating_sub(modified_at(&metadata)) >= grace_ms {
             candidates.push((path, metadata.len()));
         }

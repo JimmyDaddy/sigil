@@ -746,8 +746,13 @@ fn managed_artifact_publish_quota_denial_returns_unused_staging_admission() {
         .expect("lease");
     let bytes = b"12345";
     let error = lease
-        .backend
-        .publish_blob(&hash_bytes(bytes), bytes)
+        .store()
+        .capture_text(
+            "denied",
+            "read_file",
+            std::str::from_utf8(bytes).expect("fixture text"),
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )
         .expect_err("store quota denial");
     assert!(matches!(
         error.downcast_ref::<crate::managed_storage_writer::ManagedStorageWriterErrorV1>(),
@@ -1063,5 +1068,367 @@ fn held_artifact_gc_preserves_managed_session_file_stem_namespace_binding() -> R
     )?;
     assert_eq!(report.retained_manifests, 1);
     assert_eq!(store.resolve(&descriptor.artifact_ref)?, descriptor);
+    Ok(())
+}
+
+fn shared_artifact_session(root: &Path, name: &str) -> Result<sigil_kernel::Session> {
+    let mut session = sigil_kernel::Session::load_from_store(
+        "fixture",
+        "fixture-model",
+        sigil_kernel::JsonlSessionStore::new(root.join(name).join("records.jsonl"))?,
+    )?;
+    session.append_user_message(sigil_kernel::ModelMessage::user(name))?;
+    Ok(session)
+}
+
+#[test]
+fn shared_artifact_owner_keeps_peer_scopes_live_until_the_last_release() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let writer = writer(root.path());
+    let first = shared_artifact_session(root.path(), "first")?;
+    let second = shared_artifact_session(root.path(), "second")?;
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "records",
+        first.session_scope_id(),
+        first.store_path().context("first source")?.to_path_buf(),
+    )?;
+    let first_store = lease.store();
+    let first_output = first_store.capture_text(
+        "first-call",
+        "read_file",
+        "first output",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let peer = lease.rebind_session(&writer, "records", &second)?;
+    assert!(Arc::ptr_eq(&lease.owner, &peer.owner));
+    let second_store = peer.store();
+    let second_output = second_store.capture_text(
+        "second-call",
+        "read_file",
+        "second output",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert!(first_store.resolve(&second_output.artifact_ref).is_err());
+    assert!(second_store.resolve(&first_output.artifact_ref).is_err());
+    assert!(
+        writer
+            .acquire_named(StorageWriterChannelV1::ArtifactStaging, "records")
+            .is_err()
+    );
+    drop(peer);
+    assert_eq!(first_store.read_all(&first_output)?, b"first output");
+    let peer = lease.rebind_session(&writer, "records", &second)?;
+    assert!(
+        lease.finalize().is_err(),
+        "one facade cannot finalize its peer's live namespace"
+    );
+    assert_eq!(peer.store().read_all(&second_output)?, b"second output");
+    drop(peer);
+    assert!(
+        second_store
+            .capture_text(
+                "closed",
+                "read_file",
+                "closed",
+                sigil_kernel::ToolArtifactSensitivity::Ordinary
+            )
+            .is_err()
+    );
+    let reopened = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        writer,
+        "records",
+        second.session_scope_id(),
+        second.store_path().context("second source")?.to_path_buf(),
+    )?;
+    assert_eq!(reopened.store().read_all(&second_output)?, b"second output");
+    Ok(())
+}
+
+#[test]
+fn shared_artifact_owner_rejects_foreign_writer_key_and_closed_pair() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let other = tempfile::tempdir()?;
+    let writer = writer(root.path());
+    let first = shared_artifact_session(root.path(), "first")?;
+    let second = shared_artifact_session(root.path(), "second")?;
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "records",
+        first.session_scope_id(),
+        first.store_path().context("first source")?.to_path_buf(),
+    )?;
+    assert!(
+        lease
+            .rebind_session(&self::writer(other.path()), "records", &second)
+            .is_err()
+    );
+    assert!(lease.rebind_session(&writer, "other-key", &second).is_err());
+    assert_eq!(Arc::strong_count(&lease.owner), 1);
+    lease.backend.physical.finalize()?;
+    assert!(lease.rebind_session(&writer, "records", &second).is_err());
+    Ok(())
+}
+
+#[test]
+fn shared_artifact_gc_preserves_foreign_scopes_unknown_payloads_and_trash() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let writer = writer(root.path());
+    let first = shared_artifact_session(root.path(), "first")?;
+    let second = shared_artifact_session(root.path(), "second")?;
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "records",
+        first.session_scope_id(),
+        first.store_path().context("first source")?.to_path_buf(),
+    )?;
+    let peer = lease.rebind_session(&writer, "records", &second)?;
+    let first_store = lease.store();
+    let second_store = peer.store();
+    let own = first_store.capture_text(
+        "own",
+        "read_file",
+        "shared payload",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let unique = first_store.capture_text(
+        "own-unique",
+        "read_file",
+        "unique payload",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let foreign = second_store.capture_text(
+        "foreign",
+        "read_file",
+        "shared payload",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert_eq!(first_store.manifest_inventory()?.len(), 2);
+    assert_eq!(second_store.manifest_inventory()?.len(), 1);
+    let unknown_hash = hash_bytes(b"unknown publication");
+    {
+        let (_operation, staging, store) = lease.backend.with_mutation_lock()?;
+        ManagedArtifactStoreBackendV1::publish_blob_locked(
+            &staging,
+            &store,
+            &unknown_hash,
+            b"unknown publication",
+        )?;
+    }
+    let (staging, store) = lease.backend.live_roots()?;
+    let unknown_staging = staging.join("staging/unknown.part");
+    fs::write(&unknown_staging, b"unknown in-flight publication")?;
+    let unknown_trash = store.join("trash/tool-artifact-gc-unknown");
+    fs::create_dir_all(&unknown_trash)?;
+    fs::write(unknown_trash.join("retained.bin"), b"unattributed trash")?;
+    let refs = vec![own.artifact_ref.clone(), unique.artifact_ref.clone()];
+    let report = first_store.garbage_collect_with_retire_frontier(
+        &ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+        sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+        ToolArtifactRetireFrontierV1 {
+            selected_refs_hash: artifact_refs_hash(&refs),
+            selected_count: 2,
+            selected_bytes: own.persisted_bytes + unique.persisted_bytes,
+            eligibility_frontier: 1,
+            policy_hash: canonical_sha256(b"shared-scope-gc"),
+        },
+    )?;
+    assert_eq!(report.tombstoned_manifests, 2);
+    assert_eq!(report.tombstoned_blobs, 1);
+    assert_eq!(report.tombstoned_staging_files, 0);
+    assert_eq!(second_store.resolve(&foreign.artifact_ref)?, foreign);
+    assert_eq!(second_store.read_all(&foreign)?, b"shared payload");
+    assert!(unknown_staging.is_file());
+    assert!(blob_path(&store, &unknown_hash)?.is_file());
+    assert_eq!(
+        second_store
+            .prune_garbage_trash(
+                u64::MAX,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS
+            )?
+            .removed_tombstones,
+        0
+    );
+    assert!(store.join("trash").join(&report.tombstone_id).is_dir());
+    assert_eq!(
+        first_store
+            .prune_garbage_trash(
+                u64::MAX,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS
+            )?
+            .removed_tombstones,
+        1
+    );
+    assert!(unknown_trash.is_dir());
+    for (name, bytes) in [
+        ("wrong-reference.json", serde_json::to_vec(&foreign)?),
+        ("unknown.json", b"invalid manifest".to_vec()),
+    ] {
+        let unknown_manifest = store.join("refs").join(name);
+        fs::write(&unknown_manifest, bytes)?;
+        assert!(first_store.manifest_inventory().is_err());
+        assert!(
+            first_store
+                .garbage_collect_with_retire_frontier(
+                    &ToolArtifactGcRootsV1::default(),
+                    u64::MAX,
+                    sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+                    ToolArtifactRetireFrontierV1 {
+                        selected_refs_hash: artifact_refs_hash(&[]),
+                        selected_count: 0,
+                        selected_bytes: 0,
+                        eligibility_frontier: 2,
+                        policy_hash: canonical_sha256(b"unknown-manifest-gc"),
+                    },
+                )
+                .is_err()
+        );
+        assert!(unknown_manifest.is_file());
+        assert!(unknown_staging.is_file());
+        assert!(blob_path(&store, &unknown_hash)?.is_file());
+        assert_eq!(second_store.read_all(&foreign)?, b"shared payload");
+        fs::remove_file(unknown_manifest)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn atomic_artifact_publication_serializes_the_body_manifest_window_with_peer_gc() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let writer = writer(root.path());
+    let first = shared_artifact_session(root.path(), "first")?;
+    let second = shared_artifact_session(root.path(), "second")?;
+    let lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&writer),
+        "records",
+        first.session_scope_id(),
+        first.store_path().context("first source")?.to_path_buf(),
+    )?;
+    let peer = lease.rebind_session(&writer, "records", &second)?;
+    let first_store = lease.store();
+    let old = first_store.capture_text(
+        "old",
+        "read_file",
+        "shared old body",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let mut target = old.clone();
+    target.artifact_ref = serde_json::from_value(serde_json::json!({
+        "artifact_id": "ta1_11111111111111111111111111111111"
+    }))?;
+    target.session_scope_id_hash = peer.backend.session_scope_id_hash.clone();
+    target.tool_call_id = "target".to_owned();
+    let roots = ToolArtifactGcRootsV1::default();
+    let frontier = ToolArtifactRetireFrontierV1 {
+        selected_refs_hash: artifact_refs_hash(std::slice::from_ref(&old.artifact_ref)),
+        selected_count: 1,
+        selected_bytes: old.persisted_bytes,
+        eligibility_frontier: 1,
+        policy_hash: canonical_sha256(b"atomic-publication-gc"),
+    };
+    std::thread::scope(|scope| -> Result<()> {
+        // Exercise the same two physical steps as publish_artifact while retaining its actual
+        // namespace mutex. GC is deliberately started between body deduplication and commit.
+        let (operation, staging, store) = peer.backend.with_mutation_lock()?;
+        ManagedArtifactStoreBackendV1::publish_blob_locked(
+            &staging,
+            &store,
+            &target.content_sha256,
+            b"shared old body",
+        )?;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let gc = scope.spawn(move || {
+            let _ = started_tx.send(());
+            let outcome = first_store.garbage_collect_with_retire_frontier(
+                &roots,
+                u64::MAX,
+                sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+                frontier,
+            );
+            let _ = done_tx.send(outcome);
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+        let blocked = matches!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        ManagedArtifactStoreBackendV1::commit_manifest_locked(&store, &target)?;
+        peer.backend.reconcile_quota(&staging, &store, 0, 0)?;
+        drop(operation);
+        let report = done_rx.recv_timeout(std::time::Duration::from_secs(10))??;
+        gc.join()
+            .map_err(|_| anyhow::anyhow!("GC fixture thread panicked"))?;
+        assert!(blocked);
+        assert_eq!(report.tombstoned_manifests, 1);
+        assert_eq!(report.tombstoned_blobs, 0);
+        Ok(())
+    })?;
+    assert_eq!(peer.store().read_all(&target)?, b"shared old body");
+    let mut another = target.clone();
+    another.artifact_ref = serde_json::from_value(serde_json::json!({
+        "artifact_id": "ta1_22222222222222222222222222222222"
+    }))?;
+    peer.backend
+        .publish_artifact(&another, b"shared old body")?;
+    peer.backend.publish_artifact(&target, b"shared old body")?;
+    // Replaying a descriptor whose prior manifest was retired is another complete publication,
+    // never an acknowledgement that could consume a different publication's pending pin.
+    lease.backend.publish_artifact(&old, b"shared old body")?;
+    assert_eq!(peer.store().read_all(&target)?, b"shared old body");
+    assert_eq!(peer.store().read_all(&another)?, b"shared old body");
+    assert!(
+        peer.backend
+            .publish_blob(&target.content_sha256, b"shared old body")
+            .is_err()
+    );
+    assert!(peer.backend.publish_descriptor_manifest(&target).is_err());
+    Ok(())
+}
+
+#[test]
+fn atomic_artifact_publication_rejects_body_drift_and_manifest_collision() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let writer = writer(root.path());
+    let lease = ManagedArtifactStoreLeaseV1::acquire(writer, "atomic-failure", "atomic-scope")?;
+    let original = lease.store().capture_text(
+        "original",
+        "read_file",
+        "original body",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let mut collision = original.clone();
+    let body = b"uncommitted body";
+    collision.content_sha256 = hash_bytes(body);
+    collision.observed_bytes = body.len() as u64;
+    collision.policy_projected_bytes = body.len() as u64;
+    collision.persisted_bytes = body.len() as u64;
+    assert!(lease.backend.publish_artifact(&collision, body).is_err());
+    assert_eq!(lease.store().resolve(&original.artifact_ref)?, original);
+    assert_eq!(lease.store().read_all(&original)?, b"original body");
+    let (_, store) = lease.backend.live_roots()?;
+    assert!(
+        blob_path(&store, &collision.content_sha256)?.is_file(),
+        "failed publication is retained as an unbound body, never Published"
+    );
+    collision.artifact_ref = serde_json::from_value(serde_json::json!({
+        "artifact_id": "ta1_33333333333333333333333333333333"
+    }))?;
+    assert!(
+        lease
+            .backend
+            .publish_artifact(&collision, b"wrong bytes")
+            .is_err()
+    );
+    assert!(
+        !store
+            .join("refs")
+            .join(format!("{}.json", collision.artifact_ref.artifact_id))
+            .exists()
+    );
+    fs::remove_file(blob_path(&store, &collision.content_sha256)?)?;
+    assert!(ManagedArtifactStoreBackendV1::commit_manifest_locked(&store, &collision).is_err());
+    assert_eq!(lease.store().manifest_inventory()?.len(), 1);
     Ok(())
 }

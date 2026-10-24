@@ -666,6 +666,8 @@ current safe non-empty result 投影为零。同一 oversized batch 先为每个
 deterministic minimum preview，再按 tool-call declaration order 分配剩余 bytes。新 writer 只生成 V3
 descriptor；V2 仅作为旧格式拒绝/诊断 fixture 保留。
 
+artifact capture 与 fork 通过 provider-neutral `ToolArtifactStoreBackendV1::publish_artifact(descriptor, bytes)` 一次发布完整正文和 descriptor。并发清理的 backend 必须将该提交与回收串行化；默认组合实现仅兼容已经在外部协调发布/清理的 backend。managed runtime 在同一已准入物理 namespace 的 operation mutex 内执行 quota、body 写入或去重、hash/长度复验与 durable manifest commit，旧拆分入口拒绝调用，未提交成功不得报告 Published。TUI 同 namespace 的会话切换共享物理 lease owner，但保留逐 session 的 facade 和 GC scope；最后一个 owner 才结算，失败目标预备不释放原会话。它不改变 Resource Authority 的一次性准入或持久会话格式，具体边界见[TUI 工具输出维护](tui-artifact-maintenance.md)。
+
 持久化边界执行统一的 `SafePersist` 投影：user message、running-input queue、plan/task、agent mailbox/result、tool/provider stream 与 external URL 在首次写 session/control/history 前先做 secret/query/signed-carrier redaction、大小/行数限制和安全摘要。Exact prompt 只在当前进程内交给 provider、`Up/Down` history 或 queue dispatch；durable entry 不保存可反推 verifier，恢复后对 exact-only continuation fail closed 为 stale/interrupted。Query-bearing 或 signed URL 只由 session-local `WebUrlCapabilityStore` 持有，并同时绑定 session id、TTL、LRU 与 restart policy，durable projection 只保存不可反推的安全标识。
 
 外部数据使用 provider-neutral `ExternalSourceRecord` 与 `CitationSupport`：source content 始终带 `ExternalUntrusted`，manual/automatic compaction 与 recovery 不得提升信任；provider/MCP 原始 source id 在进入 session 前改写为 session-local id。Source evidence 与 claim citation 分离，只有存在真实 UTF-8 byte range 时才生成 citation，并绑定最终 safe assistant text digest，避免把未验证来源或 raw carrier 变成 durable 权威事实。
