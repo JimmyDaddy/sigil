@@ -34,6 +34,285 @@ async fn approval_fixture_source_bytes(path: &Path) -> Result<Vec<u8>> {
     .await?
 }
 
+fn approval_fixture_control_records(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut records = BTreeMap::new();
+    for entry in entries {
+        let path = entry?.path().join("records.jsonl");
+        if path.is_file() {
+            let bytes = std::fs::read(&path)?;
+            records.insert(path, bytes);
+        }
+    }
+    Ok(records)
+}
+
+async fn approval_fixture_application_request(
+    address: std::net::SocketAddr,
+    session_id: &str,
+    request: crate::application_bridge::HttpApplicationCommandRequest,
+) -> Result<(u16, serde_json::Value)> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let body = serde_json::to_vec(&request)?;
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        stream.write_all(format!(
+            "POST /sessions/{session_id}/application/commands HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer composition-approval-test\r\nx-sigil-application-client-id: composition-client\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        ).as_bytes()).await?;
+        stream.write_all(&body).await?;
+        let mut response = Vec::new();
+        stream.take(1024 * 1024).read_to_end(&mut response).await?;
+        let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+            .context("complete application response headers")?;
+        let head = std::str::from_utf8(&response[..split])?;
+        let status = head.split_whitespace().nth(1).context("application status")?.parse()?;
+        Ok((status, serde_json::from_slice(&response[split + 4..])?))
+    }).await.context("bounded application HTTP request")?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_preflight_rejects_all_command_seams_before_reservation()
+-> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let driver = production_queue_driver(&fixture, "composition-command-preflight");
+    let adapter_path = fixture.path().join("commands-composition-preflight.json");
+    let registry =
+        driver.build_registry(Arc::new(HttpDurableCommandStore::open(&adapter_path, 32)?))?;
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let generation = registry.conversation_queue(&session.id)?.generation;
+    let baseline = registry.command_conversation_queue(
+        &session.id,
+        HttpCommandEnvelope::new(
+            "pause-before-composition-change",
+            "composition-client",
+            &session.id,
+            crate::HttpConversationQueueCommandRequest {
+                expected_generation: generation,
+                action: crate::HttpConversationQueueCommandAction::Pause,
+            },
+        ),
+    )?;
+    assert!(baseline.queue.paused, "normal command must still settle");
+    let server = crate::HttpLocalServer::bind(
+        crate::HttpServerConfig::default(),
+        Some("composition-approval-test"),
+        Arc::clone(&registry),
+    )
+    .await?;
+    let address = server.local_addr()?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let (status, response) = approval_fixture_application_request(
+        address,
+        &session.id,
+        crate::application_bridge::HttpApplicationCommandRequest {
+            command_journal: None,
+            command_id: "generic-resume-before-composition-change".to_owned(),
+            command: ApplicationCommand::Conversation(ConversationCommand::Queue {
+                expected_generation: SafeText::new(baseline.generation.0)?,
+                action: ApplicationQueueAction::Resume,
+            }),
+        },
+    )
+    .await?;
+    assert_eq!(
+        status, 200,
+        "normal generic command must still settle: {response}"
+    );
+    assert!(matches!(
+        serde_json::from_value::<ApplicationCommandReceipt>(response)?,
+        ApplicationCommandReceipt::Settled(_)
+    ));
+    let queue_before = registry.conversation_queue(&session.id)?;
+    assert!(!queue_before.paused);
+    let (status, response) = approval_fixture_application_request(
+        address,
+        &session.id,
+        crate::application_bridge::HttpApplicationCommandRequest {
+            command_journal: None,
+            command_id: String::new(),
+            command: ApplicationCommand::Conversation(ConversationCommand::Queue {
+                expected_generation: SafeText::new(queue_before.generation.0.clone())?,
+                action: ApplicationQueueAction::Pause,
+            }),
+        },
+    )
+    .await?;
+    assert_eq!(
+        status, 400,
+        "application validation keeps its existing wire status: {response}"
+    );
+    assert_eq!(response["error"]["code"], "application_error");
+    let client = registry.application_client(&session.id, "retained-composition-client")?;
+    let retained = tokio::task::spawn_blocking(move || {
+        client.refresh()?;
+        let journal = client.command_journal_binding()?;
+        anyhow::Ok((client, journal))
+    })
+    .await??;
+    let config_path = fixture.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n[composition]\nprofile = 'core'\n",
+            std::fs::read_to_string(&config_path)?,
+        ),
+    )?;
+    let source_before = std::fs::read(&session.session_log_path)?;
+    let adapter_before = adapter_path
+        .exists()
+        .then(|| std::fs::read(&adapter_path))
+        .transpose()?;
+    let control_root = driver
+        .services
+        .authority_composition()
+        .context("authority")?
+        .storage_writer
+        .managed_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog,
+        )?;
+    let control_before = approval_fixture_control_records(&control_root)?;
+    let assert_rejected = |error: HttpRegistryError| {
+        let HttpRegistryError::SessionRunRecoveryRequired { recovery } = error else {
+            panic!("expected typed pre-reservation recovery, got {error:?}");
+        };
+        assert_eq!(
+            recovery.code,
+            crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged
+        );
+        assert!(!recovery.retryable);
+        assert_eq!(
+            recovery.allowed_actions,
+            vec![
+                crate::HttpSessionRouteRecoveryAction::StartNewSession,
+                crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+            ]
+        );
+    };
+    let generation = queue_before.generation.clone();
+    let retained_error = tokio::task::spawn_blocking(move || {
+        retained.0.execute_in_journal(
+            "retained-client-after-composition-change",
+            Some(retained.1),
+            ApplicationCommand::Conversation(ConversationCommand::Queue {
+                expected_generation: SafeText::new(generation.0).expect("actual queue generation"),
+                action: ApplicationQueueAction::Resume,
+            }),
+        )
+    })
+    .await?
+    .expect_err("retained client must read fresh composition before refresh or reservation");
+    assert_rejected(retained_error.into_registry());
+    let (status, response) = approval_fixture_application_request(
+        address,
+        &session.id,
+        crate::application_bridge::HttpApplicationCommandRequest {
+            command_journal: None,
+            command_id: "generic-pause-after-composition-change".to_owned(),
+            command: ApplicationCommand::Conversation(ConversationCommand::Queue {
+                expected_generation: SafeText::new(queue_before.generation.0.clone())?,
+                action: ApplicationQueueAction::Pause,
+            }),
+        },
+    )
+    .await?;
+    assert_eq!(
+        status, 409,
+        "generic command must reject before reserve: {response}"
+    );
+    assert_eq!(response["error"]["code"], "session_composition_changed");
+    assert_eq!(response["error"]["route_recovery"]["retryable"], false);
+    assert_rejected(
+        registry
+            .command_conversation_queue(
+                &session.id,
+                HttpCommandEnvelope::new(
+                    "resume-after-composition-change",
+                    "composition-client",
+                    &session.id,
+                    crate::HttpConversationQueueCommandRequest {
+                        expected_generation: queue_before.generation.clone(),
+                        action: crate::HttpConversationQueueCommandAction::Resume,
+                    },
+                ),
+            )
+            .expect_err("dedicated queue must use common preflight"),
+    );
+    assert_rejected(
+        registry
+            .command_conversation_recovery(
+                &session.id,
+                HttpCommandEnvelope::new(
+                    "compact-after-composition-change",
+                    "composition-client",
+                    &session.id,
+                    crate::HttpConversationRecoveryCommandAction::PrepareCompaction {
+                        preview_id: "retained-preview".to_owned(),
+                    },
+                ),
+            )
+            .expect_err("dedicated recovery must use common preflight"),
+    );
+    assert_rejected(
+        registry
+            .rerun_verification_command(
+                &session.id,
+                HttpCommandEnvelope::new(
+                    "verification-after-composition-change",
+                    "composition-client",
+                    &session.id,
+                    sigil_kernel::TaskVerificationRerunRequest::new(
+                        TaskId::new("composition-verification-task")?,
+                        1,
+                        TaskStepId::new("composition-verification-step")?,
+                        "test-check".to_owned(),
+                        "check-hash".to_owned(),
+                        "policy-hash".to_owned(),
+                        Some("snapshot-1".to_owned()),
+                    ),
+                ),
+            )
+            .expect_err("legacy verification must reject before its adapter reservation"),
+    );
+    assert_eq!(std::fs::read(&session.session_log_path)?, source_before);
+    assert_eq!(
+        approval_fixture_control_records(&control_root)?,
+        control_before,
+        "known composition rejection must not reserve or dispatch shared control records"
+    );
+    assert_eq!(
+        adapter_path
+            .exists()
+            .then(|| std::fs::read(&adapter_path))
+            .transpose()?,
+        adapter_before,
+        "legacy command admission must not leave failed adapter records"
+    );
+    assert_eq!(registry.conversation_queue(&session.id)?, queue_before);
+    assert!(registry.get_session(&session.id)?.run_ids.is_empty());
+    assert!(
+        registry
+            .session_continuity(&session.id)?
+            .foreground_owner
+            .is_none()
+    );
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .context("composition command fixture shutdown")???;
+    Ok(())
+}
+
 fn approval_fixture_run_diagnostics(
     driver: &HttpProductionRunDriver,
     session: &HttpSessionSnapshot,
@@ -440,6 +719,16 @@ async fn production_manual_write_approval_cancel_seals_stream_and_releases_foreg
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_manual_write_approval_switch_reuses_live_lease_and_allows_followup()
 -> Result<()> {
+    manual_write_approval_switch(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_manual_approval_composition_change_rejects_without_consuming_or_saving_rule()
+-> Result<()> {
+    manual_write_approval_switch(true).await
+}
+
+async fn manual_write_approval_switch(composition_changed: bool) -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let config_path = fixture.path().join("sigil.toml");
     write_production_test_config(&config_path, ".");
@@ -548,6 +837,206 @@ async fn production_manual_write_approval_switch_reuses_live_lease_and_allows_fo
     let original_generation = original_lease.generation().to_owned();
     let original_weak = Arc::downgrade(&original_lease);
     drop(original_lease);
+    if composition_changed {
+        std::fs::write(
+            &config_path,
+            format!(
+                "{}\n[composition]\nprofile = 'core'\nenhancements = ['task_orchestration']\n",
+                std::fs::read_to_string(&config_path)?,
+            ),
+        )?;
+        let config_before = std::fs::read(&config_path)?;
+        let source_before =
+            approval_fixture_source_bytes(Path::new(&first.session_log_path)).await?;
+        let entry = driver
+            .options
+            .session_lifecycle
+            .as_ref()
+            .context("catalog")?
+            .catalog()?
+            .entries
+            .into_iter()
+            .find(|entry| {
+                entry.session_id.as_deref() == Some(first.durable_session_scope_id.as_str())
+            })
+            .context("original catalog identity")?;
+        let reopened = registry.open_session(HttpSessionOpenRequest {
+            session_ref: entry.session_ref.as_path().to_string_lossy().into_owned(),
+            session_id: first.durable_session_scope_id.clone(),
+            label: None,
+            recovery_binding: None,
+        })?;
+        assert_eq!(reopened.id, first.id);
+        assert_eq!(
+            reopened.route_recovery.as_ref().map(|view| view.code),
+            Some(crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged)
+        );
+        assert_eq!(
+            registry
+                .session_continuity(&first.id)?
+                .foreground_owner
+                .context("original owner remains active")?
+                .run_id,
+            run.id
+        );
+        let decision = crate::HttpApprovalDecisionRequest {
+            approval_request_id: approval.approval_request_id.clone(),
+            tool_call_hash: approval.tool_call_hash.clone(),
+            policy_version: approval.policy_version.clone(),
+            expires_at_ms: approval.expires_at_ms,
+            decision: crate::HttpApprovalDecision::ApproveForFamily,
+            family_pattern: Some("printf *".to_owned()),
+            reason: None,
+        };
+        let control_root = driver.services.authority_composition().context("authority")?
+            .storage_writer.managed_leaf_path(
+                sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog,
+            )?;
+        let control_before = approval_fixture_control_records(&control_root)?;
+        let server = crate::HttpLocalServer::bind(
+            crate::HttpServerConfig::default(),
+            Some("composition-approval-test"),
+            Arc::clone(&registry),
+        )
+        .await?;
+        let address = server.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(async move {
+            server
+                .serve_until_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        let (status, response) = approval_fixture_application_request(
+            address,
+            &first.id,
+            crate::application_bridge::HttpApplicationCommandRequest {
+                command_journal: None,
+                command_id: "generic-changed-composition-approval".to_owned(),
+                command: ApplicationCommand::Approval(
+                    sigil_application::ApprovalCommand::Resolve {
+                        binding: format!(
+                            "{}:{}:{}",
+                            run.id, approval.call_id, approval.approval_request_id
+                        ),
+                        accepted: true,
+                        resolution: Some(Box::new(
+                            crate::application_bridge::application_approval_resolution(&decision)?,
+                        )),
+                    },
+                ),
+            },
+        )
+        .await?;
+        assert_eq!(
+            status, 409,
+            "generic approval must be rejected before reservation: {response}"
+        );
+        assert_eq!(response["error"]["code"], "session_composition_changed");
+        assert_eq!(response["error"]["route_recovery"]["retryable"], false);
+        assert_eq!(
+            approval_fixture_control_records(&control_root)?,
+            control_before,
+            "generic approval must not create or append a shared control-log reservation/effect"
+        );
+        let command = registry.submit_approval_command(
+            &run.id,
+            &approval.call_id,
+            HttpCommandEnvelope::new(
+                "changed-composition-approval",
+                "approval-client",
+                &first.id,
+                decision.clone(),
+            ),
+        );
+        assert!(
+            matches!(command, Err(HttpRegistryError::SessionRunRecoveryRequired { recovery })
+            if recovery.code == crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged
+                && !recovery.retryable)
+        );
+        let application_route = registry.submit_approval_decision_from_application(
+            &run.id,
+            &approval.call_id,
+            decision,
+            None,
+        );
+        assert!(
+            matches!(application_route, Err(HttpRegistryError::SessionRunRecoveryRequired { recovery })
+            if recovery.code == crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged)
+        );
+        assert!(
+            driver
+                .submit_approval(HttpRunDriverApproval {
+                    session_id: first.id.clone(),
+                    run_id: run.id.clone(),
+                    call_id: approval.call_id.clone(),
+                    approval_request_id: approval.approval_request_id.clone(),
+                    decision: crate::HttpApprovalDecisionRecord {
+                        run_id: run.id.clone(),
+                        call_id: approval.call_id.clone(),
+                        decision: sigil_kernel::ToolApprovalUserDecision::Approved,
+                        family_pattern: None,
+                        reason: None,
+                    },
+                })
+                .is_err()
+        );
+        assert_eq!(registry.get_run(&run.id)?.pending_approvals, vec![approval]);
+        assert_eq!(
+            std::fs::read(&config_path)?,
+            config_before,
+            "composition rejection must precede durable command-family rule publication"
+        );
+        assert_eq!(
+            approval_fixture_source_bytes(Path::new(&first.session_log_path)).await?,
+            source_before,
+            "rejected approval must not append or consume the old session decision"
+        );
+        assert_eq!(
+            original_weak
+                .upgrade()
+                .context("live original lease")?
+                .generation(),
+            original_generation
+        );
+        assert!(!fixture.path().join("approved-after-switch.txt").exists());
+        let (status, response) = approval_fixture_application_request(
+            address,
+            &first.id,
+            crate::application_bridge::HttpApplicationCommandRequest {
+                command_journal: None,
+                command_id: "generic-safe-cancel-changed-composition".to_owned(),
+                command: ApplicationCommand::Run(sigil_application::RunCommand::Cancel {
+                    binding: run.id.clone(),
+                    reason: None,
+                }),
+            },
+        )
+        .await?;
+        assert_eq!(
+            status, 200,
+            "exact safety cancel must remain available: {response}"
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if registry.get_run(&run.id)?.status.is_terminal()
+                    && driver.active_run_count()? == 0
+                {
+                    break anyhow::Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("changed composition must not disable safe cancellation")??;
+        assert!(!fixture.path().join("approved-after-switch.txt").exists());
+        let _ = stop_provider.send(());
+        tokio::time::timeout(Duration::from_secs(5), provider).await??;
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), serving).await???;
+        return Ok(());
+    }
     let second = registry.create_session(HttpSessionCreateRequest::default())?;
     assert_ne!(second.id, first.id);
     assert!(

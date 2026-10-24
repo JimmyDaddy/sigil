@@ -77,6 +77,7 @@ impl ConfigDraft {
             appearance_info_rail: root_config.appearance.info_rail,
             appearance_color_group_index: first_appearance_color_group_index(root_config),
             appearance_color_token_index: first_appearance_color_token_index(root_config),
+            mcp_import_composition: None,
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -149,6 +150,9 @@ impl ConfigDraft {
             })?;
 
         let mut root_config = self.base_root_config.clone();
+        if let Some(composition) = &self.mcp_import_composition {
+            root_config.composition = composition.clone();
+        }
         root_config.permission.mode = self.permission_mode;
         root_config.web.enabled = self.web_enabled;
         root_config.web.network_mode = self.web_network_mode;
@@ -221,6 +225,51 @@ impl ConfigDraft {
         };
         set_model_request_config_fields(&mut root_config, &model_request_fields)?;
         Ok(root_config)
+    }
+
+    pub(crate) fn import_mcp_configurations(
+        &mut self,
+        preview: &sigil_runtime::mcp_import::McpConfigurationImport,
+        selected_indices: &[usize],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !selected_indices.is_empty(),
+            "select at least one MCP server"
+        );
+        let enabled = sigil_runtime::mcp_import::mcp_enabled_configuration(&self.base_root_config)?;
+        let dormant = if self.mcp_import_composition.is_none()
+            && !self
+                .base_root_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Mcp)
+        {
+            enabled.mcp_servers
+        } else {
+            Vec::new()
+        };
+        // Keep incomplete draft fields untouched. Only exact names participate in import
+        // conflicts; the established settings save validates all editable fields afterwards.
+        let mut existing = dormant.clone();
+        for draft in &self.mcp_servers {
+            let mut server = draft.base_config.clone();
+            server.name = draft.name.trim().to_owned();
+            anyhow::ensure!(
+                !existing.iter().any(|entry| entry.name == server.name),
+                "MCP import conflicts with an existing server draft; rename or remove that entry explicitly"
+            );
+            existing.push(server);
+        }
+        let merged = preview.selected_configurations(selected_indices, &existing)?;
+        self.mcp_import_composition = Some(enabled.composition);
+        self.mcp_servers
+            .splice(0..0, dormant.iter().map(McpServerDraft::from_config));
+        self.mcp_servers.extend(
+            merged
+                .iter()
+                .skip(existing.len())
+                .map(McpServerDraft::from_config),
+        );
+        Ok(())
     }
 
     pub(super) fn parse_provider_context_window_tokens(&self) -> Result<Option<u32>> {

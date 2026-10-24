@@ -1536,6 +1536,50 @@ fn release_owned_revision_run(
 }
 
 impl HttpProductionRunDriver {
+    fn admit_session_composition(
+        &self,
+        durable_session_scope_id: &str,
+        session_log_path: &Path,
+    ) -> Result<(), HttpRunAdmissionError> {
+        if let Some(recovery) =
+            sigil_runtime::application_run::application_session_composition_recovery_view(
+                &self.options.config_path,
+                session_log_path,
+                durable_session_scope_id,
+            )
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?
+        {
+            return Err(HttpRunAdmissionError::RouteRecovery(http_route_recovery(
+                recovery,
+            )));
+        }
+        Ok(())
+    }
+
+    fn admit_plan_save_composition(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<(), HttpRunAdmissionError> {
+        let boot = self
+            .services
+            .cutover()
+            .ok_or(HttpRunAdmissionError::Unavailable)?;
+        if let Some(recovery) =
+            sigil_runtime::application_run::application_session_plan_save_recovery_view(
+                &self.options.config_path,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &boot.manifest().composition.selection_only(),
+            )
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?
+        {
+            return Err(HttpRunAdmissionError::RouteRecovery(http_route_recovery(
+                recovery,
+            )));
+        }
+        Ok(())
+    }
+
     fn acquire_exact_session_attachment(
         &self,
         durable_session_scope_id: &str,
@@ -1546,14 +1590,26 @@ impl HttpProductionRunDriver {
     > {
         let canonical_session_path = canonical_http_session_path(session_log_path)
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        self.admit_session_composition(durable_session_scope_id, &canonical_session_path)?;
+        self.acquire_admitted_session_attachment(durable_session_scope_id, &canonical_session_path)
+    }
+
+    fn acquire_admitted_session_attachment(
+        &self,
+        durable_session_scope_id: &str,
+        canonical_session_path: &Path,
+    ) -> Result<
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        HttpRunAdmissionError,
+    > {
         if let Some(attachment) =
-            self.owned_session_attachment(durable_session_scope_id, &canonical_session_path)?
+            self.owned_session_attachment(durable_session_scope_id, canonical_session_path)?
         {
             return Ok(attachment);
         }
         let attachment =
             sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
-                &canonical_session_path,
+                canonical_session_path,
             )
             .map_err(|error| match error {
                 sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentError::Busy { observed_generation } => {
@@ -2745,6 +2801,28 @@ impl HttpProductionRunDriver {
         Ok(attachment)
     }
 
+    fn acquire_plan_save_session_attachment(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        HttpRunAdmissionError,
+    > {
+        let canonical_path = canonical_http_session_path(Path::new(&session.session_log_path))
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        self.admit_plan_save_composition(session)?;
+        let attachment = self.acquire_admitted_session_attachment(
+            &session.durable_session_scope_id,
+            &canonical_path,
+        )?;
+        self.install_session_attachment(
+            &session.durable_session_scope_id,
+            &canonical_path,
+            attachment,
+            None,
+        )
+    }
+
     fn acquire_session_attachment(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -3371,6 +3449,21 @@ impl HttpRunDriver for HttpProductionRunDriver {
         {
             return Err(HttpSessionOpenBindingError::IdentityChanged);
         }
+        if let Some(recovery) =
+            sigil_runtime::application_run::application_session_composition_recovery_view(
+                &self.options.config_path,
+                &candidate.session_log_path,
+                &candidate.session_id,
+            )
+            .map_err(|_| HttpSessionOpenBindingError::Unavailable)?
+        {
+            return Ok(HttpSessionBinding {
+                session_scope_id: read_binding.session_scope_id,
+                session_log_path: read_binding.session_log_path.display().to_string(),
+                route_transition: None,
+                route_recovery: Some(http_route_recovery(recovery)),
+            });
+        }
         let (attachment, attachment_recovery) = if let Some(recovery_binding) = recovery_binding {
             (Some(Arc::new(
                 sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire_for_retry(
@@ -3629,7 +3722,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             | HttpSessionRouteRecoveryCode::AuthorityUnavailable
             | HttpSessionRouteRecoveryCode::SessionAlreadyActive
             | HttpSessionRouteRecoveryCode::SessionWriterBusy
-            | HttpSessionRouteRecoveryCode::SessionStreamInvalid => false,
+            | HttpSessionRouteRecoveryCode::SessionStreamInvalid
+            | HttpSessionRouteRecoveryCode::SessionCompositionChanged => false,
         };
         if admitted {
             Ok(())
@@ -3682,6 +3776,23 @@ impl HttpRunDriver for HttpProductionRunDriver {
     ) -> Result<crate::HttpDurableSessionAttachmentGuard, HttpRunAdmissionError> {
         self.acquire_exact_session_attachment(durable_session_scope_id, session_log_path)
             .map(crate::HttpDurableSessionAttachmentGuard::attached)
+    }
+
+    fn admit_session_command(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<(), HttpRunAdmissionError> {
+        self.admit_session_composition(
+            &session.durable_session_scope_id,
+            Path::new(&session.session_log_path),
+        )
+    }
+
+    fn admit_plan_save(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<(), HttpRunAdmissionError> {
+        self.admit_plan_save_composition(session)
     }
 
     fn session_frontier(
@@ -3820,6 +3931,18 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 "production approval decision identity mismatch",
             ));
         }
+        let session = self
+            .attached_registry()?
+            .get_session(&approval.session_id)
+            .map_err(|_| HttpRunDriverError::new("production approval session is unavailable"))?;
+        let _attachment = self
+            .acquire_exact_session_attachment(
+                &session.durable_session_scope_id,
+                Path::new(&session.session_log_path),
+            )
+            .map_err(|_| {
+                HttpRunDriverError::new("production approval session cannot accept execution")
+            })?;
         let runs = self
             .active_runs
             .lock()
@@ -4194,7 +4317,13 @@ impl HttpRunDriver for HttpProductionRunDriver {
             &session.durable_session_scope_id,
         )
         .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
-        let attachment_recovery = self.probe_session_attachment_recovery(session)?;
+        let attachment_recovery = if view.route_recovery.as_ref().is_some_and(|recovery| {
+            recovery.code == sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionCompositionChanged
+        }) {
+            None
+        } else {
+            self.probe_session_attachment_recovery(session)?
+        };
         Ok(HttpRunContextView {
             model_ref: crate::HttpProviderModelRef {
                 connection_id: view.model_ref.connection_id.to_string(),
@@ -5387,9 +5516,12 @@ impl HttpRunDriver for HttpProductionRunDriver {
         session: &crate::HttpSessionSnapshot,
         request: &HttpPlanDecisionRequest,
     ) -> Result<HttpPlanDecisionCommandReceipt, HttpRunDriverError> {
-        let session_attachment = self
-            .acquire_session_attachment(session)
-            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let session_attachment = if request.action == crate::HttpPlanDecisionAction::Save {
+            self.acquire_plan_save_session_attachment(session)
+        } else {
+            self.acquire_session_attachment(session)
+        }
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let _attachment = session_attachment;
         let command: sigil_runtime::ApplicationPlanDecisionCommand = request.clone().into();
         let receipt = sigil_runtime::application_plan_decision(
@@ -6365,6 +6497,17 @@ fn public_preparation_failure_event(error: &anyhow::Error) -> PublicRunEventKind
             sigil_runtime::application_run::ApplicationRunPrepareErrorClass::SessionStreamInvalid => {
                 return PublicRunEventKind::RouteRecoveryRequired {
                     code: PublicRouteRecoveryCode::SessionStreamInvalid,
+                    actions: vec![
+                        PublicRouteRecoveryAction::StartNewSession,
+                        PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    recovery_binding,
+                    retryable: false,
+                };
+            }
+            sigil_runtime::application_run::ApplicationRunPrepareErrorClass::SessionCompositionChanged => {
+                return PublicRunEventKind::RouteRecoveryRequired {
+                    code: PublicRouteRecoveryCode::SessionCompositionChanged,
                     actions: vec![
                         PublicRouteRecoveryAction::StartNewSession,
                         PublicRouteRecoveryAction::BackToSessionLibrary,
@@ -9647,6 +9790,14 @@ fn http_route_recovery_from_prepare_error(
         ),
         Class::SessionStreamInvalid => (
             crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid,
+            vec![
+                crate::HttpSessionRouteRecoveryAction::StartNewSession,
+                crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+            ],
+            false,
+        ),
+        Class::SessionCompositionChanged => (
+            crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged,
             vec![
                 crate::HttpSessionRouteRecoveryAction::StartNewSession,
                 crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,

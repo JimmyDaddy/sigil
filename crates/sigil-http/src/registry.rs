@@ -559,6 +559,11 @@ impl HttpSessionRunRegistry {
                 snapshot
             }
         };
+        if snapshot.route_recovery.as_ref().is_some_and(|recovery| {
+            recovery.code == HttpSessionRouteRecoveryCode::SessionCompositionChanged
+        }) {
+            return Ok(snapshot);
+        }
         // Reopening is also the restart recovery trigger for accepted user input and durable safe
         // queued work. Recovery failure must not hide an otherwise valid historical session from
         // the client; the unresolved snapshot remains visible and a later reopen retries it.
@@ -943,6 +948,24 @@ impl HttpSessionRunRegistry {
                 run_id: session_id.to_owned(),
                 message: error.message,
             })
+    }
+
+    pub(crate) fn preflight_session_command(
+        &self,
+        session_id: &str,
+    ) -> Result<(), HttpRegistryError> {
+        self.driver
+            .admit_session_command(&self.get_session(session_id)?)
+            .map_err(http_run_admission_registry_error)
+    }
+
+    pub(crate) fn application_command_client(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<crate::application_bridge::HttpApplicationClient, HttpRegistryError> {
+        self.preflight_session_command(session_id)?;
+        self.application_client(session_id, client_id)
     }
 
     pub(crate) fn prepare_application_operation(
@@ -1571,11 +1594,11 @@ impl HttpSessionRunRegistry {
 
         #[cfg(not(test))]
         {
-            let client = self.application_client(session_id, &command.client_id)?;
+            let client = self.application_command_client(session_id, &command.client_id)?;
             self.command_conversation_recovery_via_application(session_id, command, client)
         }
         #[cfg(test)]
-        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+        if let Ok(client) = self.application_command_client(session_id, &command.client_id) {
             return self.command_conversation_recovery_via_application(session_id, command, client);
         }
 
@@ -1685,7 +1708,6 @@ impl HttpSessionRunRegistry {
         command: HttpCommandEnvelope<HttpConversationRecoveryCommandAction>,
         client: crate::application_bridge::HttpApplicationClient,
     ) -> Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError> {
-        client.refresh().map_err(application_registry_error)?;
         let action = crate::application_bridge::application_recovery_action(&command.payload)
             .map_err(application_registry_error)?;
         let receipt = client
@@ -1696,7 +1718,7 @@ impl HttpSessionRunRegistry {
                     sigil_application::ConversationCommand::Recovery { action },
                 ),
             )
-            .map_err(application_registry_error)?;
+            .map_err(crate::application_bridge::HttpApplicationExecutionError::into_registry)?;
         let (outcome, replayed) = match receipt {
             sigil_application::ApplicationCommandReceipt::Settled(receipt) => {
                 (receipt.outcome.map(|outcome| *outcome), false)
@@ -1843,12 +1865,12 @@ impl HttpSessionRunRegistry {
 
         #[cfg(not(test))]
         {
-            let client = self.application_client(session_id, &command.client_id)?;
+            let client = self.application_command_client(session_id, &command.client_id)?;
             self.command_conversation_queue_via_application(session_id, command, client)
         }
         #[cfg(test)]
         {
-            if let Ok(client) = self.application_client(session_id, &command.client_id) {
+            if let Ok(client) = self.application_command_client(session_id, &command.client_id) {
                 return self
                     .command_conversation_queue_via_application(session_id, command, client);
             }
@@ -2051,7 +2073,6 @@ impl HttpSessionRunRegistry {
         } else {
             None
         };
-        client.refresh().map_err(application_registry_error)?;
         let (expected_generation, action) =
             crate::application_bridge::application_queue_command(&command.payload)
                 .map_err(application_registry_error)?;
@@ -2066,7 +2087,7 @@ impl HttpSessionRunRegistry {
                     },
                 ),
             )
-            .map_err(application_registry_error)?;
+            .map_err(crate::application_bridge::HttpApplicationExecutionError::into_registry)?;
         let (owner_generation, replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Settled(_) => (None, false),
             sigil_application::ApplicationCommandReceipt::Replayed(_) => (None, true),
@@ -2960,11 +2981,11 @@ impl HttpSessionRunRegistry {
         // only for synthetic unit-test drivers until the remaining HTTP command families migrate.
         #[cfg(not(test))]
         {
-            let client = self.application_client(session_id, &command.client_id)?;
+            let client = self.application_command_client(session_id, &command.client_id)?;
             self.start_run_command_via_application(session_id, command, client)
         }
         #[cfg(test)]
-        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+        if let Ok(client) = self.application_command_client(session_id, &command.client_id) {
             return self.start_run_command_via_application(session_id, command, client);
         }
 
@@ -3005,7 +3026,6 @@ impl HttpSessionRunRegistry {
         command: HttpCommandEnvelope<HttpRunStartRequest>,
         client: crate::application_bridge::HttpApplicationClient,
     ) -> Result<HttpRunStartCommandReceipt, HttpRegistryError> {
-        client.refresh().map_err(application_registry_error)?;
         let prompt = if command.payload.prompt.trim().is_empty() {
             None
         } else {
@@ -3035,7 +3055,7 @@ impl HttpSessionRunRegistry {
                     },
                 ),
             )
-            .map_err(application_registry_error)?;
+            .map_err(crate::application_bridge::HttpApplicationExecutionError::into_registry)?;
         let (run_id, replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Settled(settled)
             | sigil_application::ApplicationCommandReceipt::Replayed(settled) => {
@@ -3940,13 +3960,13 @@ impl HttpSessionRunRegistry {
 
         #[cfg(not(test))]
         {
-            let client = self.application_client(session_id, &command.client_id)?;
+            let client = self.application_command_client(session_id, &command.client_id)?;
             self.user_input_decision_command_via_application(
                 session_id, request_id, command, client,
             )
         }
         #[cfg(test)]
-        if let Ok(client) = self.application_client(session_id, &command.client_id) {
+        if let Ok(client) = self.application_command_client(session_id, &command.client_id) {
             return self.user_input_decision_command_via_application(
                 session_id, request_id, command, client,
             );
@@ -3990,7 +4010,6 @@ impl HttpSessionRunRegistry {
         command: HttpCommandEnvelope<HttpUserInputDecisionRequest>,
         client: crate::application_bridge::HttpApplicationClient,
     ) -> Result<HttpUserInputDecisionCommandReceipt, HttpRegistryError> {
-        client.refresh().map_err(application_registry_error)?;
         let request = command.payload.clone();
         let expected_request_hash =
             sigil_application::SafeText::new(request.expected_request_hash.clone())
@@ -4559,7 +4578,14 @@ impl HttpSessionRunRegistry {
                 message: error.to_string(),
             }
         })?;
-
+        let run = self.get_run(run_id)?;
+        if run.session_id != command.session_id {
+            return Err(HttpRegistryError::CommandSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                run_id: run_id.to_owned(),
+                run_session_id: run.session_id,
+            });
+        }
         #[cfg(not(test))]
         {
             let run = self.get_run(run_id)?;
@@ -4570,12 +4596,12 @@ impl HttpSessionRunRegistry {
                     run_session_id: run.session_id,
                 });
             }
-            let client = self.application_client(&run.session_id, &command.client_id)?;
+            let client = self.application_command_client(&run.session_id, &command.client_id)?;
             self.submit_approval_command_via_application(run_id, call_id, command, client)
         }
         #[cfg(test)]
         if let Ok(run) = self.get_run(run_id)
-            && let Ok(client) = self.application_client(&run.session_id, &command.client_id)
+            && let Ok(client) = self.application_command_client(&run.session_id, &command.client_id)
         {
             return self.submit_approval_command_via_application(run_id, call_id, command, client);
         }
@@ -4645,7 +4671,6 @@ impl HttpSessionRunRegistry {
         command: HttpCommandEnvelope<HttpApprovalDecisionRequest>,
         client: crate::application_bridge::HttpApplicationClient,
     ) -> Result<HttpApprovalCommandReceipt, HttpRegistryError> {
-        client.refresh().map_err(application_registry_error)?;
         let request = command.payload.clone();
         if request.approval_request_id.trim().is_empty()
             || request.tool_call_hash.trim().is_empty()
@@ -4675,7 +4700,7 @@ impl HttpSessionRunRegistry {
                     },
                 ),
             )
-            .map_err(application_registry_error)?;
+            .map_err(crate::application_bridge::HttpApplicationExecutionError::into_registry)?;
         let ((route_state, registry_revision), replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
                 parse_application_approval_recovery(application_owner_recovery_binding(
@@ -4791,6 +4816,11 @@ impl HttpSessionRunRegistry {
         call_id: &str,
         request: HttpApprovalDecisionRequest,
     ) -> Result<HttpApprovalRouteOutcome, HttpRegistryError> {
+        let session = self.get_session(&self.get_run(run_id)?.session_id)?;
+        let _attachment = self.acquire_durable_session_mutation_attachment(
+            &session.durable_session_scope_id,
+            std::path::Path::new(&session.session_log_path),
+        )?;
         // An `approve_for_family` decision persists the durable rule BEFORE the pending approval
         // is consumed, so a persist failure leaves the approval pending and recoverable.
         if request.decision == HttpApprovalDecision::ApproveForFamily {
@@ -4911,6 +4941,54 @@ impl HttpSessionRunRegistry {
         key: HttpCommandKey,
         request: HttpReservedCommand,
     ) -> Result<HttpCommandClaim, HttpRegistryError> {
+        let stored_identity = request.stored_identity(&key);
+        {
+            let state = self.lock_state();
+            if let Some(existing) = state.command_reservations.get(&key) {
+                if existing.request != request {
+                    return Err(HttpRegistryError::CommandKeyConflict {
+                        session_id: key.session_id,
+                        client_id: key.client_id,
+                        command_id: key.command_id,
+                    });
+                }
+                if existing.is_complete() && !existing.is_deferred_plan_decision() {
+                    return Ok(HttpCommandClaim::Wait(Arc::clone(existing)));
+                }
+            }
+            if let Some(command_store) = &self.command_store {
+                let completion = match command_store.replay_completion(&stored_identity) {
+                    Ok(completion) => completion,
+                    Err(crate::HttpCommandStoreError::IdentityConflict) => {
+                        return Err(HttpRegistryError::CommandKeyConflict {
+                            session_id: key.session_id,
+                            client_id: key.client_id,
+                            command_id: key.command_id,
+                        });
+                    }
+                    Err(error) => return Err(command_store_registry_error(error)),
+                };
+                if let Some(completion) = completion {
+                    return Ok(HttpCommandClaim::Wait(Arc::new(
+                        HttpCommandReservation::completed(
+                            request,
+                            Arc::clone(command_store),
+                            stored_identity,
+                            completion,
+                        ),
+                    )));
+                }
+            }
+        }
+        if !request.kind.is_safety_control() {
+            if request.plan_save {
+                self.driver
+                    .admit_plan_save(&self.get_session(&key.session_id)?)
+                    .map_err(http_run_admission_registry_error)?;
+            } else {
+                self.preflight_session_command(&key.session_id)?;
+            }
+        }
         let mut state = self.lock_state();
         if let Some(existing) = state.command_reservations.get(&key) {
             if existing.request != request {
@@ -4927,7 +5005,6 @@ impl HttpSessionRunRegistry {
         if !state.accepting_commands {
             return Err(HttpRegistryError::ServerShuttingDown);
         }
-        let stored_identity = request.stored_identity(&key);
         if let Some(command_store) = &self.command_store {
             let claim = command_store
                 .reserve(stored_identity.clone())
@@ -5404,6 +5481,15 @@ enum HttpCommandKind {
 }
 
 impl HttpCommandKind {
+    const fn is_safety_control(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Cancel => true,
+            Self::Pause | Self::TerminalCancel => true,
+            _ => false,
+        }
+    }
+
     const fn label(self) -> &'static [u8] {
         match self {
             #[cfg(test)]
@@ -5450,6 +5536,7 @@ impl HttpCommandKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HttpReservedCommand {
     kind: HttpCommandKind,
+    plan_save: bool,
     fingerprint: [u8; 32],
 }
 
@@ -5511,7 +5598,9 @@ impl HttpReservedCommand {
         path_session_id: &str,
         command: &HttpCommandEnvelope<HttpPlanDecisionRequest>,
     ) -> Result<Self, HttpRegistryError> {
-        Self::new(HttpCommandKind::PlanDecision, &[path_session_id], command)
+        let mut request = Self::new(HttpCommandKind::PlanDecision, &[path_session_id], command)?;
+        request.plan_save = command.payload.action == crate::HttpPlanDecisionAction::Save;
+        Ok(request)
     }
 
     #[cfg(test)]
@@ -5576,6 +5665,7 @@ impl HttpReservedCommand {
         update_command_fingerprint_part(&mut hasher, encoded);
         Ok(Self {
             kind,
+            plan_save: false,
             fingerprint: hasher.finalize().into(),
         })
     }

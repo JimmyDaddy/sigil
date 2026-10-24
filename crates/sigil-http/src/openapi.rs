@@ -3779,7 +3779,7 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "code": {
                             "type": "string",
-                            "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "authority_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                            "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "authority_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid", "session_composition_changed"]
                         },
                         "allowed_actions": {
                             "type": "array",
@@ -4650,7 +4650,7 @@ pub fn http_openapi_document() -> Value {
                             "properties": {
                                 "code": {
                                     "type": "string",
-                                    "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                                    "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid", "session_composition_changed"]
                                 },
                                 "message": { "type": "string" },
                                 "route_recovery": { "$ref": "#/components/schemas/SessionRouteRecoveryView" }
@@ -5374,7 +5374,7 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                 json_properties(json!({
                     "code": {
                         "type": "string",
-                        "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                        "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid", "session_composition_changed"]
                     },
                     "actions": {
                         "type": "array",

@@ -123,6 +123,7 @@ interface ConversationPanelProps {
   onNewSession: () => Promise<boolean>;
   onOpenWorkspacePicker: () => void;
   onOpenSessionPicker: (query: string) => void;
+  onBackToSessionLibrary?: () => void;
   onOpenSettings: () => void;
   onOpenProviderRecovery?: (context: ProviderRecoverySettingsContext) => void;
   onOpenSupport: () => void;
@@ -194,6 +195,7 @@ export function ConversationPanel({
   onNewSession,
   onOpenWorkspacePicker,
   onOpenSessionPicker,
+  onBackToSessionLibrary,
   onOpenSettings,
   onOpenProviderRecovery,
   onOpenSupport,
@@ -212,6 +214,8 @@ export function ConversationPanel({
   const [agentActivityFromTools, setAgentActivityFromTools] = useState(false);
   const [verificationFromTools, setVerificationFromTools] = useState(false);
   const [runContext, setRunContext] = useState<RunContext>();
+  const compositionReadOnly = session.routeRecovery?.code === "session_composition_changed"
+    || runContext?.routeRecovery?.code === "session_composition_changed";
   const [runContextBusy, setRunContextBusy] = useState(false);
   const [runContextError, setRunContextError] = useState(false);
   const [runContextReload, setRunContextReload] = useState(0);
@@ -261,7 +265,8 @@ export function ConversationPanel({
   const durableUserInput = durableUserInputs.find(
     (request) => userInputKey(request) === selectedUserInputKey,
   ) ?? durableUserInputs[0];
-  const hasPendingUserInput = durableUserInput !== undefined && durableUserInput.status !== "resolved";
+  const hasPendingUserInput = !compositionReadOnly
+    && durableUserInput !== undefined && durableUserInput.status !== "resolved";
   const attentionKey = hasPendingUserInput ? userInputKey(durableUserInput) : undefined;
   const [collapsedAttentionDraft, setCollapsedAttentionDraft] = useState<string>();
   const attentionDraftExpanded = attentionKey !== undefined && collapsedAttentionDraft !== attentionKey;
@@ -649,7 +654,7 @@ export function ConversationPanel({
   }, [durablePlanReview?.planHash, durablePlanReview?.planId, planDetail]);
 
   useEffect(() => {
-    if (conversationQueueBusy) return;
+    if (compositionReadOnly || conversationQueueBusy) return;
     let disposed = false;
     const requestEpoch = conversationQueueEpoch.current + 1;
     conversationQueueEpoch.current = requestEpoch;
@@ -669,7 +674,7 @@ export function ConversationPanel({
     return () => {
       disposed = true;
     };
-  }, [bridge, conversationQueueBusy, conversationQueueReload, run?.id, session.id, workspaceId]);
+  }, [bridge, compositionReadOnly, conversationQueueBusy, conversationQueueReload, run?.id, session.id, workspaceId]);
 
   useEffect(() => {
     let disposed = false;
@@ -1521,7 +1526,7 @@ export function ConversationPanel({
     return integrationReviewTaskProjection(taskIntegrationReview);
   }, [durableTask, eventTask, taskIntegrationReview]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
-  const submissionBlocked = continuityState.contractError !== undefined
+  const submissionBlocked = compositionReadOnly || continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");
   const timelineHidden = hasPendingUserInput && !attentionHistoryExpanded
     && !displayError && continuityState.contractError === undefined;
@@ -1685,7 +1690,7 @@ export function ConversationPanel({
   const commandConversationQueue = async (
     action: ConversationQueueCommandAction,
   ): Promise<boolean> => {
-    if (conversationQueueBusy) return false;
+    if (compositionReadOnly || conversationQueueBusy) return false;
     const commandEpoch = conversationQueueEpoch.current + 1;
     conversationQueueEpoch.current = commandEpoch;
     setConversationQueueBusy(true);
@@ -1785,7 +1790,8 @@ export function ConversationPanel({
     reviewAnnotations?: ReviewAnnotation[],
   ): Promise<boolean> => {
     if (
-      (nextPrompt === "" && (images?.length ?? exactRetry?.imageHandles?.length ?? 0) === 0)
+      compositionReadOnly
+      || (nextPrompt === "" && (images?.length ?? exactRetry?.imageHandles?.length ?? 0) === 0)
       || (!active && submissionBlocked && !recoveryRetry)
       || submitting
       || conversationQueueBusy
@@ -1994,7 +2000,8 @@ export function ConversationPanel({
     allowStaleActiveRun = false,
   ): Promise<boolean> => {
     if (
-      (!allowStaleActiveRun && active)
+      compositionReadOnly
+      || (!allowStaleActiveRun && active)
       || (!allowStaleActiveRun && submissionBlocked)
       || taskControlBusy
       || submitting
@@ -2145,7 +2152,7 @@ export function ConversationPanel({
     selectedRequest: UserInputRequest | undefined = durableUserInput,
   ) => {
     const request = selectedRequest;
-    if (request === undefined || request.status !== "requested" || userInputBusy) return;
+    if (compositionReadOnly || request === undefined || request.status !== "requested" || userInputBusy) return;
     const commandEpoch = userInputEpoch.current;
     setUserInputBusy(true);
     setUserInputFailure(false);
@@ -2307,7 +2314,7 @@ export function ConversationPanel({
   };
 
   const decideApproval = async (decision: ApprovalAction) => {
-    if (pendingApproval?.approval === undefined || continuityState.lifecycle !== "live" || controlBusy) return;
+    if (compositionReadOnly || pendingApproval?.approval === undefined || continuityState.lifecycle !== "live" || controlBusy) return;
     setControlBusy(true);
     try {
       const receipt = await bridge.resolveApproval(
@@ -2505,10 +2512,9 @@ export function ConversationPanel({
     ? t("runFinishedAnnouncement")
     : continuityState.lifecycle === "checking_owner" || continuityState.lifecycle === "attaching_run"
       ? t("syncingConversation") : undefined;
-  const canonicalRouteRecovery = runContext === undefined
-    ? session.routeRecovery
-    : runContext.routeRecovery;
-  const routeRecovery = liveEventState.routeRecovery?.routeRecovery
+  const canonicalRouteRecovery = session.routeRecovery?.code === "session_composition_changed"
+    || runContext === undefined ? session.routeRecovery : runContext.routeRecovery;
+  const routeRecovery = (compositionReadOnly ? undefined : liveEventState.routeRecovery?.routeRecovery)
     ?? (canonicalRouteRecovery === undefined
       ? undefined
       : {
@@ -2556,7 +2562,7 @@ export function ConversationPanel({
             labelOverride={normalContinuityLabel}
             t={t}
           />
-          <Menu label={t("conversationTools")} accessibleLabel={t("conversationTools")} triggerRef={conversationToolsTriggerRef}>
+          {compositionReadOnly ? null : <Menu label={t("conversationTools")} accessibleLabel={t("conversationTools")} triggerRef={conversationToolsTriggerRef}>
             <MenuItem onSelect={() => {
               setExtensionWorkbenchKind("skills");
               setExtensionWorkbenchQuery("");
@@ -2575,8 +2581,8 @@ export function ConversationPanel({
               setVerificationFromTools(true);
               setInspectorOpen(true);
             }}>{t("openVerification", { status: verification.status })}</MenuItem>}
-          </Menu>
-          {verification !== undefined && verification.verdict !== "passed" ? (
+          </Menu>}
+          {!compositionReadOnly && verification !== undefined && verification.verdict !== "passed" ? (
             <Tooltip
               label={pendingApproval?.approval !== undefined
                 ? t("resolveApprovalFirst")
@@ -2600,7 +2606,7 @@ export function ConversationPanel({
 
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{runAnnouncement}</div>
 
-      {agentActivity !== undefined && agentActivity.activeAgents > 0 ? (
+      {!compositionReadOnly && agentActivity !== undefined && agentActivity.activeAgents > 0 ? (
         <Button
           className="agent-activity-strip sg-bounded-content"
           ref={agentActivityTriggerRef}
@@ -2617,7 +2623,7 @@ export function ConversationPanel({
         </Button>
       ) : null}
 
-      {taskProjection === undefined ? null : (
+      {compositionReadOnly || taskProjection === undefined ? null : (
         <TaskControlPanel
           key={taskProjection.taskId}
           task={taskProjection}
@@ -2639,7 +2645,7 @@ export function ConversationPanel({
         />
       )}
 
-      {durableUserInputs.map((request, index) => {
+      {(compositionReadOnly ? [] : durableUserInputs).map((request, index) => {
         const selected = durableUserInput !== undefined
           && userInputKey(request) === userInputKey(durableUserInput);
         if (request.status === "resolved") return null;
@@ -2672,7 +2678,7 @@ export function ConversationPanel({
         );
       })}
 
-      {durablePlanReview === undefined ? null : (
+      {compositionReadOnly || durablePlanReview === undefined ? null : (
         <PlanCard
           key={durablePlanReview.planId}
           review={durablePlanReview}
@@ -2689,7 +2695,7 @@ export function ConversationPanel({
         />
       )}
 
-      {runContextError ? (
+      {runContextError && !compositionReadOnly ? (
         <ErrorCard
           title={t("runContextUnavailable")}
           message={t("runContextUnavailableDetail")}
@@ -2700,11 +2706,11 @@ export function ConversationPanel({
       ) : null}
 
       {routeRecovery === undefined ? null : (
-        <section className="continuity-recovery sg-bounded-content" role="alert">
-          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
+        <section className={`continuity-recovery sg-bounded-content${compositionReadOnly ? " is-neutral" : ""}`} role={compositionReadOnly ? "status" : "alert"}>
+          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name={compositionReadOnly ? "history" : "warning"} /></span>
           <div className="continuity-recovery-copy">
-            <strong>{t("routeRecoveryTitle")}</strong>
-            <p>{t(
+            <strong>{t(compositionReadOnly ? "routeRecoveryCompositionChanged" : "routeRecoveryTitle")}</strong>
+            {compositionReadOnly ? null : <p>{t(
               routeRecovery.code === "session_route_confirmation_required"
                 ? "routeRecoveryConfirmation"
                 : routeRecovery.code === "session_route_selection_required"
@@ -2714,10 +2720,10 @@ export function ConversationPanel({
                     : routeRecovery.code === "authority_unavailable"
                         ? "routeRecoveryAuthorityUnavailable"
                     : "routeRecoverySetup",
-            )}</p>
+            )}</p>}
           </div>
           <div className="continuity-recovery-actions">
-            {routeRecovery.actions.includes("retry_session_attach") ? (
+            {!compositionReadOnly && routeRecovery.actions.includes("retry_session_attach") ? (
               <Button
                 type="button"
                 variant="quiet"
@@ -2732,7 +2738,7 @@ export function ConversationPanel({
                 {runContextBusy ? t("retrying") : t("retrySessionAttach")}
               </Button>
             ) : null}
-            {routeRecovery.actions.includes("retry_provider") ? (
+            {!compositionReadOnly && routeRecovery.actions.includes("retry_provider") ? (
               <Button
                 type="button"
                 variant="quiet"
@@ -2752,7 +2758,7 @@ export function ConversationPanel({
                 {submitting ? t("retrying") : t("retryProvider")}
               </Button>
             ) : null}
-            {routeRecovery.actions.includes("confirm_current_route") ? (
+            {!compositionReadOnly && routeRecovery.actions.includes("confirm_current_route") ? (
               <Button
                 type="button"
                 variant="quiet"
@@ -2761,7 +2767,7 @@ export function ConversationPanel({
                 {t("confirmCurrentRoute")}
               </Button>
             ) : null}
-            {routeRecovery.actions.some((action) => (
+            {!compositionReadOnly && routeRecovery.actions.some((action) => (
               action === "repair_connection"
                 || action === "select_replacement"
             )) ? (
@@ -2775,7 +2781,7 @@ export function ConversationPanel({
               </Button>
             ) : null}
             {routeRecovery.actions.includes("back_to_session_library") ? (
-              <Button type="button" variant="quiet" onClick={() => onOpenSessionPicker("")}>
+              <Button type="button" variant="quiet" onClick={onBackToSessionLibrary ?? (() => onOpenSessionPicker(""))}>
                 {t("openConversationLibrary")}
               </Button>
             ) : null}
@@ -2783,7 +2789,7 @@ export function ConversationPanel({
         </section>
       )}
 
-      {providerTurnRecovery === undefined ? null : (
+      {compositionReadOnly || providerTurnRecovery === undefined ? null : (
         <section
           className={`continuity-recovery sg-bounded-content${providerRecoveryCopy?.neutral ? " is-neutral" : ""}`}
           role={providerRecoveryCopy?.neutral ? "status" : "alert"}
@@ -2820,7 +2826,7 @@ export function ConversationPanel({
         />
       )}
 
-      {continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only" ? (
+      {!compositionReadOnly && (continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only") ? (
         <section className={`continuity-recovery sg-bounded-content${continuityState.lifecycle === "read_only" ? " is-read-only" : ""}`} role="alert">
           <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
           <div className="continuity-recovery-copy">
@@ -2941,7 +2947,7 @@ export function ConversationPanel({
             }}
           />
         ) : null}
-        {rows.length === 0 && continuityLoading === undefined ? (
+        {rows.length === 0 && continuityLoading === undefined && !compositionReadOnly ? (
           <div className="timeline-empty">
             <strong>{t("readyForPrompt")}</strong>
             <span>{t("newRunActivity")}</span>
@@ -2972,7 +2978,7 @@ export function ConversationPanel({
                     artifactRef: row.artifactRef!,
                     selector,
                   })}
-                onCancelExecution={row.executionId === undefined ? undefined : (() => {
+                onCancelExecution={compositionReadOnly || row.executionId === undefined ? undefined : (() => {
                   const execution = terminalTasks.find(({ runId, task }) => runId === row.executionRunId && task.taskId === row.executionId
                     && (task.status === "starting" || task.status === "running"));
                   return execution === undefined ? undefined : () => void cancelTerminalTask(execution.runId, execution.task);
@@ -2983,13 +2989,13 @@ export function ConversationPanel({
             : <Message key={row.key} displayId={row.key} message={row}
               onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent}
               onReadImage={(displayId, attachmentId) => bridge.messageImage(workspaceId, session.id, displayId, attachmentId)}
-              onFork={(row.kind === "user" || row.kind === "assistant") && row.sourceStreamSequence !== undefined
+              onFork={!compositionReadOnly && (row.kind === "user" || row.kind === "assistant") && row.sourceStreamSequence !== undefined
                 ? (trigger) => {
                   messageForkTriggerRef.current = trigger;
                   void previewMessageFork(row.sourceStreamSequence!);
                 } : undefined} />)
         ) : null}
-        {terminalTasks.filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
+        {(compositionReadOnly ? [] : terminalTasks).filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
           <TerminalTaskCard
             key={`${runId}:${task.taskId}`}
             task={task}
@@ -3005,7 +3011,7 @@ export function ConversationPanel({
         </Button>
       </div> : null}
 
-      {approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live" ? (
+      {!compositionReadOnly && approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live" ? (
         <ApprovalDock
           approval={approvalPresentation.event.approval}
           phase={approvalPresentation.phase}
@@ -3038,7 +3044,7 @@ export function ConversationPanel({
         draftKey={draftStorageKey(workspaceId, session.id)}
         persistentDraftKey={draftSessionId === undefined ? undefined : draftStorageKey(workspaceId, draftSessionId)}
         active={active}
-        hidden={hasPendingUserInput && !attentionDraftExpanded}
+        hidden={compositionReadOnly || hasPendingUserInput && !attentionDraftExpanded}
         reviewActive={hasPendingUserInput || (approvalPresentation?.event.approval !== undefined && continuityState.lifecycle === "live")}
         submissionBlocked={submissionBlocked}
         readOnlyRecovery={continuityState.lifecycle === "read_only_recovery" || continuityState.lifecycle === "read_only" || continuityState.contractError !== undefined}

@@ -7957,7 +7957,8 @@
               "provider_unavailable",
               "session_already_active",
               "session_writer_busy",
-              "session_stream_invalid"
+              "session_stream_invalid",
+              "session_composition_changed"
             ],
             "type": "string"
           },
@@ -8012,7 +8013,8 @@
                   "provider_unavailable",
                   "session_already_active",
                   "session_writer_busy",
-                  "session_stream_invalid"
+                  "session_stream_invalid",
+                  "session_composition_changed"
                 ],
                 "type": "string"
               },
@@ -9469,7 +9471,8 @@
               "authority_unavailable",
               "session_already_active",
               "session_writer_busy",
-              "session_stream_invalid"
+              "session_stream_invalid",
+              "session_composition_changed"
             ],
             "type": "string"
           },

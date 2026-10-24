@@ -113,6 +113,30 @@ fn seed_waiting_root_input(
     Ok(requested)
 }
 
+fn input_fixture_control_records(
+    root: &std::path::Path,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    let mut records = std::collections::BTreeMap::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                directories.push(entry.path());
+            } else if kind.is_file() && entry.file_name() == "records.jsonl" {
+                records.insert(entry.path(), std::fs::read(entry.path())?);
+            }
+        }
+    }
+    Ok(records)
+}
+
 async fn post_input_decision(
     address: std::net::SocketAddr,
     path: &str,
@@ -673,6 +697,119 @@ async fn production_user_input_receipt_replays_actual_root_decision_after_client
     assert!(state.claim.is_none());
     assert!(state.continuation.is_none());
     assert!(registry.get_session(&session.id)?.run_ids.is_empty());
+    assert!(driver.active_runs.lock().expect("active runs").is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_user_input_composition_change_rejects_pending_answer_before_reservation()
+-> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let driver = production_queue_driver(&fixture, "input-composition-change");
+    let commands_path = fixture
+        .path()
+        .join("commands-input-composition-change.json");
+    let commands = Arc::new(HttpDurableCommandStore::open(&commands_path, 16)?);
+    let registry = driver.build_registry(commands.clone())?;
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let owner = driver.application_operation_owner(&session)?;
+    let requested = seed_waiting_root_input(&owner.owner)?;
+    let client = registry.application_client(&session.id, "composition-input-client")?;
+    assert!(client.refresh()?.user_input.pending);
+    let journal = client.command_journal_binding()?;
+    assert!(registry.get_session(&session.id)?.run_ids.is_empty());
+    assert!(registry.session_foreground_owner(&session.id)?.is_none());
+    assert!(driver.active_runs.lock().expect("active runs").is_empty());
+    let pending_before = owner.owner.attach_for_control()?.user_input_projection()?;
+    let input = pending_before
+        .request(&requested.request.identity)
+        .context("pending request")?;
+    assert_eq!(input.status, sigil_kernel::UserInputStatusV1::Requested);
+    assert!(input.decision.is_none() && input.claim.is_none() && input.continuation.is_none());
+    let source_before = std::fs::read(&session.session_log_path)?;
+    let control_root = driver
+        .services
+        .authority_composition()
+        .context("authority")?
+        .storage_writer
+        .managed_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog,
+        )?;
+    let control_before = input_fixture_control_records(&control_root)?;
+    assert!(
+        !control_before.is_empty(),
+        "real managed control journals must exist"
+    );
+    let legacy_before = match std::fs::read(&commands_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let epoch_before = commands.server_epoch();
+
+    let config_path = fixture.path().join("sigil.toml");
+    let mut changed = sigil_kernel::RootConfig::load_persisted(&config_path)?;
+    changed.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    changed.save(&config_path)?;
+    let mut command = HttpCommandEnvelope::new(
+        "composition-pending-answer",
+        "composition-input-client",
+        &session.id,
+        HttpUserInputDecisionRequest {
+            generation: requested.request.identity.generation,
+            expected_request_hash: requested.request_hash.clone(),
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![sigil_kernel::UserInputAnswerV1 {
+                    question_id: "mode".to_owned(),
+                    value: sigil_kernel::UserInputAnswerValueV1::Text {
+                        value: "Use the reviewed migration mode".to_owned(),
+                    },
+                }],
+            },
+            permission_mode: None,
+        },
+    );
+    command.command_journal = Some(journal);
+    let decision = registry.user_input_decision_command(
+        &session.id,
+        requested.request.identity.request_id.as_str(),
+        command,
+    );
+    assert!(matches!(decision,
+        Err(HttpRegistryError::SessionRunRecoveryRequired { recovery })
+            if recovery.code == crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged
+                && !recovery.retryable
+                && recovery.allowed_actions == [
+                    crate::HttpSessionRouteRecoveryAction::StartNewSession,
+                    crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+                ]
+    ));
+    assert_eq!(
+        std::fs::read(&session.session_log_path)?,
+        source_before,
+        "the old session must retain its exact pending request and immutable contract"
+    );
+    assert_eq!(
+        input_fixture_control_records(&control_root)?,
+        control_before,
+        "neither application reservations nor the HTTP adapter command journal may gain records"
+    );
+    let legacy_after = match std::fs::read(&commands_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    assert_eq!(
+        legacy_after, legacy_before,
+        "the retired adapter journal must not be recreated or changed"
+    );
+    assert_eq!(commands.server_epoch(), epoch_before);
+    assert_eq!(
+        owner.owner.attach_for_control()?.user_input_projection()?,
+        pending_before
+    );
+    assert!(registry.get_session(&session.id)?.run_ids.is_empty());
+    assert!(registry.session_foreground_owner(&session.id)?.is_none());
     assert!(driver.active_runs.lock().expect("active runs").is_empty());
     Ok(())
 }

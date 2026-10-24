@@ -311,6 +311,9 @@ impl AppState {
                     sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid => {
                         "session stream is invalid; start a new session or return to the library"
                     }
+                    sigil_kernel::PublicRouteRecoveryCode::SessionCompositionChanged => {
+                        "session capabilities changed; start a new session"
+                    }
                 };
                 self.last_notice = Some(summary.to_owned());
                 self.push_timeline(

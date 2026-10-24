@@ -49,7 +49,7 @@ impl Drop for McpImportTask {
 impl McpImportModalState {
     pub(super) fn lines(&self) -> Vec<String> {
         let mut lines = vec![
-            "Choose MCP servers to add to the settings draft.".to_owned(),
+            "Choose MCP servers to import and enable in the settings draft.".to_owned(),
             "Nothing starts during import. Save settings afterwards; activation stays explicit."
                 .to_owned(),
             "Inline environment/header values are omitted. Command arguments WILL be saved."
@@ -265,33 +265,15 @@ impl AppState {
                     state.error = Some("the settings draft changed; reopen import".to_owned());
                     return;
                 };
-                // Only names participate in conflict detection. Preserve existing draft edits,
-                // including temporarily incomplete fields, until the usual save validation.
-                let existing = config
-                    .draft
-                    .mcp_servers
-                    .iter()
-                    .map(|draft| {
-                        let mut server = draft.base_config.clone();
-                        server.name = draft.name.trim().to_owned();
-                        server
-                    })
-                    .collect::<Vec<_>>();
-                match preview.selected_configurations(
+                match config.draft.import_mcp_configurations(
+                    preview,
                     &state.selected.iter().copied().collect::<Vec<_>>(),
-                    &existing,
                 ) {
-                    Ok(servers) => {
-                        config.draft.mcp_servers.extend(
-                            servers
-                                .iter()
-                                .skip(existing.len())
-                                .map(crate::config_panel::McpServerDraft::from_config),
-                        );
+                    Ok(()) => {
                         config.mark_dirty();
                         self.modal_state = None;
                         self.last_notice = Some(
-                            "MCP servers added to draft; Ctrl-S saves, activation stays explicit"
+                            "MCP enabled in draft; Ctrl-S saves, server activation stays explicit"
                                 .to_owned(),
                         );
                     }

@@ -2043,6 +2043,7 @@ export interface TimelineRouteTransition {
 }
 
 export type RouteRecoveryCode =
+  | "session_composition_changed"
   | "session_route_confirmation_required"
   | "session_route_selection_required"
   | "model_route_not_configured"

@@ -3024,9 +3024,64 @@ fn serve_process_rejects_unsafe_startup_before_creating_listener_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_servers()
 -> anyhow::Result<()> {
+    fn run_request(prompt: &str) -> sigil_desktop::DesktopRunStartRequest {
+        sigil_desktop::DesktopRunStartRequest {
+            review_annotations: Vec::new(),
+            image_attachments: Vec::new(),
+            prompt: prompt.to_owned(),
+            permission_mode: sigil_desktop::DesktopPermissionMode::Manual,
+            model_ref: None,
+            model_selection_binding: None,
+            route_recovery_binding: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+            task_continuation: None,
+        }
+    }
+
+    async fn finish_run(
+        client: &sigil_desktop::DesktopHttpClient,
+        session_id: &str,
+        run_id: &str,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let run = client.run(run_id).await?;
+                if run.status.is_terminal() {
+                    anyhow::ensure!(
+                        run.status == sigil_desktop::DesktopRunStatus::Finished,
+                        "MCP capability run failed: {run:?}"
+                    );
+                    if client
+                        .continuity(session_id)
+                        .await?
+                        .foreground_owner
+                        .is_none()
+                    {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?
+    }
+
     let workspace = tempfile::tempdir()?;
     let config_path = workspace.path().join("sigil.toml");
-    write_config(&config_path, "http://127.0.0.1:1");
+    let provider = VisionProviderFixture::start()?;
+    write_config(&config_path, &provider.base_url);
+    let source = fs::read_to_string(&config_path)?
+        .replace("config_version = 2", "config_version = 2\nmcp_servers = []")
+        .replace("chat_completions", "responses");
+    fs::write(
+        &config_path,
+        format!(
+            "{source}\n[composition]\nprofile = 'core'\nenhancements = ['task_orchestration']\n"
+        ),
+    )?;
     let original = fs::read(&config_path)?;
     let marker = workspace.path().join("import-must-not-start");
     let import = serde_json::to_vec(&serde_json::json!({
@@ -3049,6 +3104,15 @@ async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_serv
             ))
             .await?;
         let client = manager.client(&opened.id)?;
+        let original_session = client.create_session(sigil_desktop::DesktopSessionCreateRequest {
+            label: Some("Before MCP import".to_owned()),
+            model_ref: None,
+        }).await?;
+        let first = client.start_run(
+            &original_session.id,
+            run_request("Preserve the conversation before importing a server"),
+        ).await?;
+        finish_run(&client, &original_session.id, &first.run.id).await?;
         let preview = client.preview_mcp_import(import.clone()).await?;
         assert_eq!(preview.candidates.len(), 2);
         assert!(preview.root_fields_ignored);
@@ -3071,6 +3135,21 @@ async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_serv
         assert_eq!(saved.imported_names, ["selected"]);
         assert!(!marker.exists());
         let config = sigil_kernel::RootConfig::load_persisted(&config_path)?;
+        assert_eq!(
+            config.composition.profile,
+            sigil_kernel::RuntimeCompositionProfile::Core
+        );
+        assert_eq!(
+            config.composition.enhancements,
+            std::collections::BTreeSet::from([
+                sigil_kernel::OptionalCapability::TaskOrchestration,
+                sigil_kernel::OptionalCapability::Mcp,
+            ])
+        );
+        assert_eq!(
+            config.task.routing_policy,
+            sigil_kernel::TaskRoutingPolicy::Manual
+        );
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "selected");
         assert_eq!(
@@ -3093,17 +3172,104 @@ async fn desktop_mcp_import_serve_contract_saves_selection_without_starting_serv
         let fresh = client.preview_mcp_import(import).await?;
         assert_eq!(fresh.candidates.len(), 2);
         assert!(!marker.exists(), "reload must preserve lazy startup");
+        let original_source = walkdir::WalkDir::new(workspace.path().join("state/managed/session-log"))
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| entry.file_type().is_file() && entry.file_name() == "records.jsonl")
+            .map(|entry| entry.into_path())
+            .find(|path| sigil_kernel::JsonlSessionStore::read_event_records(path)
+                .is_ok_and(|records| records.first().is_some_and(|record|
+                    record.session_id() == original_session.durable_session_scope_id)))
+            .ok_or_else(|| anyhow::anyhow!("original managed session source is absent"))?;
+        let original_bytes = fs::read(&original_source)?;
+        let attachment_generation = original_source.with_extension("jsonl.attachment-generation");
+        let generation_before = fs::read(&attachment_generation)?;
+        let catalog = client.catalog(&sigil_desktop::DesktopCatalogQuery::default()).await?;
+        let original_entry = catalog.entries.iter().find(|entry|
+            entry.session_id.as_deref() == Some(original_session.durable_session_scope_id.as_str())
+        ).ok_or_else(|| anyhow::anyhow!("original session is absent from the catalog"))?;
+        let historical = client.open_session(sigil_desktop::DesktopSessionOpenRequest {
+            session_ref: original_entry.session_ref.clone(),
+            session_id: original_session.durable_session_scope_id.clone(),
+            label: None,
+            recovery_binding: None,
+        }).await?;
+        let recovery = historical.route_recovery.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("changed composition lacks typed recovery"))?;
+        assert_eq!(recovery.code, sigil_desktop::DesktopSessionRouteRecoveryCode::SessionCompositionChanged);
+        assert_eq!(recovery.allowed_actions, [
+            sigil_desktop::DesktopSessionRouteRecoveryAction::StartNewSession,
+            sigil_desktop::DesktopSessionRouteRecoveryAction::BackToSessionLibrary,
+        ]);
+        assert!(!recovery.retryable);
+        let display = client.conversation_display(
+            &historical.id,
+            &sigil_desktop::DesktopConversationDisplayQuery::default(),
+        ).await?;
+        assert!(!display.items.is_empty(), "historical display must remain readable");
+        let context = client.run_context(&historical.id).await?;
+        assert_eq!(context.route_recovery.as_ref().map(|view| view.code), Some(recovery.code));
+        assert!(client.continuity(&historical.id).await?.foreground_owner.is_none());
+        let denied = client.start_run(&historical.id, run_request("This historical session cannot execute")).await;
+        assert!(matches!(denied, Err(sigil_desktop::DesktopClientError::Rejected {
+            status: 409,
+            code: Some(ref code),
+            route_recovery: Some(ref view),
+        }) if code == "session_composition_changed" && view.code == recovery.code && !view.retryable),
+            "unexpected historical run admission result: {denied:?}");
+        assert_eq!(fs::read(&original_source)?, original_bytes,
+            "browsing and rejected execution must not append to the original session");
+        assert_eq!(fs::read(&attachment_generation)?, generation_before,
+            "read-only restore must not acquire or transfer the old session attachment");
+        let session = client
+            .create_session(sigil_desktop::DesktopSessionCreateRequest {
+                label: Some("MCP import capability check".to_owned()),
+                model_ref: None,
+            })
+            .await?;
+        let receipt = client
+            .start_run(
+                &session.id,
+                run_request("Inspect the available tools without activating a server"),
+            )
+            .await?;
+        finish_run(&client, &session.id, &receipt.run.id).await?;
+        assert!(
+            !marker.exists(),
+            "discovery availability must not activate imported servers"
+        );
         manager.close(&opened.id).await?;
         assert!(!marker.exists());
         Ok(())
     }
     .await;
     let cleanup = manager.close_all().await;
+    let requests = provider.finish()?;
     result?;
     anyhow::ensure!(
         cleanup.iter().all(|(_, result)| result.is_ok()),
         "owned serve cleanup failed: {cleanup:?}"
     );
+    let requests = explicit_provider_requests(&requests);
+    anyhow::ensure!(
+        requests.len() == 2,
+        "expected only the before/after capability runs"
+    );
+    assert!(
+        !requests[0]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "mcp_catalog"))
+    );
+    let tools = requests[1]["tools"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing tool schema"))?;
+    for name in ["mcp_catalog", "mcp_activate_server"] {
+        assert!(
+            tools.iter().any(|tool| tool["name"] == name),
+            "restarted session lacks {name}"
+        );
+    }
     Ok(())
 }
 

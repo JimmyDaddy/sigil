@@ -5,6 +5,10 @@ fn import_fixture() -> Result<(tempfile::TempDir, AppState)> {
     let dir = tempdir()?;
     let mut config = test_config();
     config.workspace.root = dir.path().display().to_string();
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::TaskOrchestration],
+    );
     config
         .connections
         .get_mut("deepseek-default")
@@ -16,6 +20,7 @@ fn import_fixture() -> Result<(tempfile::TempDir, AppState)> {
     );
     let config_path = dir.path().join("sigil.toml");
     config.save(&config_path)?;
+    let config = RootConfig::load_persisted(&config_path)?;
     std::fs::write(
         dir.path().join("import.json"),
         serde_json::to_vec(&json!({
@@ -66,6 +71,13 @@ fn mcp_import_tui_previews_without_secrets_and_saves_selected_draft_without_mode
     let (dir, mut app) = import_fixture()?;
     let config_path = dir.path().join("sigil.toml");
     let before = std::fs::read(&config_path)?;
+    let expected = app
+        .config_state
+        .as_ref()
+        .context("settings")?
+        .draft
+        .base_root_config
+        .persisted_toml()?;
     read_preview(&mut app)?;
     let preview = app.modal_lines().join("\n");
     for secret in ["inline-env-secret", "header-secret", "argument-secret"] {
@@ -97,6 +109,11 @@ fn mcp_import_tui_previews_without_secrets_and_saves_selected_draft_without_mode
     );
     assert!(!draft.mcp_servers[0].base_config.required);
     assert!(app.config_is_dirty());
+    assert_eq!(
+        draft.base_root_config.persisted_toml()?,
+        expected,
+        "explicit import must keep the original CAS snapshot"
+    );
     assert_eq!(std::fs::read(&config_path)?, before);
     assert!(app.drain_pending_worker_commands().is_empty());
 
@@ -107,6 +124,23 @@ fn mcp_import_tui_previews_without_secrets_and_saves_selected_draft_without_mode
     let persisted = RootConfig::load(&config_path)?;
     assert_eq!(persisted.mcp_servers.len(), 1);
     assert_eq!(persisted.mcp_servers[0].name, "alpha");
+    assert_eq!(
+        persisted.composition.profile,
+        sigil_kernel::RuntimeCompositionProfile::Core
+    );
+    assert_eq!(
+        persisted.composition.enhancements,
+        std::collections::BTreeSet::from([
+            sigil_kernel::OptionalCapability::TaskOrchestration,
+            sigil_kernel::OptionalCapability::Mcp,
+        ])
+    );
+    assert!(
+        persisted
+            .with_effective_composition()?
+            .selected_capabilities()
+            .contains(&sigil_kernel::OptionalCapability::Mcp)
+    );
     assert!(!std::fs::read_to_string(&config_path)?.contains("inline-env-secret"));
     assert!(!app.config_is_dirty());
     Ok(())
@@ -244,5 +278,135 @@ fn mcp_import_tui_preserves_unrelated_incomplete_server_draft() -> Result<()> {
         "not finished yet"
     );
     assert_eq!(draft.mcp_servers[1].name, "alpha");
+    Ok(())
+}
+
+#[test]
+fn mcp_import_tui_empty_selection_and_cancel_do_not_enable_mcp() -> Result<()> {
+    let (dir, mut app) = import_fixture()?;
+    let path = dir.path().join("sigil.toml");
+    let before = std::fs::read(&path)?;
+    read_preview(&mut app)?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.mcp_import_modal_open());
+    assert!(!app.config_is_dirty());
+    assert!(
+        !app.config_state
+            .as_ref()
+            .context("settings")?
+            .draft
+            .to_base_root_config()?
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Mcp)
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.has_modal());
+    assert!(!app.config_is_dirty());
+    assert!(
+        !app.config_state
+            .as_ref()
+            .context("settings")?
+            .draft
+            .to_base_root_config()?
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Mcp)
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    Ok(())
+}
+
+#[test]
+fn mcp_import_tui_preserves_dormant_server_and_unrelated_edits_and_rejects_duplicate() -> Result<()>
+{
+    let (dir, _) = import_fixture()?;
+    let path = dir.path().join("sigil.toml");
+    let mut document: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
+    document["mcp_servers"] = toml::Value::try_from(vec![serde_json::from_value::<
+        McpServerConfig,
+    >(json!({
+    "name":"alpha", "transport":"stdio", "command":"must-not-run-existing", "args":["keep-existing"],
+        "startup":"lazy", "required":false
+    }))?])?;
+    std::fs::write(&path, toml::to_string_pretty(&document)?)?;
+    let before = std::fs::read(&path)?;
+    let config = RootConfig::load_persisted(&path)?;
+    assert!(config.mcp_servers.is_empty(), "MCP is initially deferred");
+    let mut app = AppState::from_root_config(&path, &config);
+    app.open_config_panel();
+    let state = app.config_state.as_mut().context("settings")?;
+    state.set_section(ConfigSection::Mcp);
+    state.draft.provider_model = "unsaved-model-kept".to_owned();
+    state.mark_dirty();
+    read_preview(&mut app)?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.mcp_import_modal_open());
+    assert!(
+        app.modal_lines()
+            .join("\n")
+            .contains("conflicts with an existing server name")
+    );
+    assert!(
+        app.config_state
+            .as_ref()
+            .context("settings")?
+            .draft
+            .mcp_servers
+            .is_empty()
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(!app.has_modal());
+    let draft = &app.config_state.as_ref().context("settings")?.draft;
+    assert_eq!(draft.provider_model, "unsaved-model-kept");
+    assert_eq!(
+        draft
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
+    assert_eq!(
+        draft.mcp_servers[0]
+            .base_config
+            .stdio()
+            .context("existing stdio")?
+            .1,
+        ["keep-existing"]
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    std::fs::write(
+        dir.path().join("import.json"),
+        br#"{"mcpServers":{"gamma":{"command":"must-not-run-next"}}}"#,
+    )?;
+    read_preview(&mut app)?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .context("settings")?
+            .draft
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta", "gamma"],
+        "later imports must not reinsert dormant servers"
+    );
+    let saved = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(matches!(saved, Some(AppAction::ConfigSaved { .. })));
+    let persisted = RootConfig::load_persisted(&path)?;
+    assert_eq!(persisted.agent.model, "unsaved-model-kept");
+    assert_eq!(persisted.mcp_servers.len(), 3);
+    assert!(
+        persisted
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Mcp)
+    );
     Ok(())
 }

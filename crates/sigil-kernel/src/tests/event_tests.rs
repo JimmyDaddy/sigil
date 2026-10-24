@@ -1359,6 +1359,37 @@ fn public_run_event_supports_adapter_lifecycle_events() {
 }
 
 #[test]
+fn public_composition_recovery_preserves_non_retryable_new_session_actions() {
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        1,
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: crate::PublicRouteRecoveryCode::SessionCompositionChanged,
+            actions: vec![
+                crate::PublicRouteRecoveryAction::StartNewSession,
+                crate::PublicRouteRecoveryAction::BackToSessionLibrary,
+            ],
+            recovery_binding: "composition-binding".to_owned(),
+            retryable: false,
+        },
+    );
+    let value = serde_json::to_value(&event).expect("recovery should serialize");
+    assert_eq!(value["event"]["code"], "session_composition_changed");
+    assert_eq!(value["event"]["retryable"], false);
+    assert_eq!(
+        value["event"]["actions"],
+        json!(["start_new_session", "back_to_session_library"])
+    );
+    let decoded =
+        serde_json::from_value::<PublicRunEvent>(value.clone()).expect("recovery should decode");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("recovery should reserialize"),
+        value
+    );
+}
+
+#[test]
 fn public_run_event_supports_task_lifecycle_events() {
     let started = PublicRunEvent::new(
         "session-1",

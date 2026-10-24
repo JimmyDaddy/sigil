@@ -500,8 +500,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionRecovery(routeRecovery);
       setSessionActionState("error");
       setSessionRestoreFailed(true);
-      setSessionMessage(routeRecovery?.code === "authority_unavailable"
-        ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
+      setSessionMessage(routeRecovery?.code === "session_composition_changed"
+        ? t("routeRecoveryCompositionChanged") : routeRecovery?.code === "authority_unavailable"
+          ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
       setFailedSessionEntry(canRetry ? {
         sessionRef: remembered.sessionRef, sessionId: remembered.sessionId, title: remembered.label,
       } : undefined);
@@ -792,7 +793,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionActionState("error");
       setSessionRecovery(routeRecovery);
       setSessionMessage(
-        routeRecovery?.code === "authority_unavailable"
+        routeRecovery?.code === "session_composition_changed"
+          ? t("routeRecoveryCompositionChanged") : routeRecovery?.code === "authority_unavailable"
             ? t("routeRecoveryAuthorityUnavailable")
             : t("conversationCreateFailed"),
       );
@@ -874,8 +876,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         return false;
       }
       setSessionActionState("error");
-      setSessionMessage(routeRecovery?.code === "authority_unavailable"
-        ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
+      setSessionMessage(routeRecovery?.code === "session_composition_changed"
+        ? t("routeRecoveryCompositionChanged") : routeRecovery?.code === "authority_unavailable"
+          ? t("routeRecoveryAuthorityUnavailable") : t("conversationOpenFailed"));
       setFailedSessionEntry(routeRecovery === undefined || (routeRecovery.retryable && routeRecovery.allowedActions.includes("retry_session_attach")) ? entry : undefined);
       setConversationNavigation(undefined);
       return false;
@@ -1080,7 +1083,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const legacyIdentity = legacyWorkspace ?? legacyRecent;
   const emptyCreationAllowed = sessionRecovery === undefined || sessionRecovery.allowedActions.includes("start_new_session");
   const recoveryWithoutSession = selectedSession === undefined && (
-    !emptyCreationAllowed || sessionRestoreFailed
+    !emptyCreationAllowed || sessionRestoreFailed || sessionRecovery?.code === "session_composition_changed"
   );
   const historyFiltersApplied = searchQuery.trim() !== "" || providerFilter.trim() !== "" || sourceFilter !== "all" || pinnedOnly;
   const emptyHistory = historyState === "ready" && catalog.workspaceId === activeWorkspaceId && catalog.entries.length === 0;
@@ -1426,9 +1429,10 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 }}
               />
             ) : recoveryWithoutSession ? (
-              <div className="conversation-empty" role="alert">
-                <h1>{t("conversationUnavailable")}</h1>
-                <p>{sessionMessage}</p>
+              <div className="conversation-empty" role={sessionRecovery?.code === "session_composition_changed" ? "status" : "alert"}>
+                <h1>{t(sessionRecovery?.code === "session_composition_changed" ? "routeRecoveryCompositionChanged" : "conversationUnavailable")}</h1>
+                {sessionRecovery?.code === "session_composition_changed" ? null : <p>{sessionMessage}</p>}
+                {sessionRecovery?.allowedActions.includes("start_new_session") ? <Button type="button" variant="primary" disabled={sessionNavigationBusy} onClick={() => void createSession()}>{t("newConversation")}</Button> : null}
                 {sessionRecovery === undefined || sessionRecovery.allowedActions.includes("back_to_session_library") ? <Button type="button" onClick={() => navigate("library")}>{t("openConversationLibrary")}</Button> : null}
                 {failedSessionEntry !== undefined && (sessionRecovery === undefined || sessionRecovery.allowedActions.includes("retry_session_attach")) ? <Button type="button" disabled={sessionNavigationBusy} onClick={() => void openSession(failedSessionEntry, sessionRecovery?.recoveryBinding || undefined)}>{t("retryConversation")}</Button> : null}
                 {sessionRecovery?.allowedActions.some((action) => action === "repair_connection" || action === "select_replacement") ? <Button type="button" onClick={() => navigate("settings")}>{t("openSettings")}</Button> : null}
@@ -1479,6 +1483,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   if (activeWorkspaceId !== undefined) void loadHistory(activeWorkspaceId);
                 }}
                 onNewSession={async () => (await createSession()) !== undefined}
+                onBackToSessionLibrary={() => navigate("library")}
                 onOpenWorkspacePicker={() => void pickWorkspace()}
                 onOpenSessionPicker={(query) => {
                   navigate("conversation");
@@ -1808,6 +1813,7 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
   if (!("recoveryBinding" in recovery) || typeof recovery.recoveryBinding !== "string") return undefined;
   if (!("retryable" in recovery) || typeof recovery.retryable !== "boolean") return undefined;
   const codes = new Set([
+    "session_composition_changed",
     "session_route_confirmation_required",
     "session_route_selection_required",
     "model_route_not_configured",

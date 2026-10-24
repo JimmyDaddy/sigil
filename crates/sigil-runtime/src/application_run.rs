@@ -51,7 +51,10 @@ mod user_input;
 
 pub use live_preview::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub use recorder::ApplicationRunEventRecorder;
-pub use run_start::{ApplicationRunStartView, application_run_start_view};
+pub use run_start::{
+    ApplicationRunStartView, application_run_start_view,
+    application_session_composition_recovery_view, application_session_plan_save_recovery_view,
+};
 
 pub use integration_control::{
     APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
@@ -192,6 +195,8 @@ pub enum ApplicationRunPrepareErrorClass {
     SessionWriterBusy,
     /// The durable session stream could not be safely decoded.
     SessionStreamInvalid,
+    /// A valid session's immutable execution capability selection differs from configuration.
+    SessionCompositionChanged,
     /// Durable session, tool, or extension assembly failed.
     Execution,
     /// The owned blocking preparation worker itself failed.
@@ -244,6 +249,9 @@ pub enum ApplicationRunPrepareError {
     SessionWriterBusy { recovery_binding: String },
     #[error("session stream is invalid")]
     SessionStreamInvalid,
+    /// Historical reads remain valid, but execution requires a new session.
+    #[error("session capability composition has changed")]
+    SessionCompositionChanged,
     /// Runtime/session/tool preparation failure.
     #[error("application run preparation failed")]
     Execution {
@@ -288,6 +296,9 @@ impl ApplicationRunPrepareError {
             }
             Self::SessionWriterBusy { .. } => ApplicationRunPrepareErrorClass::SessionWriterBusy,
             Self::SessionStreamInvalid => ApplicationRunPrepareErrorClass::SessionStreamInvalid,
+            Self::SessionCompositionChanged => {
+                ApplicationRunPrepareErrorClass::SessionCompositionChanged
+            }
             Self::Execution { .. } => ApplicationRunPrepareErrorClass::Execution,
             Self::Internal { .. } => ApplicationRunPrepareErrorClass::Internal,
         }
@@ -324,8 +335,11 @@ impl ApplicationRunPrepareError {
     }
 
     fn execution(source: impl Into<anyhow::Error>) -> Self {
-        Self::Execution {
-            source: source.into(),
+        let source = source.into();
+        if source.is::<crate::SessionCompositionMismatch>() {
+            Self::SessionCompositionChanged
+        } else {
+            Self::Execution { source }
         }
     }
 }
@@ -498,6 +512,7 @@ pub enum ApplicationSessionRouteRecoveryCode {
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
+    SessionCompositionChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

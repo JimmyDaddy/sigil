@@ -909,6 +909,7 @@ pub struct DesktopTimelineRouteTransition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopRouteRecoveryCode {
+    SessionCompositionChanged,
     SessionRouteConfirmationRequired,
     SessionRouteSelectionRequired,
     ModelRouteNotConfigured,
@@ -1382,6 +1383,9 @@ impl DesktopProtocolEvent {
                 DesktopTimelineEventKind::RouteRecoveryRequired,
                 Some(
                     match code {
+                        DesktopRouteRecoveryCode::SessionCompositionChanged => {
+                            "This conversation's feature configuration has changed."
+                        }
                         DesktopRouteRecoveryCode::SessionRouteConfirmationRequired => {
                             "Session route changed and needs confirmation before another run."
                         }

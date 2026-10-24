@@ -151,6 +151,8 @@ pub enum MachineErrorCode {
     SessionWriterBusy,
     /// The durable session stream is invalid.
     SessionStreamInvalid,
+    /// This valid history cannot execute with the current capability selection.
+    SessionCompositionChanged,
     /// Provider, tool, or runtime execution failed.
     ExecutionFailed,
     /// The run was cooperatively cancelled before a result could be produced.
@@ -257,7 +259,8 @@ impl MachineExitCode {
             | MachineErrorCode::ConnectionConfigInvalid
             | MachineErrorCode::ModelRouteNotConfigured
             | MachineErrorCode::SessionRouteConfirmationRequired
-            | MachineErrorCode::SessionRouteSelectionRequired => Self::InvalidInput,
+            | MachineErrorCode::SessionRouteSelectionRequired
+            | MachineErrorCode::SessionCompositionChanged => Self::InvalidInput,
             MachineErrorCode::Cancelled => Self::Cancelled,
             MachineErrorCode::SessionAlreadyActive
             | MachineErrorCode::ProviderUnavailable

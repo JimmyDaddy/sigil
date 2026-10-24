@@ -2576,6 +2576,9 @@ pub(crate) fn desktop_session_route_recovery_summary(
 ) -> DesktopSessionRouteRecoverySummary {
     DesktopSessionRouteRecoverySummary {
         code: match recovery.code {
+            DesktopSessionRouteRecoveryCode::SessionCompositionChanged => {
+                "session_composition_changed"
+            }
             DesktopSessionRouteRecoveryCode::SessionRouteConfirmationRequired => {
                 "session_route_confirmation_required"
             }
@@ -3652,6 +3655,9 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             route_recovery: value.route_recovery.map(|recovery| {
                 DesktopSessionRouteRecoverySummary {
                     code: match recovery.code {
+                        DesktopSessionRouteRecoveryCode::SessionCompositionChanged => {
+                            "session_composition_changed"
+                        }
                         DesktopSessionRouteRecoveryCode::SessionRouteConfirmationRequired => {
                             "session_route_confirmation_required"
                         }

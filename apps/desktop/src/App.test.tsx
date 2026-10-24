@@ -26,6 +26,7 @@ import type {
   RunContext,
   RunStreamStatus,
   ProviderSetupCatalog,
+  SessionRouteRecoveryView,
   SessionSummary,
   TaskIntegrationReview,
   TimelineEvent,
@@ -66,6 +67,216 @@ const emptyCatalog: CatalogPage = {
   truncatedSourceCount: 0,
   entries: [],
 };
+
+describe("composition-changed conversation history", () => {
+  const changedRecovery: SessionRouteRecoveryView = {
+    code: "session_composition_changed",
+    allowedActions: ["start_new_session", "back_to_session_library"],
+    recoveryBinding: "session-composition:fixture-read-only-binding",
+    retryable: false,
+  };
+  const entry: CatalogEntry = {
+    sessionRef: "composition-history.jsonl",
+    sessionId: "durable-composition-history",
+    sourceState: "ready",
+    sourceBytes: 512,
+    sourceModifiedAtUnixMs: 1_784_419_200_000,
+    title: "Conversation before adding an integration",
+    userMessageCount: 1,
+    assistantMessageCount: 1,
+    toolResultCount: 0,
+    pinned: false,
+  };
+  const historyPage = (older = false): ConversationDisplayPage => ({
+    schemaVersion: 1,
+    requestScope: "composition-read-only-scope",
+    throughSessionStreamSequence: "2",
+    totalItems: "2",
+    items: [{
+      schemaVersion: 1,
+      displayId: older ? "older-composition-answer" : "latest-composition-answer",
+      displayOrder: { sessionStreamSequence: older ? "1" : "2", subindex: 0 },
+      sourceEventId: older ? "older-composition-event" : "latest-composition-event",
+      kind: "assistant_message",
+      source: "durable_transcript",
+      runId: older ? "earlier-run-before-composition-change" : "latest-run-before-composition-change",
+      status: "succeeded",
+      content: {
+        type: "message",
+        role: "assistant",
+        text: older ? "Earlier saved answer stays readable." : "Latest saved answer stays readable.",
+        assistantPhase: "final_answer",
+        imageAttachmentCount: 0,
+        truncated: false,
+        originalContentBytes: 40,
+      },
+    }],
+    nextCursor: older ? undefined : "earlier-composition-page",
+    hasMore: !older,
+    gapFacts: [],
+  });
+
+  it("reads and pages saved history without exposing execution or retry, then creates a fresh conversation", async () => {
+    const user = userEvent.setup();
+    const draftKey = `sigil:conversation-draft:v1:${workspace.id}:${entry.sessionId}`;
+    window.localStorage.setItem(draftKey, "Keep my earlier unsent draft 中文");
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async () => ({
+      id: "http-composition-history", label: entry.title, runCount: 1,
+      routeRecovery: changedRecovery,
+    }));
+    const createSession = vi.fn<DesktopBridge["createSession"]>(async () => ({
+      id: "http-session-new", durableSessionId: "durable-session-new", runCount: 0,
+    }));
+    const display = vi.fn<DesktopBridge["display"]>(async (_workspaceId, _sessionId, request) =>
+      historyPage(request.cursor !== undefined));
+    const startRun = vi.fn<DesktopBridge["startRun"]>();
+    const conversationQueue = vi.fn<DesktopBridge["conversationQueue"]>(async (_workspaceId, sessionId) => ({
+      schemaVersion: 1, sessionId, generation: "0", paused: false, totalItems: 0, items: [], truncated: false,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }),
+      openSession, createSession, display, startRun, conversationQueue,
+      // A stale clean context cannot promote the read-only session binding to a writer.
+      runContext: async () => defaultRunContext,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Conversation before adding/ }));
+    expect(await screen.findByText("Latest saved answer stays readable.")).toBeTruthy();
+    const recovery = screen.getByText("This conversation's feature configuration has changed").closest("section")!;
+    expect(recovery.getAttribute("role")).toBe("status");
+    expect(recovery.classList.contains("is-neutral")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Retry attachment" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry provider" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review connection" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Conversation tools" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Message Sigil" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(conversationQueue).not.toHaveBeenCalled();
+    expect(startRun).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(draftKey)).toBe("Keep my earlier unsent draft 中文");
+    const timeline = screen.getByRole("log");
+    fireEvent.wheel(timeline, { deltaY: -120 });
+    timeline.scrollTop = 0;
+    fireEvent.scroll(timeline);
+    await waitFor(() => expect(display).toHaveBeenLastCalledWith(workspace.id, "http-composition-history",
+      { cursor: "earlier-composition-page", limit: 50 }, expect.any(AbortSignal)));
+    const earlier = await screen.findByText("Earlier saved answer stays readable.");
+    const latest = screen.getByText("Latest saved answer stays readable.");
+    expect(earlier.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.queryByText(/more than one unreconciled final answer/)).toBeNull();
+    expect(openSession).toHaveBeenCalledOnce();
+
+    await user.click(within(recovery).getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
+    await screen.findByRole("combobox", { name: "Message Sigil" });
+    expect(screen.queryByText("This conversation's feature configuration has changed")).toBeNull();
+    expect(startRun).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(draftKey)).toBe("Keep my earlier unsent draft 中文");
+  });
+
+  it("returns to the library from read-only history without retrying the old attachment", async () => {
+    const user = userEvent.setup();
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async () => ({
+      id: "http-composition-history", label: entry.title, runCount: 1, routeRecovery: changedRecovery,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }),
+      openSession, display: async () => historyPage(true),
+      runContext: async () => ({ ...defaultRunContext, routeRecovery: changedRecovery }),
+    })} />);
+    await user.click(await screen.findByRole("button", { name: /^Conversation before adding/ }));
+    await screen.findByText("Earlier saved answer stays readable.");
+    const recovery = screen.getByText("This conversation's feature configuration has changed").closest("section")!;
+    await user.click(within(recovery).getByRole("button", { name: "Manage conversations" }));
+    expect(await screen.findByRole("heading", { name: "Conversation Library" })).toBeTruthy();
+    expect(openSession).toHaveBeenCalledOnce();
+  });
+
+  it("recognizes a typed composition failure without inventing a retry action", async () => {
+    const user = userEvent.setup();
+    const openSession = vi.fn<DesktopBridge["openSession"]>(async () => Promise.reject({
+      code: "session_open_recovery_required", routeRecovery: changedRecovery,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }), openSession,
+    })} />);
+    await user.click(await screen.findByRole("button", { name: /^Conversation before adding/ }));
+    const heading = await screen.findByRole("heading", { name: "This conversation's feature configuration has changed" });
+    const recovery = heading.closest<HTMLElement>(".conversation-empty")!;
+    expect(screen.queryByRole("button", { name: "Retry conversation" })).toBeNull();
+    expect(openSession).toHaveBeenCalledOnce();
+    expect(within(recovery).getByRole("button", { name: "New conversation" })).toBeTruthy();
+    await user.click(within(recovery).getByRole("button", { name: "Manage conversations" }));
+    expect(await screen.findByRole("heading", { name: "Conversation Library" })).toBeTruthy();
+    expect(openSession).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("handles a real live pending approval only when the session is writable (read-only=%s)", async (readOnly) => {
+    const user = userEvent.setup();
+    const sessionId = "http-composition-live-approval";
+    const runId = "run-before-composition-change";
+    const owner = { runId, ownerRevision: `sha256:${"a".repeat(64)}` };
+    const resolveApproval = vi.fn<DesktopBridge["resolveApproval"]>(async (_workspaceId, resolvedSessionId, resolvedRunId, approval) => ({
+      commandId: "composition-approval-command", clientId: "desktop-test",
+      sessionId: resolvedSessionId, runId: resolvedRunId, callId: approval.callId,
+      approvalRequestId: approval.approvalRequestId, expectedStreamSequence: 2,
+      decision: "approved", routeState: "decision_accepted", registryRevision: 3, replayed: false,
+    }));
+    const events: TimelineEvent[] = [{
+      workspaceId: workspace.id, sessionId, runId, sequence: 1, runSequence: "1",
+      provisionalId: "composition-old-live-user", replayable: true, kind: "run_started",
+      text: "Work started before the feature configuration changed.",
+    }, {
+      workspaceId: workspace.id, sessionId, runId, sequence: 2, runSequence: "2",
+      provisionalId: "composition-old-live-approval", replayable: true,
+      kind: "approval_requested", itemId: "old-composition-call", toolName: "bash",
+      approval: {
+        callId: "old-composition-call", toolName: "bash",
+        approvalRequestId: "old-composition-approval", toolCallHash: "frozen-old-call-hash",
+        policyVersion: "manual", expiresAtMs: 4_102_444_800_000, snapshotRequired: false,
+        sessionGrantAvailable: true,
+        operation: "execute_workspace_check_command", previewTitle: "Old pending command",
+        previewBody: "Command: true", risk: "low",
+      },
+    }];
+    const attachRun = vi.fn<DesktopBridge["attachRun"]>(async () => ({
+      run: { id: runId, sessionId, status: "waiting_for_approval", permissionMode: "manual", streamSequence: 2 },
+      events, streamState: "live", hasGap: false,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [entry] }),
+      openSession: async () => ({ id: sessionId, label: entry.title, runCount: 1,
+        foregroundRunId: runId, routeRecovery: readOnly ? changedRecovery : undefined }),
+      continuity: async () => ({ durableFrontier: { throughStreamSequence: 0 },
+        foregroundOwner: owner, retainedTerminalRuns: [], recoveryActions: [] }),
+      attachRun, resolveApproval,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Conversation before adding/ }));
+    await waitFor(() => expect(document.querySelector(`[data-session-id="${sessionId}"]`)
+      ?.getAttribute("data-continuity-lifecycle")).toBe("live"));
+    expect(attachRun).toHaveBeenCalledOnce();
+    expect(await screen.findByText("Work started before the feature configuration changed.")).toBeTruthy();
+    if (readOnly) {
+      expect(screen.getByText("This conversation's feature configuration has changed")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Allow for session" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+      expect(document.querySelector(".approval-dock")).toBeNull();
+      fireEvent.keyDown(screen.getByRole("log"), { key: "Enter", ctrlKey: true });
+      expect(resolveApproval).not.toHaveBeenCalled();
+    } else {
+      await user.click(await screen.findByRole("button", { name: "Approve once" }));
+      await waitFor(() => expect(resolveApproval).toHaveBeenCalledOnce());
+      expect(resolveApproval).toHaveBeenCalledWith(workspace.id, sessionId, runId,
+        events[1]!.approval, "approve_once");
+    }
+  });
+});
 
 it("opens authentication recovery on the failed connection without mutating credentials or losing the draft", async () => {
   const user = userEvent.setup();

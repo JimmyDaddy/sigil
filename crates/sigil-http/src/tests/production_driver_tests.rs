@@ -167,6 +167,32 @@ fn preparation_authority_failure_projects_new_session_without_provider_fallback(
     ));
 }
 
+#[test]
+fn preparation_composition_mismatch_projects_only_new_session_recovery() {
+    use sigil_runtime::application_run::ApplicationRunPrepareError;
+
+    let error = anyhow::Error::new(ApplicationRunPrepareError::SessionCompositionChanged);
+    assert!(matches!(
+        public_preparation_failure_event(&error),
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::SessionCompositionChanged,
+            actions,
+            retryable: false,
+            ..
+        } if actions == vec![
+            PublicRouteRecoveryAction::StartNewSession,
+            PublicRouteRecoveryAction::BackToSessionLibrary,
+        ]
+    ));
+    let generic = anyhow::Error::new(ApplicationRunPrepareError::Execution {
+        source: anyhow::anyhow!("session capability composition has changed"),
+    });
+    assert!(matches!(
+        public_preparation_failure_event(&generic),
+        PublicRunEventKind::RunFailed { .. }
+    ));
+}
+
 fn call() -> ToolCall {
     ToolCall {
         id: "call-1".to_owned(),
@@ -7052,6 +7078,89 @@ fn accept_production_revision_guidance(
     )
     .expect("guidance should be accepted durably before dispatch");
     request.expect("accepted guidance must produce an executable revision request")
+}
+
+#[tokio::test]
+async fn production_plan_save_admission_preserves_only_the_existing_boot_selection() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let driver = production_queue_driver(&temp, "plan-save-selection");
+    let registry = driver.build_registry(Arc::new(HttpDurableCommandStore::open(
+        temp.path().join("commands.json"),
+        8,
+    )?))?;
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let config_path = temp.path().join("sigil.toml");
+    let valid_config = std::fs::read_to_string(&config_path)?;
+    let source_before = std::fs::read(&session.session_log_path)?;
+    assert!(driver.admit_plan_save(&session).is_ok());
+    std::fs::write(
+        &config_path,
+        format!("{valid_config}\n[composition]\nprofile = 'core'\n"),
+    )?;
+    assert!(matches!(driver.admit_plan_save(&session),
+        Err(HttpRunAdmissionError::RouteRecovery(recovery))
+            if recovery.code == crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged
+                && !recovery.retryable));
+    std::fs::write(&config_path, "invalid = [")?;
+    assert!(
+        driver.admit_plan_save(&session).is_ok(),
+        "syntax-only config failure cannot erase an existing local Save action"
+    );
+    assert!(
+        matches!(
+            driver.admit_session_command(&session),
+            Err(HttpRunAdmissionError::Unavailable)
+        ),
+        "invalid config never admits ordinary execution"
+    );
+    std::fs::write(
+        &config_path,
+        format!(
+            "{valid_config}\n[composition]\nprofile = 'core'\nenhancements = ['unknown_capability']\n"
+        ),
+    )?;
+    assert!(
+        matches!(
+            driver.admit_plan_save(&session),
+            Err(HttpRunAdmissionError::Unavailable)
+        ),
+        "a parseable invalid composition cannot use the syntax-only recovery"
+    );
+    std::fs::remove_file(&config_path)?;
+    assert!(
+        matches!(
+            driver.admit_plan_save(&session),
+            Err(HttpRunAdmissionError::Unavailable)
+        ),
+        "missing config is not a syntax-only recovery"
+    );
+    assert_eq!(std::fs::read(&session.session_log_path)?, source_before);
+    std::fs::write(&config_path, "invalid = [")?;
+    let mut log = sigil_kernel::Session::load_from_store_for_control(JsonlSessionStore::new(
+        &session.session_log_path,
+    )?)?;
+    let binding = log
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::SessionCompositionBound(binding)) => {
+                Some(binding.clone())
+            }
+            _ => None,
+        })
+        .expect("original admitted composition");
+    log.append_control(ControlEntry::SessionCompositionBound(binding))?;
+    drop(log);
+    let corrupt_before = std::fs::read(&session.session_log_path)?;
+    assert!(
+        matches!(
+            driver.admit_plan_save(&session),
+            Err(HttpRunAdmissionError::Unavailable)
+        ),
+        "syntax-only config recovery cannot bypass corrupt durable bindings"
+    );
+    assert_eq!(std::fs::read(&session.session_log_path)?, corrupt_before);
+    Ok(())
 }
 
 #[tokio::test]

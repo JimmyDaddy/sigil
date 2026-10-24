@@ -105,10 +105,9 @@ impl HttpSupportContext {
             .as_ref()
             .filter(|draft| draft.id == request.preview_id)
             .ok_or(HttpMcpImportFailure::Stale)?;
-        let mut next = prepared.current.clone();
-        next.mcp_servers = prepared
+        let next = prepared
             .import
-            .selected_configurations(&request.selected_indices, &prepared.current.mcp_servers)
+            .selected_root_configuration(&request.selected_indices, &prepared.current)
             .map_err(|_| HttpMcpImportFailure::Invalid)?;
         let imported_names = request
             .selected_indices

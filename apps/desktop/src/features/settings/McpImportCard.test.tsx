@@ -32,7 +32,7 @@ it("previews first, publishes only the selection, and does not need a model cred
   expect((screen.getByRole("checkbox", { name: "invalid" }) as HTMLInputElement).disabled).toBe(true);
   expect(screen.getByText(/Inline environment and header values are not copied/)).toBeTruthy();
   await user.click(screen.getByRole("checkbox", { name: "beta" }));
-  await user.click(screen.getByRole("button", { name: "Import selected servers" }));
+  await user.click(screen.getByRole("button", { name: "Import and enable" }));
   expect(applyMcpImport).toHaveBeenCalledWith("workspace", "preview", [0]);
   expect((await screen.findByRole("status")).textContent).toContain("MCP servers imported: alpha");
   expect(onImported).toHaveBeenCalledOnce();
@@ -45,11 +45,11 @@ it("retains the exact preview and selection after a save failure", async () => {
   fixture({ applyMcpImport });
   await user.click(screen.getByRole("button", { name: "Choose JSON file" }));
   await user.click(screen.getByRole("checkbox", { name: "beta" }));
-  await user.click(screen.getByRole("button", { name: "Import selected servers" }));
+  await user.click(screen.getByRole("button", { name: "Import and enable" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Your selection is preserved");
   expect((screen.getByRole("checkbox", { name: "alpha" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("checkbox", { name: "beta" }) as HTMLInputElement).checked).toBe(false);
-  await user.click(screen.getByRole("button", { name: "Import selected servers" }));
+  await user.click(screen.getByRole("button", { name: "Import and enable" }));
   expect(applyMcpImport).toHaveBeenNthCalledWith(2, "workspace", "preview", [0]);
 });
 
@@ -57,9 +57,9 @@ it("reports a saved import accurately when workspace reload needs recovery", asy
   const user = userEvent.setup();
   const { onImported } = fixture({ applyMcpImport: async () => ({ importedNames: ["alpha"], reloadRequired: true }) });
   await user.click(screen.getByRole("button", { name: "Choose JSON file" }));
-  await user.click(screen.getByRole("button", { name: "Import selected servers" }));
+  await user.click(screen.getByRole("button", { name: "Import and enable" }));
   expect((await screen.findByRole("status")).textContent).toContain("MCP servers imported");
   expect(screen.getByRole("alert").textContent).toContain("Import was saved");
   expect(onImported).not.toHaveBeenCalled();
-  expect(screen.queryByRole("button", { name: "Import selected servers" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Import and enable" })).toBeNull();
 });

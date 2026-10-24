@@ -114,7 +114,8 @@ pub use reasoning_effort::admitted_reasoning_effort;
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod session_composition;
 pub use session_composition::{
-    bind_session_composition, validate_boot_composition, validate_session_composition,
+    SessionCompositionMismatch, bind_session_composition, validate_boot_composition,
+    validate_session_composition,
 };
 mod run_options; // shared run options and scoped tool registry views.
 

@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn composition_changed_session_recovery_ipc_preserves_read_only_actions() {
+    let recovery: sigil_desktop::DesktopSessionRouteRecoveryView =
+        serde_json::from_value(serde_json::json!({
+            "code": "session_composition_changed",
+            "allowed_actions": ["start_new_session", "back_to_session_library"],
+            "recovery_binding": "session-composition:fixture-read-only-binding",
+            "retryable": false
+        }))
+        .expect("typed read-only recovery");
+    let ipc = serde_json::to_value(desktop_session_route_recovery_summary(recovery))
+        .expect("safe recovery IPC");
+    assert_eq!(ipc["code"], "session_composition_changed");
+    assert_eq!(
+        ipc["allowedActions"],
+        serde_json::json!(["start_new_session", "back_to_session_library"])
+    );
+    assert_eq!(ipc["retryable"], false);
+    assert_eq!(
+        ipc["recoveryBinding"],
+        "session-composition:fixture-read-only-binding"
+    );
+}
+
 fn user_input_presentation_request_value() -> serde_json::Value {
     serde_json::json!({
         "identity": { "session_scope_id": "presentation-session", "root_logical_run_id": "presentation-run",

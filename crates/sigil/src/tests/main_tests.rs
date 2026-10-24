@@ -750,6 +750,36 @@ fn text_cli_renders_authority_recovery_without_provider_fallback() {
 }
 
 #[test]
+fn composition_change_recovery_does_not_offer_retry_or_expose_private_binding() -> Result<()> {
+    let error = super::machine_error_from_prepare(
+        &sigil_runtime::application_run::ApplicationRunPrepareError::SessionCompositionChanged,
+    );
+    let wire = serde_json::to_value(error)?;
+    assert_eq!(wire["code"], "session_composition_changed");
+    assert_eq!(wire["retryable"], false);
+    assert_eq!(
+        wire["allowed_actions"],
+        serde_json::json!(["start_new_session", "back_to_session_library"])
+    );
+    assert!(wire.get("recovery_binding").is_none());
+
+    let output = super::render_public_run_event(PublicRunEventKind::RouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionCompositionChanged,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: "opaque-composition-binding".to_owned(),
+        retryable: false,
+    });
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("start a new session"));
+    assert!(!output.stderr.contains("retry"));
+    assert!(!output.stderr.contains("opaque-composition-binding"));
+    Ok(())
+}
+
+#[test]
 fn text_cli_renders_partial_output_discard_without_content_or_attempt_identity() {
     let output =
         super::render_public_run_event(PublicRunEventKind::ProviderTurnPartialOutputDiscarded {

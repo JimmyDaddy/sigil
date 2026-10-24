@@ -91,6 +91,8 @@ pub(crate) fn application_scope(
 
 /// HTTP-local client facade used by the listener and production integration tests.
 pub struct HttpApplicationClient {
+    registry: Arc<HttpSessionRunRegistry>,
+    session_id: String,
     journal_store: Arc<ManagedApplicationReservationStore>,
     client: ApplicationClient,
     runtime: Handle,
@@ -98,6 +100,23 @@ pub struct HttpApplicationClient {
     urgent_frontier: sigil_application::ExpectedFrontier,
     dispatch_observation: Arc<std::sync::Mutex<Option<UserInputDispatchObservation>>>,
     observation_execution: std::sync::Mutex<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HttpApplicationExecutionError {
+    #[error(transparent)]
+    Admission(#[from] crate::HttpRegistryError),
+    #[error(transparent)]
+    Application(#[from] ApplicationError),
+}
+
+impl HttpApplicationExecutionError {
+    pub(crate) fn into_registry(self) -> crate::HttpRegistryError {
+        match self {
+            Self::Admission(error) => error,
+            Self::Application(error) => crate::registry::application_registry_error(error),
+        }
+    }
 }
 
 /// Call-local diagnostics only. Domain settlement and replay never consume this observation.
@@ -171,7 +190,7 @@ impl HttpApplicationClient {
         command_id: &str,
         journal: Option<sigil_application::CommandJournalBinding>,
         command: ApplicationCommand,
-    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+    ) -> Result<ApplicationCommandReceipt, HttpApplicationExecutionError> {
         self.execute_with_observation(command_id, journal, command)
             .map(|(receipt, _)| receipt)
     }
@@ -184,7 +203,7 @@ impl HttpApplicationClient {
     ) -> Result<ApplicationCommandReceipt, crate::HttpRegistryError> {
         let (receipt, error) = self
             .execute_with_observation(command_id, journal, command)
-            .map_err(crate::registry::application_registry_error)?;
+            .map_err(HttpApplicationExecutionError::into_registry)?;
         match error {
             Some(error) => Err(error),
             None => Ok(receipt),
@@ -196,41 +215,54 @@ impl HttpApplicationClient {
         command_id: &str,
         journal: Option<sigil_application::CommandJournalBinding>,
         command: ApplicationCommand,
-    ) -> Result<(ApplicationCommandReceipt, Option<crate::HttpRegistryError>), ApplicationError>
-    {
+    ) -> Result<
+        (ApplicationCommandReceipt, Option<crate::HttpRegistryError>),
+        HttpApplicationExecutionError,
+    > {
         // Serialize only this client's normal invocation observation. Urgent stop retains its
         // separate nonwaiting lane; other clients own independent slots.
         let _execution = self
             .observation_execution
             .lock()
             .map_err(|_| ApplicationError::Unavailable)?;
-        let command_id = ApplicationCommandId::new(command_id.to_owned())?;
-        let mut request = self.client.prepare_command(command_id, command)?;
-        request.admission.command_journal = journal;
-        self.block_on(self.client.restore_original_command_context(&mut request))?;
-        let key = request
-            .admission
-            .reservation_key(&request.envelope.command_id);
-        let fingerprint = sigil_application::command_fingerprint(&request)?;
-        let _observation = DispatchObservationGuard(Arc::clone(&self.dispatch_observation));
-        *self
-            .dispatch_observation
-            .lock()
-            .map_err(|_| ApplicationError::Unavailable)? = Some(UserInputDispatchObservation {
-            key: key.clone(),
-            fingerprint: fingerprint.clone(),
-            error: None,
-        });
-        let receipt = self.block_on(self.client.execute_prepared(request))?;
-        let observation = self
-            .dispatch_observation
-            .lock()
-            .map_err(|_| ApplicationError::Unavailable)?
-            .take();
-        let error = observation
-            .filter(|observation| observation.key == key && observation.fingerprint == fingerprint)
-            .and_then(|observation| observation.error);
-        Ok((receipt, error))
+        if !application_command_is_safety_control(&command) {
+            // Admission precedes refresh and every journal reservation. The client may have
+            // been created before configuration changed; its original projection is no permit.
+            self.registry.preflight_session_command(&self.session_id)?;
+        }
+        (|| {
+            self.block_on(self.client.refresh())?;
+            let command_id = ApplicationCommandId::new(command_id.to_owned())?;
+            let mut request = self.client.prepare_command(command_id, command)?;
+            request.admission.command_journal = journal;
+            self.block_on(self.client.restore_original_command_context(&mut request))?;
+            let key = request
+                .admission
+                .reservation_key(&request.envelope.command_id);
+            let fingerprint = sigil_application::command_fingerprint(&request)?;
+            let _observation = DispatchObservationGuard(Arc::clone(&self.dispatch_observation));
+            *self
+                .dispatch_observation
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)? = Some(UserInputDispatchObservation {
+                key: key.clone(),
+                fingerprint: fingerprint.clone(),
+                error: None,
+            });
+            let receipt = self.block_on(self.client.execute_prepared(request))?;
+            let observation = self
+                .dispatch_observation
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?
+                .take();
+            let error = observation
+                .filter(|observation| {
+                    observation.key == key && observation.fingerprint == fingerprint
+                })
+                .and_then(|observation| observation.error);
+            Ok((receipt, error))
+        })()
+        .map_err(HttpApplicationExecutionError::Application)
     }
 
     /// Executes an urgent command using the host-bound baseline frontier without opening the
@@ -289,6 +321,17 @@ impl HttpApplicationClient {
     }
 }
 
+pub(crate) const fn application_command_is_safety_control(command: &ApplicationCommand) -> bool {
+    matches!(
+        command,
+        ApplicationCommand::Run(
+            RunCommand::Cancel { .. }
+                | RunCommand::CancelTerminalTask { .. }
+                | RunCommand::Pause { .. }
+        )
+    )
+}
+
 /// Builds one HTTP client from trusted composition data and a transport client identity.
 pub(crate) fn build_client(
     context: &HttpApplicationContext,
@@ -345,6 +388,8 @@ pub(crate) fn build_client(
     let client = ApplicationClient::new(service, scope, 1, client_epoch, connection_instance)
         .map_err(application_driver_error)?;
     Ok(HttpApplicationClient {
+        registry: Arc::clone(&context.registry),
+        session_id: session.id.clone(),
         journal_store: Arc::clone(&context.reservations),
         client,
         runtime: context.runtime.clone(),

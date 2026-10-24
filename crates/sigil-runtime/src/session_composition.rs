@@ -6,6 +6,11 @@ use sigil_kernel::{
     SessionCompositionSnapshotV1, SessionLogEntry,
 };
 
+/// A structurally valid session retains a different immutable execution capability selection.
+#[derive(Debug, thiserror::Error)]
+#[error("session capability composition differs from configuration; start a new session")]
+pub struct SessionCompositionMismatch;
+
 /// Ensures a long-lived host uses only the capabilities admitted by its current authority boot.
 /// The caller supplies its effective configuration; this check performs no module initialization.
 pub fn validate_boot_composition(
@@ -32,9 +37,16 @@ pub(crate) fn validate_session_composition_snapshot(
     session: &Session,
     expected: &SessionCompositionSnapshotV1,
 ) -> Result<()> {
+    validate_session_composition_entries(session.entries(), expected)
+}
+
+pub(crate) fn validate_session_composition_entries(
+    entries: &[SessionLogEntry],
+    expected: &SessionCompositionSnapshotV1,
+) -> Result<()> {
     let mut binding = None;
     let mut has_execution_history = false;
-    for entry in session.entries() {
+    for entry in entries {
         match entry {
             SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot)) => {
                 snapshot.validate()?;
@@ -60,13 +72,18 @@ pub(crate) fn validate_session_composition_snapshot(
         }
     }
     match binding {
-        Some(actual) => ensure!(
-            actual.schema_version == expected.schema_version
-                && actual.core_contract_version == expected.core_contract_version
-                && execution_capabilities(&actual.capabilities)
-                    == execution_capabilities(&expected.capabilities),
-            "session capability composition differs from configuration; start a new session"
-        ),
+        Some(actual) => {
+            ensure!(
+                actual.schema_version == expected.schema_version
+                    && actual.core_contract_version == expected.core_contract_version,
+                "session execution contract differs from configuration; start a new session"
+            );
+            if execution_capabilities(&actual.capabilities)
+                != execution_capabilities(&expected.capabilities)
+            {
+                return Err(SessionCompositionMismatch.into());
+            }
+        }
         None if has_execution_history => {
             bail!("session has no capability composition binding; start a new session")
         }

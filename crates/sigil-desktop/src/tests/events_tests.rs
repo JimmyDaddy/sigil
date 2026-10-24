@@ -949,6 +949,109 @@ fn route_recovery_event_projects_bounded_renderer_actions() {
 }
 
 #[test]
+fn session_composition_changed_snapshot_preserves_read_only_recovery_contract() {
+    let snapshot: crate::DesktopSessionSnapshot = serde_json::from_value(json!({
+        "id": "http-session-1",
+        "label": "Earlier conversation",
+        "run_ids": ["run-1"],
+        "durable_session_scope_id": "session-1",
+        "foreground_run_id": null,
+        "route_recovery": {
+            "code": "session_composition_changed",
+            "allowed_actions": ["start_new_session", "back_to_session_library"],
+            "recovery_binding": "composition-binding-1",
+            "retryable": false
+        }
+    }))
+    .expect("read-only session snapshot should consume the HTTP wire contract");
+
+    assert_eq!(snapshot.id, "http-session-1");
+    assert_eq!(snapshot.durable_session_scope_id, "session-1");
+    assert_eq!(snapshot.run_ids, vec!["run-1"]);
+    assert!(snapshot.foreground_run_id.is_none());
+    let recovery = snapshot.route_recovery.expect("typed composition recovery");
+    assert_eq!(
+        recovery.code,
+        crate::DesktopSessionRouteRecoveryCode::SessionCompositionChanged
+    );
+    assert_eq!(
+        recovery.allowed_actions,
+        vec![
+            crate::DesktopSessionRouteRecoveryAction::StartNewSession,
+            crate::DesktopSessionRouteRecoveryAction::BackToSessionLibrary,
+        ]
+    );
+    assert_eq!(recovery.recovery_binding, "composition-binding-1");
+    assert!(!recovery.retryable);
+}
+
+#[test]
+fn session_composition_changed_event_keeps_identity_and_neutral_read_only_recovery() {
+    let event: DesktopProtocolEvent = serde_json::from_value(json!({
+        "schema_version": DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
+        "event_class": "durable",
+        "replay_id": "sigil-http-run-v1:session-1:run-1:7",
+        "run_event": {
+            "schema_version": DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "sequence": 7,
+            "event": {
+                "type": "route_recovery_required",
+                "code": "session_composition_changed",
+                "actions": ["start_new_session", "back_to_session_library"],
+                "recovery_binding": "composition-binding-1",
+                "retryable": false
+            }
+        }
+    }))
+    .expect("composition recovery SSE data should decode through the protocol parser");
+
+    for (session_id, run_id) in [("another-session", "run-1"), ("session-1", "another-run")] {
+        assert_eq!(
+            event
+                .clone()
+                .into_timeline("workspace-1", session_id, run_id, "http-session-1"),
+            Err(DesktopProtocolEventError::WrongStream)
+        );
+    }
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+        .expect("same-stream composition recovery should project");
+    assert_eq!(timeline.workspace_id, "workspace-1");
+    assert_eq!(timeline.session_id, "http-session-1");
+    assert_eq!(timeline.run_id, "run-1");
+    assert_eq!(timeline.sequence, 7);
+    assert_eq!(timeline.run_sequence, "7");
+    assert!(timeline.replayable);
+    assert_eq!(
+        timeline.replay_id.as_deref(),
+        Some("sigil-http-run-v1:session-1:run-1:7")
+    );
+    assert_eq!(
+        timeline.kind,
+        DesktopTimelineEventKind::RouteRecoveryRequired
+    );
+    assert_eq!(timeline.status.as_deref(), Some("recovery_required"));
+    assert_eq!(
+        timeline.text.as_deref(),
+        Some("This conversation's feature configuration has changed.")
+    );
+    assert!(timeline.provider_turn_recovery.is_none());
+    assert_eq!(
+        serde_json::to_value(timeline.route_recovery.expect("renderer recovery DTO"))
+            .expect("renderer recovery should serialize"),
+        json!({
+            "code": "session_composition_changed",
+            "actions": ["start_new_session", "back_to_session_library"],
+            "recoveryBinding": "composition-binding-1",
+            "retryable": false
+        })
+    );
+}
+
+#[test]
 fn authority_unavailable_recovery_uses_stable_snake_case_and_starts_new_session() {
     let event = envelope(
         DesktopProtocolEventClass::Durable,

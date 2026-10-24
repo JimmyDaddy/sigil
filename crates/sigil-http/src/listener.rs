@@ -1378,10 +1378,6 @@ fn route_http_request(
                 "invalid transport-neutral application command body",
             );
         };
-        let client = match registry.application_client(session_id, client_id) {
-            Ok(client) => client,
-            Err(error) => return registry_error_response(error),
-        };
         let exact_stop_run = match &body.command {
             sigil_application::ApplicationCommand::Run(sigil_application::RunCommand::Cancel {
                 binding,
@@ -1392,7 +1388,17 @@ fn route_http_request(
             ) => Some(identity.run_id.as_str()),
             _ => None,
         };
-        let result = if let Some(run_id) = exact_stop_run {
+        let client = match if crate::application_bridge::application_command_is_safety_control(
+            &body.command,
+        ) {
+            registry.application_client(session_id, client_id)
+        } else {
+            registry.application_command_client(session_id, client_id)
+        } {
+            Ok(client) => client,
+            Err(error) => return registry_error_response(error),
+        };
+        if let Some(run_id) = exact_stop_run {
             // A scope mismatch is known before any effect. Check the exact registry owner
             // without loading configuration or projection, including in the unrecorded lane.
             let run = match registry.get_run(run_id) {
@@ -1404,16 +1410,24 @@ fn route_http_request(
                     sigil_application::ApplicationError::ScopeMismatch,
                 );
             }
-            client.execute_without_refresh(&body.command_id, body.command_journal, body.command)
-        } else {
-            if let Err(error) = client.refresh() {
-                return application_error_response(error);
-            }
-            client.execute_in_journal(&body.command_id, body.command_journal, body.command)
-        };
-        return match result {
+            return match client.execute_without_refresh(
+                &body.command_id,
+                body.command_journal,
+                body.command,
+            ) {
+                Ok(receipt) => json_response(200, json!(receipt)),
+                Err(error) => application_error_response(error),
+            };
+        }
+        return match client.execute_in_journal(&body.command_id, body.command_journal, body.command)
+        {
             Ok(receipt) => json_response(200, json!(receipt)),
-            Err(error) => application_error_response(error),
+            Err(crate::application_bridge::HttpApplicationExecutionError::Admission(error)) => {
+                registry_error_response(error)
+            }
+            Err(crate::application_bridge::HttpApplicationExecutionError::Application(error)) => {
+                application_error_response(error)
+            }
         };
     }
 
@@ -2838,6 +2852,9 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
             crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
             crate::HttpSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
             crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",
+            crate::HttpSessionRouteRecoveryCode::SessionCompositionChanged => {
+                "session_composition_changed"
+            }
         };
         return json_response(
             409,

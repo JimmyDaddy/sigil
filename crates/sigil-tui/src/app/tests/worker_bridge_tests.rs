@@ -39,6 +39,23 @@ fn rejected_session_target_keeps_ready_current_context_and_draft() -> Result<()>
         "unactivated invalid source does not disable the current worker"
     );
     assert_eq!(app.session_id, session_id);
+    app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionCompositionChanged,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: String::new(),
+        retryable: false,
+        target_session: None,
+    })?;
+    assert!(app.worker_ready);
+    assert_eq!(app.session_id, session_id);
+    assert_eq!(app.composer.input, "保留当前草稿");
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("start a new session"))
+    );
     Ok(())
 }
 

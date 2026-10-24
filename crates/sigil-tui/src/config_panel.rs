@@ -99,6 +99,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) appearance_info_rail: bool,
     pub(crate) appearance_color_group_index: usize,
     pub(crate) appearance_color_token_index: usize,
+    mcp_import_composition: Option<sigil_kernel::RuntimeCompositionConfig>,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 

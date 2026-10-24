@@ -4724,7 +4724,7 @@ export interface components {
         RouteRecoveryRequiredEvent: {
             actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
             /** @enum {string} */
-            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid" | "session_composition_changed";
             recovery_binding: string;
             retryable: boolean;
             /** @constant */
@@ -4742,7 +4742,7 @@ export interface components {
         RunAdmissionErrorResponse: {
             error: {
                 /** @enum {string} */
-                code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+                code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid" | "session_composition_changed";
                 message: string;
                 route_recovery: components["schemas"]["SessionRouteRecoveryView"];
             };
@@ -5099,7 +5099,7 @@ export interface components {
         SessionRouteRecoveryView: {
             allowed_actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
             /** @enum {string} */
-            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "authority_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "authority_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid" | "session_composition_changed";
             recovery_binding: string;
             retryable: boolean;
         };

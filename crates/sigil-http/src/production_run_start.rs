@@ -58,6 +58,7 @@ pub(super) fn http_route_recovery(
             RuntimeCode::SessionAlreadyActive => HttpCode::SessionAlreadyActive,
             RuntimeCode::SessionWriterBusy => HttpCode::SessionWriterBusy,
             RuntimeCode::SessionStreamInvalid => HttpCode::SessionStreamInvalid,
+            RuntimeCode::SessionCompositionChanged => HttpCode::SessionCompositionChanged,
         },
         allowed_actions: recovery
             .allowed_actions

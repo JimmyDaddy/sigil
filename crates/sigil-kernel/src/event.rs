@@ -1475,6 +1475,7 @@ pub enum PublicRouteRecoveryCode {
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
+    SessionCompositionChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

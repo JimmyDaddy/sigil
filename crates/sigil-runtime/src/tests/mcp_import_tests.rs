@@ -132,3 +132,185 @@ fn mcp_import_rejects_other_sigil_schema_and_bounds_untrusted_display() -> Resul
     );
     Ok(())
 }
+
+fn core_import_config(mcp_document: &str) -> Result<RootConfig> {
+    RootConfig::parse_persisted(&format!(
+        r#"config_version = 2
+{mcp_document}
+[agent]
+connection = "fixture"
+model = "fixture-model"
+[composition]
+profile = "core"
+enhancements = ["task_orchestration"]
+[task]
+enabled = true
+routing_policy = "auto"
+multi_agent_mode = "none"
+[memory]
+writable = ["deferred and unchanged"]
+[web]
+search_route = "deferred and unchanged"
+"#
+    ))
+}
+
+#[test]
+fn mcp_import_selects_only_its_owner_and_preserves_empty_deferred_and_other_documents() -> Result<()>
+{
+    let current = core_import_config("mcp_servers = []")?;
+    let original = current.persisted_toml()?;
+    let import = preview_mcp_configuration_import(
+        br#"{"mcpServers":{"selected":{"command":"must-not-run-during-import"}}}"#,
+    )?;
+    let next = import.selected_root_configuration(&[0], &current)?;
+    assert_eq!(current.persisted_toml()?, original);
+    assert_eq!(next.composition.profile, current.composition.profile);
+    assert_eq!(
+        next.composition.enhancements,
+        BTreeSet::from([
+            OptionalCapability::TaskOrchestration,
+            OptionalCapability::Mcp
+        ])
+    );
+    assert_eq!(next.task, current.task);
+    let before: toml::Value = toml::from_str(&original)?;
+    let saved: toml::Value = toml::from_str(&next.persisted_toml()?)?;
+    for key in ["memory", "web"] {
+        assert_eq!(saved.get(key), before.get(key), "{key}");
+    }
+    let effective = next.with_effective_composition()?;
+    assert_eq!(effective.mcp_servers.len(), 1);
+    assert_eq!(effective.mcp_servers[0].name, "selected");
+    assert_eq!(
+        effective.selected_capabilities(),
+        next.composition.enhancements
+    );
+    assert_eq!(
+        effective.mcp_servers[0].startup,
+        sigil_kernel::McpServerStartup::Lazy
+    );
+    assert!(!effective.mcp_servers[0].required);
+    assert_eq!(
+        effective.mcp_servers[0].trust.approval_default,
+        sigil_kernel::ApprovalMode::Ask
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_import_reloads_existing_deferred_servers_before_conflict_detection() -> Result<()> {
+    let current = core_import_config(
+        r#"[[mcp_servers]]
+name = "existing"
+transport = "stdio"
+command = "must-not-run-existing"
+args = ["preserve-argument"]
+description = "preserve existing declaration"
+startup = "lazy"
+required = false
+"#,
+    )?;
+    assert!(
+        current.mcp_servers.is_empty(),
+        "unselected owner stays deferred"
+    );
+    let import = preview_mcp_configuration_import(
+        br#"{"mcpServers":{"selected":{"command":"must-not-run-selected"}}}"#,
+    )?;
+    let next = import.selected_root_configuration(&[0], &current)?;
+    assert_eq!(next.mcp_servers.len(), 2);
+    assert_eq!(next.mcp_servers[0].name, "existing");
+    assert_eq!(
+        next.mcp_servers[0].description,
+        "preserve existing declaration"
+    );
+    assert_eq!(
+        next.mcp_servers[0].stdio().expect("stdio declaration").1,
+        ["preserve-argument"]
+    );
+    assert_eq!(next.mcp_servers[1].name, "selected");
+    let conflict = preview_mcp_configuration_import(
+        br#"{"mcpServers":{"existing":{"command":"must-not-replace"}}}"#,
+    )?;
+    assert!(
+        conflict
+            .selected_root_configuration(&[0], &current)
+            .is_err()
+    );
+    assert!(import.selected_root_configuration(&[], &current).is_err());
+    assert!(
+        import
+            .selected_root_configuration(&[0, 0], &current)
+            .is_err()
+    );
+    let duplicate_existing = core_import_config(
+        "[[mcp_servers]]\nname = 'existing'\ntransport = 'stdio'\ncommand = 'one'\n\
+         [[mcp_servers]]\nname = 'existing'\ntransport = 'stdio'\ncommand = 'two'",
+    )?;
+    assert!(
+        import
+            .selected_root_configuration(&[0], &duplicate_existing)
+            .is_err()
+    );
+    let invalid = core_import_config(
+        "[[mcp_servers]]\nname = 'invalid-dormant'\ntransport = 'private-existing-value'",
+    )?;
+    let error = import
+        .selected_root_configuration(&[0], &invalid)
+        .err()
+        .ok_or_else(|| anyhow!("invalid deferred transport was accepted"))?;
+    assert!(!error.to_string().contains("private-existing-value"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_import_reload_makes_discovery_and_activation_available_without_starting_servers()
+-> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let current = core_import_config("mcp_servers = []")?;
+    let import = preview_mcp_configuration_import(
+        br#"{"mcpServers":{"selected":{"command":"must-not-run-during-discovery"}}}"#,
+    )?;
+    let mut reloaded = RootConfig::parse_persisted(
+        &import
+            .selected_root_configuration(&[0], &current)?
+            .persisted_toml()?,
+    )?
+    .with_effective_composition()?;
+    reloaded.storage.state_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("state").display().to_string());
+    reloaded.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(fixture.path().join("cache").display().to_string());
+    let capabilities = crate::provider_capabilities_for_name("deepseek")
+        .ok_or_else(|| anyhow!("missing fixture capabilities"))?;
+    let registry =
+        crate::build_tool_registry(&reloaded, &capabilities, fixture.path().to_path_buf()).await?;
+    assert!(registry.spec_for("mcp_catalog").is_some());
+    assert!(registry.spec_for("mcp_activate_server").is_some());
+    assert!(
+        registry
+            .specs()
+            .iter()
+            .all(|spec| !spec.name.starts_with("mcp__"))
+    );
+    let result = registry
+        .execute(
+            sigil_kernel::ToolContext::new(fixture.path(), 5),
+            sigil_kernel::ToolCall {
+                id: "import-discovery".to_owned(),
+                name: "mcp_catalog".to_owned(),
+                args_json: json!({"operation":"list_servers"}).to_string(),
+            },
+        )
+        .await?;
+    let catalog: Value = serde_json::from_str(&result.content)?;
+    assert_eq!(catalog["servers"][0]["server_name"], "selected");
+    assert!(
+        registry
+            .specs()
+            .iter()
+            .all(|spec| !spec.name.starts_with("mcp__"))
+    );
+    Ok(())
+}

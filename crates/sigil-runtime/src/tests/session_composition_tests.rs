@@ -29,8 +29,12 @@ fn composition_change_requires_a_new_session() -> Result<()> {
         .composition
         .enhancements
         .insert(OptionalCapability::Terminal);
-    assert!(validate_session_composition(&session, &config).is_err());
-    assert!(bind_session_composition(&mut session, &config).is_err());
+    let error = validate_session_composition(&session, &config)
+        .expect_err("changed execution capabilities require a new session");
+    assert!(error.is::<SessionCompositionMismatch>());
+    let bind_error = bind_session_composition(&mut session, &config)
+        .expect_err("rebinding cannot authorize the existing session");
+    assert!(bind_error.is::<SessionCompositionMismatch>());
     assert_eq!(session.entries().len(), 1);
     Ok(())
 }
@@ -118,5 +122,60 @@ fn child_session_inherits_selection_and_rejects_different_existing_selection() -
     let mut existing = Session::new("fixture", "model");
     bind_session_composition(&mut existing, &other_config)?;
     assert!(inherit_session_composition(&parent, &mut existing).is_err());
+    Ok(())
+}
+
+#[test]
+fn composition_mismatch_is_distinct_from_missing_duplicate_late_and_corrupt_bindings() -> Result<()>
+{
+    let original = SessionCompositionSnapshotV1::new(core_config().selected_capabilities());
+    let mut changed = original.clone();
+    changed.capabilities.insert(OptionalCapability::Mcp);
+    let binding = SessionLogEntry::Control(ControlEntry::SessionCompositionBound(original.clone()));
+    let valid = vec![binding.clone()];
+    let before = serde_json::to_vec(&valid)?;
+    let error = validate_session_composition_entries(&valid, &changed)
+        .expect_err("valid immutable composition mismatch must be recoverable separately");
+    assert!(error.is::<SessionCompositionMismatch>());
+    assert_eq!(serde_json::to_vec(&valid)?, before);
+
+    let execution = SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("completed historical answer".to_owned()),
+        Vec::new(),
+    ));
+    let mut invalid_schema = original.clone();
+    invalid_schema.schema_version = 0;
+    let mut invalid_contract = original;
+    invalid_contract.core_contract_version += 1;
+    for (label, entries) in [
+        ("missing", vec![execution.clone()]),
+        ("duplicate", vec![binding.clone(), binding.clone()]),
+        ("late", vec![execution, binding]),
+        (
+            "corrupt schema",
+            vec![SessionLogEntry::Control(
+                ControlEntry::SessionCompositionBound(invalid_schema),
+            )],
+        ),
+        (
+            "corrupt contract",
+            vec![SessionLogEntry::Control(
+                ControlEntry::SessionCompositionBound(invalid_contract),
+            )],
+        ),
+    ] {
+        let before = serde_json::to_vec(&entries)?;
+        let error = validate_session_composition_entries(&entries, &changed)
+            .expect_err("invalid history must stay invalid even when capabilities differ");
+        assert!(
+            !error.is::<SessionCompositionMismatch>(),
+            "{label} must not become a recoverable capability change"
+        );
+        assert_eq!(
+            serde_json::to_vec(&entries)?,
+            before,
+            "{label} validation must be read-only"
+        );
+    }
     Ok(())
 }

@@ -318,6 +318,55 @@ fn intent_drop_receipt(command_id: &str) -> HttpIntentDropCommandReceipt {
 }
 
 #[test]
+fn completed_command_lookup_is_exact_and_readonly_without_reserving_incomplete_work() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let path = temp.path().join("completed-lookup.json");
+    let store = HttpDurableCommandStore::open(&path, 8).expect("command store");
+    let exact = identity("lookup-command", 'a');
+    store.reserve(exact.clone()).expect("reserve first command");
+    let pending = std::fs::read(&path).expect("pending bytes");
+    assert_eq!(
+        store.replay_completion(&exact).expect("pending lookup"),
+        None
+    );
+    assert_eq!(
+        store
+            .replay_completion(&identity("new-command", 'b'))
+            .expect("missing lookup"),
+        None
+    );
+    assert!(matches!(
+        store.replay_completion(&identity("lookup-command", 'c')),
+        Err(crate::HttpCommandStoreError::IdentityConflict)
+    ));
+    assert_eq!(std::fs::read(&path).expect("lookup bytes"), pending);
+    let completed = HttpStoredCommandCompletion::Start(receipt("lookup-command"));
+    store
+        .complete(&exact, completed.clone())
+        .expect("complete real receipt");
+    let terminal = std::fs::read(&path).expect("terminal bytes");
+    assert_eq!(
+        store.replay_completion(&exact).expect("terminal lookup"),
+        Some(completed)
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("terminal lookup bytes"),
+        terminal
+    );
+    let aborted = identity("aborted-command", 'd');
+    store.reserve(aborted.clone()).expect("reserve aborted");
+    store
+        .complete(&aborted, HttpStoredCommandCompletion::Aborted)
+        .expect("abort");
+    let sealed = std::fs::read(&path).expect("sealed bytes");
+    assert_eq!(
+        store.replay_completion(&aborted).expect("aborted lookup"),
+        None
+    );
+    assert_eq!(std::fs::read(&path).expect("aborted lookup bytes"), sealed);
+}
+
+#[test]
 fn current_schema_command_store_uses_managed_idempotency_ledger() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let legacy_path = temp.path().join("legacy-commands.json");

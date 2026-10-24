@@ -305,6 +305,30 @@ impl HttpDurableCommandStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Reads an exact completed receipt without reserving, persisting, or reopening its session.
+    pub(crate) fn replay_completion(
+        &self,
+        identity: &HttpStoredCommandIdentity,
+    ) -> Result<Option<HttpStoredCommandCompletion>, HttpCommandStoreError> {
+        identity.validate()?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HttpCommandStoreError::Unavailable)?;
+        let Some(existing) = state.entries.get(&identity.key) else {
+            return Ok(None);
+        };
+        if existing.identity != *identity {
+            return Err(HttpCommandStoreError::IdentityConflict);
+        }
+        match &existing.completion {
+            HttpStoredCommandCompletion::Reserved
+            | HttpStoredCommandCompletion::Aborted
+            | HttpStoredCommandCompletion::PlanDecisionDeferred => Ok(None),
+            completion => Ok(Some(completion.clone())),
+        }
+    }
+
     pub(crate) fn reserve(
         &self,
         identity: HttpStoredCommandIdentity,

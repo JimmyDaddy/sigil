@@ -50,6 +50,100 @@ pub fn application_run_start_view(
     result
 }
 
+/// Inspects immutable execution selection through a scope-checked observer, without acquiring a
+/// session attachment, opening a writer, or recovering execution state.
+///
+/// # Errors
+/// Returns an error for unreadable configuration, malformed composition or changed source identity.
+pub fn application_session_composition_recovery_view(
+    config_path: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<Option<ApplicationSessionRouteRecoveryView>> {
+    let config = RootConfig::load(config_path)?.with_effective_composition()?;
+    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    composition_recovery_view(&config, &entries, expected_session_scope_id)
+}
+
+/// Checks only persistence of an already authorized Plan against the immutable boot selection.
+/// A readable TOML syntax error may not erase that local Save action; every valid configuration
+/// still supplies its fresh selection. Missing config, invalid schema/selection and corrupt or
+/// unbound durable history remain errors. This grants no model, tool or provider execution.
+///
+/// # Errors
+/// Returns an error for unreadable config, invalid durable identity/binding or invalid selection.
+pub fn application_session_plan_save_recovery_view(
+    config_path: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    boot_composition: &sigil_kernel::RuntimeCompositionConfig,
+) -> Result<Option<ApplicationSessionRouteRecoveryView>> {
+    let raw = std::fs::read_to_string(config_path).with_context(|| {
+        format!(
+            "failed to read Plan save configuration at {}",
+            config_path.display()
+        )
+    })?;
+    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    anyhow::ensure!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionCompositionBound(_))
+        )),
+        "plan save requires an existing session composition binding"
+    );
+    if toml::from_str::<toml::Value>(&raw).is_ok() {
+        let config =
+            RootConfig::parse_with_model_request_env(&raw)?.with_effective_composition()?;
+        return composition_recovery_view(&config, &entries, expected_session_scope_id);
+    }
+    composition_recovery_view_for_selection(
+        &sigil_kernel::SessionCompositionSnapshotV1::new(boot_composition.selected_capabilities()),
+        &entries,
+        expected_session_scope_id,
+    )
+}
+
+fn composition_recovery_view(
+    config: &RootConfig,
+    entries: &[SessionLogEntry],
+    scope: &str,
+) -> Result<Option<ApplicationSessionRouteRecoveryView>> {
+    composition_recovery_view_for_selection(
+        &sigil_kernel::SessionCompositionSnapshotV1::new(config.selected_capabilities()),
+        entries,
+        scope,
+    )
+}
+
+fn composition_recovery_view_for_selection(
+    expected: &sigil_kernel::SessionCompositionSnapshotV1,
+    entries: &[SessionLogEntry],
+    scope: &str,
+) -> Result<Option<ApplicationSessionRouteRecoveryView>> {
+    use sha2::Digest as _;
+
+    match crate::session_composition::validate_session_composition_entries(entries, expected) {
+        Ok(()) => return Ok(None),
+        Err(error) if error.is::<crate::SessionCompositionMismatch>() => {}
+        Err(error) => return Err(error),
+    }
+    let actual = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot)) => Some(snapshot),
+        _ => None,
+    });
+    let binding = sha2::Sha256::digest(serde_json::to_vec(&(scope, actual, expected))?);
+    Ok(Some(ApplicationSessionRouteRecoveryView {
+        code: ApplicationSessionRouteRecoveryCode::SessionCompositionChanged,
+        allowed_actions: vec![
+            ApplicationSessionRouteRecoveryAction::StartNewSession,
+            ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: format!("session-composition:{binding:x}"),
+        retryable: false,
+    }))
+}
+
 pub(super) fn resolve_run_start_view(
     root_config: &RootConfig,
     entries: &[SessionLogEntry],
@@ -59,6 +153,8 @@ pub(super) fn resolve_run_start_view(
     if expected_session_scope_id.is_empty() {
         bail!("expected run-context session scope must not be empty");
     }
+    let composition_recovery =
+        composition_recovery_view(root_config, entries, expected_session_scope_id)?;
     let route = application_session_route(entries).ok_or_else(|| {
         anyhow!(
             "session_route_missing: restore the referenced connection or fork with current route"
@@ -177,6 +273,7 @@ pub(super) fn resolve_run_start_view(
             }),
         ),
     };
+    let route_recovery = composition_recovery.or(route_recovery);
     let model_name = effective_route.model_ref.model_id.clone();
     let available_reasoning_efforts = if route_recovery.as_ref().is_some_and(|recovery| {
         recovery.code != ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired

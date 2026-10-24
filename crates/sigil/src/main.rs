@@ -1677,6 +1677,9 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
         ApplicationRunPrepareErrorClass::SessionStreamInvalid => {
             MachineErrorCode::SessionStreamInvalid
         }
+        ApplicationRunPrepareErrorClass::SessionCompositionChanged => {
+            MachineErrorCode::SessionCompositionChanged
+        }
         ApplicationRunPrepareErrorClass::Execution => MachineErrorCode::ExecutionFailed,
         ApplicationRunPrepareErrorClass::Internal => MachineErrorCode::Internal,
     };
@@ -1735,7 +1738,8 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
             true,
             vec![Action::StartNewSession, Action::BackToSessionLibrary],
         ),
-        ApplicationRunPrepareErrorClass::SessionStreamInvalid => (
+        ApplicationRunPrepareErrorClass::SessionStreamInvalid
+        | ApplicationRunPrepareErrorClass::SessionCompositionChanged => (
             false,
             vec![Action::StartNewSession, Action::BackToSessionLibrary],
         ),
@@ -2060,6 +2064,9 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
                 }
                 sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid => {
                     "the session stream is invalid"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::SessionCompositionChanged => {
+                    "session capabilities changed; start a new session"
                 }
             };
             RenderedOutput {

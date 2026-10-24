@@ -150,6 +150,8 @@ Large diffs may be shortened in the activity view; inspect the final repository 
 
 ## Sessions and Recovery
 
+If a saved Desktop conversation's feature configuration has changed, you can still read its history. Choose **New conversation** to use the current configuration, or **Manage conversations** to return to the library.
+
 Session logs stay under the per-user Sigil state directory. A plain `sigil` launch always starts a fresh session, even when another Sigil window is already open in the same workspace. Resume is explicit: use `sigil resume` for the latest supported session, `sigil resume <session-id>` for an exact session, or `/resume` to choose one. Resume restores visible messages, task state, completed activity summaries, and interrupted tool results; it does not silently rerun an interrupted tool. Exiting prints the session id and the exact resume command.
 
 An in-flight Direct Task becomes resumable after a process interruption. `/task continue` selects the latest unfinished Task. If the previous provider request lacks a provable recovery schedule, the first continuation stops with a visible blocked state instead of replaying it. Review that state and continue explicitly again to start a new execution attempt.

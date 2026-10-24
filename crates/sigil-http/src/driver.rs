@@ -355,6 +355,20 @@ pub trait HttpRunDriver: Send + Sync {
         Ok(HttpDurableSessionAttachmentGuard::unmanaged())
     }
 
+    /// Checks fresh durable execution selection before any ordinary command reservation.
+    /// This read-only admission must not acquire or transfer session ownership.
+    fn admit_session_command(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<(), HttpRunAdmissionError> {
+        Ok(())
+    }
+
+    /// Admits only saving an existing authorized Plan without starting execution.
+    fn admit_plan_save(&self, session: &HttpSessionSnapshot) -> Result<(), HttpRunAdmissionError> {
+        self.admit_session_command(session)
+    }
+
     /// Acquires write ownership and validates route recovery before registry run allocation.
     fn admit_run_start(
         &self,

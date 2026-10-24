@@ -7,6 +7,14 @@ fn import_context() -> Result<(tempfile::TempDir, HttpSupportContext)> {
         &path,
         r#"
 config_version = 2
+mcp_servers = []
+[composition]
+profile = "core"
+enhancements = ["task_orchestration"]
+[task]
+enabled = true
+routing_policy = "auto"
+multi_agent_mode = "none"
 [agent]
 connection = "local"
 model = "test"
@@ -76,10 +84,75 @@ fn mcp_import_is_explicit_cas_bound_and_does_not_copy_credentials() -> Result<()
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers[0].name, "alpha");
     assert_eq!(
+        config.composition.profile,
+        sigil_kernel::RuntimeCompositionProfile::Core
+    );
+    assert_eq!(
+        config.composition.enhancements,
+        std::collections::BTreeSet::from([
+            sigil_kernel::OptionalCapability::TaskOrchestration,
+            sigil_kernel::OptionalCapability::Mcp,
+        ])
+    );
+    assert!(
+        config
+            .with_effective_composition()?
+            .selected_capabilities()
+            .contains(&sigil_kernel::OptionalCapability::Mcp)
+    );
+    assert_eq!(
         config.mcp_servers[0].startup,
         sigil_kernel::McpServerStartup::Lazy
     );
     assert!(!fs::read_to_string(&context.config_path)?.contains("do_not_copy"));
+    Ok(())
+}
+
+#[test]
+fn mcp_import_preserves_dormant_servers_and_rejects_names_already_in_that_document() -> Result<()> {
+    let (_root, context) = import_context()?;
+    let source = fs::read_to_string(&context.config_path)?.replace(
+        "mcp_servers = []",
+        "[[mcp_servers]]\nname = 'existing'\ntransport = 'stdio'\ncommand = 'must-not-run-existing'\nstartup = 'lazy'",
+    );
+    fs::write(&context.config_path, &source)?;
+    let preview = context
+        .preview_mcp_import(br#"{"mcpServers":{"existing":{"command":"replacement"}}}"#)
+        .expect("duplicate preview");
+    assert!(matches!(
+        context.apply_mcp_import(
+            HttpMcpImportApplyRequest {
+                preview_id: preview.preview_id,
+                selected_indices: vec![0],
+            },
+            configuration_capsule("test-dormant-duplicate")
+        ),
+        Err(HttpMcpImportFailure::Invalid)
+    ));
+    assert_eq!(fs::read_to_string(&context.config_path)?, source);
+    let preview = context.preview_mcp_import(IMPORT).expect("fresh import");
+    context
+        .apply_mcp_import(
+            HttpMcpImportApplyRequest {
+                preview_id: preview.preview_id,
+                selected_indices: vec![0],
+            },
+            configuration_capsule("test-dormant-append"),
+        )
+        .expect("append after reloading dormant declarations");
+    let config = RootConfig::load_persisted(&context.config_path)?;
+    assert_eq!(
+        config
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>(),
+        ["existing", "alpha"]
+    );
+    assert_eq!(
+        config.mcp_servers[0].stdio().expect("stdio").0,
+        "must-not-run-existing"
+    );
     Ok(())
 }
 

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use anyhow::{Result, anyhow, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
-use sigil_kernel::{McpServerConfig, SecretRedactor};
+use sigil_kernel::{McpServerConfig, OptionalCapability, RootConfig, SecretRedactor};
 
 const MAX_IMPORT_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_TEXT_BYTES: usize = 512;
@@ -102,6 +102,10 @@ impl McpConfigurationImport {
             .iter()
             .map(|server| server.name.as_str())
             .collect::<BTreeSet<_>>();
+        ensure!(
+            names.len() == existing.len(),
+            "existing MCP server names conflict; rename or remove the duplicate entry explicitly"
+        );
         let mut result = existing.to_vec();
         for &index in selected_indices {
             ensure!(
@@ -125,6 +129,49 @@ impl McpConfigurationImport {
         );
         Ok(result)
     }
+
+    /// Adds the explicitly selected declarations and selects their MCP configuration owner.
+    /// Deferred MCP declarations are reloaded before merging; other optional owners and their
+    /// dormant documents remain unchanged. This does not publish or start a server.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty or invalid selection, duplicate names, invalid deferred MCP configuration,
+    /// and configurations that cannot be durably rendered. Publication must still use the
+    /// caller's original configuration revision and normal authority.
+    pub fn selected_root_configuration(
+        &self,
+        selected_indices: &[usize],
+        current: &RootConfig,
+    ) -> Result<RootConfig> {
+        ensure!(
+            !selected_indices.is_empty(),
+            "select at least one MCP server"
+        );
+        let mut next = mcp_enabled_configuration(current)?;
+        next.mcp_servers = self.selected_configurations(selected_indices, &next.mcp_servers)?;
+        Ok(next)
+    }
+}
+
+/// Selects only the MCP owner and reloads any deferred MCP declarations for explicit editing.
+/// Other composition selections and dormant module documents are preserved. The result remains
+/// a persistable editing configuration; this does not publish, activate, or grant tool approval.
+///
+/// # Errors
+///
+/// Rejects invalid deferred MCP declarations and configurations that cannot be durably rendered.
+pub fn mcp_enabled_configuration(current: &RootConfig) -> Result<RootConfig> {
+    let mut selected = current.clone();
+    if !selected.composition.allows(OptionalCapability::Mcp) {
+        selected
+            .composition
+            .enhancements
+            .insert(OptionalCapability::Mcp);
+    }
+    RootConfig::parse_persisted(&selected.persisted_toml()?).map_err(|_| {
+        anyhow!("MCP configuration could not be enabled; check existing server declarations")
+    })
 }
 
 /// Converts an explicitly supplied `mcpServers` object to current typed configuration candidates.
