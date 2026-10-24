@@ -110,6 +110,7 @@ import { LoadingState, useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import { providerRecoveryPresentation, type ProviderRecoverySettingsContext } from "./features/conversation/providerRecovery";
+import { configuredModelRouteIssue } from "./features/conversation/modelRouteSelection";
 
 interface ConversationPanelProps {
   bridge: DesktopBridge;
@@ -223,6 +224,7 @@ export function ConversationPanel({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
   const [selectedModelRef, setSelectedModelRef] = useState<ProviderModelRef>();
+  const pendingModelChoice = useRef<ProviderModelRef | undefined>(undefined);
   const [continuityState, dispatchContinuity] = useReducer(
     reduceConversationContinuity,
     session.id,
@@ -547,6 +549,7 @@ export function ConversationPanel({
     setPermissionMode("manual");
     setReasoningEffort(undefined);
     setSelectedModelRef(undefined);
+    pendingModelChoice.current = undefined;
     dispatchContinuity({ type: "session_selected", sessionId: session.id });
     dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
     setPendingPrompt(undefined);
@@ -687,14 +690,24 @@ export function ConversationPanel({
         setRunContext(context);
         onRunContextChange?.(context);
         setRunContextError(false);
-        setSelectedModelRef(context.modelRef);
+        if (providerModelRefsEqual(pendingModelChoice.current, context.modelRef)) {
+          pendingModelChoice.current = undefined;
+        }
+        const chosenModel = pendingModelChoice.current;
+        setSelectedModelRef(chosenModel ?? context.modelRef);
         setPermissionMode((current) =>
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
         );
+        const chosenOption = chosenModel === undefined ? undefined
+          : context.modelOptions.find((option) => providerModelRefsEqual(option.modelRef, chosenModel));
+        const efforts = chosenModel === undefined ? context.availableReasoningEfforts
+          : chosenOption?.availableReasoningEfforts ?? [];
+        const defaultEffort = chosenModel === undefined ? context.defaultReasoningEffort
+          : chosenOption?.defaultReasoningEffort;
         setReasoningEffort((current) =>
-          current !== undefined && context.availableReasoningEfforts.includes(current)
+          current !== undefined && efforts.includes(current)
             ? current
-            : context.defaultReasoningEffort,
+            : defaultEffort,
         );
       })
       .catch(() => {
@@ -1829,6 +1842,10 @@ export function ConversationPanel({
     setSubmitting(true);
     startRunPendingRef.current = true;
     try {
+      if (exactRetry === undefined && pendingModelChoice.current !== undefined && runContext === undefined) {
+        onNotice(t("customModelBindingUnavailable"), true);
+        return false;
+      }
       const modelChanged =
         runContext !== undefined
         && selectedModelRef !== undefined
@@ -1846,11 +1863,10 @@ export function ConversationPanel({
         && runContext !== undefined
         && selectedModelRef !== undefined
       ) {
-        if (
-          selectedModelOption === undefined
-          || !modelOptionIsSelectable(selectedModelOption)
-        ) {
-          onNotice(t("unsupportedModel", { value: selectedModelRef.modelId }), true);
+        const issue = configuredModelRouteIssue(selectedModelRef, providerInventory?.connections ?? []);
+        if ((selectedModelOption === undefined || !modelOptionIsSelectable(selectedModelOption))
+          && issue !== undefined) {
+          onNotice(t(issue), true);
           return false;
         }
       }
@@ -1868,7 +1884,7 @@ export function ConversationPanel({
         imageHandles: images?.map((image) => image.attachmentId),
         reviewAnnotations,
         permissionMode,
-        modelRef: modelChanged ? selectedModelOption?.modelRef : undefined,
+        modelRef: modelChanged ? selectedModelRef : undefined,
         modelSelectionBinding: modelChanged ? runContext?.modelSelectionBinding : undefined,
         reasoningEffort: selectedReasoningEffort,
         reasoningEffortBinding: selectedReasoningEffort === undefined
@@ -1926,7 +1942,10 @@ export function ConversationPanel({
       dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
       setContinuityReload((current) => current + 1);
       const imageCode = error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
-      onNotice(t(imageCode === "image_input_unsupported" ? "imageModelUnsupported" : imageCode === "image_attachment_invalid" ? "imageUnavailable" : "runStartFailed"), true);
+      onNotice(t(imageCode === "image_input_unsupported" ? "imageModelUnsupported" : imageCode === "image_attachment_invalid" ? "imageUnavailable"
+        : pendingModelChoice.current !== undefined
+          && !runContext?.modelOptions.some((option) => providerModelRefsEqual(option.modelRef, pendingModelChoice.current))
+          ? "customModelStartFailed" : "runStartFailed"), true);
       return false;
     } finally {
       startRunPendingRef.current = false;
@@ -3082,6 +3101,7 @@ export function ConversationPanel({
           />
         )}
         onModelChange={(modelRef) => {
+          pendingModelChoice.current = providerModelRefsEqual(modelRef, runContext?.modelRef) ? undefined : modelRef;
           setSelectedModelRef(modelRef);
           const modelOption = runContext?.modelOptions.find(
             (option) => providerModelRefsEqual(option.modelRef, modelRef),

@@ -14,6 +14,7 @@ import { MarkdownEditor, type MarkdownEditorHandle } from "./ui/editor/MarkdownE
 import type { MarkdownFormat } from "./ui/editor/markdownEditing";
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
+import { CustomModelDialog } from "./features/conversation/CustomModelDialog";
 import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import { modelOptionIsSelectable, providerModelRefKey, providerModelRefsEqual } from "./types";
 import type {
@@ -34,6 +35,7 @@ import { Icon } from "./ui/icons";
 import { Button, Dialog, IconButton, Popover, Select, Tooltip } from "./ui/primitives";
 
 const MAX_DRAFT_BYTES = 256 * 1024;
+const CUSTOM_MODEL_VALUE = "__custom_model__";
 
 export function Composer({
   draftKey,
@@ -199,6 +201,11 @@ export function Composer({
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
   const suggestionListId = `${useId()}-suggestions`;
   const modelSelectRef = useRef<HTMLSelectElement>(null);
+  const [customModelOpen, setCustomModelOpen] = useState(false);
+  useEffect(() => { setCustomModelOpen(false); }, [draftKey]);
+  useEffect(() => {
+    if (hidden || active || submitting || submissionBlocked) setCustomModelOpen(false);
+  }, [active, hidden, submissionBlocked, submitting]);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
     if (requestedSkill === undefined) return;
@@ -445,7 +452,8 @@ export function Composer({
       ? `${routeIdentity} · ${t("modelNotListed")}`
       : routeIdentity;
   };
-  const selectedModelValue = modelOption === undefined ? "" : modelOptionValue(modelOption);
+  const selectedModelValue = effectiveModelRef === undefined ? "" : providerModelRefKey(effectiveModelRef);
+  const customModelAvailable = runContext !== undefined && (providerConnections?.length ?? 0) > 0;
   const modelTooltip = runContext === undefined
     ? modelName
     : t("modelHint", {
@@ -476,6 +484,16 @@ export function Composer({
 
   return (
     <>
+    {customModelOpen ? <CustomModelDialog
+      connections={providerConnections ?? []}
+      currentModel={effectiveModelRef}
+      returnFocusRef={modelSelectRef}
+      onCancel={() => setCustomModelOpen(false)}
+      onChoose={(model) => {
+        onModelChange(model);
+        setCustomModelOpen(false);
+      }}
+    /> : null}
     <form
       hidden={hidden}
       className={`composer${activity === undefined || !showActivity
@@ -631,8 +649,12 @@ export function Composer({
                   className="composer-model-select"
                   ref={modelSelectRef}
                   value={selectedModelValue}
-                  disabled={active || submissionBlocked || runContextBusy || selectableModelCount === 0}
+                  disabled={active || submissionBlocked || runContextBusy || (selectableModelCount === 0 && !customModelAvailable)}
                   onChange={(event) => {
+                    if (event.target.value === CUSTOM_MODEL_VALUE) {
+                      setCustomModelOpen(true);
+                      return;
+                    }
                     const selected = modelOptions.find(
                       (option) => modelOptionValue(option) === event.target.value,
                     );
@@ -641,7 +663,10 @@ export function Composer({
                     }
                   }}
                 >
-                  {modelOptions.length === 0 ? <option value="">{modelName}</option> : modelOptions.map((option) => (
+                  {modelOption === undefined ? <option value={selectedModelValue}>
+                    {effectiveModelRef === undefined ? modelName : `${connectionLabel} · ${modelName}`}
+                  </option> : null}
+                  {modelOptions.map((option) => (
                     <option
                       key={modelOptionValue(option)}
                       value={modelOptionValue(option)}
@@ -650,6 +675,7 @@ export function Composer({
                       {modelOptionLabel(option)}
                     </option>
                   ))}
+                  {customModelAvailable ? <option value={CUSTOM_MODEL_VALUE}>{t("customModel")}</option> : null}
                 </Select>
               </div>
             </Tooltip>

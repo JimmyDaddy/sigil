@@ -10241,3 +10241,149 @@ describe("workspace activation persistence", () => {
     expect(screen.getByRole("button", { name: "Switch workspace: Gamma" })).toBeTruthy();
   });
 });
+
+describe("desktop custom model routing", () => {
+  const normal = { connectionId: "normal", modelId: "sigil-e2e-model" };
+
+  function renderRouting() {
+    const inventory: ProviderConnectionInventory = {
+      configMode: "v2", defaultModel: normal, issues: [], connections: [
+        { id: "normal", label: "Normal", providerLabel: "Custom", protocolLabel: "Chat Completions",
+          endpointDisplay: "normal.example", credentialSource: "environment", readiness: "ready", defaultModel: normal },
+        { id: "failed-auth", label: "Failed auth", providerLabel: "Custom", protocolLabel: "Chat Completions",
+          endpointDisplay: "gateway.example", credentialSource: "environment", readiness: "ready" },
+        { id: "images", label: "Local images", providerLabel: "Custom", protocolLabel: "Responses",
+          endpointDisplay: "local loopback endpoint", credentialSource: "none", readiness: "ready" },
+      ],
+    };
+    const context: RunContext = {
+      ...defaultRunContext, modelRef: normal, modelName: normal.modelId, providerName: "openai_compat",
+      modelSelectionBinding: "exact-current-normal-binding",
+      modelOptions: [{ ...defaultRunContext.modelOptions[0], modelRef: normal, modelName: normal.modelId,
+        displayName: normal.modelId, reasoningEffortBinding: "normal-only-effort-binding" }],
+    };
+    const runContext = vi.fn(async () => context);
+    const saveProviderDefaultModel = vi.fn<DesktopBridge["saveProviderDefaultModel"]>();
+    const createSession = vi.fn<DesktopBridge["createSession"]>(async () => ({
+      id: "manual-http-session", durableSessionId: "manual-durable-session", label: "New conversation", runCount: 0,
+    }));
+    const startRun = vi.fn<DesktopBridge["startRun"]>(async (_workspace, sessionId, _prompt, permissionMode) => ({
+      id: "manual-route-run", sessionId, status: "running", permissionMode, streamSequence: 0,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      providerConnections: async () => inventory, runContext, saveProviderDefaultModel, createSession, startRun,
+    })} />);
+    return { inventory, context, runContext, saveProviderDefaultModel, createSession, startRun };
+  }
+
+  async function openCustomModel(user: ReturnType<typeof userEvent.setup>, modelId: string) {
+    await user.selectOptions(screen.getByRole("combobox", { name: "Model" }), "__custom_model__");
+    const dialog = screen.getByRole("dialog", { name: "Custom model" });
+    await user.selectOptions(within(dialog).getByLabelText("Configured connection"), "failed-auth");
+    const field = within(dialog).getByLabelText("Model ID");
+    await user.clear(field);
+    await user.type(field, modelId);
+    return dialog;
+  }
+
+  it("sends an unlisted custom route with the current session binding without changing its shared default", async () => {
+    const user = userEvent.setup();
+    const fixture = renderRouting();
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const editor = await readyComposer();
+    setEditorText(editor, "Use the exact failed-auth connection");
+    const model = screen.getByRole("combobox", { name: "Model" });
+    expect(within(model).queryByRole("option", { name: /Failed auth/ })).toBeNull();
+    const dialog = await openCustomModel(user, normal.modelId);
+    await user.click(within(dialog).getByRole("button", { name: "Use model" }));
+    expect(fixture.startRun).not.toHaveBeenCalled();
+    expect(editorText(editor)).toBe("Use the exact failed-auth connection");
+    expect((model as HTMLSelectElement).value).toBe("failed-auth/sigil-e2e-model");
+    expect(within(model).getByRole("option", { name: "Failed auth · sigil-e2e-model" })).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "Reasoning effort" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(fixture.startRun).toHaveBeenCalledOnce());
+    expect(fixture.startRun.mock.calls[0].slice(0, 8)).toEqual([
+      workspace.id, "manual-http-session", "Use the exact failed-auth connection", "manual",
+      { connectionId: "failed-auth", modelId: normal.modelId }, "exact-current-normal-binding", undefined, undefined,
+    ]);
+    expect(fixture.createSession).toHaveBeenCalledExactlyOnceWith(workspace.id, "New conversation", normal);
+    expect(fixture.saveProviderDefaultModel).not.toHaveBeenCalled();
+    expect(fixture.inventory.defaultModel).toEqual(normal);
+    expect(fixture.context.modelOptions).toHaveLength(1);
+  });
+
+  it.each(["cancel", "escape"] as const)("keeps the route, draft, and default when custom selection is dismissed by %s", async (dismissal) => {
+    const user = userEvent.setup();
+    const fixture = renderRouting();
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const editor = await readyComposer();
+    const draft = "**Keep this draft**\nwithout sending it";
+    setEditorText(editor, draft);
+    const dialog = await openCustomModel(user, "do-not-use");
+    if (dismissal === "cancel") await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    else await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Custom model" })).toBeNull();
+    expect(editorText(editor)).toBe(draft);
+    expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe("normal/sigil-e2e-model");
+    expect(fixture.startRun).not.toHaveBeenCalled();
+    expect(fixture.saveProviderDefaultModel).not.toHaveBeenCalled();
+    expect(fixture.inventory.defaultModel).toEqual(normal);
+  });
+
+  it("retains an unlisted route and draft after backend rejection so the model ID can be corrected", async () => {
+    const user = userEvent.setup();
+    const fixture = renderRouting();
+    fixture.startRun.mockRejectedValueOnce({ code: "session_model_invalid", message: "Model is not available" });
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const editor = await readyComposer();
+    const draft = "Retry only after fixing this exact route";
+    setEditorText(editor, draft);
+    const dialog = await openCustomModel(user, "unknown-model");
+    await user.click(within(dialog).getByRole("button", { name: "Use model" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("The run could not be started. Check the selected connection and model ID, then try again.")).toBeTruthy();
+    await waitFor(() => expect(fixture.runContext.mock.calls.length).toBeGreaterThan(1));
+    const selector = screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+    await waitFor(() => expect(selector.disabled).toBe(false));
+    expect(selector.value).toBe("failed-auth/unknown-model");
+    expect(editorText(editor)).toBe(draft);
+    expect(fixture.startRun).toHaveBeenCalledOnce();
+    const retryDialog = await openCustomModel(user, "corrected-model");
+    await user.click(within(retryDialog).getByRole("button", { name: "Use model" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(fixture.startRun).toHaveBeenCalledTimes(2));
+    expect(fixture.startRun.mock.calls[1][4]).toEqual({ connectionId: "failed-auth", modelId: "corrected-model" });
+    expect(fixture.startRun.mock.calls[1][5]).toBe("exact-current-normal-binding");
+    expect(fixture.saveProviderDefaultModel).not.toHaveBeenCalled();
+    expect(fixture.createSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not drop an explicit route when refreshing its source binding fails", async () => {
+    const user = userEvent.setup();
+    const fixture = renderRouting();
+    fixture.startRun.mockRejectedValueOnce({ code: "session_model_invalid", message: "Model is not available" });
+    await screen.findByText("0 conversations");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const editor = await readyComposer();
+    setEditorText(editor, "Keep the selected connection through reload failure");
+    const dialog = await openCustomModel(user, "manual-model");
+    await user.click(within(dialog).getByRole("button", { name: "Use model" }));
+    fixture.runContext.mockRejectedValueOnce(new Error("source context temporarily unavailable"));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("Conversation controls unavailable")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("Reload the conversation controls before sending with the selected model.")).toBeTruthy();
+    expect(fixture.startRun).toHaveBeenCalledOnce();
+    expect(editorText(editor)).toBe("Keep the selected connection through reload failure");
+    await user.click(screen.getByRole("button", { name: "Retry controls" }));
+    const selector = screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement;
+    await waitFor(() => expect(selector.disabled).toBe(false));
+    expect(selector.value).toBe("failed-auth/manual-model");
+    expect(fixture.saveProviderDefaultModel).not.toHaveBeenCalled();
+  });
+});

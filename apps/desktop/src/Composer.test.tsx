@@ -639,6 +639,47 @@ describe("structured composer", () => {
     });
   });
 
+  it("opens custom model selection only on request and keeps cancelling separate from the draft", async () => {
+    const user = userEvent.setup();
+    const { onModelChange, onSubmit } = renderComposer();
+    const editor = screen.getByRole("combobox", { name: "Message Sigil" });
+    const draft = "**Keep this draft**\nwith its next line";
+    setEditorText(editor, draft);
+    expect(screen.queryByRole("dialog", { name: "Custom model" })).toBeNull();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Model" }), "__custom_model__");
+    const dialog = screen.getByRole("dialog", { name: "Custom model" });
+    await user.clear(within(dialog).getByLabelText("Model ID"));
+    await user.type(within(dialog).getByLabelText("Model ID"), "do-not-apply");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onModelChange).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(editorText(editor)).toBe(draft);
+    expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value)
+      .toBe("deepseek-default/deepseek-v4-flash");
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Model" }));
+  });
+
+  it("chooses an exact custom connection and model without submitting the composer", async () => {
+    const user = userEvent.setup();
+    const { onModelChange, onSubmit } = renderComposer({ providerConnections: [{
+      id: "custom-env", label: "Custom gateway", providerLabel: "Custom", protocolLabel: "Chat Completions",
+      endpointDisplay: "gateway.example", credentialSource: "environment", readiness: "ready",
+    }] });
+    const editor = screen.getByRole("combobox", { name: "Message Sigil" });
+    setEditorText(editor, "Keep this unsent prompt");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Model" }), "__custom_model__");
+    const dialog = screen.getByRole("dialog", { name: "Custom model" });
+    await user.selectOptions(within(dialog).getByLabelText("Configured connection"), "custom-env");
+    const id = within(dialog).getByLabelText("Model ID");
+    await user.clear(id);
+    await user.type(id, "  unlisted/model-v2  ");
+    await user.click(within(dialog).getByRole("button", { name: "Use model" }));
+    expect(onModelChange).toHaveBeenCalledExactlyOnceWith({ connectionId: "custom-env", modelId: "unlisted/model-v2" });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(editorText(editor)).toBe("Keep this unsent prompt");
+    expect(screen.queryByRole("dialog", { name: "Custom model" })).toBeNull();
+  });
+
   it("keeps the current task state visible above the composer", () => {
     renderComposer({ active: true, activityState: "running" });
 
