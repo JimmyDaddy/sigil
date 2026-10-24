@@ -250,13 +250,18 @@ impl ReservationIndex {
             operation,
         })
         .map_err(unavailable)?;
-        self.reserve_capacity(writer, index, line.len())?;
-        // A failed append/fsync or projection commit poisons this writer instance. Reopen must
-        // verify the physical prefix before another forward operation is possible.
+        // Only an OS permission denial while opening the append file is known to precede all
+        // journal writes. Every other storage/index failure still requires reopening the owner.
         self.writable = false;
-        writer
-            .append_command_record(source, self.offset, self.sequence, &line)
-            .map_err(unavailable)?;
+        self.reserve_capacity(writer, index, line.len())?;
+        if let Err(error) = writer.append_command_record(source, self.offset, self.sequence, &line)
+        {
+            self.writable = matches!(
+                error,
+                crate::managed_storage_writer::CommandJournalAppendError::OpenPermissionDenied(_)
+            );
+            return Err(unavailable(error));
+        }
         self.connection()?
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(unavailable)?;

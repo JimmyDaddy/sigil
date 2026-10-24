@@ -235,6 +235,15 @@ pub enum ManagedStorageWriterErrorV1 {
     RetireAuthorizationFailed(String),
 }
 
+/// Only an OS rejection of the append open proves that this attempt wrote no journal bytes.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CommandJournalAppendError {
+    #[error("command journal append open denied: {0}")]
+    OpenPermissionDenied(#[source] std::io::Error),
+    #[error(transparent)]
+    Failed(#[from] ManagedStorageWriterErrorV1),
+}
+
 /// One admitted namespace lease: the authority-declared physical directory plus the handle.
 #[derive(Debug)]
 pub struct ManagedStorageWriterLeaseV1 {
@@ -443,11 +452,11 @@ impl ManagedStorageWriterAdapterV1 {
         expected_bytes: u64,
         expected_records: u64,
         record: &[u8],
-    ) -> Result<(), ManagedStorageWriterErrorV1> {
+    ) -> Result<(), CommandJournalAppendError> {
         if lease.channel != StorageWriterChannelV1::ApplicationControlLog {
-            return Err(ManagedStorageWriterErrorV1::Io(
-                "wrong command journal owner".to_owned(),
-            ));
+            return Err(
+                ManagedStorageWriterErrorV1::Io("wrong command journal owner".to_owned()).into(),
+            );
         }
         let _lock = open_namespace_lock(&lease.path)?;
         self.service
@@ -463,13 +472,15 @@ impl ManagedStorageWriterAdapterV1 {
             _ => {
                 return Err(ManagedStorageWriterErrorV1::Io(
                     "invalid command journal object".to_owned(),
-                ));
+                )
+                .into());
             }
         };
         if current != expected_bytes {
             return Err(ManagedStorageWriterErrorV1::Io(
                 "command journal frontier changed".to_owned(),
-            ));
+            )
+            .into());
         }
         let next = current
             .checked_add(record.len() as u64)
@@ -494,11 +505,17 @@ impl ManagedStorageWriterAdapterV1 {
                 windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
             );
         }
-        let mut file = options.open(&path).map_err(storage_io)?;
+        let mut file = options.open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                CommandJournalAppendError::OpenPermissionDenied(error)
+            } else {
+                storage_io(error).into()
+            }
+        })?;
         file.write_all(record).map_err(storage_io)?;
         file.write_all(b"\n").map_err(storage_io)?;
         file.sync_all().map_err(storage_io)?;
-        sync_parent_directory(&path)
+        sync_parent_directory(&path).map_err(Into::into)
     }
 
     /// Streams the verified prefix of a command journal. Only an otherwise complete final

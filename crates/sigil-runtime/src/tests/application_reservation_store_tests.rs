@@ -239,6 +239,199 @@ fn namespace_setup_failure_releases_holder_for_same_process_retry() -> anyhow::R
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn command_append_open_permission_denied_allows_same_owner_exact_retry() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir()?;
+    let writer = production_writer(fixture.path());
+    let store = ManagedApplicationReservationStore::open(Arc::clone(&writer), "open-denied")?;
+    let first = command_request(1, 1);
+    futures::executor::block_on(store.reserve(
+        first.admission.reservation_key(&first.envelope.command_id),
+        sigil_application::command_fingerprint(&first)?,
+        first,
+    ))?;
+    let path = store
+        .lease
+        .lock()
+        .expect("lease")
+        .as_ref()
+        .expect("journal")
+        .path()
+        .join("records.jsonl");
+    let before = std::fs::read(&path)?;
+    let request = command_request(2, 1);
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    let fingerprint = sigil_application::command_fingerprint(&request)?;
+    let permissions = std::fs::metadata(&path)?.permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+    let denied = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect_err("fixture must enforce OS write permission");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    for _ in 0..2 {
+        assert!(
+            futures::executor::block_on(store.reserve(
+                key.clone(),
+                fingerprint.clone(),
+                request.clone(),
+            ))
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path)?, before);
+        assert!(store.entries.lock().expect("entries").is_writable());
+        assert!(
+            futures::executor::block_on(store.original_command_context(key.clone()))?.is_none()
+        );
+    }
+    std::fs::set_permissions(&path, permissions)?;
+    assert_eq!(
+        futures::executor::block_on(store.reserve(key.clone(), fingerprint, request.clone()))?,
+        RuntimeApplicationReservationAdmission::Reserved
+    );
+    let after = std::fs::read(&path)?;
+    assert!(after.starts_with(&before));
+    assert_eq!(
+        after
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count(),
+        2
+    );
+    assert_eq!(
+        futures::executor::block_on(store.original_command_context(key))?
+            .map(|context| context.expected_frontier),
+        Some(request.envelope.expected_frontier)
+    );
+    Ok(())
+}
+
+#[test]
+fn command_append_frontier_failure_keeps_owner_poisoned_after_source_is_restored()
+-> anyhow::Result<()> {
+    use std::io::Write;
+
+    let fixture = tempfile::tempdir()?;
+    let writer = production_writer(fixture.path());
+    let store = ManagedApplicationReservationStore::open(writer, "frontier-failure")?;
+    let first = command_request(1, 1);
+    futures::executor::block_on(store.reserve(
+        first.admission.reservation_key(&first.envelope.command_id),
+        sigil_application::command_fingerprint(&first)?,
+        first,
+    ))?;
+    let path = store
+        .lease
+        .lock()
+        .expect("lease")
+        .as_ref()
+        .expect("journal")
+        .path()
+        .join("records.jsonl");
+    let before = std::fs::read(&path)?;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(b"{")?;
+    let request = command_request(2, 1);
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    let fingerprint = sigil_application::command_fingerprint(&request)?;
+    assert!(
+        futures::executor::block_on(store.reserve(
+            key.clone(),
+            fingerprint.clone(),
+            request.clone()
+        ))
+        .is_err()
+    );
+    assert!(!store.entries.lock().expect("entries").is_writable());
+    std::fs::write(&path, &before)?;
+    assert!(futures::executor::block_on(store.reserve(key, fingerprint, request)).is_err());
+    assert_eq!(std::fs::read(path)?, before);
+    Ok(())
+}
+
+#[test]
+fn command_append_index_failure_never_replays_a_durable_append_in_the_same_owner()
+-> anyhow::Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let writer = production_writer(fixture.path());
+    let store = ManagedApplicationReservationStore::open(Arc::clone(&writer), "index-failure")?;
+    let first = command_request(1, 1);
+    futures::executor::block_on(store.reserve(
+        first.admission.reservation_key(&first.envelope.command_id),
+        sigil_application::command_fingerprint(&first)?,
+        first,
+    ))?;
+    let path = store
+        .lease
+        .lock()
+        .expect("lease")
+        .as_ref()
+        .expect("journal")
+        .path()
+        .join("records.jsonl");
+    let index_path = store
+        .index_lease
+        .lock()
+        .expect("index")
+        .as_ref()
+        .expect("index lease")
+        .path()
+        .join("records.sqlite3");
+    let connection = rusqlite::Connection::open(index_path)?;
+    connection.execute_batch("CREATE TRIGGER fail_reservation BEFORE INSERT ON reservations BEGIN SELECT RAISE(ROLLBACK, 'injected projection failure'); END;")?;
+    let before = std::fs::read(&path)?;
+    let request = command_request(2, 1);
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    let fingerprint = sigil_application::command_fingerprint(&request)?;
+    assert!(
+        futures::executor::block_on(store.reserve(
+            key.clone(),
+            fingerprint.clone(),
+            request.clone()
+        ))
+        .is_err()
+    );
+    let appended = std::fs::read(&path)?;
+    assert!(appended.len() > before.len());
+    assert!(appended.starts_with(&before));
+    assert!(!store.entries.lock().expect("entries").is_writable());
+    connection.execute_batch("DROP TRIGGER fail_reservation;")?;
+    drop(connection);
+    assert!(
+        futures::executor::block_on(store.reserve(
+            key.clone(),
+            fingerprint.clone(),
+            request.clone()
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path)?, appended);
+    drop(store);
+    let reopened = ManagedApplicationReservationStore::open(writer, "index-failure")?;
+    assert!(matches!(
+        futures::executor::block_on(reopened.reserve(key.clone(), fingerprint, request.clone()))?,
+        RuntimeApplicationReservationAdmission::Existing(_)
+    ));
+    assert_eq!(
+        futures::executor::block_on(reopened.original_command_context(key))?
+            .map(|context| context.expected_frontier),
+        Some(request.envelope.expected_frontier)
+    );
+    assert_eq!(std::fs::read(path)?, appended);
+    Ok(())
+}
+
 #[test]
 fn broken_command_tail_retains_prefix_and_blocks_new_effects() -> anyhow::Result<()> {
     let fixture = tempfile::tempdir()?;

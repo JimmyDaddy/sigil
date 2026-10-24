@@ -2,6 +2,8 @@
 
 业务日志使用有界逐条 JSONL 回源，不保留全历史内存 map，也不以累计 4096 key 或 16 MiB 拒绝正常历史。单条协议记录保留独立大小边界。SQLite 索引位于独立 `ApplicationCommandIndex` namespace；打开和恢复 SQLite 之前先按已有数据库及 journal 计算容量，回源的行与来源 checkpoint 在同一事务中发布。索引丢失、损坏或 schema 不符时从 canonical 日志重建；完整末行仅缺换行时可在原锁内补分隔符并同步，其他坏尾部保留可读前缀并拒绝新的 forward effect。
 
+命令追加只有在完成原 namespace、RA 和 frontier 校验后，打开 append 文件直接返回类型化 `PermissionDenied`、尚未开始任何日志写入时，才保留同一 writer 的可写状态。权限恢复后，用户可对原待决请求明确重试，重新经过原有校验；失败尝试不形成命令或触发 dispatch。该判断不依据错误文案或文件长度。quota、lease、frontier、任何写入或同步，以及日志已落盘后的索引失败仍封锁当前 writer，通过既有恢复或重开验证，不能自动重放结果不确定的决定。
+
 RA 的 quota profile 限额按 class 累计。所有受管 durable writer 的 `RuntimeState` grant 因此统一使用 512 MiB 类别上限及不设累计条数上限；不同 owner 的 holder 限制仍独立保留，artifact 类别额度及整个 managed storage 的 522 MiB workspace 上限不变。恢复 registry 或 input history 的小额写入不会重新把已有命令日志与索引压到旧的 1 MiB 类别门槛，真实新增容量仍须先通过 RA 配额申请。
 
 每个新意图冻结原 K/F、expected frontier 和 `CommandJournalBinding`；K 的既有含义不变。HTTP 原始 envelope 的缺代字段只代表 legacy generation zero；新意图从专用 binding 查询获取当前代，重试保留原 envelope，不能在恢复后重新绑定当前代。旧代未知 key 不得进入新代 dispatch，旧代已知 key 仍可经真实领域因果记录查询结算。RA 已 Activated 但本地索引接管失败时，重新预览仍返回同一恢复操作；物理 namespace setup 失败退出现有 holder 并保留 charge，解除故障后可在同一进程重试。
