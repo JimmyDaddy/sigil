@@ -37,6 +37,7 @@ fn prompt_origin_uses_question_structure_without_matching_question_words() -> Re
             &mut Handler,
             &call,
             RequestUserInputContext {
+                logical_run_id: "origin-root",
                 root_logical_run_id: "origin-root",
                 source_thread_id: &thread,
                 provider_name: "fixture",
@@ -113,6 +114,7 @@ fn prompt_origin_replay_retains_historical_absence_and_frozen_current_origin() -
             &mut Handler,
             &call,
             RequestUserInputContext {
+                logical_run_id: "origin-root",
                 root_logical_run_id: "origin-root",
                 source_thread_id: &thread,
                 provider_name: "fixture",

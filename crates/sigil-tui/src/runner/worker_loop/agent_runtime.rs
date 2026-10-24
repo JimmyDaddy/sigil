@@ -562,6 +562,7 @@ where
         return Err("user input continuation is already owned by another physical run".to_owned());
     }
     let continuation_logical_run_id = preparation.continuation.continuation_logical_run_id.clone();
+    let continuation = preparation.continuation;
     let public_run_id = Some(continuation_logical_run_id.as_str().to_owned());
     let source_thread_id = identity.source_thread_id.clone();
     let root_logical_run_id = identity.root_logical_run_id.as_str().to_owned();
@@ -620,86 +621,40 @@ where
             &mut agent_delegate,
         )
         .await;
-        let (payload, resolution) = match output {
+        let publication_uncertain = output
+            .as_ref()
+            .is_err_and(sigil_runtime::application_run::is_application_public_outbox_append_error);
+        let settlement = settle_tui_user_input_continuation_after_output(
+            &mut run_session,
+            &continuation,
+            &output,
+        );
+        let payload = match output {
             Ok(output) => match output.disposition {
-                AgentRunDisposition::FinalAnswer => (
-                    RunTaskPayload::Chat {
-                        result: Ok(output.result),
-                        plan_mode: false,
-                        plan_review: false,
-                        queue_id: None,
-                        provider_logical_run_id: None,
-                        agent_result_continuation_thread_ids: Vec::new(),
-                    },
-                    sigil_kernel::UserInputResolutionV1::Consumed,
-                ),
-                AgentRunDisposition::AwaitingUserInput(request) => (
-                    RunTaskPayload::AwaitingUserInput { request },
-                    sigil_kernel::UserInputResolutionV1::Consumed,
-                ),
-                _ => (
-                    RunTaskPayload::Chat {
-                        result: Err(
-                            "user input continuation ended with an unsupported disposition"
-                                .to_owned(),
-                        ),
-                        plan_mode: false,
-                        plan_review: false,
-                        queue_id: None,
-                        provider_logical_run_id: None,
-                        agent_result_continuation_thread_ids: Vec::new(),
-                    },
-                    sigil_kernel::UserInputResolutionV1::Failed {
-                        failure_class: "unsupported_disposition".to_owned(),
-                        retryable: true,
-                    },
-                ),
-            },
-            Err(error) => (
-                RunTaskPayload::Chat {
-                    result: Err(format!("{error:#}")),
+                AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
+                    result: Ok(output.result),
                     plan_mode: false,
                     plan_review: false,
                     queue_id: None,
                     provider_logical_run_id: None,
                     agent_result_continuation_thread_ids: Vec::new(),
                 },
-                sigil_kernel::UserInputResolutionV1::Failed {
-                    failure_class: "continuation_failed".to_owned(),
-                    retryable: true,
+                AgentRunDisposition::AwaitingUserInput(request) => {
+                    RunTaskPayload::AwaitingUserInput { request }
+                }
+                _ => RunTaskPayload::Chat {
+                    result: Err(
+                        "user input continuation ended with an unsupported disposition".to_owned(),
+                    ),
+                    plan_mode: false,
+                    plan_review: false,
+                    queue_id: None,
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
                 },
-            ),
-        };
-        let settlement = if matches!(
-            resolution,
-            sigil_kernel::UserInputResolutionV1::Failed { .. }
-        ) {
-            sigil_kernel::reconcile_user_input_continuation_after_failed_run(
-                &mut run_session,
-                &identity,
-                &request_hash,
-                current_unix_time_ms(),
-            )
-            .map(|_| ())
-        } else {
-            run_session.append_user_input_lifecycle(vec![
-                sigil_kernel::UserInputLifecycleEntryV1::Resolved(
-                    sigil_kernel::UserInputResolvedV1 {
-                        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
-                        identity: identity.clone(),
-                        request_hash,
-                        resolution,
-                        resolved_at_unix_ms: current_unix_time_ms(),
-                    },
-                ),
-            ])
-        };
-        let payload = match settlement {
-            Ok(()) => payload,
+            },
             Err(error) => RunTaskPayload::Chat {
-                result: Err(format!(
-                    "user input continuation settlement failed: {error:#}"
-                )),
+                result: Err(format!("{error:#}")),
                 plan_mode: false,
                 plan_review: false,
                 queue_id: None,
@@ -707,16 +662,29 @@ where
                 agent_result_continuation_thread_ids: Vec::new(),
             },
         };
-        let publication = sigil_runtime::ApplicationRunEventRecorder::resume(
-            &run_session,
-            identity.root_logical_run_id.as_str(),
-        )
-        .and_then(|recorder| recorder.record_user_input_state(&run_session, &identity));
-        let payload = match publication {
-            Ok(()) => payload,
+        let payload = match settlement {
+            Ok(false) => payload,
+            Ok(true) => match sigil_runtime::ApplicationRunEventRecorder::resume(
+                &run_session,
+                identity.root_logical_run_id.as_str(),
+            )
+            .and_then(|recorder| recorder.record_user_input_state(&run_session, &identity))
+            {
+                Ok(()) => payload,
+                Err(error) => RunTaskPayload::Chat {
+                    result: Err(format!(
+                        "failed to publish input continuation settlement: {error:#}"
+                    )),
+                    plan_mode: false,
+                    plan_review: false,
+                    queue_id: None,
+                    provider_logical_run_id: None,
+                    agent_result_continuation_thread_ids: Vec::new(),
+                },
+            },
             Err(error) => RunTaskPayload::Chat {
                 result: Err(format!(
-                    "failed to publish input continuation settlement: {error:#}"
+                    "user input continuation settlement failed: {error:#}"
                 )),
                 plan_mode: false,
                 plan_review: false,
@@ -737,7 +705,8 @@ where
                     agent_result_continuation_thread_ids: Vec::new(),
                 },
             };
-        if !public_cancellation.is_cancel_requested()
+        if !publication_uncertain
+            && !public_cancellation.is_cancel_requested()
             && let Err(error) = handler.finish_public_payload(&mut run_session, &mut payload)
         {
             payload = RunTaskPayload::Chat {
@@ -772,6 +741,91 @@ where
         image_attachment_resolver,
     }))
 }
+
+fn settle_tui_user_input_continuation_after_output(
+    session: &mut Session,
+    continuation: &sigil_kernel::UserInputContinuationStartedV1,
+    output: &anyhow::Result<sigil_kernel::AgentRunOutput>,
+) -> anyhow::Result<bool> {
+    if output
+        .as_ref()
+        .is_err_and(sigil_runtime::application_run::is_application_public_outbox_append_error)
+    {
+        return Ok(false);
+    }
+    let resolution = match output {
+        Ok(output)
+            if matches!(
+                output.disposition,
+                AgentRunDisposition::FinalAnswer | AgentRunDisposition::AwaitingUserInput(_)
+            ) =>
+        {
+            sigil_kernel::UserInputResolutionV1::Consumed
+        }
+        _ => sigil_kernel::UserInputResolutionV1::Failed {
+            failure_class: "continuation_failed".to_owned(),
+            retryable: true,
+        },
+    };
+    settle_tui_user_input_continuation(session, continuation, resolution)
+}
+
+fn settle_tui_user_input_continuation(
+    session: &mut Session,
+    continuation: &sigil_kernel::UserInputContinuationStartedV1,
+    resolution: sigil_kernel::UserInputResolutionV1,
+) -> anyhow::Result<bool> {
+    let projection = session.user_input_projection()?;
+    let before = projection
+        .request(&continuation.identity)
+        .context("user input settlement references an unknown request")?;
+    if before.requested.request_hash != continuation.request_hash
+        || before.continuation.as_ref() != Some(continuation)
+    {
+        anyhow::bail!("user input settlement does not bind the exact continuation attempt");
+    }
+    match resolution {
+        sigil_kernel::UserInputResolutionV1::Consumed => {
+            if before.status == sigil_kernel::UserInputStatusV1::Resolved
+                && before.resolution.as_ref().is_some_and(|resolved| {
+                    resolved.resolution == sigil_kernel::UserInputResolutionV1::Consumed
+                })
+            {
+                // Publishing the next question already consumed this exact continuation.
+                return Ok(false);
+            }
+            session.append_user_input_lifecycle(vec![
+                sigil_kernel::UserInputLifecycleEntryV1::Resolved(
+                    sigil_kernel::UserInputResolvedV1 {
+                        schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
+                        identity: continuation.identity.clone(),
+                        request_hash: continuation.request_hash.clone(),
+                        resolution,
+                        resolved_at_unix_ms: current_unix_time_ms(),
+                    },
+                ),
+            ])?;
+        }
+        sigil_kernel::UserInputResolutionV1::Failed { .. } => {
+            sigil_kernel::reconcile_user_input_continuation_after_failed_run(
+                session,
+                &continuation.identity,
+                &continuation.request_hash,
+                current_unix_time_ms(),
+            )?;
+        }
+        _ => anyhow::bail!("user input settlement requires a continuation outcome"),
+    }
+    Ok(session
+        .user_input_projection()?
+        .request(&continuation.identity)
+        .context("settled user input request disappeared")?
+        != before)
+}
+
+#[cfg(test)]
+#[path = "tests/user_input_settlement_tests.rs"]
+mod user_input_settlement_tests;
 
 pub(in crate::runner) enum PlanReviewExecutionResult {
     Finished(sigil_kernel::AgentRunResult),

@@ -2656,8 +2656,11 @@ impl ApplicationRunExecution {
                     return Err(error).context("failed to start user-input continuation");
                 }
             };
-            if let Err(error) =
-                bridge.emit(user_input::application_user_input_changed_event(request))
+            if let Err(error) = bridge
+                .refresh_durable_task_projector(&self.session)
+                .and_then(|()| {
+                    bridge.emit(user_input::application_user_input_changed_event(request))
+                })
             {
                 if is_application_public_outbox_append_error(&error) {
                     return Err(error).context(
@@ -2796,12 +2799,14 @@ impl ApplicationRunExecution {
                     context,
                     sigil_kernel::UserInputResolutionV1::Consumed,
                 ) {
-                    Ok(request) => bridge
+                    Ok(Some(request)) => bridge
                         .emit(user_input::application_user_input_changed_event(request))
                         .map(|()| agent_output),
+                    Ok(None) => Ok(agent_output),
                     Err(error) => Err(error),
                 }
             }
+            (Some(_), Err(error)) if is_application_public_outbox_append_error(&error) => Err(error),
             (Some(context), Err(error)) => {
                 match user_input::reconcile_failed_application_user_input_continuation(
                     &mut self.session,
@@ -7057,7 +7062,9 @@ struct ApplicationPublicOutboxAppendError {
     source: anyhow::Error,
 }
 
-fn is_application_public_outbox_append_error(error: &anyhow::Error) -> bool {
+/// Returns whether a host must leave publication recovery intact instead of appending a new
+/// input settlement or run terminal. Typed contexts preserve this classification.
+pub fn is_application_public_outbox_append_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<ApplicationPublicOutboxAppendError>()
         .is_some()
@@ -8068,6 +8075,23 @@ where
             task_events,
             handler,
         })
+    }
+
+    /// Rejoins exact private continuation controls appended through the session writer.
+    /// This only refreshes the cache; it neither republishes nor repairs durable records.
+    fn refresh_durable_task_projector(&mut self, session: &Session) -> Result<()> {
+        if session.session_scope_id() != self.events.session_id
+            || session.store_path() != Some(self.events.outbox_store.path())
+        {
+            bail!("application task projector refresh belongs to another durable session");
+        }
+        self.task_events = self
+            .events
+            .outbox_store
+            .read_event_records_writer()
+            .and_then(|records| task_projector_from_records(&records))
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
+        Ok(())
     }
 
     fn emit(&mut self, event: PublicRunEventKind) -> Result<()> {

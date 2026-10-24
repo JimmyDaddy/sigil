@@ -133,7 +133,12 @@ pub(super) fn request_user_input_call_is_accepted(call: &ToolCall) -> bool {
         && parse_request_user_input_args(&call.args_json).is_ok()
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to publish the durable user-input request")]
+pub(super) struct RequestUserInputPublicationFailure;
+
 pub(super) struct RequestUserInputContext<'a> {
+    pub logical_run_id: &'a str,
     pub root_logical_run_id: &'a str,
     pub source_thread_id: &'a AgentThreadId,
     pub provider_name: &'a str,
@@ -206,7 +211,7 @@ where
     let requested = UserInputRequestedV1::new(UserInputRequestV1 {
         schema_version: USER_INPUT_SCHEMA_VERSION,
         identity,
-        source: context.source,
+        source: context.source.clone(),
         purpose: UserInputPurposeV1::Clarification,
         prompt: args.prompt,
         prompt_origin,
@@ -240,8 +245,78 @@ where
         None,
     )?));
     let request_control = ControlEntry::UserInputRequested(Box::new(requested.clone()));
-    handler.commit_controls(session, vec![started, request_control])?;
+    let mut controls =
+        consumed_continuation_before_request(session, &projection, &requested, &context)?;
+    controls.extend([started, request_control]);
+    // Validate the whole transition before publication, including root budget and one pending
+    // request. A malformed follow-up must never consume the previous answer by itself.
+    let mut staged = projection;
+    for control in &controls {
+        if let Some(entry) = crate::UserInputLifecycleEntryV1::from_control(control) {
+            staged.apply(entry)?;
+        }
+    }
+    handler
+        .commit_controls(session, controls)
+        .context(RequestUserInputPublicationFailure)?;
     Ok((&requested).into())
+}
+
+/// Settles only an answer whose exact continuation has already consumed a provider turn.
+/// The returned control is committed atomically with the new request, never on its own.
+fn consumed_continuation_before_request(
+    session: &Session,
+    projection: &crate::UserInputProjectionV1,
+    requested: &UserInputRequestedV1,
+    context: &RequestUserInputContext<'_>,
+) -> Result<Vec<ControlEntry>> {
+    let identity = &requested.request.identity;
+    let Some(state) = projection.pending().find(|state| {
+        state.requested.request.identity.source_thread_id == identity.source_thread_id
+    }) else {
+        return Ok(Vec::new());
+    };
+    let previous = &state.requested.request;
+    if state.status != crate::UserInputStatusV1::ContinuationStarted
+        || state
+            .decision
+            .as_ref()
+            .is_none_or(|decision| !decision.decision.is_submitted())
+        || previous.identity.session_scope_id != identity.session_scope_id
+        || previous.identity.root_logical_run_id != identity.root_logical_run_id
+        || previous.source != requested.request.source
+    {
+        // The ordinary reducer rejects overlapping requests. Do not relax pending admission.
+        return Ok(Vec::new());
+    }
+    let started = state
+        .continuation
+        .as_ref()
+        .context("started user-input continuation lost its exact attempt")?;
+    if started.continuation_logical_run_id.as_str() != context.logical_run_id {
+        bail!("new user-input request does not belong to the live continuation");
+    }
+    let attempts = session.provider_physical_attempt_projection()?;
+    let attempt = attempts
+        .attempt(&started.physical_attempt_id)
+        .context("new user-input request lacks its continuation provider evidence")?;
+    if attempt.session_id() != session.session_scope_id()
+        || attempt.entry.logical_run_id != context.logical_run_id
+        || attempt.terminal.as_ref().is_none_or(|terminal| {
+            terminal.outcome != crate::ProviderPhysicalAttemptOutcome::Completed
+        })
+    {
+        bail!("new user-input request requires its exact completed continuation attempt");
+    }
+    Ok(vec![ControlEntry::UserInputResolved(
+        crate::UserInputResolvedV1 {
+            schema_version: USER_INPUT_SCHEMA_VERSION,
+            identity: previous.identity.clone(),
+            request_hash: state.requested.request_hash.clone(),
+            resolution: crate::UserInputResolutionV1::Consumed,
+            resolved_at_unix_ms: super::unix_time_ms(),
+        },
+    )])
 }
 
 pub(super) fn append_request_user_input_error(
@@ -365,3 +440,7 @@ fn reject_credential_collection(args: &NormalizedRequestUserInputArgs) -> Result
 #[cfg(test)]
 #[path = "../tests/agent_user_input_prompt_origin_tests.rs"]
 mod prompt_origin_tests;
+
+#[cfg(test)]
+#[path = "../tests/agent_user_input_continuation_tests.rs"]
+mod continuation_tests;

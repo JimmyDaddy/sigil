@@ -265,3 +265,164 @@ fn ordinary_user_input_recovery_after_restart_requires_exact_receipt_and_resumes
     restarted.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn tui_sequential_user_input_suspensions_settle_once_with_and_without_restart() -> Result<()> {
+    for restart_between_questions in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().to_path_buf();
+        let session_path = workspace.join(".sigil/sessions/two-questions.jsonl");
+        let root_config = routed_unauthenticated_test_root_config(&workspace, "planned-model");
+        let question = |ordinal| {
+            StreamPlan::Chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: format!("tui-sequential-{ordinal}"),
+                    name: sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                    args_json: serde_json::json!({"questions":[{
+                        "id":"scope", "question":format!("Question {ordinal}?")
+                    }]})
+                    .to_string(),
+                }),
+                ProviderChunk::Done,
+            ])
+        };
+        let provider = PlannedProvider::new(vec![
+            question(1),
+            question(2),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("Both TUI answers consumed once.".to_owned()),
+                ProviderChunk::Done,
+            ]),
+        ]);
+        // Retain the first stopped worker: it owns the authority fixture's temporary root.
+        let mut workers = vec![spawn_test_worker(
+            root_config.clone(),
+            session_path.clone(),
+            Agent::new(provider.clone(), ToolRegistry::new()),
+            workspace.clone(),
+        )?];
+        workers[0].send(WorkerCommand::SubmitPrompt {
+            prompt: "Clarify two decisions, then finish.".to_owned(),
+            reasoning_effort: ReasoningEffort::Max,
+        })?;
+        let mut references: Vec<sigil_kernel::PublicUserInputRequestV1> = Vec::new();
+        for ordinal in 1..=2 {
+            let worker = workers.last().expect("current worker");
+            let request = loop {
+                match worker.recv_with_timeout(Duration::from_secs(20))? {
+                    WorkerMessage::UserInputRequested { request, .. }
+                        if references
+                            .iter()
+                            .all(|prior| prior.identity != request.identity) =>
+                    {
+                        break request;
+                    }
+                    WorkerMessage::RunFailed(error) => {
+                        anyhow::bail!("question {ordinal} failed after settlement: {error}");
+                    }
+                    WorkerMessage::UserInputDecisionFailed { message, .. } => {
+                        anyhow::bail!("question {ordinal} decision failed: {message}");
+                    }
+                    WorkerMessage::RunFinished { .. } => {
+                        anyhow::bail!("question {ordinal} was skipped");
+                    }
+                    _ => {}
+                }
+            };
+            assert_eq!(request.status, UserInputStatusV1::Requested);
+            references.push(request.clone());
+            if restart_between_questions {
+                let composition = worker.authority_composition();
+                workers.last_mut().expect("current worker").stop()?;
+                workers.push(spawn_test_worker_with_existing_authority_composition(
+                    root_config.clone(),
+                    session_path.clone(),
+                    Agent::new(provider.clone(), ToolRegistry::new()),
+                    workspace.clone(),
+                    composition,
+                )?);
+            }
+            workers.last().expect("current worker").send(
+                WorkerCommand::SubmitUserInputDecision {
+                    command_id: Some(format!("tui-sequential-answer-{ordinal}")),
+                    request_id: request.identity.request_id.as_str().to_owned(),
+                    generation: request.identity.generation,
+                    expected_request_hash: request.request_hash.clone(),
+                    decision: UserInputDecisionV1::Submitted {
+                        answers: vec![UserInputAnswerV1 {
+                            question_id: "scope".to_owned(),
+                            value: UserInputAnswerValueV1::Text {
+                                value: format!("answer {ordinal}"),
+                            },
+                        }],
+                    },
+                },
+            )?;
+        }
+        loop {
+            match workers
+                .last()
+                .expect("current worker")
+                .recv_with_timeout(Duration::from_secs(20))?
+            {
+                WorkerMessage::RunFinished { result, .. } => {
+                    assert_eq!(result.final_text, "Both TUI answers consumed once.");
+                    break;
+                }
+                WorkerMessage::RunFailed(error) => {
+                    anyhow::bail!("final continuation failed after settlement: {error}");
+                }
+                WorkerMessage::UserInputDecisionFailed { message, .. } => {
+                    anyhow::bail!("final decision failed: {message}");
+                }
+                _ => {}
+            }
+        }
+        workers.last_mut().expect("current worker").stop()?;
+        assert_eq!(provider.remaining_plan_count(), 0);
+        let session = Session::load_from_store(
+            "planned",
+            "planned-model",
+            JsonlSessionStore::open_existing(&session_path)?,
+        )?;
+        assert_eq!(session.user_input_projection()?.pending().count(), 0);
+        assert!(sigil_kernel::recoverable_user_input_decision(&session)?.is_none());
+        assert_eq!(
+            references[0].identity.root_logical_run_id,
+            references[1].identity.root_logical_run_id
+        );
+        let records = JsonlSessionStore::read_event_records(&session_path)?;
+        let public = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+        assert!(!public.events_in_order().iter().any(|entry| matches!(
+            entry.event.event,
+            sigil_kernel::PublicRunEventKind::RunFailed { .. }
+        )));
+        for (index, request) in references.iter().enumerate() {
+            assert_eq!(
+                session
+                    .entries()
+                    .iter()
+                    .filter(|entry| matches!(entry,
+                SessionLogEntry::ToolResultV3(result)
+                    if result.call_id == format!("tui-sequential-{}", index + 1)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                session
+                    .entries()
+                    .iter()
+                    .filter(|entry| matches!(entry,
+                SessionLogEntry::Control(ControlEntry::UserInputResolved(resolved))
+                    if resolved.identity == request.identity))
+                    .count(),
+                1
+            );
+            assert_eq!(public.events_in_order().iter().filter(|entry| matches!(&entry.event.event,
+                sigil_kernel::PublicRunEventKind::UserInputChanged { request_id, status: UserInputStatusV1::Resolved, .. }
+                    if request_id == request.identity.request_id.as_str())).count(), 1,
+                "the TUI outer settlement must not duplicate the kernel's atomic Consumed event");
+        }
+    }
+    Ok(())
+}

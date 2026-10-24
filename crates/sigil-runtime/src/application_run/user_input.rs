@@ -732,7 +732,30 @@ pub(super) fn resolve_application_user_input_continuation(
     session: &mut Session,
     context: &ApplicationUserInputContinuationContext,
     resolution: sigil_kernel::UserInputResolutionV1,
-) -> Result<sigil_kernel::PublicUserInputRequestV1> {
+) -> Result<Option<sigil_kernel::PublicUserInputRequestV1>> {
+    let projection = session.user_input_projection()?;
+    let state = projection
+        .request(&context.identity)
+        .context("user-input continuation resolution references an unknown request")?;
+    if state.requested.request_hash != context.request_hash {
+        bail!("user-input continuation resolution does not bind the exact request hash");
+    }
+    if state.status == sigil_kernel::UserInputStatusV1::Resolved
+        && resolution == sigil_kernel::UserInputResolutionV1::Consumed
+        && state.resolution.as_ref().is_some_and(|resolved| {
+            resolved.resolution == sigil_kernel::UserInputResolutionV1::Consumed
+        })
+    {
+        if state
+            .continuation
+            .as_ref()
+            .is_none_or(|started| started.physical_attempt_id != context.physical_attempt_id)
+        {
+            bail!("consumed user-input continuation belongs to another physical attempt");
+        }
+        // A same-continuation follow-up already settled this request in its atomic batch.
+        return Ok(None);
+    }
     session.append_user_input_lifecycle(vec![
         sigil_kernel::UserInputLifecycleEntryV1::Resolved(sigil_kernel::UserInputResolvedV1 {
             schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
@@ -746,6 +769,7 @@ pub(super) fn resolve_application_user_input_continuation(
     projection
         .request(&context.identity)
         .map(sigil_kernel::UserInputRequestStateV1::public_view)
+        .map(Some)
         .context("resolved user-input continuation lost its durable request")
 }
 

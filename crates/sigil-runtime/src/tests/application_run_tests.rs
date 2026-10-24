@@ -8163,3 +8163,6 @@ fn trusted_plugin_skill_catalog_binding_loads_and_rejects_revocation_or_manifest
     ));
     Ok(())
 }
+
+#[path = "application_user_input_continuation_tests.rs"]
+mod user_input_continuation_tests;

@@ -132,7 +132,7 @@ use tool_results::{
     emit_tool_result_batch, record_tool_run_outcome,
 };
 use user_input::{
-    RequestUserInputContext, append_request_user_input_error,
+    RequestUserInputContext, RequestUserInputPublicationFailure, append_request_user_input_error,
     append_tool_ignored_after_user_input_request, handle_request_user_input_call,
     request_user_input_call_is_accepted,
 };
@@ -3287,6 +3287,7 @@ where
                             handler,
                             &call,
                             RequestUserInputContext {
+                                logical_run_id: &logical_run_id,
                                 root_logical_run_id: &root_logical_run_id,
                                 source_thread_id: &source_thread_id,
                                 provider_name: self.provider.name(),
@@ -3303,6 +3304,13 @@ where
                             },
                         ) {
                             Ok(request) => accepted_user_input = Some(request),
+                            Err(error)
+                                if error
+                                    .downcast_ref::<RequestUserInputPublicationFailure>()
+                                    .is_some() =>
+                            {
+                                return Err(error);
+                            }
                             Err(error) => append_request_user_input_error(
                                 session,
                                 &mut outcome,

@@ -295,6 +295,17 @@ UserInputDecisionAccepted -> ContinuationStarted -> ordinary run events -> UserI
 
 snapshot 是重连 authority；SSE 可以丢失，客户端必须按 sequence/cursor 补齐。
 
+同一 agent 的续跑再次提问时，不放宽“一份未回答请求”约束：仅当旧请求已有 submitted decision、
+精确 claim/start，且其绑定 physical attempt 已有 Completed 事实，当前实际 logical run 又精确等于
+该 continuation logical run，才可在同一 control/outbox 原子批次内先记录旧请求 `Resolved(Consumed)`、
+再记录新请求。session、root 与 source 继续精确匹配；未接受、仅 accepted/claimed、未派发或无消费
+证明的请求不能借新问题提前消费。runtime 刷新私有 continuation 控制之后的 public projector 前缀；
+同一已消费请求的收尾只读返回，不重复落盘或发布；TUI host 独立续跑的外层结算也必须精确核对
+原 identity、hash 与完整 started/claim/physical binding，已由下一问消费时不得再次写入或广播旧状态。
+publication failure 作为宿主持久化错误传播，TUI 在转为展示文案前也必须保留 typed 分类并跳过尾端
+结算、重新发布和 terminal append；普通 provider 失败与取消继续按原 provider evidence 结算。
+不得回写成模型可纠正的 `InvalidInput`，也不得在不确定 append 之后制造新的结算记录。
+
 ### 9.3 HTTP/Desktop contract
 
 本地 bearer 认证接口：
