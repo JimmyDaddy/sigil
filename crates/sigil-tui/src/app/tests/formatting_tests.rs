@@ -359,7 +359,7 @@ fn format_tool_result_block_redacted_keeps_full_preview_payloads_for_expansion()
     assert!(
         markdown_payload["summary"]
             .as_str()
-            .is_some_and(|summary| summary.contains("24 lines"))
+            .is_some_and(|summary| summary.starts_with("Preview · "))
     );
 
     let bash_content = (1..=30)

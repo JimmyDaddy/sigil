@@ -183,7 +183,7 @@ describe("desktop UI catalog contract", () => {
     scalarRender.unmount();
 
     render(createElement(ToolCard, { tool: text! }));
-    expect(screen.getByText("7 lines read.")).toBeTruthy();
+    expect(screen.getByText("Output preview.")).toBeTruthy();
     expect(screen.getByLabelText("read_file output content").textContent).toContain("fmt");
     expect(screen.getByLabelText("read_file output content").textContent).not.toContain("pin::Pin");
     expect(screen.getByRole("button", { name: "Expand read_file output" })).toBeTruthy();

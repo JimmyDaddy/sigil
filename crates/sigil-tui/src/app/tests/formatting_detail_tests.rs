@@ -141,6 +141,79 @@ fn preview_helpers_cover_json_markdown_and_limits() {
 }
 
 #[test]
+fn read_preview_summary_does_not_count_a_bounded_preview_as_the_complete_read() -> anyhow::Result<()>
+{
+    use sigil_kernel::{
+        JsonlSessionStore, ToolArtifactBindingV1, ToolArtifactSensitivity, ToolArtifactStore,
+        ToolResultRecordedV3,
+    };
+
+    let fixture = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(fixture.path().join("session.jsonl"))?;
+    let artifacts = ToolArtifactStore::for_session_store(&store);
+    let content = (0..160)
+        .map(|index| format!("{index:04} {}", "x".repeat(250)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let result = ToolResult::ok(
+        "long-read",
+        "read_file",
+        content.clone(),
+        ToolResultMeta::default(),
+    );
+    let (recorded, _) = ToolResultRecordedV3::capture(
+        &result,
+        Some(&artifacts),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let ToolArtifactBindingV1::Published { descriptor } = &recorded.artifact else {
+        panic!("file output must be captured");
+    };
+    let saved = String::from_utf8(artifacts.read_all(descriptor)?)?;
+    assert_eq!(saved, content);
+    assert_eq!(saved.lines().count(), 160);
+    let display = recorded.display_view();
+    assert!(display.preview.lines().count() < 160);
+    let metadata = ToolResultMeta {
+        bytes: Some(display.observed_bytes),
+        ..Default::default()
+    };
+    let formatted = format_tool_preview_payload(
+        Some("long-read"),
+        "read_file",
+        "ok",
+        &display.preview,
+        Some(&metadata),
+        None,
+        None,
+        &SecretRedactor::empty(),
+        Some(json!({
+            "artifact_ref": descriptor.artifact_ref,
+            "availability": "available",
+            "observed_bytes": display.observed_bytes,
+            "persisted_bytes": display.persisted_bytes,
+            "has_more": display.has_more
+        })),
+    );
+    let payload: serde_json::Value = serde_json::from_str(&formatted)?;
+    assert_eq!(payload["summary"], "Preview · 41.0 KB");
+    assert_eq!(payload["artifact"]["persisted_bytes"], content.len() as u64);
+    assert_eq!(
+        payload["artifact"]["artifact_ref"],
+        serde_json::to_value(&descriptor.artifact_ref)?
+    );
+    assert_eq!(payload["artifact"]["has_more"], true);
+    assert_eq!(
+        payload["preview_lines"]
+            .as_array()
+            .expect("preview lines")
+            .len(),
+        display.preview.lines().count()
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_thread_tool_blocks_include_mode_source_status_and_background_hint() -> anyhow::Result<()> {
     let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
     let profile_id = sigil_kernel::AgentProfileId::new("explore")?;

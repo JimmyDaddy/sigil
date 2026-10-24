@@ -1133,6 +1133,9 @@ fn format_tool_preview_summary(
 ) -> String {
     let line_label = if total_lines == 1 { "line" } else { "lines" };
     let size = format_bytes(bytes);
+    if tool_name == "read_file" {
+        return format!("Preview · {size}");
+    }
     if hidden_lines == 0 {
         return format!("{total_lines} {line_label} · {size}");
     }

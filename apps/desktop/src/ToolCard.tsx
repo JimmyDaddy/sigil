@@ -537,6 +537,7 @@ function ToolOutputPanel({
   const showOutput = visibleText.trim() !== "";
   const lineCount = text.split("\n").length;
   const metadata = detailMetadata(language, lineCount);
+  const outputLabel = t(toolName === "read_file" ? "preview" : "toolOutputLabel");
   return (
     <section
       className={`tool-output-section${showExpanded ? " is-expanded" : ""}`}
@@ -553,13 +554,13 @@ function ToolOutputPanel({
         >
           <span className="tool-output-disclosure-title">
             <Icon name={expanded ? "chevron-up" : "chevron-down"} />
-            <strong>{t("toolOutputLabel")}</strong>
+            <strong>{outputLabel}</strong>
           </span>
           <small>{metadata}</small>
         </Button>
       ) : (
         <header>
-          <strong>{t("toolOutputLabel")}</strong>
+          <strong>{outputLabel}</strong>
           <small>{metadata}</small>
         </header>
       )}
@@ -608,7 +609,8 @@ export function presentTool(tool: ToolView, t: Translate = translateEnglish): To
       structured?.language,
     );
   const summary = structured?.summary
-    ?? (diff ? t("toolChangesReady") : outputPresentation?.summary);
+    ?? (diff ? t("toolChangesReady") : tool.toolName === "read_file" && tone === "success" && outputPresentation !== undefined
+      ? t("toolOutputPreview") : outputPresentation?.summary);
   const detailKind = diff
     ? "diff" as const
     : structured?.hasError
@@ -703,7 +705,7 @@ function presentOutput(
     ? fallbackSummary(tone)?.summary
     : isStructuralOnlyLine(firstLine)
       ? `${lines.length} lines of output.`
-      : textOutputSummary(lines, toolName);
+      : textOutputSummary(lines);
   if (summary === undefined) return undefined;
   return {
     summary,
@@ -756,12 +758,8 @@ function isStructuralOnlyLine(value: string): boolean {
   return /^[\[\]\{\},]+$/.test(value);
 }
 
-function textOutputSummary(lines: readonly string[], toolName: string): string {
-  const normalized = toolName.toLocaleLowerCase();
+function textOutputSummary(lines: readonly string[]): string {
   const lineCount = lines.length;
-  if (/(?:^|[_-])(?:read|read_file|view_file)(?:$|[_-])/.test(normalized)) {
-    return `${lineCount} line${lineCount === 1 ? "" : "s"} read.`;
-  }
   if (lineCount > 1) return `${lineCount} lines of output.`;
   return boundedSummary(lines[0]?.trim() ?? "");
 }

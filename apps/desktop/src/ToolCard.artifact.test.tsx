@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ToolCard } from "./ToolCard";
+import { LocaleProvider } from "./i18n";
 import type { ToolArtifactPage, ToolArtifactSelector } from "./types";
 
 afterEach(cleanup);
@@ -18,6 +19,57 @@ function page(selector: ToolArtifactSelector, body: string, patch: Partial<ToolA
     returnedBytes: new TextEncoder().encode(body).length, pageSha256: `sha256:${"b".repeat(64)}`,
     artifactSha256: `sha256:${"c".repeat(64)}`, eof: true, matchCount: 0, ...patch };
 }
+
+it("labels a shortened file preview without treating its lines as the full read and retains paging and search", async () => {
+  const user = userEvent.setup();
+  const lines = Array.from({ length: 160 }, (_, index) => `${String(index).padStart(4, "0")} ${"x".repeat(250)}`);
+  const body = lines.join("\n");
+  const preview = [...lines.slice(0, 17), "[sigil: output truncated]", ...lines.slice(-16)].join("\n");
+  expect(preview.split("\n")).toHaveLength(34);
+  const read = vi.fn(async (selector: ToolArtifactSelector) => {
+    if (selector.kind === "search_literal") return page(selector, lines[150]!, { matchCount: 1 });
+    if (selector.kind !== "byte_slice") throw new Error("unexpected selector");
+    const end = Math.min(body.length, selector.offset + selector.limit);
+    return page(selector, body.slice(selector.offset, end), {
+      eof: end === body.length,
+      nextSelector: end === body.length ? undefined : { kind: "byte_slice", offset: end, limit: selector.limit },
+    });
+  });
+  render(<ToolCard tool={{ ...tool, text: preview, artifactHasMore: true, artifactPersistedBytes: body.length }} onReadArtifact={read} />);
+  expect(screen.getByText("Output preview.")).toBeTruthy();
+  expect(screen.getByText("Preview")).toBeTruthy();
+  expect(screen.queryByText("34 lines read.")).toBeNull();
+  expect(read).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "View full output" }));
+  expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain(lines[0]);
+  await user.click(screen.getByRole("button", { name: "Next page" }));
+  expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain(lines[80]);
+  await user.click(screen.getByRole("button", { name: "Next page" }));
+  expect((await screen.findByLabelText("read_file saved output page")).textContent).toContain(lines[159]);
+  await user.click(screen.getByRole("button", { name: "Search saved tool output" }));
+  await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "0150");
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  expect((await screen.findByLabelText("read_file saved output search results")).textContent).toContain(lines[150]);
+  expect(read).toHaveBeenLastCalledWith({ kind: "search_literal", query: "0150", startOffset: 0, maxMatches: 20, contextLines: 2 });
+});
+
+it("localizes the file preview summary and heading", () => {
+  const key = "sigil.desktop.locale.v1";
+  const previousLocale = window.localStorage.getItem(key);
+  const previousLanguage = document.documentElement.lang;
+  try {
+    window.localStorage.setItem(key, "zh-CN");
+    render(<LocaleProvider><ToolCard tool={tool} /></LocaleProvider>);
+    expect(screen.getByText("输出预览。")).toBeTruthy();
+    expect(screen.getByText("预览")).toBeTruthy();
+    expect(screen.queryByText("2 lines read.")).toBeNull();
+  } finally {
+    cleanup();
+    if (previousLocale === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, previousLocale);
+    document.documentElement.lang = previousLanguage;
+  }
+});
 
 it("keeps a completed short file read compact until requested and preserves exact text across collapse", async () => {
   const user = userEvent.setup();

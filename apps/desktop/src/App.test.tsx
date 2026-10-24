@@ -1239,7 +1239,7 @@ describe("desktop coding-agent components", () => {
       displayName: "Read file",
       status: "Succeeded",
       tone: "success",
-      summary: "1 line read.",
+      summary: "Output preview.",
       detailKind: "output",
       detailText: "pub fn ready() -> bool { true }",
       detailLanguage: "rust",
@@ -1248,8 +1248,8 @@ describe("desktop coding-agent components", () => {
     render(<ToolCard tool={tool} />);
     expect(screen.getByText("path=src/lib.rs")).toBeTruthy();
     expect(screen.getByText("Result")).toBeTruthy();
-    expect(screen.getByText("1 line read.")).toBeTruthy();
-    expect(screen.getByText("Output")).toBeTruthy();
+    expect(screen.getByText("Output preview.")).toBeTruthy();
+    expect(screen.getByText("Preview")).toBeTruthy();
     expect(screen.getByText("Rust · 1 line")).toBeTruthy();
     expect(screen.getByLabelText("read_file output content").querySelector(".hljs-keyword")?.textContent).toBe("pub");
     expect(screen.queryByRole("button", { name: /show output|show all/i })).toBeNull();
