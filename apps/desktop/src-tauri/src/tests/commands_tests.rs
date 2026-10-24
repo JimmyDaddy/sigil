@@ -478,6 +478,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 session_stream_sequence: "9007199254740994".to_owned(),
                 status: DesktopConversationDisplayStatus::AwaitingUserInput,
             }),
+            provider_recovery: None,
             total_items: "9007199254740995".to_owned(),
             items: vec![DesktopConversationDisplayItem {
                 schema_version: 1,

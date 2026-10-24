@@ -1,5 +1,6 @@
 import type {
   ApprovalDecisionSummary,
+  ConversationProviderRecovery,
   RunApprovalSnapshot,
   TimelineEvent,
   TimelineTerminalTask,
@@ -95,6 +96,11 @@ export interface LiveEventState {
   routeRecovery?: TimelineEvent;
   /** Most recent provider-turn recovery for the active run, projected without attempt identity. */
   providerTurnRecovery?: TimelineEvent;
+  /** Changes while a latest-page request is in flight must take precedence over its old cut. */
+  providerRecoveryEpoch: number;
+  providerRecoveryObservedRunId?: string;
+  providerRecoveryThroughSequence?: string;
+  providerRecoverySnapshotSequences: ReadonlyMap<string, string>;
   /** Same-run progress/settlement frontier that retired automatic retry presentation. */
   retiredProviderRecoverySequences: ReadonlyMap<string, string>;
   settledCancelledRecoveryRuns: ReadonlySet<string>;
@@ -104,6 +110,8 @@ export interface LiveEventState {
 export type LiveEventAction =
   | { type: "session_selected"; sessionId: string }
   | { type: "anchor_received"; sessionId: string; anchor?: LiveProvisionalAnchor }
+  | { type: "provider_recovery_snapshot_received"; sessionId: string; workspaceId: string;
+      throughSequence: string; snapshot?: ConversationProviderRecovery; observedEpoch: number }
   | { type: "event_received"; sessionId: string; event: TimelineEvent }
   | { type: "run_owner_received"; sessionId: string; runId?: string }
   | { type: "approval_snapshot_received"; sessionId: string; snapshot: RunApprovalSnapshot }
@@ -132,6 +140,8 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     pendingTaskEvents: new Map(),
     terminalTasks: new Map(),
     terminalSignals: new Map(),
+    providerRecoveryEpoch: 0,
+    providerRecoverySnapshotSequences: new Map(),
     retiredProviderRecoverySequences: new Map(),
     settledCancelledRecoveryRuns: new Set(),
     supersededProviderRecoveryRuns: new Set(),
@@ -152,6 +162,8 @@ export function liveEventReducer(
   switch (action.type) {
     case "anchor_received":
       return receiveAnchor(state, action.anchor);
+    case "provider_recovery_snapshot_received":
+      return receiveProviderRecoverySnapshot(state, action);
     case "event_received":
       return receiveTimelineEvent(state, action.event);
     case "run_owner_received":
@@ -498,10 +510,61 @@ function receiveAnchor(
   return { ...state, anchor, deltaBuffers };
 }
 
+function receiveProviderRecoverySnapshot(
+  state: LiveEventState,
+  action: Extract<LiveEventAction, { type: "provider_recovery_snapshot_received" }>,
+): LiveEventState {
+  const { snapshot, throughSequence } = action;
+  if (!isDecimalSequence(throughSequence)
+    || state.providerRecoveryThroughSequence !== undefined
+      && compareRunSequence(throughSequence, state.providerRecoveryThroughSequence) < 0
+    || snapshot !== undefined && (!isDecimalSequence(snapshot.runSequence) || !snapshot.runId)) return state;
+  // Only latest-page callers dispatch this action. An owner/start received after the request
+  // began wins over a response from another run, even when that response has no recovery.
+  if (action.observedEpoch !== state.providerRecoveryEpoch
+    && snapshot?.runId !== state.providerRecoveryObservedRunId
+    || state.ownerRunId !== undefined && snapshot?.runId !== state.ownerRunId
+    || snapshot !== undefined && state.supersededProviderRecoveryRuns.has(snapshot.runId)) return state;
+  if (snapshot !== undefined
+    && compareRunSequence(state.durableRunSequences.get(snapshot.runId) ?? "0", snapshot.runSequence) > 0) return state;
+  if (snapshot === undefined && action.observedEpoch !== state.providerRecoveryEpoch) return state;
+  const supersededProviderRecoveryRuns = new Set(state.supersededProviderRecoveryRuns);
+  if (snapshot !== undefined && state.providerRecoveryObservedRunId !== undefined
+    && state.providerRecoveryObservedRunId !== snapshot.runId) {
+    supersededProviderRecoveryRuns.add(state.providerRecoveryObservedRunId);
+  }
+  const providerRecoverySnapshotSequences = new Map(state.providerRecoverySnapshotSequences);
+  if (snapshot !== undefined) providerRecoverySnapshotSequences.set(snapshot.runId, snapshot.runSequence);
+  const recovery = snapshot?.recovery;
+  return { ...state, providerRecoveryThroughSequence: throughSequence,
+    providerRecoveryObservedRunId: snapshot?.runId, providerRecoverySnapshotSequences,
+    supersededProviderRecoveryRuns,
+    providerTurnRecovery: snapshot === undefined || recovery === undefined ? undefined : {
+      workspaceId: action.workspaceId, sessionId: state.sessionId, runId: snapshot.runId,
+      sequence: 0, runSequence: snapshot.runSequence, replayable: true,
+      kind: "provider_turn_recovery", providerTurnRecovery: recovery,
+    } };
+}
+
 function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): LiveEventState {
   if (event.sessionId !== state.sessionId || !isDecimalSequence(event.runSequence)) return state;
   if (event.livePreview !== undefined) return receivePreviewSnapshot(state, event);
   if (event.replayable) {
+    state = { ...state, providerRecoveryEpoch: state.providerRecoveryEpoch + 1 };
+    if (state.providerRecoveryObservedRunId === undefined
+      && !state.supersededProviderRecoveryRuns.has(event.runId)
+      && (state.ownerRunId === undefined || state.ownerRunId === event.runId)
+      && (event.kind === "provider_turn_recovery" || terminalSignalFromTimelineEvent(event) !== undefined)) {
+      state = { ...state, providerRecoveryObservedRunId: event.runId };
+    }
+    if (event.kind === "run_started" && !state.supersededProviderRecoveryRuns.has(event.runId)
+      && (state.ownerRunId === undefined || state.ownerRunId === event.runId)) {
+      const supersededProviderRecoveryRuns = new Set(state.supersededProviderRecoveryRuns);
+      if (state.providerRecoveryObservedRunId !== undefined && state.providerRecoveryObservedRunId !== event.runId) {
+        supersededProviderRecoveryRuns.add(state.providerRecoveryObservedRunId);
+      }
+      state = { ...state, providerRecoveryObservedRunId: event.runId, supersededProviderRecoveryRuns };
+    }
     const durableRunSequences = new Map(state.durableRunSequences);
     const previous = durableRunSequences.get(event.runId) ?? "0";
     if (compareRunSequence(event.runSequence, previous) > 0) {
@@ -523,7 +586,8 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   if (event.kind === "provider_turn_recovery" && event.providerTurnRecovery !== undefined) {
     const retiredThrough = next.retiredProviderRecoverySequences.get(event.runId) ?? "0";
     const current = next.providerTurnRecovery;
-    if (!next.supersededProviderRecoveryRuns.has(event.runId)
+    if (compareRunSequence(event.runSequence, next.providerRecoverySnapshotSequences.get(event.runId) ?? "0") > 0
+      && !next.supersededProviderRecoveryRuns.has(event.runId)
       && (!cancelledProviderRecovery(event) || !next.settledCancelledRecoveryRuns.has(event.runId))
       && (!automaticProviderRecovery(event) || compareRunSequence(event.runSequence, retiredThrough) > 0)
       && (current?.runId !== event.runId
@@ -553,6 +617,14 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   if (terminalSignal !== undefined || event.replayable && (event.kind === "assistant_message"
     || event.kind === "user_input_changed" && event.status === "requested") || cancelledRecoverySettled) {
     next = retireProviderTurnRecovery(next, event.runId, event.runSequence, cancelledRecoverySettled);
+  }
+  if (terminalSignal !== undefined && (terminalSignal.status === "succeeded" || terminalSignal.status === "cancelled")) {
+    const providerRecoverySnapshotSequences = new Map(next.providerRecoverySnapshotSequences);
+    providerRecoverySnapshotSequences.set(event.runId, event.runSequence);
+    next = { ...next, providerRecoverySnapshotSequences,
+      providerTurnRecovery: next.providerTurnRecovery?.runId === event.runId
+        && compareRunSequence(next.providerTurnRecovery.runSequence, event.runSequence) <= 0
+        ? undefined : next.providerTurnRecovery };
   }
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(retirePreviewSnapshots(next, event), terminalSignal);
@@ -806,6 +878,8 @@ function receiveRunOwner(state: LiveEventState, runId: string | undefined): Live
     if (recovery !== undefined && recovery.runId !== runId) supersededProviderRecoveryRuns.add(recovery.runId);
   }
   let next: LiveEventState = { ...state, ownerRunId: runId, supersededProviderRecoveryRuns,
+    providerRecoveryEpoch: runId !== undefined && runId !== state.ownerRunId ? state.providerRecoveryEpoch + 1 : state.providerRecoveryEpoch,
+    providerRecoveryObservedRunId: runId ?? state.providerRecoveryObservedRunId,
     providerTurnRecovery: recovery !== undefined && supersededProviderRecoveryRuns.has(recovery.runId) ? undefined : recovery };
   if (runId !== undefined) {
     const pending = [...next.pendingTaskEvents.values()].filter((event) => event.runId === runId).sort(compareTimelineEvents);

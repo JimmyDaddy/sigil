@@ -3895,3 +3895,239 @@ fn canonical_terminal_before_receipt_survives_stale_cross_run_followup() -> Resu
     assert_eq!(*original_content_bytes, 16);
     Ok(())
 }
+
+fn append_display_provider_recovery(
+    session: &Session,
+    run_id: &str,
+    sequence: u64,
+    recovery: sigil_kernel::PublicProviderTurnRecoveryViewV1,
+) -> Result<()> {
+    let mut recorder = crate::ApplicationRunEventRecorder::resume(session, run_id)?;
+    assert_eq!(recorder.public_sequence()?, sequence - 1);
+    // Use the production producer: provider recovery is its own nonterminal publication fact.
+    // Linked control and terminal publications retain their separate atomic bundle contracts.
+    sigil_kernel::EventHandler::handle(
+        &mut recorder,
+        sigil_kernel::RunEvent::ProviderTurnRecovery(recovery),
+    )?;
+    assert_eq!(recorder.public_sequence()?, sequence);
+    Ok(())
+}
+
+fn append_display_auth_recovery(session: &Session, run_id: &str, sequence: u64) -> Result<()> {
+    let recovery = sigil_kernel::PublicProviderTurnRecoveryViewV1 {
+        phase: sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Blocked,
+        active_retry_count: 0,
+        active_max_retries: 2,
+        retry_count: 0,
+        max_transport_retries: 2,
+        next_retry_unix_ms: None,
+        reason_code: Some("provider_authentication_required".to_owned()),
+        failed_model_ref: Some(sigil_kernel::ModelRef::new(
+            sigil_kernel::ConnectionId::new("failed-auth")?,
+            "manual-model",
+        )?),
+        available_actions: vec![sigil_kernel::PublicProviderTurnRecoveryActionV1::UpdateConnection],
+        user_attention_required: true,
+    };
+    append_display_provider_recovery(session, run_id, sequence, recovery)
+}
+
+#[test]
+fn conversation_display_recovers_latest_provider_attention_from_exact_durable_source() -> Result<()>
+{
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("auth-run", 1)?)?;
+    session.append_user_message(ModelMessage::user("first"))?;
+    session.append_user_message(ModelMessage::user("second"))?;
+    append_display_auth_recovery(&session, "auth-run", 1)?;
+    lifecycle.append_finalized_with_outbox(
+        &ConversationRunFinalizedEntryV1::new(
+            "auth-run",
+            ConversationRunTerminalStatusV1::Blocked,
+            None,
+            None,
+            2,
+            &SecretRedactor::empty(),
+        )?,
+        &terminal_outbox(
+            &scope,
+            "auth-run",
+            2,
+            PublicRunEventKind::RunBlocked {
+                reason: "blocked".to_owned(),
+            },
+        )?,
+    )?;
+    // Rebuild both scan and incremental projections from committed bytes, with no live events.
+    let records = store.read_event_records_writer()?;
+    let page = conversation_display_page_from_records(&records, &scope, None, 1, None)?;
+    let snapshot = page
+        .provider_recovery
+        .as_ref()
+        .context("durable attention")?;
+    assert_eq!(snapshot.run_id, "auth-run");
+    assert_eq!(snapshot.run_sequence, 2);
+    assert_eq!(
+        snapshot
+            .recovery
+            .as_ref()
+            .and_then(|view| view.failed_model_ref.as_ref())
+            .map(|model| model.connection_id.as_str()),
+        Some("failed-auth")
+    );
+    let cursor = page.next_cursor.context("older page")?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("new-run", 3)?)?;
+    let committed_before_late_event = store.read_event_records_writer()?.len();
+    assert!(
+        append_display_auth_recovery(&session, "auth-run", 3).is_err(),
+        "a finalized old producer cannot publish recovery after the new run starts"
+    );
+    assert_eq!(
+        store.read_event_records_writer()?.len(),
+        committed_before_late_event,
+        "the rejected late event must not append any durable record"
+    );
+    let records = store.read_event_records_writer()?;
+    let latest = conversation_display_page_from_records(&records, &scope, None, 1, None)?;
+    let latest = latest
+        .provider_recovery
+        .context("explicit latest-run empty snapshot")?;
+    assert_eq!(latest.run_id, "new-run");
+    assert!(latest.recovery.is_none());
+    let older = conversation_display_page_from_records(&records, &scope, Some(&cursor), 1, None)?;
+    assert_eq!(older.provider_recovery, page.provider_recovery);
+    Ok(())
+}
+
+#[test]
+fn conversation_display_success_and_cancel_clear_provider_attention_without_replaying_actions()
+-> Result<()> {
+    for status in [
+        ConversationRunTerminalStatusV1::Succeeded,
+        ConversationRunTerminalStatusV1::Cancelled,
+    ] {
+        let (_temp, store, mut session) = durable_session()?;
+        let scope = session.session_scope_id().to_owned();
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&ConversationRunStartedEntryV1::new("auth-run", 1)?)?;
+        append_display_auth_recovery(&session, "auth-run", 1)?;
+        let final_id = if status == ConversationRunTerminalStatusV1::Succeeded {
+            let message = ModelMessage::assistant_with_kind(
+                Some("done".to_owned()),
+                Vec::new(),
+                AssistantMessageKind::FinalAnswer,
+            );
+            let id = message.id.clone();
+            session.append_assistant_message(message)?;
+            Some(id)
+        } else {
+            None
+        };
+        let event = if status == ConversationRunTerminalStatusV1::Succeeded {
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            }
+        } else {
+            PublicRunEventKind::RunCancelled
+        };
+        lifecycle.append_finalized_with_outbox(
+            &ConversationRunFinalizedEntryV1::new(
+                "auth-run",
+                status,
+                final_id,
+                None,
+                2,
+                &SecretRedactor::empty(),
+            )?,
+            &terminal_outbox(&scope, "auth-run", 2, event)?,
+        )?;
+        let records = store.read_event_records_writer()?;
+        let page = conversation_display_page_from_records(&records, &scope, None, 20, None)?;
+        assert!(
+            page.provider_recovery
+                .context("settled snapshot")?
+                .recovery
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conversation_display_provider_attention_requires_its_exact_hydration_record() -> Result<()> {
+    let (_temp, store, session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new("auth-run", 1)?)?;
+    append_display_auth_recovery(&session, "auth-run", 1)?;
+    let records = store.read_event_records_writer()?;
+    let index = display_index(&records)?;
+    let plan = index.prepare_page(&scope, None, 20, None)?;
+    assert_eq!(
+        plan.positions().len(),
+        1,
+        "only the exact recovery body needs hydration"
+    );
+    assert!(plan.finish(&[], None).is_err());
+    Ok(())
+}
+
+#[test]
+fn conversation_display_typed_recovery_cancellation_does_not_reappear_as_paused_attention()
+-> Result<()> {
+    let (_temp, store, session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("auth-run", 1)?)?;
+    let exhausted = sigil_kernel::ProviderTurnRecoveryExhaustedEntry {
+        schema_version: 1,
+        logical_run_id: "auth-run".to_owned(),
+        last_physical_attempt_id: "attempt-owned".to_owned(),
+        reason_code: "provider_recovery_cancelled".to_owned(),
+        failed_model_ref: None,
+        budget_snapshot: sigil_kernel::RecoveryBudgetProjectionV1::default(),
+        terminal_disposition: sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled,
+    };
+    store.append_event(
+        DurableEventType::ProviderTurnRecoveryExhausted,
+        EventClass::Critical,
+        serde_json::to_value(&exhausted)?,
+    )?;
+    append_display_provider_recovery(
+        &session,
+        "auth-run",
+        1,
+        sigil_kernel::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+    )?;
+    lifecycle.append_finalized_with_outbox(
+        &ConversationRunFinalizedEntryV1::new(
+            "auth-run",
+            ConversationRunTerminalStatusV1::Paused,
+            None,
+            None,
+            2,
+            &SecretRedactor::empty(),
+        )?,
+        &terminal_outbox(
+            &scope,
+            "auth-run",
+            2,
+            PublicRunEventKind::RunPaused {
+                reason: "paused".to_owned(),
+            },
+        )?,
+    )?;
+    let records = store.read_event_records_writer()?;
+    let page = conversation_display_page_from_records(&records, &scope, None, 20, None)?;
+    assert!(
+        page.provider_recovery
+            .context("settled snapshot")?
+            .recovery
+            .is_none()
+    );
+    Ok(())
+}

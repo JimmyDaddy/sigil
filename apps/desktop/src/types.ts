@@ -843,6 +843,7 @@ export interface ConversationDisplayPage {
     sessionStreamSequence: string;
     status: ConversationDisplayStatus;
   };
+  providerRecovery?: ConversationProviderRecovery;
   totalItems: string;
   items: ConversationDisplayItem[];
   nextCursor?: string;
@@ -860,6 +861,13 @@ export interface ConversationDisplayPage {
   planReview?: ConversationPlanReview;
   userInputs?: UserInputRequest[];
   userInput?: UserInputRequest;
+}
+
+/** Canonical latest-run attention at a fixed display cut; carries no retry authority. */
+export interface ConversationProviderRecovery {
+  runId: string;
+  runSequence: string;
+  recovery?: TimelineProviderTurnRecovery;
 }
 
 export type PlanReviewStatus =

@@ -2340,6 +2340,22 @@ fn validate_conversation_display_page(
     {
         return Err(DesktopClientError::InvalidResponse);
     }
+    if let Some(snapshot) = page.provider_recovery.as_ref() {
+        validate_task_control_label(&snapshot.run_id)?;
+        if snapshot.run_id.len() > 512 {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if let Some(recovery) = snapshot.recovery.as_ref()
+            && (!recovery.user_attention_required
+                || !matches!(
+                    recovery.phase,
+                    crate::DesktopProviderTurnRecoveryPhase::Blocked
+                        | crate::DesktopProviderTurnRecoveryPhase::Paused
+                ))
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+    }
     for item in &page.items {
         if let crate::DesktopConversationDisplayContent::Tool {
             truncated,

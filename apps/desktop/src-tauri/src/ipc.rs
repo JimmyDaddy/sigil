@@ -1503,6 +1503,8 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) through_session_stream_sequence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) terminal_frontier: Option<DesktopConversationTerminalFrontier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_recovery: Option<DesktopConversationProviderRecovery>,
     pub(crate) total_items: String,
     pub(crate) items: Vec<DesktopConversationDisplayItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1518,6 +1520,15 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) user_inputs: Vec<DesktopUserInputRequestSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) user_input: Option<DesktopUserInputRequestSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationProviderRecovery {
+    pub(crate) run_id: String,
+    pub(crate) run_sequence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<sigil_desktop::DesktopTimelineProviderTurnRecovery>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -3122,6 +3133,13 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
                     run_id: frontier.run_id,
                     session_stream_sequence: frontier.session_stream_sequence,
                     status: conversation_display_status(frontier.status),
+                }
+            }),
+            provider_recovery: value.provider_recovery.map(|snapshot| {
+                DesktopConversationProviderRecovery {
+                    run_id: snapshot.run_id,
+                    run_sequence: snapshot.run_sequence,
+                    recovery: snapshot.recovery,
                 }
             }),
             total_items: value.total_items,

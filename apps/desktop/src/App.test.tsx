@@ -278,8 +278,42 @@ describe("composition-changed conversation history", () => {
   });
 });
 
+
+it("rebuilds authentication recovery when opening a durable conversation without replay events", async () => {
+  const user = userEvent.setup();
+  const entry: CatalogEntry = {
+    sessionRef: "auth-saved.jsonl", sessionId: "durable-auth-saved", sourceState: "ready",
+    sourceBytes: 512, sourceModifiedAtUnixMs: 1_784_419_200_000,
+    title: "Saved authentication failure", userMessageCount: 1, assistantMessageCount: 0,
+    toolResultCount: 0, pinned: false,
+  };
+  const sessionId = "http-auth-saved";
+  const startRun = vi.fn();
+  render(<App bridge={bridgeWith({
+    bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+    catalog: async () => ({ ...emptyCatalog, entries: [entry] }),
+    openSession: async () => ({ id: sessionId, label: entry.title, runCount: 1 }),
+    display: async () => ({ schemaVersion: 1, requestScope: sessionId,
+      throughSessionStreamSequence: "30", totalItems: "0", items: [], hasMore: false, gapFacts: [],
+      providerRecovery: { runId: "auth-saved-run", runSequence: "6", recovery: {
+        phase: "blocked", activeRetryCount: 0, activeMaxRetries: 2, retryCount: 0, maxTransportRetries: 2,
+        reasonCode: "provider_authentication_required",
+        failedModelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+        availableActions: ["update_connection"], userAttentionRequired: true,
+      } } }),
+    startRun,
+  })} />);
+  await user.click(await screen.findByRole("button", { name: /^Saved authentication failure/ }));
+  expect(await screen.findByText("Connection authentication failed")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Review connection" }));
+  await screen.findByRole("heading", { name: "Settings" });
+  expect(screen.getByText(/The failed request used DeepSeek · deepseek-v4-flash/)).toBeTruthy();
+  expect(startRun).not.toHaveBeenCalled();
+});
+
 it("opens authentication recovery on the failed connection without mutating credentials or losing the draft", async () => {
   const user = userEvent.setup();
+  let durableRecovery: ConversationDisplayPage["providerRecovery"];
   let listener: ((event: TimelineEvent) => void) | undefined;
   const updateProviderConnectionCredential = vi.fn();
   const startRun = vi.fn<DesktopBridge["startRun"]>(async (_workspace, sessionId) => ({
@@ -289,6 +323,9 @@ it("opens authentication recovery on the failed connection without mutating cred
     bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
     subscribeRunEvents: async (next) => { listener = next; return () => undefined; },
     startRun, updateProviderConnectionCredential,
+    display: async () => ({ schemaVersion: 1, requestScope: "http-session-new",
+      throughSessionStreamSequence: durableRecovery === undefined ? "0" : "30",
+      totalItems: "0", items: [], hasMore: false, gapFacts: [], providerRecovery: durableRecovery }),
   })} />);
   await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
   typeEditorText(await readyComposer(), "Read the project");
@@ -300,6 +337,12 @@ it("opens authentication recovery on the failed connection without mutating cred
       retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_authentication_required",
       failedModelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
       availableActions: ["update_connection", "cancel"], userAttentionRequired: true } }));
+  durableRecovery = { runId: "auth-recovery-run", runSequence: "5", recovery: {
+    phase: "blocked", activeRetryCount: 0, activeMaxRetries: 2, retryCount: 0, maxTransportRetries: 2,
+    reasonCode: "provider_authentication_required",
+    failedModelRef: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
+    availableActions: ["update_connection", "cancel"], userAttentionRequired: true,
+  } };
   expect(await screen.findByText("Connection authentication failed")).toBeTruthy();
   typeEditorText(await readyComposer(), "Keep this unsent draft  ");
   await user.click(screen.getByRole("button", { name: "Review connection" }));
@@ -312,6 +355,9 @@ it("opens authentication recovery on the failed connection without mutating cred
   expect(document.activeElement).toBe(document.querySelector('[data-settings-focus-key="credential:deepseek-default"] button'));
   await user.click(screen.getByRole("button", { name: "Back to conversations" }));
   expect(editorText(await readyComposer())).toBe("Keep this unsent draft  ");
+  expect(await screen.findByRole("button", { name: "Review connection" })).toBeTruthy();
+  expect(screen.getByText("Connection authentication failed")).toBeTruthy();
+  expect(startRun).toHaveBeenCalledOnce();
   await user.click(screen.getByRole("button", { name: "Open settings" }));
   expect(screen.queryByText(/The failed request used/)).toBeNull();
 });

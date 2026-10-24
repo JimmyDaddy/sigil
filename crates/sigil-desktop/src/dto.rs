@@ -1025,6 +1025,8 @@ pub struct DesktopConversationDisplayPage {
     pub through_session_stream_sequence: String,
     #[serde(default)]
     pub terminal_frontier: Option<DesktopConversationTerminalFrontier>,
+    #[serde(default)]
+    pub provider_recovery: Option<DesktopConversationProviderRecovery>,
     #[serde(deserialize_with = "deserialize_decimal_u64")]
     pub total_items: String,
     pub items: Vec<DesktopConversationDisplayItem>,
@@ -1043,6 +1045,31 @@ pub struct DesktopConversationDisplayPage {
     pub user_inputs: Vec<DesktopUserInputRequest>,
     #[serde(default)]
     pub user_input: Option<DesktopUserInputRequest>,
+}
+
+/// Safe latest-run recovery snapshot, carrying no execution or retry authority.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopConversationProviderRecovery {
+    pub run_id: String,
+    #[serde(deserialize_with = "deserialize_decimal_u64")]
+    pub run_sequence: String,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_provider_recovery_view")]
+    pub recovery: Option<crate::DesktopTimelineProviderTurnRecovery>,
+}
+
+fn deserialize_provider_recovery_view<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::DesktopTimelineProviderTurnRecovery>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<crate::DesktopPublicProviderTurnRecoveryView>::deserialize(deserializer)?
+        .as_ref()
+        .map(crate::DesktopTimelineProviderTurnRecovery::try_from)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 /// Bounded query for one canonical conversation display page.

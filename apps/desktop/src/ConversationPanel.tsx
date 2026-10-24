@@ -235,6 +235,8 @@ export function ConversationPanel({
     session.id,
     createLiveEventState,
   );
+  const liveEventStateRef = useRef(liveEventState);
+  liveEventStateRef.current = liveEventState;
   const [streamStatus, setStreamStatus] = useState<RunStreamStatus>();
   const [submitting, setSubmitting] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
@@ -759,6 +761,7 @@ export function ConversationPanel({
       try {
         for (let attempt = 0; attempt <= CANONICAL_DISPLAY_RETRY_DELAYS_MS.length; attempt += 1) {
           try {
+            const providerRecoveryEpoch = liveEventStateRef.current.providerRecoveryEpoch;
             const page = await bridge.display(workspaceId, session.id, { limit: 50 }, query.signal);
             if (disposed) return;
             const canonicalPage = toContinuityPage(page);
@@ -772,6 +775,9 @@ export function ConversationPanel({
               sessionId: session.id,
               anchor: canonicalPage.liveProvisionalAnchor,
             });
+            dispatchLiveEvent({ type: "provider_recovery_snapshot_received", sessionId: session.id,
+              workspaceId, throughSequence: canonicalPage.throughSessionStreamSequence,
+              snapshot: canonicalPage.providerRecovery, observedEpoch: providerRecoveryEpoch });
             setDurableTaskControl(canonicalPage.taskControl);
             setDurablePlanReview(canonicalPage.planReview);
             reconcileDurableUserInputs(canonicalPage);
@@ -1401,6 +1407,7 @@ export function ConversationPanel({
         if (retryDelay > 0) await waitForCanonicalProjection(retryDelay);
           if (cancelled) return;
           try {
+            const providerRecoveryEpoch = liveEventStateRef.current.providerRecoveryEpoch;
             const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }, query.signal));
             if (cancelled) return;
             setDisplayError(false);
@@ -1410,6 +1417,9 @@ export function ConversationPanel({
             sessionId: session.id,
             anchor: page.liveProvisionalAnchor,
           });
+          dispatchLiveEvent({ type: "provider_recovery_snapshot_received", sessionId: session.id,
+            workspaceId, throughSequence: page.throughSessionStreamSequence,
+            snapshot: page.providerRecovery, observedEpoch: providerRecoveryEpoch });
           setDurableTaskControl(page.taskControl);
           setDurablePlanReview(page.planReview);
           reconcileDurableUserInputs(page);

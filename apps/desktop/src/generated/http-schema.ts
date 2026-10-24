@@ -3711,6 +3711,7 @@ export interface components {
             live_provisional_anchor?: components["schemas"]["ConversationLiveProvisionalAnchor"] | null;
             next_cursor?: string | null;
             plan_review?: components["schemas"]["PlanReview"] | null;
+            provider_recovery?: components["schemas"]["ConversationProviderRecovery"] | null;
             request_scope: string;
             /** @constant */
             schema_version: 1;
@@ -3756,6 +3757,11 @@ export interface components {
         /** @description Process-local observation only; never a durable display order. */
         ConversationLiveProvisionalAnchor: {
             durable_frontier: components["schemas"]["DecimalSequence"];
+            run_id: string;
+            run_sequence: components["schemas"]["DecimalSequence"];
+        };
+        ConversationProviderRecovery: {
+            recovery?: components["schemas"]["PublicProviderTurnRecoveryView"] | null;
             run_id: string;
             run_sequence: components["schemas"]["DecimalSequence"];
         };

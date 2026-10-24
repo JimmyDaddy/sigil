@@ -1471,3 +1471,76 @@ function approvalReceipt(
     ...overrides,
   };
 }
+
+describe("canonical provider recovery hydration", () => {
+  const recovery = {
+    phase: "blocked" as const, activeRetryCount: 0, activeMaxRetries: 2,
+    retryCount: 0, maxTransportRetries: 2, reasonCode: "provider_authentication_required",
+    failedModelRef: { connectionId: "failed-auth", modelId: "manual-model" },
+    availableActions: ["update_connection" as const], userAttentionRequired: true,
+  };
+  const snapshot = (state: ReturnType<typeof createLiveEventState>, overrides: Partial<Extract<Parameters<typeof liveEventReducer>[1], { type: "provider_recovery_snapshot_received" }>> = {}) => liveEventReducer(state, {
+    type: "provider_recovery_snapshot_received", sessionId: SESSION_ID, workspaceId: "workspace-1",
+    throughSequence: "100", snapshot: { runId: "run-1", runSequence: "20", recovery },
+    observedEpoch: state.providerRecoveryEpoch, ...overrides,
+  });
+
+  it("restores actionable recovery without live events, and rejects an older fixed page", () => {
+    let state = snapshot(createLiveEventState(SESSION_ID));
+    expect(selectProviderTurnRecovery(state)?.providerTurnRecovery).toEqual(recovery);
+    state = snapshot(state, { throughSequence: "110", snapshot: { runId: "run-2", runSequence: "1" } });
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = snapshot(state);
+    state = reduceLiveTimelineEvent(state, event({ kind: "provider_turn_recovery", replayable: true,
+      runSequence: "21", providerTurnRecovery: recovery }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+  });
+
+  it("hydrates a snapshot covering the first same-run terminal when its recovery event was not replayed", () => {
+    let state = createLiveEventState(SESSION_ID);
+    const observedEpoch = state.providerRecoveryEpoch;
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_blocked", replayable: true,
+      runSequence: "20", status: "blocked" }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = snapshot(state, { observedEpoch });
+    expect(selectProviderTurnRecovery(state)?.providerTurnRecovery).toEqual(recovery);
+    let newer = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({ kind: "run_blocked",
+      replayable: true, runSequence: "21", status: "blocked" }));
+    newer = snapshot(newer, { observedEpoch });
+    expect(selectProviderTurnRecovery(newer)).toBeUndefined();
+  });
+
+  it("keeps a newer same-run live recovery and ignores an earlier empty snapshot", () => {
+    let state = createLiveEventState(SESSION_ID);
+    const observedEpoch = state.providerRecoveryEpoch;
+    state = reduceLiveTimelineEvent(state, event({ kind: "provider_turn_recovery", replayable: true,
+      runSequence: "21", providerTurnRecovery: recovery }));
+    state = snapshot(state, { observedEpoch, snapshot: { runId: "run-1", runSequence: "20" } });
+    expect(selectProviderTurnRecovery(state)?.runSequence).toBe("21");
+    state = snapshot(state, { observedEpoch, snapshot: undefined });
+    expect(selectProviderTurnRecovery(state)?.runSequence).toBe("21");
+  });
+
+  it("does not resurrect an old-run snapshot that returns after a new start or owner", () => {
+    for (const owner of [false, true]) {
+      let state = createLiveEventState(SESSION_ID);
+      const observedEpoch = state.providerRecoveryEpoch;
+      state = owner
+        ? liveEventReducer(state, { type: "run_owner_received", sessionId: SESSION_ID, runId: "run-2" })
+        : reduceLiveTimelineEvent(state, event({ kind: "run_started", replayable: true, runId: "run-2", runSequence: "1" }));
+      state = snapshot(state, { observedEpoch });
+      expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    }
+  });
+
+  it.each(["run_finished", "run_cancelled"] as const)("clears old attention on %s and rejects an older recovery replay", (kind) => {
+    let state = snapshot(createLiveEventState(SESSION_ID));
+    state = reduceLiveTimelineEvent(state, event({ kind, replayable: true, runSequence: "22" }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = reduceLiveTimelineEvent(state, event({ kind: "provider_turn_recovery", replayable: true,
+      runSequence: "21", providerTurnRecovery: recovery }));
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+    state = snapshot(state, { throughSequence: "120", snapshot: { runId: "run-1", runSequence: "22" } });
+    expect(selectProviderTurnRecovery(state)).toBeUndefined();
+  });
+});

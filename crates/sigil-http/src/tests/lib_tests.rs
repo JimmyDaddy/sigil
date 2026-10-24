@@ -2667,6 +2667,30 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
         request_scope: session_id.to_owned(),
         through_session_stream_sequence: "9007199254740993".to_owned(),
         terminal_frontier: None,
+        provider_recovery: Some(crate::HttpConversationProviderRecovery {
+            run_id: "failed-run".to_owned(),
+            run_sequence: "9007199254740992".to_owned(),
+            recovery: Some(sigil_kernel::PublicProviderTurnRecoveryViewV1 {
+                phase: sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Blocked,
+                active_retry_count: 0,
+                active_max_retries: 2,
+                retry_count: 0,
+                max_transport_retries: 2,
+                next_retry_unix_ms: None,
+                reason_code: Some("provider_authentication_required".to_owned()),
+                failed_model_ref: Some(
+                    sigil_kernel::ModelRef::new(
+                        sigil_kernel::ConnectionId::new("failed-auth").expect("connection"),
+                        "manual-model",
+                    )
+                    .expect("model"),
+                ),
+                available_actions: vec![
+                    sigil_kernel::PublicProviderTurnRecoveryActionV1::UpdateConnection,
+                ],
+                user_attention_required: true,
+            }),
+        }),
         total_items: "1".to_owned(),
         items: vec![HttpConversationDisplayItem {
             schema_version: 1,
@@ -2713,6 +2737,20 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
     assert_eq!(status, 200);
     assert_eq!(body["request_scope"], session_id);
     assert_eq!(body["through_session_stream_sequence"], "9007199254740993");
+    assert_eq!(body["provider_recovery"]["run_id"], "failed-run");
+    assert_eq!(
+        body["provider_recovery"]["run_sequence"],
+        "9007199254740992"
+    );
+    assert_eq!(
+        body["provider_recovery"]["recovery"]["failed_model_ref"]["connection_id"],
+        "failed-auth"
+    );
+    assert!(
+        body["provider_recovery"]["recovery"]
+            .get("last_physical_attempt_id")
+            .is_none()
+    );
     assert_eq!(
         body["items"][0]["display_order"]["session_stream_sequence"],
         "9007199254740993"
@@ -2844,6 +2882,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
         request_scope: session_id.to_owned(),
         through_session_stream_sequence: "5".to_owned(),
         terminal_frontier: None,
+        provider_recovery: None,
         total_items: "0".to_owned(),
         items: Vec::new(),
         next_cursor: None,

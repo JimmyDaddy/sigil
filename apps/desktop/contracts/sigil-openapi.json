@@ -3180,6 +3180,16 @@
               }
             ]
           },
+          "provider_recovery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConversationProviderRecovery"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "request_scope": {
             "maxLength": 512,
             "type": "string"
@@ -3392,6 +3402,33 @@
         },
         "required": [
           "durable_frontier",
+          "run_id",
+          "run_sequence"
+        ],
+        "type": "object"
+      },
+      "ConversationProviderRecovery": {
+        "properties": {
+          "recovery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PublicProviderTurnRecoveryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_sequence": {
+            "$ref": "#/components/schemas/DecimalSequence"
+          }
+        },
+        "required": [
           "run_id",
           "run_sequence"
         ],

@@ -398,3 +398,31 @@ fn provider_connection_credential_update_projects_only_exact_identity_and_key() 
         .is_err()
     );
 }
+
+#[test]
+fn conversation_display_recovery_ipc_is_camel_case_and_omits_private_diagnostics() {
+    let native: sigil_desktop::DesktopConversationDisplayPage = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "request_scope": "session-auth", "through_session_stream_sequence": "30",
+        "total_items": "0", "items": [], "has_more": false,
+        "provider_recovery": { "run_id": "auth-run", "run_sequence": "9007199254740993",
+            "recovery": { "phase": "blocked", "retry_count": 0, "max_transport_retries": 2,
+                "reason_code": "provider_authentication_required", "user_attention_required": true,
+                "available_actions": ["update_connection"],
+                "failed_model_ref": { "connection_id": "failed-auth", "model_id": "manual-model" },
+                "api_key": "private-fixture-secret", "endpoint": "https://private.example" }
+        }
+    })).expect("narrow display recovery");
+    let summary = serde_json::to_value(DesktopConversationDisplayPage::from(native))
+        .expect("renderer summary");
+    assert_eq!(
+        summary["providerRecovery"]["runSequence"],
+        "9007199254740993"
+    );
+    assert_eq!(
+        summary["providerRecovery"]["recovery"]["failedModelRef"]["connectionId"],
+        "failed-auth"
+    );
+    let text = summary.to_string();
+    assert!(!text.contains("private-fixture-secret") && !text.contains("private.example"));
+    assert!(summary.get("provider_recovery").is_none());
+}

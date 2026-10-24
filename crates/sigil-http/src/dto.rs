@@ -1301,6 +1301,8 @@ pub struct HttpConversationDisplayPage {
     pub through_session_stream_sequence: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_frontier: Option<HttpConversationTerminalFrontier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_recovery: Option<HttpConversationProviderRecovery>,
     pub total_items: String,
     pub items: Vec<HttpConversationDisplayItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1318,6 +1320,16 @@ pub struct HttpConversationDisplayPage {
     pub user_inputs: Vec<HttpUserInputRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input: Option<HttpUserInputRequest>,
+}
+
+/// Display-only recovery snapshot for the latest durable foreground run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpConversationProviderRecovery {
+    pub run_id: String,
+    pub run_sequence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<sigil_kernel::PublicProviderTurnRecoveryViewV1>,
 }
 
 /// Bounded public plan review surface with no prompt, transcript, path, ref, or authority.
@@ -1414,6 +1426,13 @@ impl HttpConversationDisplayPage {
             request_scope: request_scope.to_owned(),
             through_session_stream_sequence: page.through_session_stream_sequence.to_string(),
             terminal_frontier: page.terminal_frontier.map(Into::into),
+            provider_recovery: page.provider_recovery.map(|snapshot| {
+                HttpConversationProviderRecovery {
+                    run_id: snapshot.run_id,
+                    run_sequence: snapshot.run_sequence.to_string(),
+                    recovery: snapshot.recovery,
+                }
+            }),
             total_items: page.total_items.to_string(),
             items: page.items.into_iter().map(Into::into).collect(),
             next_cursor: page.next_cursor,

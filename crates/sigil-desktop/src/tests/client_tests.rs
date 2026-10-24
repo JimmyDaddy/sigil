@@ -2991,3 +2991,47 @@ async fn plugin_catalog_http_preserves_cleanup_independently_of_trust() {
         );
     }
 }
+
+#[test]
+fn conversation_display_recovery_snapshot_is_narrow_validated_and_precision_safe() {
+    let fixture = serde_json::json!({
+        "schema_version": 1, "request_scope": "http-session-1",
+        "through_session_stream_sequence": "9007199254740995", "total_items": "0",
+        "items": [], "has_more": false,
+        "provider_recovery": {
+            "run_id": "auth-run", "run_sequence": "9007199254740993",
+            "recovery": {
+                "phase": "blocked", "active_retry_count": 0, "active_max_retries": 2,
+                "retry_count": 0, "max_transport_retries": 2,
+                "reason_code": "provider_authentication_required",
+                "failed_model_ref": { "connection_id": "failed-auth", "model_id": "manual-model" },
+                "available_actions": ["update_connection", "cancel"], "user_attention_required": true,
+                "endpoint": "https://private.example", "api_key": "private-fixture-secret"
+            }
+        }
+    });
+    let page: crate::DesktopConversationDisplayPage =
+        serde_json::from_value(fixture.clone()).expect("recovery page");
+    validate_conversation_display_page(&page, "http-session-1").expect("safe recovery");
+    let snapshot = page.provider_recovery.expect("recovery snapshot");
+    assert_eq!(snapshot.run_sequence, "9007199254740993");
+    let safe = serde_json::to_string(&snapshot.recovery).expect("safe renderer view");
+    assert!(safe.contains("failed-auth"));
+    assert!(!safe.contains("private.example") && !safe.contains("private-fixture-secret"));
+    for (field, bad) in [
+        ("phase", serde_json::json!("waiting")),
+        ("user_attention_required", serde_json::json!(false)),
+    ] {
+        let mut invalid = fixture.clone();
+        invalid["provider_recovery"]["recovery"][field] = bad;
+        let invalid = serde_json::from_value(invalid).expect("typed but non-actionable state");
+        assert!(validate_conversation_display_page(&invalid, "http-session-1").is_err());
+    }
+    let mut malformed = fixture.clone();
+    malformed["provider_recovery"]["run_sequence"] = serde_json::json!(9007199254740993_u64);
+    assert!(serde_json::from_value::<crate::DesktopConversationDisplayPage>(malformed).is_err());
+    let mut unsafe_label = fixture;
+    unsafe_label["provider_recovery"]["recovery"]["reason_code"] =
+        serde_json::json!("Bearer private-secret\n");
+    assert!(serde_json::from_value::<crate::DesktopConversationDisplayPage>(unsafe_label).is_err());
+}

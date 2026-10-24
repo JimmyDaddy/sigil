@@ -2475,6 +2475,7 @@ pub fn http_openapi_document() -> Value {
                         "request_scope": { "type": "string", "maxLength": 512 },
                         "through_session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
                         "terminal_frontier": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTerminalFrontier" }, { "type": "null" }] },
+                        "provider_recovery": { "oneOf": [{ "$ref": "#/components/schemas/ConversationProviderRecovery" }, { "type": "null" }] },
                         "total_items": { "$ref": "#/components/schemas/DecimalSequence" },
                         "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ConversationDisplayItem" } },
                         "next_cursor": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$" },
@@ -2485,6 +2486,15 @@ pub fn http_openapi_document() -> Value {
                         "plan_review": { "oneOf": [{ "$ref": "#/components/schemas/PlanReview" }, { "type": "null" }] },
                         "user_inputs": { "type": "array", "maxItems": 64, "items": { "$ref": "#/components/schemas/UserInputRequest" } },
                         "user_input": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] }
+                    }
+                },
+                "ConversationProviderRecovery": {
+                    "type": "object",
+                    "required": ["run_id", "run_sequence"],
+                    "properties": {
+                        "run_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "run_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
+                        "recovery": { "oneOf": [{ "$ref": "#/components/schemas/PublicProviderTurnRecoveryView" }, { "type": "null" }] }
                     }
                 },
                 "PlanReview": {

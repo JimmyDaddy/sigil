@@ -53,6 +53,8 @@ pub struct ConversationDisplayIndex {
     task: TaskMetadataProjection,
     plan: PlanMetadataProjection,
     inputs: InputMetadataProjection,
+    recoveries: Vec<(u64, ProviderRecoveryProjection)>,
+    recovery: ProviderRecoveryProjection,
     row_cache: RowCache,
     surface_cache: SurfaceCache,
     outbox: sigil_kernel::PublicEventOutboxValidatorV1,
@@ -78,6 +80,8 @@ pub struct ConversationDisplayPagePlan {
     task: Option<TaskSnapshot>,
     plan: Option<PlanSnapshot>,
     inputs: Vec<InputSnapshot>,
+    recovery: ProviderRecoveryProjection,
+    recovery_source: Option<ConversationDisplayRecordPosition>,
     workspace: Option<String>,
     cached_rows: BTreeMap<ConversationDisplayOrderV1, Arc<ConversationDisplayItemV1>>,
     cached_surfaces: BTreeMap<u64, Arc<SurfaceBody>>,
@@ -139,6 +143,12 @@ impl ConversationDisplayIndex {
             self.plan.apply(&entry, &position)?;
             self.inputs.apply(&entry, &position, input)?;
         }
+        self.recovery.apply_record(record)?;
+        push_version(
+            &mut self.recoveries,
+            position.sequence,
+            self.recovery.clone(),
+        );
         let mut projected = self.row_state.apply(record, scope)?;
         projected.sort_by_key(|item| item.display_order);
         for item in projected {
@@ -236,6 +246,18 @@ impl ConversationDisplayIndex {
         let task = self.task.at(through_sequence);
         let plan = self.plan.at(through_sequence);
         let inputs = self.inputs.at(through_sequence);
+        let recovery = version_at(&self.recoveries, through_sequence)
+            .cloned()
+            .unwrap_or_default();
+        let recovery_source = recovery
+            .source_sequence()
+            .map(|sequence| {
+                self.envelopes
+                    .get((sequence - 1) as usize)
+                    .map(|envelope| envelope.position.clone())
+                    .context("conversation recovery source is absent from the index")
+            })
+            .transpose()?;
         let mut positions = BTreeMap::new();
         let mut cached_surfaces = BTreeMap::new();
         for position in task
@@ -243,6 +265,7 @@ impl ConversationDisplayIndex {
             .flat_map(TaskSnapshot::positions)
             .chain(plan.iter().flat_map(PlanSnapshot::positions))
             .chain(inputs.iter().map(InputSnapshot::position))
+            .chain(recovery_source.iter())
         {
             if let Some(surface) = self.surface_cache.get(position.sequence) {
                 cached_surfaces.insert(position.sequence, surface);
@@ -332,6 +355,8 @@ impl ConversationDisplayIndex {
             task,
             plan,
             inputs,
+            recovery,
+            recovery_source,
             workspace: workspace.map(str::to_owned),
             cached_rows,
             cached_surfaces,
@@ -407,6 +432,14 @@ impl ConversationDisplayPagePlan {
             session_scope_id: self.scope,
             through_session_stream_sequence: self.through_sequence,
             terminal_frontier: self.terminal,
+            provider_recovery: self.recovery.hydrate(|sequence| {
+                let position = self
+                    .recovery_source
+                    .as_ref()
+                    .filter(|position| position.sequence == sequence)
+                    .context("conversation recovery source is missing from the page")?;
+                records.record(position)
+            })?,
             total_items: self.total_items,
             items,
             next_cursor: self.next_cursor,

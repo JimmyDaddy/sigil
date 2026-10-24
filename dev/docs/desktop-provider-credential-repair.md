@@ -6,6 +6,14 @@
 
 工作区重载后，renderer 按原 durable session identity 重新附着会话，留在当前设置分类并保留会话草稿。重新附着不能走“已经选中此会话”的导航快捷路径；可见列表被筛选时，使用独立的有界目录查找，不把缺少搜索结果视为会话已删除。晚到的重载结果不得覆盖用户随后选择的会话或工作区。重新附着失败保留原恢复身份，并在返回会话后提供既有重试入口。
 
+## 认证失败后的设置往返
+
+认证失败卡片的连接身份与可执行导航来自 durable typed provider-recovery 记录；会话最新 display 页在同一固定提交 cut 上投影最新前台 run 的恢复状态。返回会话或重新打开已保存会话时，不依赖原 SSE 仍在内存中，也能重新提供“检查连接”。该展示摘要不含 endpoint、密钥、physical attempt、request hash 或重试授权；进入设置、取消表单和返回会话都不会自动重试请求。
+
+只有最新 run 仍需处理的 blocked/paused 状态参与恢复。新的 run、成功、取消以及已进入用户提问的运行会清除旧卡；取消的 provider recovery 使用其 typed terminal disposition 识别。自动等待/重连进度不会在冷打开时复活。历史分页仍固定在原 cut，但不参与当前恢复卡片的 hydration；晚返回的最新页也不能覆盖请求期间收到的更新 run owner、start 或同 run 更晚的实时状态。
+
+索引只保留 run/watermark 与 exact source location 元数据，展示内容按现有 checksum、固定 cut、4 MiB source hydration 和 1 MiB response 预算读取。HTTP 以十进制字符串传递序列；native 在 allowlisted IPC 前校验并投影同一窄恢复 DTO。没有新增 command、capability 或 provider 执行权限。
+
 ## 窄接口与不变量
 
 - Renderer 只提交 `{ connectionId, apiKey }`，经 allowlisted `desktop_update_provider_connection_credential` 交给 native shell；不能提交 endpoint、provider、protocol、默认模型或完整配置。

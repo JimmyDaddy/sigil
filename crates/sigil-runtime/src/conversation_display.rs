@@ -2,11 +2,13 @@
 
 mod command;
 mod index;
+mod recovery;
 use command::{command_input, command_result_projection};
 pub use index::{
     ConversationDisplayHashMetrics, ConversationDisplayIndex, ConversationDisplayPagePlan,
     ConversationDisplayRecordPosition,
 };
+use recovery::ProviderRecoveryProjection;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -28,6 +30,18 @@ use sigil_kernel::{
     conversation_run_lifecycle_record_from_stream, safe_persistence_text,
 };
 use thiserror::Error as ThisError;
+
+/// Latest foreground run's recovery presentation at one committed display cut.
+/// This summary carries no retry authority, request material, or provider diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConversationProviderRecoveryV1 {
+    pub run_id: String,
+    /// Public-event watermark for this run, not a command or replay capability.
+    pub run_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<sigil_kernel::PublicProviderTurnRecoveryViewV1>,
+}
 
 /// Schema version for the canonical conversation display projection.
 pub const CONVERSATION_DISPLAY_SCHEMA_VERSION: u16 = 1;
@@ -413,6 +427,8 @@ pub struct ConversationDisplayPageV1 {
     pub through_session_stream_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_frontier: Option<ConversationTerminalFrontierV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_recovery: Option<ConversationProviderRecoveryV1>,
     pub total_items: u64,
     pub items: Vec<ConversationDisplayItemV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1159,6 +1175,7 @@ pub fn conversation_display_page_from_records(
     let mut approval_items = HashMap::<String, String>::new();
     let mut run_skills = HashMap::<String, ConversationDisplaySkillReferenceV1>::new();
     let mut terminal_frontier = None;
+    let mut provider_recovery = ProviderRecoveryProjection::default();
     let mut task_control = ConversationTaskControlProjection::default();
     let mut plan_review = PlanReviewDisplayProjection::default();
     let mut user_input = UserInputProjectionV1::default();
@@ -1171,6 +1188,7 @@ pub fn conversation_display_page_from_records(
         .iter()
         .take_while(|record| record.stream_sequence() <= frontier.sequence)
     {
+        provider_recovery.apply_record(record)?;
         plan_review.apply_record(record)?;
         if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()?
             && let Some(entry) = UserInputLifecycleEntryV1::from_control(&control)
@@ -1277,6 +1295,12 @@ pub fn conversation_display_page_from_records(
         session_scope_id: expected_scope.to_owned(),
         through_session_stream_sequence: frontier.sequence,
         terminal_frontier,
+        provider_recovery: provider_recovery.hydrate(|sequence| {
+            records
+                .iter()
+                .find(|record| record.stream_sequence() == sequence)
+                .context("conversation recovery source is missing")
+        })?,
         total_items,
         items,
         next_cursor,
