@@ -125,6 +125,8 @@ answering it. Pending questions have no wall-clock timeout and are restored by `
 `Shift-Tab` returns to them from the composer. Sigil resumes the exact suspended continuation after
 an accepted answer instead of replaying the provider turn that asked the question.
 
+TUI question forms temporarily use the composer space while keeping its draft. `Tab` / `Shift-Tab` moves between questions; Space selects or toggles an option. Typing or pasting focuses the Other answer, where Space inserts text and keeps existing choices. Multi-select questions also accept only an Other answer without any suggested option; `Up` / `Down` returns to options. Questions, actions, and relevant hints remain reachable at 80×12. `Esc` keeps the answers and returns to the composer; `Shift-Tab` reopens them.
+
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
 The release default is `auto / explicit_request_only`. Automatic Task routing uses the configured provider's tool capability and the available executor; it does not require a release manifest. Release qualification can enable proactive read-only agents by default for a matching new installation. Existing configurations stay unchanged. Set `routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"` to disable automatic handoff and proactive spawning.

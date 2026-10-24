@@ -62,6 +62,7 @@ fn revision_form() -> PendingUserInputForm {
         validation_error: None,
         plan_revision_editor: Default::default(),
         scroll: 0,
+        follow_focused_field: false,
         scroll_extent: Default::default(),
         question_scroll_offsets: Default::default(),
     }
@@ -220,13 +221,14 @@ fn ordinary_form() -> PendingUserInputForm {
 }
 
 #[test]
-fn ordinary_form_localizes_only_a_typed_host_question_group() -> anyhow::Result<()> {
+fn ordinary_form_omits_only_a_typed_host_question_group_preface() -> anyhow::Result<()> {
     let mut form = ordinary_form();
     form.view.prompt = "Please answer the following questions before continuing.".to_owned();
     form.view.prompt_origin = Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup);
     let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
     terminal.draw(|frame| render_user_input_form(frame, frame.area(), &form, &Theme::default()))?;
-    assert!(rendered_content(&terminal).contains("请回答以下问题后继续"));
+    assert!(rendered_content(&terminal).contains("你希望保留哪些内容？"));
+    assert!(!rendered_content(&terminal).contains("请回答以下问题后继续"));
     assert!(!rendered_content(&terminal).contains("Please answer the following questions"));
     form.view.prompt_origin = None;
     terminal.draw(|frame| render_user_input_form(frame, frame.area(), &form, &Theme::default()))?;

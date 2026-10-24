@@ -111,6 +111,8 @@ Submit、Decline、Cancel run 是三个不同动作，`Esc` 只关闭表单，�
 超时，`sigil resume` 会恢复它，composer 中按 `Shift-Tab` 可以重新打开。回答被接受后，Sigil 继续精确
 的 suspended continuation，不会重放提出问题的 provider turn。
 
+TUI 的问题表单会临时收起普通输入框，保留原草稿。用 `Tab` / `Shift-Tab` 切题，空格确认或切换选项；直接输入或粘贴会进入“其他”回答，此时空格输入普通空格，不会更改选项。多选题也可以只填写“其他”，无需勾选推荐项。`↑` / `↓` 可以返回选项。80×12 的终端也会保留题目、提交动作和当前所需的提示；`Esc` 暂存回答并返回，`Shift-Tab` 重新打开。
+
 任务界面会显示步骤、当前状态和子智能体的工作；需要你检查时，还会显示验证卡片。按 `Alt-V` 可以直接聚焦。恢复会话只会还原已保存的任务状态，不会自动继续执行。
 
 release 默认值是 `auto / explicit_request_only`。自动 Task 路由依据当前 provider 的工具能力与实际执行器，不要求发布清单。发布评测可为匹配的新安装默认开启主动只读子智能体，已有配置保持不变。设置 `routing_policy = "manual"` 与 `multi_agent_mode = "explicit_request_only"` 可关闭自动交接和主动子智能体。

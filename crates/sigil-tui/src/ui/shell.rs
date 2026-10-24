@@ -76,9 +76,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         frame.area(),
     );
 
-    let user_input_takeover = app
-        .pending_user_input()
-        .is_some_and(|form| form.open && frame.area().height <= 11);
+    let user_input_takeover = app.pending_user_input().is_some_and(|form| form.open);
     let plan_takeover = app
         .pending_plan_approval()
         .is_some_and(|pending| pending.workbench_open && frame.area().height <= 11)

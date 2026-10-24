@@ -479,6 +479,8 @@ fn info_details_attention_open_form_blocks_shortcuts_and_committed_mouse_entry()
     app.set_terminal_size(124, 40);
     app.runtime.is_busy = true;
     app.composer.input = "unsent  composer".to_owned();
+    let (_, previous_presentation) = present_attention(&app)?;
+    assert!(previous_presentation.layout().info_rail_details.is_some());
     let request = pending_text_user_input_request()?;
     app.set_pending_user_input(request.clone());
     for key in read_only_keys() {
@@ -491,11 +493,12 @@ fn info_details_attention_open_form_blocks_shortcuts_and_committed_mouse_entry()
             request.identity
         );
     }
-    let (surface, presentation) = present_attention(&app)?;
+    let (surface, _) = present_attention(&app)?;
     assert_no_read_only_overlay(&surface);
     assert!(surface.user_input_open);
+    assert!(surface.layout.info_rail_details.is_none());
     assert!(matches!(
-        click_committed_details(&mut app, &presentation)?,
+        click_committed_details(&mut app, &previous_presentation)?,
         AppMouseOutcome::Redraw
     ));
     assert!(!app.has_modal());

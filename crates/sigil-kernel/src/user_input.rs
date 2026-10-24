@@ -2202,7 +2202,7 @@ fn validate_answer_value(
             bail!("multi-select user input answer has the wrong kind");
         };
         let selected = option_ids.iter().collect::<BTreeSet<_>>();
-        if selected.is_empty()
+        if (selected.is_empty() && other.as_ref().is_none_or(|text| text.trim().is_empty()))
             || selected.len() != option_ids.len()
             || selected.len() > question.options.len()
             || selected

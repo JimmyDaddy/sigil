@@ -28,7 +28,7 @@ pub(super) fn render_user_input_form(
         render_plan_revision_form(frame, area, form, theme);
         return;
     }
-    let action_lines = regular_action_lines(form, theme, area.width as usize);
+    let action_lines = regular_action_lines(form, theme, area.width as usize, area.height <= 12);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -282,21 +282,19 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let mut lines = wrap_terminal_lines(
-        vec![
-            Line::raw(
-                if form.view.prompt_origin
-                    == Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup)
-                {
-                    "请回答以下问题后继续".to_owned()
-                } else {
-                    form.view.prompt.clone()
-                },
-            ),
-            Line::raw(String::new()),
-        ],
-        inner.width as usize,
-    );
+    let mut lines = if form.view.prompt_origin
+        == Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup)
+    {
+        Vec::new()
+    } else {
+        wrap_terminal_lines(
+            vec![
+                Line::raw(form.view.prompt.clone()),
+                Line::raw(String::new()),
+            ],
+            inner.width as usize,
+        )
+    };
     let mut question_offsets = Vec::with_capacity(form.view.questions.len());
     if form.recovery_command.is_some() {
         lines.push(Line::from(Span::styled(
@@ -316,7 +314,7 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
         }
     } else {
         for (index, (question, draft)) in form.view.questions.iter().zip(&form.drafts).enumerate() {
-            question_offsets.push(lines.len());
+            let question_start = lines.len();
             let focused = !form.focus_actions && index == form.focused_question;
             let mut question_lines = vec![Line::from(vec![
                 Span::styled(
@@ -335,16 +333,53 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
                     styles::muted(&theme.palette),
                 )));
             }
-            question_lines.extend(answer_lines(question, draft, focused, theme));
-            question_lines.push(Line::raw(String::new()));
             lines.extend(wrap_terminal_lines(question_lines, inner.width as usize));
+            let mut focused_row = question_start;
+            let focused_answer = match draft {
+                UserInputDraftValue::SingleSelect { selected, .. } => *selected,
+                UserInputDraftValue::MultiSelect { cursor, .. } => Some(*cursor),
+                UserInputDraftValue::Text(_) => Some(0),
+            };
+            for (answer_index, answer) in answer_lines(question, draft, focused, theme)
+                .into_iter()
+                .enumerate()
+            {
+                let answer_rows = wrap_terminal_lines(vec![answer], inner.width as usize);
+                if focused_answer == Some(answer_index) {
+                    focused_row = lines
+                        .len()
+                        .saturating_add(answer_rows.len().saturating_sub(1));
+                }
+                lines.extend(answer_rows);
+            }
+            question_offsets.push(
+                question_start.max(
+                    focused_row
+                        .saturating_add(1)
+                        .saturating_sub(inner.height as usize),
+                ),
+            );
+            lines.push(Line::raw(String::new()));
         }
     }
     *form.question_scroll_offsets.borrow_mut() = question_offsets;
     lines = wrap_terminal_lines(lines, inner.width as usize);
     let max_scroll = lines.len().saturating_sub(inner.height as usize);
     form.scroll_extent.set(max_scroll);
-    let scroll = form.scroll.min(max_scroll);
+    let scroll = if form.follow_focused_field {
+        if form.focus_actions {
+            max_scroll
+        } else {
+            form.question_scroll_offsets
+                .borrow()
+                .get(form.focused_question)
+                .copied()
+                .unwrap_or(0)
+                .min(max_scroll)
+        }
+    } else {
+        form.scroll.min(max_scroll)
+    };
     frame.render_widget(
         Paragraph::new(Text::from(
             lines
@@ -401,7 +436,12 @@ fn answer_lines(
                 })
                 .collect::<Vec<_>>();
             values.push(Line::raw(format!(
-                "    {} Other{}",
+                "    {}{} Other{}",
+                if focused && *selected == Some(question.options.len()) {
+                    "› "
+                } else {
+                    ""
+                },
                 if *selected == Some(question.options.len()) {
                     "●"
                 } else {
@@ -426,7 +466,11 @@ fn answer_lines(
             .map(|(index, option)| {
                 Line::raw(format!(
                     "    {} {} {}",
-                    if index == *cursor { "›" } else { " " },
+                    if focused && index == *cursor {
+                        "›"
+                    } else {
+                        " "
+                    },
                     if selected.contains(&option.id) {
                         "[x]"
                     } else {
@@ -436,7 +480,12 @@ fn answer_lines(
                 ))
             })
             .chain(std::iter::once(Line::raw(format!(
-                "    Other{}",
+                "    {} Other{}",
+                if focused && *cursor == question.options.len() {
+                    "›"
+                } else {
+                    " "
+                },
                 if other.is_empty() {
                     String::new()
                 } else {
@@ -451,6 +500,7 @@ fn regular_action_lines(
     form: &PendingUserInputForm,
     theme: &Theme,
     width: usize,
+    compact: bool,
 ) -> Vec<Line<'static>> {
     let spans = UserInputFormAction::ORDER
         .iter()
@@ -492,15 +542,29 @@ fn regular_action_lines(
         } else {
             "Actions"
         };
-        if form
+        if form.other_answer_focused() {
+            if compact {
+                vec![
+                    "Type Other · Space inserts space · ↑↓ Options · Tab Next · Esc Close"
+                        .to_owned(),
+                ]
+            } else {
+                vec![
+                    format!("Type Other · Space inserts space · Enter {next} · Esc Close"),
+                    "↑↓ Options · Tab Next · Shift-Tab Previous".to_owned(),
+                ]
+            }
+        } else if form
             .view
             .questions
             .get(form.focused_question)
             .is_some_and(|question| question.options.is_empty())
         {
-            vec![format!(
-                "Enter {next} · Tab Next · Shift-Tab Previous · Esc Close"
-            )]
+            vec![if compact {
+                format!("Enter {next} · Tab Next · Esc Close")
+            } else {
+                format!("Enter {next} · Tab Next · Shift-Tab Previous · Esc Close")
+            }]
         } else {
             let choose = if matches!(
                 form.drafts.get(form.focused_question),
@@ -518,10 +582,14 @@ fn regular_action_lines(
             } else {
                 "↑↓ Choose · Space Select"
             };
-            vec![
-                format!("{choose} · Enter {next} · Esc Close"),
-                "Type / paste Other · Tab Next · Shift-Tab Previous".to_owned(),
-            ]
+            if compact {
+                vec![format!("{choose} · Tab Next · Esc Close")]
+            } else {
+                vec![
+                    format!("{choose} · Enter {next} · Esc Close"),
+                    "Type / paste Other · Tab Next · Shift-Tab Previous".to_owned(),
+                ]
+            }
         }
     };
     lines.extend(
@@ -529,7 +597,7 @@ fn regular_action_lines(
             .into_iter()
             .map(|hint| Line::from(Span::styled(hint, styles::muted(&theme.palette)))),
     );
-    if !form.focus_actions && form.scroll_extent.get() > 0 {
+    if !compact && !form.focus_actions && form.scroll_extent.get() > 0 {
         lines.push(Line::from(Span::styled(
             "PgUp/PgDn Scroll · Ctrl-Enter Actions",
             styles::muted(&theme.palette),

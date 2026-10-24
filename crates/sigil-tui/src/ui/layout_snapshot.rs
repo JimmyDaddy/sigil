@@ -288,13 +288,22 @@ impl LayoutSnapshot {
             return snapshot;
         }
 
-        let shell = shell_layout(
-            screen,
-            app.footer_strip_height(),
-            app.composer_height(),
-            app.info_rail_visible(),
-        );
-        let (egress_disclosure, live_content) = egress_disclosure_layout(shell.live_panel, app);
+        let user_input_open = app.pending_user_input().is_some_and(|form| form.open);
+        let shell = if user_input_open {
+            shell_layout(screen, 0, 0, false)
+        } else {
+            shell_layout(
+                screen,
+                app.footer_strip_height(),
+                app.composer_height(),
+                app.info_rail_visible(),
+            )
+        };
+        let (egress_disclosure, live_content) = if user_input_open {
+            (None, shell.live_panel)
+        } else {
+            egress_disclosure_layout(shell.live_panel, app)
+        };
         let mut snapshot = Self {
             screen,
             mode: LayoutMode::Main,

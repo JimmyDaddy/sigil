@@ -352,6 +352,7 @@ pub(crate) struct PendingUserInputForm {
     pub(crate) validation_error: Option<UserInputFormValidationError>,
     pub(crate) plan_revision_editor: plan_revision_editor::PlanRevisionEditorState,
     pub(crate) scroll: usize,
+    pub(crate) follow_focused_field: bool,
     pub(crate) scroll_extent: ViewportScrollExtent,
     // Rendered row offsets stay shared with the input owner, like scroll_extent.
     pub(crate) question_scroll_offsets: Rc<RefCell<Vec<usize>>>,

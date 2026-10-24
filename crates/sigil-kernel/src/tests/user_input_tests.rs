@@ -64,6 +64,38 @@ fn text_request_for_session(
     UserInputRequestedV1::new(request)
 }
 
+fn multi_select_request(request_id: &str, generation: u32) -> Result<UserInputRequestedV1> {
+    let mut request = text_request(request_id, generation)?.request;
+    request.questions[0].options = ["narrow", "broad"]
+        .into_iter()
+        .map(|id| UserInputOptionV1 {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            description: None,
+        })
+        .collect();
+    request.questions[0].multiple = true;
+    UserInputRequestedV1::new(request)
+}
+
+fn multi_select_submission(
+    request: &UserInputRequestedV1,
+    command_id: &str,
+    value: UserInputAnswerValueV1,
+) -> Result<UserInputDecisionAcceptedV1> {
+    UserInputDecisionAcceptedV1::new(
+        request,
+        UserInputCommandId::new(command_id)?,
+        UserInputDecisionV1::Submitted {
+            answers: vec![UserInputAnswerV1 {
+                question_id: "scope".to_owned(),
+                value,
+            }],
+        },
+        20,
+    )
+}
+
 #[test]
 fn prompt_origin_absence_preserves_legacy_serialization_and_request_hash() -> Result<()> {
     let legacy = text_request("legacy-heading", 1)?;
@@ -1045,6 +1077,176 @@ fn answer_validation_is_typed_bounded_and_complete() -> Result<()> {
         20,
     );
     assert!(optional_decision.is_ok());
+    Ok(())
+}
+
+#[test]
+fn multi_select_answers_allow_other_only_options_and_combined_values() -> Result<()> {
+    let request = multi_select_request("multi_select_request", 1)?;
+    for (index, (option_ids, other)) in [
+        (vec![], Some("其他：只体验恢复流程")),
+        (vec!["narrow"], None),
+        (vec!["narrow", "broad"], None),
+        (vec!["broad"], Some("保留这个补充说明")),
+        (vec!["narrow"], Some(" \t\n\u{3000}")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let value = UserInputAnswerValueV1::MultiSelect {
+            option_ids: option_ids.into_iter().map(str::to_owned).collect(),
+            other: other.map(str::to_owned),
+        };
+        let accepted =
+            multi_select_submission(&request, &format!("multi-valid-{index}"), value.clone())?;
+        accepted.validate_against(&request)?;
+        let UserInputDurableDecisionV1::Submitted {
+            answers: Some(answers),
+            ..
+        } = accepted.decision
+        else {
+            panic!("agent answer values must remain durable");
+        };
+        assert_eq!(answers[0].value, value);
+    }
+    Ok(())
+}
+
+#[test]
+fn multi_select_other_only_does_not_bypass_empty_bounds_kind_or_option_validation() -> Result<()> {
+    let request = multi_select_request("multi_select_request", 1)?;
+    let multi = |option_ids: &[&str], other: Option<String>| UserInputAnswerValueV1::MultiSelect {
+        option_ids: option_ids.iter().map(|id| (*id).to_owned()).collect(),
+        other,
+    };
+    let invalid = [
+        multi(&[], None),
+        multi(&[], Some(String::new())),
+        multi(&[], Some(" \t\n\u{2003}\u{3000}".to_owned())),
+        multi(&[], Some("invalid\0answer".to_owned())),
+        multi(
+            &[],
+            Some("x".repeat(MAX_USER_INPUT_TEXT_CHARS as usize + 1)),
+        ),
+        multi(&[], Some("😀".repeat(MAX_USER_INPUT_TEXT_CHARS as usize))),
+        multi(&["narrow"], Some(String::new())),
+        multi(&["narrow"], Some("invalid\0answer".to_owned())),
+        multi(
+            &["narrow"],
+            Some("x".repeat(MAX_USER_INPUT_TEXT_CHARS as usize + 1)),
+        ),
+        multi(&["narrow", "narrow"], None),
+        multi(&["narrow", "narrow"], Some("其他".to_owned())),
+        multi(&["unknown"], None),
+        multi(&["unknown"], Some("其他".to_owned())),
+        multi(&["narrow", "broad", "unknown"], Some("其他".to_owned())),
+        UserInputAnswerValueV1::Text {
+            value: "其他".to_owned(),
+        },
+        UserInputAnswerValueV1::SingleSelect {
+            option_id: None,
+            other: Some("其他".to_owned()),
+        },
+    ];
+    for (index, value) in invalid.into_iter().enumerate() {
+        assert!(
+            multi_select_submission(&request, &format!("multi-invalid-{index}"), value).is_err(),
+            "invalid multi-select case {index} must be rejected"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn multi_select_other_only_and_existing_blank_other_replay_after_durable_readback() -> Result<()> {
+    for (option_ids, other) in [
+        (vec![], "只选择其他，保留原文和哈希"),
+        (vec!["narrow".to_owned()], " \t\n\u{3000}"),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let mut session = Session::load_from_store("test", "model", store.clone())?;
+        let mut request = multi_select_request("multi_durable", 1)?.request;
+        request.identity.session_scope_id = SessionScopeId::new(session.session_scope_id())?;
+        let requested = UserInputRequestedV1::new(request)?;
+        session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(
+            Box::new(requested.clone()),
+        )])?;
+        let command = UserInputDecisionCommandV1 {
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            command_id: UserInputCommandId::new("multi-durable-command")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: UserInputAnswerValueV1::MultiSelect {
+                        option_ids,
+                        other: Some(other.to_owned()),
+                    },
+                }],
+            },
+        };
+        let first = accept_user_input_decision(&mut session, command.clone(), 20)?;
+        assert!(!first.idempotent_replay);
+        assert!(first.continuation_required);
+        let accepted = session
+            .user_input_projection()?
+            .request(&requested.request.identity)
+            .expect("accepted request")
+            .decision
+            .clone()
+            .expect("durable decision");
+        let encoded = serde_json::to_vec(&accepted)?;
+        let decoded: UserInputDecisionAcceptedV1 = serde_json::from_slice(&encoded)?;
+        assert_eq!(decoded, accepted);
+        decoded.validate_against(&requested)?;
+        let mut wrong_identity = decoded.clone();
+        wrong_identity.identity.generation += 1;
+        assert!(wrong_identity.validate_against(&requested).is_err());
+        let mut wrong_request_hash = decoded;
+        wrong_request_hash.request_hash = digest('b');
+        assert!(wrong_request_hash.validate_against(&requested).is_err());
+        drop(session);
+
+        let mut reopened = Session::load_from_store("test", "model", store)?;
+        let restored = reopened
+            .user_input_projection()?
+            .request(&requested.request.identity)
+            .expect("reloaded request")
+            .decision
+            .clone()
+            .expect("reloaded decision");
+        assert_eq!(restored, accepted);
+        restored.validate_against(&requested)?;
+        assert_eq!(
+            recoverable_user_input_decision(&reopened)?,
+            Some(command.clone())
+        );
+        let before_replay = reopened.entries().len();
+        assert!(accept_user_input_decision(&mut reopened, command.clone(), 30)?.idempotent_replay);
+        assert_eq!(reopened.entries().len(), before_replay);
+        let mut changed = command;
+        let UserInputDecisionV1::Submitted { answers } = &mut changed.decision else {
+            panic!("submitted fixture");
+        };
+        let UserInputAnswerValueV1::MultiSelect { other, .. } = &mut answers[0].value else {
+            panic!("multi-select fixture");
+        };
+        *other = Some("a different answer must not reuse the command".to_owned());
+        assert!(accept_user_input_decision(&mut reopened, changed, 40).is_err());
+        assert_eq!(reopened.entries().len(), before_replay);
+        assert_eq!(
+            reopened
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(_))
+                ))
+                .count(),
+            1
+        );
+    }
     Ok(())
 }
 

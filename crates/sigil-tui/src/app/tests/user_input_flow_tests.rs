@@ -316,6 +316,299 @@ fn choice_question(multiple: bool) -> sigil_kernel::UserInputQuestionV1 {
     question
 }
 
+fn host_question_group_app() -> Result<AppState> {
+    let mut single = choice_question(false);
+    single.id = "priority".to_owned();
+    single.question = "先检查哪个功能？".to_owned();
+    single.options[0].label = "输入体验".to_owned();
+    single.options.push(sigil_kernel::UserInputOptionV1 {
+        id: "recovery".to_owned(),
+        label: "恢复体验".to_owned(),
+        description: None,
+    });
+    let mut multiple = single.clone();
+    multiple.id = "surfaces".to_owned();
+    multiple.question = "检查哪些界面？".to_owned();
+    multiple.multiple = true;
+    multiple.options[0].label = "TUI".to_owned();
+    multiple.options[1].label = "Desktop".to_owned();
+    let mut detail = ordinary_question("detail");
+    detail.question = "还有哪些要求？".to_owned();
+    let mut app = ordinary_app_with_questions(vec![single, multiple, detail])?;
+    let form = app.composer.pending_user_input.as_mut().expect("form");
+    form.view.prompt_origin = Some(sigil_kernel::UserInputPromptOriginV1::HostQuestionGroup);
+    form.request.as_mut().expect("request").prompt_origin = form.view.prompt_origin;
+    Ok(app)
+}
+
+fn ordinary_surface_text(app: &AppState, height: u16) -> Result<String> {
+    let screen = ratatui::layout::Rect::new(0, 0, 80, height);
+    let surface = crate::surface_adapter::build_surface_model(
+        screen,
+        app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    if surface.user_input_open {
+        assert_eq!(surface.layout.composer.height, 0);
+        assert_eq!(surface.layout.agent_panel.height, 0);
+        assert_eq!(surface.layout.live_panel.height, height - 1);
+        assert!(surface.layout.egress_disclosure.is_none());
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let buffer = terminal.backend().buffer();
+    let mut rendered = String::new();
+    for row in buffer.content().chunks(usize::from(buffer.area.width)) {
+        let mut column = 0;
+        while let Some(cell) = row.get(column) {
+            rendered.push_str(cell.symbol());
+            column += crate::ui::terminal_cell_width(cell.symbol()).max(1);
+        }
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
+#[test]
+fn ordinary_form_production_surface_keeps_three_questions_reachable_on_short_terminals()
+-> Result<()> {
+    for height in [12, 24] {
+        let mut app = host_question_group_app()?;
+        app.set_terminal_size(80, height);
+        app.composer.input = "原始草稿\n保留选区".to_owned();
+        app.composer.input_cursor = 3;
+        app.composer.input_selection_anchor = Some(1);
+        let rendered = ordinary_surface_text(&app, height)?;
+        assert!(
+            rendered.contains("先检查哪个功能？"),
+            "{height}: {rendered}"
+        );
+        assert!(rendered.contains("输入体验"));
+        assert!(!rendered.contains("请回答以下问题后继续"));
+        assert!(!rendered.contains("What should change in this plan?"));
+        press(&mut app, KeyCode::PageDown, KeyModifiers::NONE)?;
+        assert!(ordinary_surface_text(&app, height)?.contains("还有哪些要求？"));
+        press(&mut app, KeyCode::PageUp, KeyModifiers::NONE)?;
+        assert!(ordinary_surface_text(&app, height)?.contains("先检查哪个功能？"));
+
+        press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL)?;
+        assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_none());
+        let rendered = ordinary_surface_text(&app, height)?;
+        assert!(rendered.contains("Please answer question 1 before submitting"));
+        assert!(rendered.contains("先检查哪个功能？"));
+        assert!(rendered.contains("Submit"));
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, height)?;
+        assert!(rendered.contains("检查哪些界面？"));
+        assert!(rendered.contains("Desktop"));
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, height)?;
+        assert!(rendered.contains("还有哪些要求？"));
+        assert!(rendered.contains("type an answer"));
+        app.handle_paste_text("简洁明了");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE)?;
+        assert!(!app.pending_user_input().expect("form").open);
+        let surface = crate::surface_adapter::build_surface_model(
+            ratatui::layout::Rect::new(0, 0, 80, height),
+            &app,
+            crate::surface::SurfaceState {
+                frame_generation: 2,
+                terminal_epoch: 1,
+            },
+        );
+        assert!(surface.layout.composer.height > 0);
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?;
+        let rendered = ordinary_surface_text(&app, height)?;
+        assert!(rendered.contains("还有哪些要求？"));
+        assert!(rendered.contains("简洁明了"));
+        assert_eq!(app.composer.input, "原始草稿\n保留选区");
+        assert_eq!(app.composer.input_cursor, 3);
+        assert_eq!(app.composer.input_selection_anchor, Some(1));
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_other_space_edits_without_changing_choices() -> Result<()> {
+    for multiple in [false, true] {
+        let mut app = ordinary_app_with_questions(vec![choice_question(multiple)])?;
+        if multiple {
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        }
+        press(&mut app, KeyCode::Char('甲'), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Char('乙'), KeyModifiers::NONE)?;
+        let expected = match &app.pending_user_input().expect("form").drafts[0] {
+            UserInputDraftValue::SingleSelect {
+                selected,
+                selected_by_user,
+                other,
+            } => {
+                assert_eq!(*selected, Some(1));
+                assert!(*selected_by_user);
+                assert_eq!(other, "甲 乙");
+                sigil_kernel::UserInputAnswerValueV1::SingleSelect {
+                    option_id: None,
+                    other: Some(other.clone()),
+                }
+            }
+            UserInputDraftValue::MultiSelect {
+                cursor,
+                selected,
+                other,
+            } => {
+                assert_eq!(*cursor, 1);
+                assert_eq!(selected, &["suggested".to_owned()]);
+                assert_eq!(other, "甲 乙");
+                sigil_kernel::UserInputAnswerValueV1::MultiSelect {
+                    option_ids: selected.clone(),
+                    other: Some(other.clone()),
+                }
+            }
+            _ => panic!("choice draft"),
+        };
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?;
+        assert!(
+            app.pending_user_input()
+                .expect("form")
+                .other_answer_focused()
+        );
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?;
+        assert!(
+            matches!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?, Some(AppAction::SubmitUserInputDecision {
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers }, ..
+        }) if answers[0].value == expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_empty_other_keeps_text_focus_and_options_keep_space_toggle() -> Result<()> {
+    for multiple in [false, true] {
+        let mut app = ordinary_app_with_questions(vec![
+            choice_question(multiple),
+            ordinary_question("next"),
+        ])?;
+        app.handle_paste_text("甲");
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE)?;
+        assert!(
+            app.pending_user_input()
+                .expect("form")
+                .other_answer_focused()
+        );
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        match &app.pending_user_input().expect("form").drafts[0] {
+            UserInputDraftValue::SingleSelect { other, .. }
+            | UserInputDraftValue::MultiSelect { other, .. } => assert_eq!(other, " "),
+            _ => panic!("choice draft"),
+        }
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE)?;
+        assert!(
+            !app.pending_user_input()
+                .expect("form")
+                .other_answer_focused()
+        );
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        match &app.pending_user_input().expect("form").drafts[0] {
+            UserInputDraftValue::SingleSelect {
+                selected, other, ..
+            } => {
+                assert_eq!(*selected, Some(0));
+                assert_eq!(other, " ");
+            }
+            UserInputDraftValue::MultiSelect {
+                selected, other, ..
+            } => {
+                assert_eq!(selected, &["suggested".to_owned()]);
+                assert_eq!(other, " ");
+            }
+            _ => panic!("choice draft"),
+        }
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+        assert_eq!(app.pending_user_input().expect("form").focused_question, 1);
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT)?;
+        assert_eq!(app.pending_user_input().expect("form").focused_question, 0);
+        assert!(
+            !app.pending_user_input()
+                .expect("form")
+                .other_answer_focused()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_arrow_selection_reveals_a_hidden_question_after_manual_scroll() -> Result<()> {
+    for (key, scroll_key) in [
+        (KeyCode::Left, KeyCode::Home),
+        (KeyCode::Right, KeyCode::PageUp),
+    ] {
+        let mut app = host_question_group_app()?;
+        app.set_terminal_size(80, 12);
+        app.composer
+            .pending_user_input
+            .as_mut()
+            .expect("form")
+            .view
+            .questions[0]
+            .description = Some("First question context. ".repeat(40));
+        let _ = ordinary_surface_text(&app, 12)?;
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, 12)?;
+        assert!(rendered.contains("检查哪些界面？"), "{key:?}: {rendered}");
+        press(&mut app, scroll_key, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, 12)?;
+        assert!(
+            !rendered.contains("检查哪些界面？"),
+            "{scroll_key:?}: {rendered}"
+        );
+        press(&mut app, key, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, 12)?;
+        assert!(rendered.contains("检查哪些界面？"), "{key:?}: {rendered}");
+        assert!(rendered.contains("[x] TUI"), "{key:?}: {rendered}");
+        let form = app.pending_user_input().expect("form");
+        assert_eq!(form.focused_question, 1);
+        assert!(
+            matches!(&form.drafts[1], UserInputDraftValue::MultiSelect { selected, .. }
+            if selected == &["suggested".to_owned()])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_form_other_focus_reveals_its_wrapped_row_and_keeps_manual_scroll() -> Result<()> {
+    for multiple in [false, true] {
+        let mut question = choice_question(multiple);
+        question.options[0].label = "A long option label. ".repeat(40);
+        let mut app = ordinary_app_with_questions(vec![question])?;
+        app.set_terminal_size(80, 12);
+        let _ = ordinary_surface_text(&app, 12)?;
+        press(&mut app, KeyCode::Char('甲'), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE)?;
+        press(&mut app, KeyCode::Char('乙'), KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, 12)?;
+        assert!(
+            rendered.contains("Other: 甲 乙"),
+            "multiple={multiple}: {rendered}"
+        );
+        assert!(rendered.contains("Space inserts space"));
+        press(&mut app, KeyCode::Home, KeyModifiers::NONE)?;
+        let rendered = ordinary_surface_text(&app, 12)?;
+        assert!(!rendered.contains("Other: 甲 乙"));
+        press(&mut app, KeyCode::Char('丙'), KeyModifiers::NONE)?;
+        assert!(ordinary_surface_text(&app, 12)?.contains("Other: 甲 乙丙"));
+    }
+    Ok(())
+}
+
 #[test]
 fn ordinary_form_paste_preserves_unicode_multiline_answer_and_original_composer_draft() -> Result<()>
 {

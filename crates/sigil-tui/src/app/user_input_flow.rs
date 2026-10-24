@@ -5,6 +5,28 @@ use super::{
     UserInputFormAction, UserInputFormSource, UserInputFormValidationError, UserInputFormViewModel,
 };
 
+impl PendingUserInputForm {
+    pub(crate) fn other_answer_focused(&self) -> bool {
+        if self.focus_actions {
+            return false;
+        }
+        let Some(question) = self.view.questions.get(self.focused_question) else {
+            return false;
+        };
+        match self.drafts.get(self.focused_question) {
+            Some(UserInputDraftValue::SingleSelect {
+                selected: Some(selected),
+                selected_by_user: true,
+                ..
+            }) => *selected == question.options.len(),
+            Some(UserInputDraftValue::MultiSelect { cursor, .. }) => {
+                *cursor == question.options.len()
+            }
+            _ => false,
+        }
+    }
+}
+
 impl AppState {
     pub(in crate::app) fn handle_user_input_form_key_event(
         &mut self,
@@ -127,6 +149,10 @@ impl AppState {
             });
             return true;
         }
+        let Some(question) = form.view.questions.get(form.focused_question) else {
+            return true;
+        };
+        let option_count = question.options.len();
         match form.drafts.get_mut(form.focused_question) {
             Some(UserInputDraftValue::Text(value)) => value.push_str(text),
             Some(UserInputDraftValue::SingleSelect {
@@ -135,17 +161,17 @@ impl AppState {
                 other,
             }) => {
                 other.push_str(text);
-                *selected = form
-                    .view
-                    .questions
-                    .get(form.focused_question)
-                    .map(|question| question.options.len());
+                *selected = Some(option_count);
                 *selected_by_user = true;
             }
-            Some(UserInputDraftValue::MultiSelect { other, .. }) => other.push_str(text),
+            Some(UserInputDraftValue::MultiSelect { cursor, other, .. }) => {
+                *cursor = option_count;
+                other.push_str(text);
+            }
             None => return true,
         }
         self.clear_corrected_user_input_error();
+        self.reveal_focused_user_input_region();
         true
     }
 
@@ -254,23 +280,36 @@ impl AppState {
                 Some(None)
             }
             KeyCode::Left | KeyCode::Right if key.modifiers.is_empty() => {
-                self.toggle_user_input_selection();
+                if !self
+                    .pending_user_input()
+                    .is_some_and(PendingUserInputForm::other_answer_focused)
+                    && self.toggle_user_input_selection()
+                {
+                    self.reveal_focused_user_input_region();
+                }
                 Some(None)
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
-                if !self.toggle_user_input_selection() {
+                if self
+                    .pending_user_input()
+                    .is_some_and(PendingUserInputForm::other_answer_focused)
+                    || !self.toggle_user_input_selection()
+                {
                     self.edit_user_input_text(Some(' '));
                 }
+                self.reveal_focused_user_input_region();
                 Some(None)
             }
             KeyCode::Backspace if key.modifiers.is_empty() => {
                 self.edit_user_input_text(None);
+                self.reveal_focused_user_input_region();
                 Some(None)
             }
             KeyCode::Char(character)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 self.edit_user_input_text(Some(character));
+                self.reveal_focused_user_input_region();
                 Some(None)
             }
             _ => Some(None),
@@ -280,8 +319,18 @@ impl AppState {
     fn update_user_input_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
         if let Some(form) = self.composer.pending_user_input.as_mut() {
             let max_scroll = form.scroll_extent.get();
-            let current = form.scroll.min(max_scroll);
+            let current = if form.follow_focused_field {
+                form.question_scroll_offsets
+                    .borrow()
+                    .get(form.focused_question)
+                    .copied()
+                    .unwrap_or(form.scroll)
+            } else {
+                form.scroll
+            }
+            .min(max_scroll);
             form.scroll = update(current).min(max_scroll);
+            form.follow_focused_field = false;
         }
     }
 
@@ -290,6 +339,7 @@ impl AppState {
             return;
         };
         let extent = form.scroll_extent.get();
+        form.follow_focused_field = true;
         if form.focus_actions {
             form.scroll = extent;
             return;
@@ -314,8 +364,9 @@ impl AppState {
             form.drafts.get(form.focused_question),
             Some(UserInputDraftValue::SingleSelect {
                 selected_by_user: true,
+                selected: Some(selected),
                 ..
-            })
+            }) if *selected < question.options.len()
         );
         if !question.options.is_empty() && !question.multiple && selection_was_confirmed {
             let len = form.view.questions.len();
@@ -330,18 +381,27 @@ impl AppState {
             question.multiple,
             form.drafts.get_mut(form.focused_question),
         ) {
-            (false, false, Some(UserInputDraftValue::SingleSelect { selected, .. })) => {
+            (
+                false,
+                false,
+                Some(UserInputDraftValue::SingleSelect {
+                    selected,
+                    selected_by_user,
+                    ..
+                }),
+            ) => {
                 let len = question.options.len() + 1;
                 if len > 0 {
                     let current =
                         selected.map_or(if direction < 0 { 0 } else { -1 }, |value| value as isize);
                     *selected = Some(((current + direction).rem_euclid(len as isize)) as usize);
+                    *selected_by_user = false;
                 }
             }
             (false, true, Some(UserInputDraftValue::MultiSelect { cursor, .. })) => {
                 if !question.options.is_empty() {
                     *cursor = ((*cursor as isize + direction)
-                        .rem_euclid(question.options.len() as isize))
+                        .rem_euclid(question.options.len() as isize + 1))
                         as usize;
                 }
             }
@@ -419,6 +479,10 @@ impl AppState {
         let Some(form) = self.composer.pending_user_input.as_mut() else {
             return;
         };
+        let Some(question) = form.view.questions.get(form.focused_question) else {
+            return;
+        };
+        let option_count = question.options.len();
         let Some(draft) = form.drafts.get_mut(form.focused_question) else {
             return;
         };
@@ -429,17 +493,22 @@ impl AppState {
                 selected_by_user,
                 other,
             } => {
+                if character.is_none() && (*selected != Some(option_count) || !*selected_by_user) {
+                    return;
+                }
                 if character.is_some() {
-                    *selected = form
-                        .view
-                        .questions
-                        .get(form.focused_question)
-                        .map(|question| question.options.len());
+                    *selected = Some(option_count);
                     *selected_by_user = true;
                 }
                 Some(other)
             }
-            UserInputDraftValue::MultiSelect { other, .. } => Some(other),
+            UserInputDraftValue::MultiSelect { cursor, other, .. } => {
+                if character.is_none() && *cursor != option_count {
+                    return;
+                }
+                *cursor = option_count;
+                Some(other)
+            }
         };
         let Some(target) = target else {
             return;
@@ -705,6 +774,7 @@ impl AppState {
             validation_error: None,
             plan_revision_editor: Default::default(),
             scroll: 0,
+            follow_focused_field: false,
             scroll_extent: Default::default(),
             question_scroll_offsets: Default::default(),
         };
@@ -749,6 +819,7 @@ impl AppState {
             validation_error: None,
             plan_revision_editor: Default::default(),
             scroll: 0,
+            follow_focused_field: false,
             scroll_extent: Default::default(),
             question_scroll_offsets: Default::default(),
         });
@@ -1194,6 +1265,7 @@ fn preserve_user_input_presentation(
     next.validation_error = previous.validation_error.clone();
     next.plan_revision_editor = previous.plan_revision_editor.clone();
     next.scroll = previous.scroll;
+    next.follow_focused_field = previous.follow_focused_field;
     next.scroll_extent = previous.scroll_extent.clone();
     next.question_scroll_offsets = previous.question_scroll_offsets.clone();
 }
