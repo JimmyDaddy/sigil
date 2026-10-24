@@ -3035,6 +3035,26 @@ where
     WorkerAdvancementControl::PollCommand
 }
 
+fn defer_queued_conversation_dispatch(
+    state: &mut WorkerLoopState,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    error: &str,
+) {
+    if !arm_authority_cas_retry(
+        &mut state.session.conversation_queue_retry_at,
+        &mut state.session.conversation_queue_retry_attempts,
+        &mut state.session.conversation_queue_retry_latched,
+        Instant::now(),
+    ) {
+        let _ = message_tx.send(WorkerMessage::Notice(
+            "conversation queue authority retry latched after 6 failures; a new relevant durable event or session reload is required".to_owned(),
+        ));
+    }
+    let _ = message_tx.send(WorkerMessage::Notice(format!(
+        "queued promotion was not dispatched: {error}"
+    )));
+}
+
 fn advance_conversation_queue<P>(
     context: WorkerAdvancementContext<'_, P>,
 ) -> WorkerAdvancementControl
@@ -3302,7 +3322,7 @@ where
                 ..
             }) => {
                 if let Err(error) = state.acquire_route_execution_owner() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    defer_queued_conversation_dispatch(state, message_tx, &error);
                     return WorkerAdvancementControl::SkipCommandPoll;
                 }
                 let Some(session) = state.session.current.as_ref() else {
@@ -3342,14 +3362,18 @@ where
         };
         if let Some(candidate) = candidate {
             let queue_id = candidate.promotion.queue_id.clone();
-            let committed = match state.session.current.as_mut() {
-                Some(session) => commit_prepared_queued_conversation_candidate(
-                    &state.session.log_path,
-                    session,
-                    candidate,
-                ),
-                None => Err("session state is unavailable for queued promotion".to_owned()),
-            };
+            // Every admission path transfers the session into the new run. Acquire its route
+            // owner before promotion; once detached, approval commands cannot establish it.
+            let committed = state.acquire_route_execution_owner().and_then(|()| {
+                match state.session.current.as_mut() {
+                    Some(session) => commit_prepared_queued_conversation_candidate(
+                        &state.session.log_path,
+                        session,
+                        candidate,
+                    ),
+                    None => Err("session state is unavailable for queued promotion".to_owned()),
+                }
+            });
             match committed {
                 Ok(candidate) => {
                     state.session.exact_prompts.remove(&queue_id);
@@ -3387,19 +3411,7 @@ where
                     );
                 }
                 Err(error) => {
-                    if !arm_authority_cas_retry(
-                        &mut state.session.conversation_queue_retry_at,
-                        &mut state.session.conversation_queue_retry_attempts,
-                        &mut state.session.conversation_queue_retry_latched,
-                        Instant::now(),
-                    ) {
-                        let _ = message_tx.send(WorkerMessage::Notice(
-                            "conversation queue authority retry latched after 6 failures; a new relevant durable event or session reload is required".to_owned(),
-                        ));
-                    }
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "queued promotion was not dispatched: {error}"
-                    )));
+                    defer_queued_conversation_dispatch(state, message_tx, &error);
                 }
             }
         }

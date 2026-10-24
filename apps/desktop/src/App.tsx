@@ -58,6 +58,11 @@ type SessionOpenTarget = Pick<CatalogEntry, "sessionRef" | "sessionId" | "title"
 type ConversationNavigationState =
   | { readonly kind: "creating"; readonly targetSessionId?: string }
   | { readonly kind: "opening"; readonly sessionRef: string; readonly title: string; readonly targetSessionId?: string };
+interface FailedSessionCreation {
+  readonly workspaceId: string;
+  readonly selectionEpoch: number;
+  readonly recovery: SessionRouteRecoveryView;
+}
 interface PendingWorkspaceClose {
   id: string;
   displayName: string;
@@ -168,6 +173,8 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const workspaceSwitcherRef = useRef<HTMLButtonElement>(null);
   const sessionRenameInputRef = useRef<HTMLInputElement>(null);
   const sessionSelectionEpoch = useRef(0);
+  const failedSessionCreation = useRef<FailedSessionCreation | undefined>(undefined);
+  const successfulProviderSetupRevision = useRef(0);
   const workspaceSelectionEpoch = useRef(0);
   const workspaceNavigationTail = useRef<Promise<unknown>>(Promise.resolve());
   const activeWorkspaceIdRef = useRef(activeWorkspaceId);
@@ -719,8 +726,18 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     requestedModel?: ProviderModelRef,
   ): Promise<SessionSummary | undefined> => {
     if (activeWorkspaceId === undefined) return undefined;
+    if (requestedModel === undefined && selectedSession === undefined
+      && readyProviderInventory?.configMode === "v2"
+      && readyProviderInventory.defaultModel === undefined) {
+      setNavigationOpen(false);
+      navigate("conversation");
+      notify({ message: t("providerSetupBeforeConversation") });
+      return undefined;
+    }
     setSessionRestoreFailed(false);
     const selectionEpoch = ++sessionSelectionEpoch.current;
+    const providerSetupRevision = successfulProviderSetupRevision.current;
+    failedSessionCreation.current = undefined;
     setSessionActionState("working");
     setFailedSessionEntry(undefined);
     setSessionRecovery(undefined);
@@ -753,8 +770,19 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       return session;
     } catch (error) {
       if (sessionSelectionEpoch.current !== selectionEpoch) return undefined;
-      setSessionActionState("error");
       const routeRecovery = sessionRouteRecoveryFromError(error);
+      // Saving a connection can finish before an older create request rejects.
+      // Retire only the prerequisite failure that this successful save replaced.
+      if (providerSetupRevision !== successfulProviderSetupRevision.current
+        && isProviderSetupPrerequisiteFailure(routeRecovery)) {
+        setSessionActionState("idle");
+        setConversationNavigation(undefined);
+        return undefined;
+      }
+      failedSessionCreation.current = routeRecovery === undefined ? undefined : {
+        workspaceId: activeWorkspaceId, selectionEpoch, recovery: routeRecovery,
+      };
+      setSessionActionState("error");
       setSessionRecovery(routeRecovery);
       setSessionMessage(
         routeRecovery?.code === "authority_unavailable"
@@ -1368,6 +1396,19 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 mode="onboarding"
                 onSaved={(inventory) => {
                   if (activeWorkspace.id !== activeWorkspaceIdRef.current) return;
+                  if (inventory.configMode === "v2" && inventory.defaultModel !== undefined) {
+                    successfulProviderSetupRevision.current += 1;
+                    const failedCreation = failedSessionCreation.current;
+                    if (failedCreation?.workspaceId === activeWorkspace.id
+                      && failedCreation.selectionEpoch === sessionSelectionEpoch.current
+                      && isProviderSetupPrerequisiteFailure(failedCreation.recovery)
+                      && selectedSession === undefined && !sessionRestoreFailed) {
+                      failedSessionCreation.current = undefined;
+                      setSessionActionState("idle");
+                      setSessionRecovery(undefined);
+                      setSessionMessage(undefined);
+                    }
+                  }
                   setProviderInventory(inventory);
                   setProviderInventoryWorkspaceId(activeWorkspace.id);
                   setProviderInventoryState("ready");
@@ -1775,6 +1816,10 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
     return undefined;
   }
   return recovery as SessionRouteRecoveryView;
+}
+
+function isProviderSetupPrerequisiteFailure(recovery: SessionRouteRecoveryView | undefined): boolean {
+  return recovery?.code === "connection_config_invalid" || recovery?.code === "model_route_not_configured";
 }
 
 function workspaceRecoveryFromError(

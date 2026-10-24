@@ -33,21 +33,12 @@ fn core_root_config(workspace_root: &std::path::Path) -> Result<RootConfig> {
     config.with_effective_composition()
 }
 
-#[test]
-fn core_worker_approves_and_executes_file_write_and_one_shot_command() -> Result<()> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    let _runtime_guard = runtime.enter();
-    let temp = tempdir()?;
-    let workspace_root = temp.path().to_path_buf();
-    let session_log_path = temp.path().join(".sigil/sessions/core-tools.jsonl");
-    let config = core_root_config(&workspace_root)?;
-    let (provider_name, route) =
-        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
-    let mut routed_session = sigil_kernel::Session::new_with_route(provider_name, route)
-        .with_store(JsonlSessionStore::new(&session_log_path)?);
-    routed_session.ensure_identity_entry()?;
-    let (authority, _authority_root) = test_authority_composition(&workspace_root)?;
-    let paths = sigil_tools_builtin::BuiltinToolPaths::workspace_defaults(&workspace_root);
+fn core_tool_registry(
+    workspace_root: &std::path::Path,
+    config: &RootConfig,
+    authority: &Arc<sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1>,
+) -> ToolRegistry {
+    let paths = sigil_tools_builtin::BuiltinToolPaths::workspace_defaults(workspace_root);
     let scratch = sigil_runtime::authority_scratch_control(paths.scratch_root.clone());
     let mut registry = ToolRegistry::new();
     let handles = sigil_tools_builtin::register_builtin_tools_with_selection(
@@ -67,6 +58,24 @@ fn core_worker_approves_and_executes_file_write_and_one_shot_command() -> Result
         },
     );
     assert!(handles.terminal.is_some());
+    registry
+}
+
+#[test]
+fn core_worker_approves_and_executes_file_write_and_one_shot_command() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/core-tools.jsonl");
+    let config = core_root_config(&workspace_root)?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let mut routed_session = sigil_kernel::Session::new_with_route(provider_name, route)
+        .with_store(JsonlSessionStore::new(&session_log_path)?);
+    routed_session.ensure_identity_entry()?;
+    let (authority, _authority_root) = test_authority_composition(&workspace_root)?;
+    let registry = core_tool_registry(&workspace_root, &config, &authority);
     let provider = PlannedProvider::new(vec![
         tool_call_plan(
             "core-write",
@@ -653,6 +662,272 @@ fn core_worker_runs_chat_queue_after_rejecting_plan_and_task_without_role_runtim
         )
     )));
     Ok(())
+}
+
+#[test]
+fn core_worker_resolves_promoted_queued_approval_allow_once() -> Result<()> {
+    promoted_core_approval_after_denial(true)
+}
+
+#[test]
+fn core_worker_resolves_promoted_queued_approval_deny() -> Result<()> {
+    promoted_core_approval_after_denial(false)
+}
+
+fn promoted_core_approval_after_denial(approve_queued: bool) -> Result<()> {
+    use sigil_kernel::{ToolApprovalAuditAction, ToolApprovalUserDecision};
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/core-queued-approval.jsonl");
+    let config = core_root_config(&workspace_root)?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let projection_store = JsonlSessionStore::new(&session_log_path)?;
+    let mut routed_session = sigil_kernel::Session::new_with_route(provider_name, route)
+        .with_store(projection_store.clone());
+    routed_session.ensure_identity_entry()?;
+    let session_id = routed_session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace_root)?;
+    let registry = core_tool_registry(&workspace_root, &config, &authority);
+    let provider = PlannedProvider::new(vec![
+        tool_call_plan(
+            "initial-core-write",
+            "write_file",
+            serde_json::json!({"path": "initial.txt", "content": "must remain denied\n"}),
+        ),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("initial request denied".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        tool_call_plan(
+            "queued-core-write",
+            "write_file",
+            serde_json::json!({"path": "queued.txt", "content": "approved queued write\n"}),
+        ),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("queued request finished".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        session_log_path.clone(),
+        Agent::new(provider, registry),
+        workspace_root.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = crate::application_bridge::tests::connect_real_worker(
+        &workspace_root.join("sigil.toml"),
+        &workspace_root,
+        &session_log_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&projection_store),
+    )?;
+    application
+        .try_execute_action(
+            &crate::app::AppAction::SubmitPrompt("first write request".to_owned()),
+            None,
+            None,
+        )?
+        .context("initial prompt must use the application bridge")?;
+    let first = queued_approval_identity(&worker, "initial-core-write")?;
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "second write request".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let WorkerMessage::ConversationQueueUpdated { items, .. } = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. }
+            if items.iter().any(|item| item.queued.prompt == "second write request"))
+    })?
+    else {
+        bail!("follow-up must be durable before the first approval is denied");
+    };
+    let queue_id = items[0].queued.queue_id.clone();
+    let first_action = crate::app::AppAction::ApprovalDecision {
+        call_id: first.call_id.clone(),
+        approval_request_id: first.approval_request_id.clone(),
+        approved: false,
+    };
+    application
+        .try_execute_action(&first_action, None, None)?
+        .context("first denial must use the application bridge")?;
+
+    let second = queued_approval_identity(&worker, "queued-core-write")?;
+    assert_eq!(second.session_id, first.session_id);
+    assert_ne!(second.run_id, first.run_id);
+    assert_ne!(second.call_id, first.call_id);
+    assert_ne!(second.approval_request_id, first.approval_request_id);
+    assert!(!workspace_root.join("initial.txt").exists());
+    assert!(!workspace_root.join("queued.txt").exists());
+
+    assert!(matches!(
+        application.try_execute_action(&first_action, None, None),
+        Err(sigil_application::ApplicationError::ScopeMismatch)
+    ));
+    // A new call with the previous request ID must also be rejected by the actual handler.
+    worker.send(WorkerCommand::ApprovalCommand(
+        crate::runner::protocol::WorkerCommandEnvelope::new(
+            "stale-queued-approval",
+            "queued-approval-test",
+            &session_id,
+            crate::runner::protocol::WorkerApprovalCommand::Decision {
+                call_id: second.call_id.clone(),
+                approval_request_id: first.approval_request_id.clone(),
+                approved: true,
+            },
+        ),
+    ))?;
+    let rejected = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ApprovalCommandReceipt(receipt)
+            if receipt.command_id == "stale-queued-approval")
+    })?;
+    assert!(
+        matches!(rejected, WorkerMessage::ApprovalCommandReceipt(receipt)
+        if receipt.route_state == crate::runner::WorkerApprovalRouteState::Rejected
+            && !receipt.replayed)
+    );
+    assert!(!workspace_root.join("queued.txt").exists());
+    application
+        .try_execute_action(
+            &crate::app::AppAction::ApprovalDecision {
+                call_id: second.call_id.clone(),
+                approval_request_id: second.approval_request_id.clone(),
+                approved: approve_queued,
+            },
+            None,
+            None,
+        )?
+        .context("queued approval must use the application bridge")?;
+
+    let mut accepted = false;
+    let mut resolved = false;
+    let mut finished = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !accepted || !resolved || !finished {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "queued approval did not finish: accepted={accepted}, resolved={resolved}, finished={finished}"
+            );
+        }
+        match worker.recv_with_timeout(remaining)? {
+            WorkerMessage::ApprovalCommandReceipt(receipt)
+                if receipt.call_id == second.call_id
+                    && receipt.approval_request_id == second.approval_request_id =>
+            {
+                assert_eq!(
+                    receipt.route_state,
+                    crate::runner::WorkerApprovalRouteState::DecisionAccepted
+                );
+                assert!(!receipt.replayed);
+                accepted = true;
+            }
+            WorkerMessage::Event(event) => {
+                if let RunEvent::ToolApprovalResolved {
+                    call_id, approved, ..
+                } = event.as_ref()
+                    && call_id == &second.call_id
+                {
+                    assert_eq!(*approved, approve_queued);
+                    resolved = true;
+                }
+            }
+            WorkerMessage::RunFinished { result, .. } => {
+                assert_eq!(result.final_text, "queued request finished");
+                finished = true;
+            }
+            WorkerMessage::RunFailed(error) => bail!("queued approval failed: {error}"),
+            _ => {}
+        }
+    }
+    worker.shutdown()?;
+    assert!(!workspace_root.join("initial.txt").exists());
+    if approve_queued {
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("queued.txt"))?,
+            "approved queued write\n"
+        );
+    } else {
+        assert!(!workspace_root.join("queued.txt").exists());
+    }
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    let approvals = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval)) => Some(approval),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (identity, decision) in [
+        (&first, ToolApprovalUserDecision::Denied),
+        (
+            &second,
+            if approve_queued {
+                ToolApprovalUserDecision::Approved
+            } else {
+                ToolApprovalUserDecision::Denied
+            },
+        ),
+    ] {
+        for action in [
+            ToolApprovalAuditAction::Requested,
+            ToolApprovalAuditAction::DecisionAccepted,
+            ToolApprovalAuditAction::Resolved,
+        ] {
+            let matching = approvals
+                .iter()
+                .filter(|entry| entry.identity == *identity && entry.action == action)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{identity:?} {action:?}");
+            if action != ToolApprovalAuditAction::Requested {
+                assert_eq!(matching[0].user_decision, Some(decision));
+            }
+        }
+    }
+    assert!(entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+            if promotion.queue_id == queue_id && promotion.dispatch_run_id == second.run_id
+    )));
+    assert!(entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id == queue_id && status.status == ConversationInputStatus::Delivered
+    )));
+    Ok(())
+}
+
+fn queued_approval_identity(
+    worker: &super::common::TestWorker,
+    expected_call_id: &str,
+) -> Result<sigil_kernel::ApprovalRequestIdentityV2> {
+    let request = worker.recv_until_with_timeout_diagnostic(
+        expected_call_id,
+        Duration::from_secs(15),
+        |message| {
+            matches!(message, WorkerMessage::Event(event)
+            if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { call, .. }
+                if call.id == expected_call_id))
+        },
+    )?;
+    let WorkerMessage::Event(event) = request else {
+        bail!("approval predicate must select a run event");
+    };
+    let RunEvent::ToolApprovalRequested {
+        approval_identity, ..
+    } = event.as_ref()
+    else {
+        bail!("approval predicate must select an approval request");
+    };
+    Ok(approval_identity.clone())
 }
 
 #[test]

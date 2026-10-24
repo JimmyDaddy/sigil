@@ -1217,6 +1217,189 @@ fn live_text_row_hit_areas_cover_empty_and_tiny_regions() {
     assert!(live_text_row_hit_areas(Rect::new(0, 0, 1, 10), &empty_app).is_empty());
 }
 
+fn render_setup_surface_with_checked_hit_areas(
+    app: &AppState,
+    width: u16,
+    height: u16,
+) -> anyhow::Result<(crate::surface::SurfaceModel, Vec<String>)> {
+    let screen = Rect::new(0, 0, width, height);
+    let surface = crate::surface_adapter::build_surface_model(
+        screen,
+        app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let rows = (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let body = crate::ui::setup_config::setup_content_layout(
+        screen,
+        &app.setup_lines(),
+        None,
+        &crate::ui::theme::resolve_for_app(app).palette,
+    )
+    .body;
+    let hits = &surface
+        .layout
+        .setup_hit_areas
+        .as_ref()
+        .expect("visible setup fields")
+        .fields;
+    assert!(!hits.is_empty());
+    assert!(hits.windows(2).all(|pair| pair[0].index < pair[1].index));
+    for field in hits {
+        assert!(field.area.width > 0 && field.area.height > 0);
+        assert_eq!(field.area.intersection(body), field.area);
+        for y in field.area.y..field.area.bottom() {
+            for x in field.area.x..field.area.right() {
+                assert_eq!(
+                    surface.layout.hit_target(x, y),
+                    HitTarget::SetupField { index: field.index }
+                );
+            }
+        }
+    }
+    for y in 0..height {
+        for x in 0..width {
+            if !contains(body, x, y) {
+                assert_eq!(surface.layout.hit_target(x, y), HitTarget::Background);
+            }
+        }
+    }
+    Ok((surface, rows))
+}
+
+#[test]
+fn setup_short_window_cold_start_and_provider_scroll_keep_original_hit_indices()
+-> anyhow::Result<()> {
+    for height in [11, 12] {
+        let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
+        app.set_terminal_size(80, height);
+        for selected in 0..crate::setup::SETUP_PROVIDER_ORDER.len() {
+            let (surface, rows) = render_setup_surface_with_checked_hit_areas(&app, 80, height)?;
+            let fields = &surface
+                .layout
+                .setup_hit_areas
+                .expect("provider hits")
+                .fields;
+            if selected == 0 {
+                assert!(fields.len() < crate::setup::SETUP_PROVIDER_ORDER.len());
+            }
+            assert!(fields.iter().any(|field| field.index == selected));
+            for field in fields {
+                let label = crate::setup::SetupState::provider_choice_label(
+                    crate::setup::SETUP_PROVIDER_ORDER[field.index],
+                );
+                assert!(rows[field.area.y as usize].contains(label));
+            }
+            if selected + 1 < crate::setup::SETUP_PROVIDER_ORDER.len() {
+                app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn setup_short_window_standard_fields_remain_visible_through_resize_and_navigation()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    for index in 1..6 {
+        for height in [24, 12, 11, 24] {
+            app.set_terminal_size(80, height);
+            let (surface, rows) = render_setup_surface_with_checked_hit_areas(&app, 80, height)?;
+            let fields = &surface
+                .layout
+                .setup_hit_areas
+                .expect("standard hits")
+                .fields;
+            let selected = fields
+                .iter()
+                .find(|field| field.index == index)
+                .expect("selected field stays visible after resize");
+            let field = crate::setup::SetupField::from_index(index, false).expect("standard field");
+            assert!(rows[selected.area.y as usize].contains(field.label()));
+            assert_eq!(app.setup_state().expect("setup").selected_field, field);
+        }
+        if index < 5 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn setup_short_window_custom_wrapped_field_is_clipped_and_clicks_its_original_index()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
+    let state = app.setup_state_mut().expect("setup");
+    state.select_provider_index(crate::setup::SETUP_PROVIDER_ORDER.len() - 1);
+    state.base_url = format!("https://provider.example.test/{}", "segment/".repeat(60));
+    state.model = "custom-model".to_owned();
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    for index in 1..=4 {
+        app.set_terminal_size(80, 12);
+        let (surface, _) = render_setup_surface_with_checked_hit_areas(&app, 80, 12)?;
+        assert!(
+            surface
+                .layout
+                .setup_hit_areas
+                .expect("custom hits")
+                .fields
+                .iter()
+                .any(|field| field.index == index)
+        );
+        if index < 4 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+        }
+    }
+    let (surface, rows) = render_setup_surface_with_checked_hit_areas(&app, 80, 12)?;
+    let fields = &surface
+        .layout
+        .setup_hit_areas
+        .as_ref()
+        .expect("custom hits")
+        .fields;
+    assert_eq!(
+        fields.iter().map(|field| field.index).collect::<Vec<_>>(),
+        [2, 3, 4]
+    );
+    let endpoint = fields
+        .iter()
+        .find(|field| field.index == 2)
+        .expect("endpoint");
+    assert!(!rows[endpoint.area.y as usize].contains("endpoint"));
+    assert!(rows[endpoint.area.y as usize].contains("segment/"));
+    let outcome = app.handle_mouse_event(
+        crate::mouse::MouseInput {
+            column: endpoint.area.x,
+            row: endpoint.area.y,
+            kind: crate::mouse::MouseInputKind::LeftDown,
+            modifiers: KeyModifiers::NONE,
+        },
+        &surface.layout,
+    )?;
+    assert!(matches!(outcome, crate::mouse::AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.setup_state().expect("setup").selected_field,
+        crate::setup::SetupField::Endpoint
+    );
+    for height in [24, 11, 12] {
+        app.set_terminal_size(80, height);
+        render_setup_surface_with_checked_hit_areas(&app, 80, height)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<()> {
     let setup_app = AppState::from_setup(

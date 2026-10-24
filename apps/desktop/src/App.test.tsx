@@ -9617,6 +9617,158 @@ it("ignores a deferred empty workspace create rejection after switching to anoth
   expect(createSession).toHaveBeenNthCalledWith(2, other.id, "New conversation", expect.anything());
 });
 
+describe("first-run conversation prerequisites", () => {
+  const unconfiguredInventory: ProviderConnectionInventory = { configMode: "v2", connections: [], issues: [] };
+  const createdSession: CreatedSessionSummary = {
+    id: "http-first-run-created", durableSessionId: "durable-first-run-created", label: "First conversation", runCount: 0,
+  };
+  const setupModel = { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" };
+  const connectionFailure = (code: "connection_config_invalid" | "model_route_not_configured" | "authority_unavailable") => ({
+    code: "session_open_recovery_required", routeRecovery: {
+      code, allowedActions: ["repair_connection", "back_to_session_library"], recoveryBinding: "", retryable: false,
+    },
+  });
+  const bootstrap = async () => ({ protocolVersion: 2 as const, workspaces: [workspace], recentWorkspaces: [] });
+
+  async function saveFirstConnection(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "first-run-fixture-key");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ });
+    await user.click(screen.getByRole("button", { name: "Save and continue" }));
+    await screen.findByText("Provider connection saved");
+  }
+
+  it.each([false, true])("requires an explicit first conversation after provider setup (early new=%s)", async (earlyNew) => {
+    const user = userEvent.setup();
+    const createSession = vi.fn<DesktopBridge["createSession"]>(async () => createdSession);
+    render(<App bridge={bridgeWith({ bootstrap, providerConnections: async () => unconfiguredInventory, createSession })} />);
+    await screen.findByRole("heading", { name: "Connect a model provider" });
+    if (earlyNew) {
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      expect(screen.getByText("Connect a model before starting a conversation.")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Connect a model provider" })).toBeTruthy();
+    }
+    expect(createSession).not.toHaveBeenCalled();
+    await saveFirstConnection(user);
+    expect(screen.queryByRole("heading", { name: "Conversation unavailable" })).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+    await readyComposer();
+    expect(createSession).toHaveBeenCalledExactlyOnceWith(workspace.id, "New conversation", setupModel);
+  });
+
+  it("keeps the current setup step and authentication draft when new conversation is requested", async () => {
+    const user = userEvent.setup();
+    const createSession = vi.fn<DesktopBridge["createSession"]>();
+    render(<App bridge={bridgeWith({ bootstrap, providerConnections: async () => unconfiguredInventory, createSession })} />);
+    await user.click(await screen.findByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "retained-fixture-key");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("retained-fixture-key");
+    expect(screen.getByRole("button", { name: "Continue to models" })).toBeTruthy();
+    expect(screen.getByText("Connect a model before starting a conversation.")).toBeTruthy();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["connection_config_invalid", "model_route_not_configured"] as const)(
+    "retires only a failed create prerequisite resolved by the first provider save (%s)",
+    async (code) => {
+      const user = userEvent.setup();
+      const inventory = deferred<ProviderConnectionInventory>();
+      const createSession = vi.fn<DesktopBridge["createSession"]>()
+        .mockRejectedValueOnce(connectionFailure(code))
+        .mockResolvedValue(createdSession);
+      render(<App bridge={bridgeWith({ bootstrap, providerConnections: () => inventory.promise, createSession })} />);
+      await user.click(await screen.findByRole("button", { name: "New conversation" }));
+      await waitFor(() => expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(false));
+      await act(async () => inventory.resolve(unconfiguredInventory));
+      await saveFirstConnection(user);
+      expect(screen.queryByRole("heading", { name: "Conversation unavailable" })).toBeNull();
+      expect(screen.queryByText("The conversation could not be created. Try again.")).toBeNull();
+      await user.click(await screen.findByRole("button", { name: "Start a conversation" }));
+      await readyComposer();
+      expect(createSession).toHaveBeenCalledTimes(2);
+      expect(createSession).toHaveBeenLastCalledWith(workspace.id, "New conversation", setupModel);
+    },
+  );
+
+  it("ignores an old prerequisite rejection delivered after provider setup succeeds", async () => {
+    const user = userEvent.setup();
+    const inventory = deferred<ProviderConnectionInventory>();
+    const firstCreation = deferred<CreatedSessionSummary>();
+    const createSession = vi.fn<DesktopBridge["createSession"]>()
+      .mockImplementationOnce(() => firstCreation.promise)
+      .mockResolvedValue(createdSession);
+    render(<App bridge={bridgeWith({ bootstrap, providerConnections: () => inventory.promise, createSession })} />);
+    await user.click(await screen.findByRole("button", { name: "New conversation" }));
+    await act(async () => inventory.resolve(unconfiguredInventory));
+    await saveFirstConnection(user);
+    await act(async () => firstCreation.reject(connectionFailure("connection_config_invalid")));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start a conversation" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole("heading", { name: "Conversation unavailable" })).toBeNull();
+    expect(screen.queryByText("The conversation could not be created. Try again.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Start a conversation" }));
+    await readyComposer();
+    expect(createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["before", "after"] as const)("preserves an authority create failure delivered %s provider setup succeeds", async (timing) => {
+    const user = userEvent.setup();
+    const inventory = deferred<ProviderConnectionInventory>();
+    const firstCreation = deferred<CreatedSessionSummary>();
+    const createSession = vi.fn<DesktopBridge["createSession"]>(() => firstCreation.promise);
+    render(<App bridge={bridgeWith({ bootstrap, providerConnections: () => inventory.promise, createSession })} />);
+    await user.click(await screen.findByRole("button", { name: "New conversation" }));
+    if (timing === "before") {
+      await act(async () => firstCreation.reject(connectionFailure("authority_unavailable")));
+      await waitFor(() => expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(false));
+    }
+    await act(async () => inventory.resolve(unconfiguredInventory));
+    await saveFirstConnection(user);
+    if (timing === "after") await act(async () => firstCreation.reject(connectionFailure("authority_unavailable")));
+    expect(await screen.findByRole("heading", { name: "Conversation unavailable" })).toBeTruthy();
+    expect(screen.getByText("Workspace access is unavailable. Review the available recovery options.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start a conversation" })).toBeNull();
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(["connection_config_invalid", "authority_unavailable"] as const)(
+    "preserves remembered-session recovery when first provider setup succeeds (%s)",
+    async (code) => {
+      const user = userEvent.setup();
+      const remembered = { sessionRef: "first-run-remembered.jsonl", sessionId: "durable-first-run-remembered", label: "Existing conversation" };
+      writeLastSession(workspace.id, remembered);
+      const openSession = vi.fn<DesktopBridge["openSession"]>().mockRejectedValue(connectionFailure(code));
+      const createSession = vi.fn<DesktopBridge["createSession"]>();
+      render(<App bridge={bridgeWith({ bootstrap, providerConnections: async () => unconfiguredInventory, openSession, createSession })} />);
+      await screen.findByRole("heading", { name: "Connect a model provider" });
+      await waitFor(() => expect((screen.getByRole("button", { name: "New conversation" }) as HTMLButtonElement).disabled).toBe(false));
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await saveFirstConnection(user);
+      const recovery = (await screen.findByRole("heading", { name: "Conversation unavailable" })).closest("div")!;
+      expect(within(recovery).getByRole("button", { name: "Manage conversations" })).toBeTruthy();
+      expect(within(recovery).getByRole("button", { name: "Open settings" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Start a conversation" })).toBeNull();
+      expect(createSession).not.toHaveBeenCalled();
+      expect(readLastSession(workspace.id)).toEqual(remembered);
+    },
+  );
+
+  it("keeps configured workspace creation on the selected default model", async () => {
+    const user = userEvent.setup();
+    const createSession = vi.fn<DesktopBridge["createSession"]>(async () => createdSession);
+    render(<App bridge={bridgeWith({ bootstrap, createSession })} />);
+    await screen.findByRole("button", { name: "Start a conversation" });
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await readyComposer();
+    expect(createSession).toHaveBeenCalledExactlyOnceWith(workspace.id, "New conversation", {
+      connectionId: "deepseek-default", modelId: "deepseek-v4-flash",
+    });
+    expect(screen.queryByText("Connect a model before starting a conversation.")).toBeNull();
+  });
+});
+
 describe("workspace activation persistence", () => {
   const alpha = { ...workspace, id: "workspace-activation-alpha", displayName: "Alpha" };
   const beta = { ...workspace, id: "workspace-activation-beta", displayName: "Beta" };

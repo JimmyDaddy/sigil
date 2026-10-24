@@ -806,7 +806,7 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
             let end = range
                 .end
                 .min(layout.scroll.saturating_add(layout.body.height as usize));
-            (start < end).then_some(SetupFieldHitArea {
+            (start < end).then(|| SetupFieldHitArea {
                 index,
                 area: Rect::new(
                     layout.body.x,
