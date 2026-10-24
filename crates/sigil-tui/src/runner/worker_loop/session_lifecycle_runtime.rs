@@ -34,12 +34,7 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_worker(
         paths.session_exports_root,
     )
     .with_lifecycle_journal_path(paths.session_lifecycle_journal);
-    match managed_writer {
-        Some(writer) => service
-            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
-            .ok(),
-        None => Some(service),
-    }
+    attach_worker_managed_lifecycle_sources(service, paths.workspace_id, managed_writer)
 }
 
 /// Scratch-aware variant of [`local_session_lifecycle_service_for_worker`].
@@ -59,12 +54,35 @@ pub(in crate::runner) fn local_session_lifecycle_service_with_scratch_for_worker
     )
     .with_lifecycle_journal_path(paths.session_lifecycle_journal)
     .with_scratch_cleanup(scratch_control.clone());
-    match managed_writer {
-        Some(writer) => service
-            .with_managed_writer(Arc::clone(writer), paths.workspace_id)
-            .ok(),
-        None => Some(service),
-    }
+    attach_worker_managed_lifecycle_sources(service, paths.workspace_id, managed_writer)
+}
+
+fn attach_worker_managed_lifecycle_sources(
+    service: LocalSessionLifecycleService,
+    workspace_id: String,
+    managed_writer: Option<
+        &Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> Option<LocalSessionLifecycleService> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1;
+
+    let Some(writer) = managed_writer else {
+        return Some(service);
+    };
+    let session_root = writer
+        .managed_leaf_path(StorageWriterChannelV1::SessionLog)
+        .ok()?;
+    let artifact_store = writer
+        .managed_leaf_path(StorageWriterChannelV1::ArtifactStore)
+        .ok()?;
+    let artifact_staging = writer
+        .managed_leaf_path(StorageWriterChannelV1::ArtifactStaging)
+        .ok()?;
+    service
+        .with_managed_writer(Arc::clone(writer), workspace_id)
+        .and_then(|service| service.with_managed_session_log_root(session_root))
+        .and_then(|service| service.with_managed_artifact_roots(artifact_store, artifact_staging))
+        .ok()
 }
 
 pub(in crate::runner) fn local_session_lifecycle_service_for_source(
@@ -73,11 +91,10 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_source(
     source_path: &Path,
 ) -> Option<LocalSessionLifecycleService> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
-    let configured_dir = fs::canonicalize(&paths.session_log_dir).ok()?;
     let source_dir = source_path
         .parent()
         .and_then(|parent| fs::canonicalize(parent).ok())?;
-    if source_dir == configured_dir {
+    if fs::canonicalize(&paths.session_log_dir).is_ok_and(|directory| source_dir == directory) {
         return Some(
             LocalSessionLifecycleService::new(
                 paths.workspace_id,
@@ -121,19 +138,7 @@ pub(in crate::runner) fn local_session_lifecycle_service_for_source_for_worker(
     let service =
         local_session_lifecycle_service_for_source(root_config, workspace_root, source_path)?;
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
-    match managed_writer {
-        Some(writer) => service
-            .with_managed_session_log_root(paths.state_root.join("managed/session-log"))
-            .and_then(|service| {
-                service.with_managed_artifact_roots(
-                    paths.state_root.join("managed/artifact-store"),
-                    paths.state_root.join("managed/artifact-staging"),
-                )
-            })
-            .and_then(|service| service.with_managed_writer(Arc::clone(writer), paths.workspace_id))
-            .ok(),
-        None => Some(service),
-    }
+    attach_worker_managed_lifecycle_sources(service, paths.workspace_id, managed_writer)
 }
 
 pub(in crate::runner) fn inspect_local_session(

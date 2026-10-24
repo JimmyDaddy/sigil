@@ -109,6 +109,78 @@ fn managed_worker_lifecycle_service_uses_authority_namespace() -> Result<()> {
 }
 
 #[test]
+fn managed_worker_lifecycle_actions_use_the_same_sources_as_history() -> Result<()> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1;
+
+    let fixture = tempdir()?;
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let (composition, authority_root) = test_authority_composition(&workspace)?;
+    let writer = Arc::clone(&composition.storage_writer);
+    let mut config = test_root_config(&workspace, "deepseek", "deepseek-v4-flash");
+    config.storage.state_root =
+        StorageRoot::Path(authority_root.path().join("state").display().to_string());
+    config.storage.cache_root =
+        StorageRoot::Path(fixture.path().join("cache").display().to_string());
+    let paths = resolve_sigil_paths(&config.storage, &config.session, &workspace);
+    assert!(!paths.session_log_dir.exists());
+
+    let source_fixture = fixture.path().join("source.jsonl");
+    write_finalized_session(&source_fixture, "managed history actions", &config)?;
+    let lease = writer.acquire_named(StorageWriterChannelV1::SessionLog, "history-actions")?;
+    let managed_path = lease.path().join("records.jsonl");
+    for record in fs::read_to_string(&source_fixture)?.lines() {
+        writer.write_record(&lease, record.as_bytes())?;
+    }
+    writer.finalize(lease)?;
+
+    let service = super::super::worker_loop::local_session_lifecycle_service_for_worker(
+        &config,
+        &workspace,
+        Some(&writer),
+    )
+    .context("managed history lifecycle service")?;
+    let entry = super::super::worker_loop::inspect_local_session(&service, &managed_path)?;
+    assert_eq!(entry.path, managed_path.canonicalize()?);
+    assert_eq!(entry.title.as_deref(), Some("managed history actions"));
+    let binding = service.resolve_session_for_reopen(
+        &entry.session_ref,
+        entry.session_id.as_deref().context("durable session id")?,
+    )?;
+    assert_eq!(binding.session_log_path, entry.path);
+    service.set_session_pin(&managed_path, true, 1)?;
+    assert!(super::super::worker_loop::inspect_local_session(&service, &managed_path)?.pinned);
+    let output = service.export_session(&managed_path, None, 2)?;
+    let export: SessionExportV1 = serde_json::from_slice(&fs::read(&output.path)?)?;
+    export.validate_digest()?;
+    assert_eq!(export.payload.messages.len(), 2);
+
+    let source_service =
+        super::super::worker_loop::local_session_lifecycle_service_for_source_for_worker(
+            &config,
+            &workspace,
+            &managed_path,
+            Some(&writer),
+        )
+        .context("managed source must not require an unused direct session directory")?;
+    assert!(
+        super::super::worker_loop::inspect_local_session(&source_service, &managed_path)?.pinned
+    );
+    assert!(
+        super::super::worker_loop::local_session_lifecycle_service_for_source_for_worker(
+            &config,
+            &workspace,
+            &source_fixture,
+            Some(&writer),
+        )
+        .is_none()
+    );
+    assert!(super::super::worker_loop::inspect_local_session(&service, &source_fixture).is_err());
+    assert!(!paths.session_log_dir.exists());
+    Ok(())
+}
+
+#[test]
 fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().join("workspace");

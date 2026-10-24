@@ -4,6 +4,8 @@
 
 普通恢复不再把内部 PlanReview research stream 当成用户会话。失败目标在激活前保留原 owner；真实 route recovery 另保留原会话返回上下文，返回时先恢复原 application owner，再接纳其它切换。用途、历史兼容和边界见[会话恢复资格](session-resume-eligibility.md)。
 
+历史候选与 worker 会话操作复用同一 authority writer 声明的 SessionLog、ArtifactStore 和 ArtifactStaging 根。managed 会话的逻辑 catalog reference 仍绑定其真实 `records.jsonl`；检查、导出、固定与删除继续重验同一来源，不能退回只扫描旧 direct 目录。纯 managed 工作区不要求创建或保留未使用的 direct 会话目录；来源不属于已配置目录或声明的 managed 命名空间时仍拒绝。
+
 `TuiApplicationJournals` 仅属于内部 TUI host：
 
 - command reservation store 在同一 authority writer、application、subject 和 workspace 内共享，保留原命令的 K/F、CAS、恢复及审计记录。
