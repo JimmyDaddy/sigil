@@ -69,6 +69,196 @@ fn app_with_resume_target() -> Result<(tempfile::TempDir, AppState, PathBuf)> {
     Ok((temp, app, target))
 }
 
+fn open_ready_resume_actions(app: &mut AppState, target: &Path) -> Result<()> {
+    let Some(AppAction::InspectLocalSession {
+        request_id,
+        source_path,
+    }) = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?
+    else {
+        anyhow::bail!("expected session action inspection");
+    };
+    assert_eq!(source_path, target);
+    app.handle_worker_message(WorkerMessage::LocalSessionInspected {
+        request_id,
+        entry: ready_entry(target, false, 1),
+    })?;
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_keyboard_consumes_only_its_selector_command() -> Result<()> {
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    app.set_input_and_cursor("/resum".to_owned());
+    app.insert_input_character('e');
+    app.composer.input_cursor = 4;
+    app.composer.input_selection_anchor = Some(2);
+    open_ready_resume_actions(&mut app, &target)?;
+    assert_eq!(app.composer.input, "/resume");
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SwitchSession { session_log_path }) if session_log_path == target
+    ));
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_cursor, 0);
+    assert!(app.composer.input_selection_anchor.is_none());
+    assert!(!app.has_slash_selector());
+    assert!(
+        !app.undo_composer_edit(),
+        "a consumed command is not an unsent draft"
+    );
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_mouse_consumes_its_selector_command() -> Result<()> {
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    app.set_terminal_size(120, 24);
+    let screen = Rect::new(0, 0, 120, 24);
+    let layout = LayoutSnapshot::from_app(screen, &app);
+    let slash = layout.slash_overlay.expect("resume selector overlay");
+    let inspect = app.handle_mouse_event(
+        MouseInput {
+            column: slash.content.x,
+            row: slash.content.y.saturating_add(slash.title_rows),
+            kind: MouseInputKind::RightDown,
+            modifiers: KeyModifiers::NONE,
+        },
+        &layout,
+    )?;
+    let AppMouseOutcome::Action(AppAction::InspectLocalSession { request_id, .. }) = inspect else {
+        anyhow::bail!("expected mouse session inspection, got {inspect:?}");
+    };
+    app.handle_worker_message(WorkerMessage::LocalSessionInspected {
+        request_id,
+        entry: ready_entry(&target, false, 1),
+    })?;
+    let layout = LayoutSnapshot::from_app(screen, &app);
+    let resume = layout
+        .session_modal_hit_areas
+        .as_ref()
+        .expect("session actions")
+        .actions
+        .iter()
+        .find(|hit| hit.action == SessionModalAction::Resume)
+        .expect("resume action");
+    let outcome = app.handle_mouse_event(
+        MouseInput {
+            column: resume.area.x,
+            row: resume.area.y,
+            kind: MouseInputKind::LeftDown,
+            modifiers: KeyModifiers::NONE,
+        },
+        &layout,
+    )?;
+    assert!(matches!(
+        outcome,
+        AppMouseOutcome::Action(AppAction::SwitchSession { session_log_path })
+            if session_log_path == target
+    ));
+    assert!(app.composer.input.is_empty());
+    assert!(!app.has_slash_selector());
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_preserves_drafts_without_the_exact_selector_origin() -> Result<()> {
+    for case in 0..5 {
+        let (_temp, mut app, target) = app_with_resume_target()?;
+        open_ready_resume_actions(&mut app, &target)?;
+        match case {
+            0 => {
+                let Some(ModalState::SessionActions(state)) = app.modal_state.as_mut() else {
+                    anyhow::bail!("session actions");
+                };
+                // A library action has no composer ownership, even if its text looks like a command.
+                state.composer_origin = None;
+            }
+            1 => app.set_input_and_cursor("新的待发送草稿".to_owned()),
+            2 => app.session_id = "another-source-scope".to_owned(),
+            3 => app.session_log_path = PathBuf::from("another-source.jsonl"),
+            4 => {
+                let Some(ModalState::SessionActions(state)) = app.modal_state.as_mut() else {
+                    anyhow::bail!("session actions");
+                };
+                state.target_path = target.with_file_name("another-target.jsonl");
+            }
+            _ => unreachable!(),
+        }
+        let draft = app.composer.input.clone();
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(matches!(action, Some(AppAction::SwitchSession { .. })));
+        assert_eq!(app.composer.input, draft, "origin case {case}");
+    }
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_preserves_a_draft_with_image_attachments() -> Result<()> {
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    let image = sigil_kernel::ImageAttachment::from_bytes(
+        "resume-draft-image",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?;
+    app.composer.image_attachments.push(image.clone());
+    open_ready_resume_actions(&mut app, &target)?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SwitchSession { session_log_path }) if session_log_path == target
+    ));
+    assert_eq!(app.composer.input, "/resume");
+    assert_eq!(app.composer.image_attachments, vec![image]);
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_worker_results_preserve_a_new_draft_after_dispatch() -> Result<()> {
+    for success in [true, false] {
+        let (_temp, mut app, target) = app_with_resume_target()?;
+        open_ready_resume_actions(&mut app, &target)?;
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(matches!(action, Some(AppAction::SwitchSession { .. })));
+        assert!(app.composer.input.is_empty());
+        app.insert_input_text("等待期间的新草稿");
+        if success {
+            app.handle_worker_message(WorkerMessage::SessionSwitched {
+                session_id: crate::app::tests::common::fixture_session_id(&target),
+                session_log_path: target.clone(),
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                entries: JsonlSessionStore::read_entries(&target)?,
+            })?;
+        } else {
+            app.handle_worker_message(WorkerMessage::SessionSwitchRejected {
+                session_log_path: target,
+                reason: "target is busy".to_owned(),
+            })?;
+        }
+        assert_eq!(app.composer.input, "等待期间的新草稿");
+    }
+    Ok(())
+}
+
+#[test]
+fn session_actions_resume_rejection_does_not_restore_the_consumed_command() -> Result<()> {
+    let (_temp, mut app, target) = app_with_resume_target()?;
+    open_ready_resume_actions(&mut app, &target)?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::SwitchSession { .. })));
+    app.handle_worker_message(WorkerMessage::SessionSwitchRejected {
+        session_log_path: target,
+        reason: "target is busy".to_owned(),
+    })?;
+    assert!(app.composer.input.is_empty());
+    assert!(!app.has_slash_selector());
+    Ok(())
+}
+
 #[test]
 fn ctrl_o_opens_exclusive_session_actions_and_preserves_draft() -> Result<()> {
     let (_temp, mut app, target) = app_with_resume_target()?;

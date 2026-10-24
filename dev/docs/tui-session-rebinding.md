@@ -18,6 +18,8 @@
 
 既有新建/切换会话 command 只返回精确 `Uncertain(EffectStarted)`，没有独立的 typed operation settlement target。本批不把该回执改写或宣传成 `Settled`；回归保留原 command id、K/F 与恢复阶段断言，再等待匹配路径的 `NewSessionStarted` / `SessionSwitched`、attachment 转移及新作用域 Ready。
 
+从 `/resume` 候选打开 Session Actions 后，点击 Resume 会在派发切换的同一界面事务中消费其来源命令，避免切换成功后遗留查询又显示“无匹配会话”。只有来源会话、目标和原输入仍匹配、且没有图片附件时才清空；非 composer 来源、已更改的草稿与附件继续保留。切换结果不执行输入清理，因此等待期间输入的新草稿在成功或失败后都保留。派发时消费及失败不自动恢复旧命令的行为与直接提交 `/resume` 一致。
+
 取消回归使用真实 Ctrl-C 输入返回 `CancelRun`，进入 production 共用 handler 的当前 worker stop owner 路线，并核对 durable Requested/Finalized 的同一 request、run scope、取消终态和零存活资源；不直接构造运行绑定或伪造 `RunStarted`。
 
 定向验证：
@@ -27,6 +29,7 @@ python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib conf
 python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib attachment_failure_is_not_provider_failure_or_a_ready_run
 python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib tui_journal_delivery -- --test-threads=1
 python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib runtime_transition -- --test-threads=4
+python3 scripts/run-isolated-tests.py -- cargo test -p sigil-tui-host --lib session_actions_resume_
 ```
 
 测试通过不代表真实模型或原生终端已复验。完整资格以本轮不可变候选的“F3 保存 → `/new` → 真实读取 → 取消/恢复”证据为准。

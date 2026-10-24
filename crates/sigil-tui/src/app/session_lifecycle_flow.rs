@@ -56,6 +56,14 @@ pub(crate) struct SessionActionsFrameIdentity {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ResumeSelectorComposerOrigin {
+    session_id: String,
+    session_log_path: PathBuf,
+    target_path: PathBuf,
+    input: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SessionActionsModalState {
     pub(crate) request_id: u64,
     pub(crate) target_path: PathBuf,
@@ -66,6 +74,7 @@ pub(crate) struct SessionActionsModalState {
     pub(crate) result_message: Option<String>,
     pub(crate) details_scroll: Option<usize>,
     pub(crate) scroll_rows: usize,
+    pub(crate) composer_origin: Option<ResumeSelectorComposerOrigin>,
 }
 
 impl SessionActionsModalState {
@@ -405,6 +414,12 @@ impl AppState {
                 result_message: None,
                 details_scroll: None,
                 scroll_rows: 0,
+                composer_origin: Some(ResumeSelectorComposerOrigin {
+                    session_id: self.session_id.clone(),
+                    session_log_path: self.session_log_path.clone(),
+                    target_path: target_path.clone(),
+                    input: self.composer.input.clone(),
+                }),
             },
         )));
         self.last_notice = Some("loading session actions".to_owned());
@@ -594,7 +609,23 @@ impl AppState {
                         Some(self.open_branch_knowledge_modal(source_ref, source_id))
                     }
                     SessionModalAction::Resume => {
+                        let consume_command =
+                            state.composer_origin.as_ref().is_some_and(|origin| {
+                                origin.session_id == self.session_id
+                                    && origin.session_log_path == self.session_log_path
+                                    && origin.target_path == target_path
+                                    && origin.input == self.composer.input
+                                    && self.composer.image_attachments.is_empty()
+                            });
                         self.modal_state = None;
+                        if consume_command {
+                            // Consume the selector command in the dispatch transaction, just as
+                            // direct /resume does; later worker results never clear a new draft.
+                            self.set_input_and_cursor(String::new());
+                            self.reset_composer_edit_context();
+                            self.pending_mouse_slash_confirmation = None;
+                            self.reset_slash_selector();
+                        }
                         Some(AppAction::SwitchSession {
                             session_log_path: target_path,
                         })
