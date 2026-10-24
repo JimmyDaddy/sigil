@@ -13,6 +13,52 @@ use super::{
 };
 
 impl AppState {
+    pub(crate) fn reject_approval_action(&mut self, action: &AppAction, detail: &str) -> bool {
+        let (call_id, request_id) = match action {
+            AppAction::ApprovalDecision {
+                call_id,
+                approval_request_id,
+                ..
+            }
+            | AppAction::ApprovalDecisionWithArgs {
+                call_id,
+                approval_request_id,
+                ..
+            }
+            | AppAction::ApprovalSessionDecision {
+                call_id,
+                approval_request_id,
+            }
+            | AppAction::ApprovalFamilyDecision {
+                call_id,
+                approval_request_id,
+                ..
+            } => (call_id, approval_request_id),
+            _ => return false,
+        };
+        self.reject_approval_delivery(call_id, request_id);
+        self.push_event("approval:delivery-rejected", detail);
+        true
+    }
+
+    pub(crate) fn reject_approval_delivery(
+        &mut self,
+        call_id: &str,
+        approval_request_id: &str,
+    ) -> bool {
+        let Some(pending) = self.approval.pending.as_mut().filter(|pending| {
+            pending.call.id == call_id
+                && pending.approval_request_id == approval_request_id
+                && pending.actions_available()
+        }) else {
+            return false;
+        };
+        pending.presentation_state =
+            super::ApprovalPresentationState::Rejected { command_id: None };
+        self.last_notice = Some("Decision not delivered; review and retry".to_owned());
+        true
+    }
+
     pub(super) fn update_approval_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
         let Some(view) = self.approval_modal_view() else {
             return;
@@ -411,6 +457,7 @@ impl AppState {
                 session_grant_available: pending.session_grant_available,
                 session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
                 command_family_allow_pattern: pending.command_family_allow_pattern.clone(),
+                delivery_feedback: pending.presentation_state.delivery_feedback(),
             });
         };
 
@@ -538,6 +585,7 @@ impl AppState {
             session_grant_available: pending.session_grant_available,
             session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
             command_family_allow_pattern: pending.command_family_allow_pattern.clone(),
+            delivery_feedback: pending.presentation_state.delivery_feedback(),
         })
     }
 

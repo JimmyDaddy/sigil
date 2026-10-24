@@ -9,6 +9,7 @@ pub(super) use session_actions::session_actions_layout;
 pub(crate) use session_actions::session_actions_scroll_bounds;
 
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::{
     Frame,
@@ -34,6 +35,16 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let visual = modal_visual(app);
+    if let Some(input) = app.modal_input_view() {
+        render_input_modal(
+            frame,
+            app.modal_title().unwrap_or("Input"),
+            &app.modal_lines(),
+            &input,
+            &visual,
+        );
+        return;
+    }
     if let Some(view) = app.session_actions_view() {
         session_actions::render_session_actions(
             frame,
@@ -135,8 +146,17 @@ pub(super) struct ModalGeometry {
 }
 
 pub(super) fn modal_geometry(screen: Rect, app: &AppState) -> ModalGeometry {
-    let raw_lines = app.modal_lines();
+    let mut raw_lines = app.modal_lines();
+    if let Some(input) = app.modal_input_view() {
+        raw_lines = input_modal_lines(&raw_lines, &input.label);
+    }
     modal_geometry_from_lines(screen, &raw_lines, app.modal_title())
+}
+
+fn input_modal_lines(lines: &[String], label: &str) -> Vec<String> {
+    let mut display = lines.iter().take(2).cloned().collect::<Vec<_>>();
+    display.extend([String::new(), format!("{label}: ")]);
+    display
 }
 
 pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, theme: &theme::Theme) {
@@ -144,6 +164,16 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         return;
     }
     let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
+    if let Some(input) = modal.input.as_ref() {
+        render_input_modal(
+            frame,
+            modal.title.as_deref().unwrap_or("Input"),
+            &modal.lines,
+            input,
+            &visual,
+        );
+        return;
+    }
     if let Some(view) = modal.session_actions.as_ref() {
         session_actions::render_session_actions(
             frame,
@@ -235,6 +265,115 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         let cursor_y = area.y.saturating_add(1 + rows_before);
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn render_input_modal(
+    frame: &mut Frame,
+    title: &str,
+    lines: &[String],
+    input: &crate::surface::ModalInputSurface,
+    visual: &ModalVisual,
+) {
+    let display = input_modal_lines(lines, &input.label);
+    let geometry = modal_geometry_from_lines(frame.area(), &display, Some(title));
+    let block = Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(visual.title_fg)
+                .bg(visual.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(visual.border))
+        .style(Style::default().bg(visual.modal_bg));
+    frame.render_widget(Clear, geometry.area);
+    frame.render_widget(block, geometry.area);
+    let content = geometry.content;
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+    let editor = Rect::new(content.x, content.bottom() - 1, content.width, 1);
+    let explanation = Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(1),
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(
+            display[..display.len() - 1]
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, line)| render_modal_line(index, line, visual))
+                .collect::<Vec<_>>(),
+        ))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(visual.text)),
+        explanation,
+    );
+    let label = truncate_middle_display_width(
+        &format!("{}: ", input.label),
+        (editor.width as usize / 3).max(1),
+    );
+    let label_width = super::text::terminal_cell_width(&label);
+    let width = (editor.width as usize).saturating_sub(label_width).max(1);
+    let mut char_offset = 0;
+    let mut column = 0;
+    let graphemes = input
+        .value
+        .graphemes(true)
+        .map(|value| {
+            let start = char_offset;
+            char_offset += value.chars().count();
+            let safe_value = super::text::sanitize_terminal_text(value);
+            let cells = super::text::terminal_cell_width(&safe_value);
+            let at = column;
+            column += cells;
+            (start, char_offset, at, cells, safe_value)
+        })
+        .collect::<Vec<_>>();
+    let cursor_column = graphemes
+        .iter()
+        .filter(|(start, _, _, _, _)| *start < input.cursor)
+        .map(|(_, _, _, cells, _)| *cells)
+        .sum::<usize>();
+    let start_column = graphemes
+        .iter()
+        .find(|(_, _, at, _, _)| cursor_column.saturating_sub(*at) < width)
+        .map_or(cursor_column, |(_, _, at, _, _)| *at);
+    let mut spans = vec![Span::styled(
+        label,
+        Style::default().fg(visual.label).bg(visual.selected_bg),
+    )];
+    for (start, end, at, cells, value) in &graphemes {
+        if *at < start_column || at.saturating_sub(start_column) + cells > width {
+            continue;
+        }
+        let selected = input
+            .selection
+            .as_ref()
+            .is_some_and(|range| *start < range.end && *end > range.start);
+        let style = if selected {
+            Style::default().fg(visual.modal_bg).bg(visual.accent)
+        } else {
+            Style::default().fg(visual.text).bg(visual.selected_bg)
+        };
+        spans.push(Span::styled(value.clone(), style));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(visual.selected_bg)),
+        editor,
+    );
+    frame.set_cursor_position((
+        editor.x.saturating_add(
+            (label_width + cursor_column.saturating_sub(start_column))
+                .min(editor.width.saturating_sub(1) as usize) as u16,
+        ),
+        editor.y,
+    ));
 }
 
 fn modal_geometry_from_lines(
@@ -452,11 +591,12 @@ fn render_modal_command_line(line: &str, visual: &ModalVisual) -> Line<'static> 
     let mut spans = Vec::new();
     for (index, token) in line
         .split("  ")
+        .flat_map(|part| part.split(" · "))
         .filter(|token| !token.is_empty())
         .enumerate()
     {
         if index > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(if line.contains(" · ") { " · " } else { "  " }));
         }
         push_modal_command_token(&mut spans, token, visual);
     }

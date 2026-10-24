@@ -1,19 +1,13 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     lines.push("[attention signals]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::TerminalNotificationsEnabled,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::TerminalNotificationMethod,
-    ));
-    lines.push(render_config_value_row(
+    lines.field(config_state, ConfigField::TerminalNotificationsEnabled);
+    lines.field(config_state, ConfigField::TerminalNotificationMethod);
+    lines.field(
         config_state,
         ConfigField::TerminalNotificationMinimumRunDurationMs,
-    ));
+    );
     lines.push(render_config_hint_row(
         "Fixed privacy-safe messages only; terminal support and focus handling are automatic",
     ));

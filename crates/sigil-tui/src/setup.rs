@@ -59,6 +59,7 @@ impl SetupField {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn next(self, custom: bool) -> Self {
         let order = Self::order(custom);
         let index = order
@@ -68,6 +69,7 @@ impl SetupField {
         order[(index + 1) % order.len()]
     }
 
+    #[cfg(test)]
     pub(crate) fn previous(self, custom: bool) -> Self {
         let order = Self::order(custom);
         let index = order
@@ -96,6 +98,46 @@ impl SetupField {
             Self::MaxOutputTokens => "max output tokens",
             Self::Save => "review",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupAction {
+    Continue,
+    Back,
+    Options,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupStep {
+    Provider,
+    Connection,
+    Model,
+    Review,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupFrameIdentity {
+    pub(crate) step: SetupStep,
+    pub(crate) provider_name: String,
+    pub(crate) draft_revision: u64,
+    pub(crate) model_options_open: bool,
+}
+
+impl SetupField {
+    pub(crate) fn step(self) -> SetupStep {
+        match self {
+            Self::Provider => SetupStep::Provider,
+            Self::Protocol | Self::Endpoint | Self::ApiKey => SetupStep::Connection,
+            Self::Model | Self::ContextWindow | Self::MaxOutputTokens => SetupStep::Model,
+            Self::Save => SetupStep::Review,
+        }
+    }
+    pub(crate) fn index(self, custom: bool) -> usize {
+        Self::order(custom)
+            .iter()
+            .position(|field| *field == self)
+            .expect("field belongs to this setup")
     }
 }
 
@@ -166,6 +208,8 @@ struct SetupProviderDraft {
 pub(crate) struct SetupState {
     pub(crate) config_path: PathBuf,
     pub(crate) selected_field: SetupField,
+    pub(crate) selected_action: Option<SetupAction>,
+    pub(crate) model_options_open: bool,
     pub(crate) provider_name: String,
     pub(crate) protocol: ProviderProtocol,
     pub(crate) base_url: String,
@@ -261,6 +305,8 @@ impl SetupState {
         let mut state = Self {
             config_path,
             selected_field: SetupField::Provider,
+            selected_action: None,
+            model_options_open: false,
             model,
             context_window_tokens,
             max_output_tokens,
@@ -339,6 +385,7 @@ impl SetupState {
             self.credential_source = default_credential_source(&provider_name);
         }
         self.selected_field = SetupField::Provider;
+        self.selected_action = None;
         self.bump_revision();
         self.refresh_orchestration_rollout();
     }
@@ -469,6 +516,7 @@ impl SetupState {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn masked_api_key(&self) -> String {
         if self.api_key.is_empty() {
             "<not staged>".to_owned()

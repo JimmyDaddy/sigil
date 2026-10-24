@@ -72,6 +72,13 @@ pub(super) struct ConfigVisualRows {
 }
 
 impl ConfigVisualRows {
+    pub fn focused_rows(&self, logical: Option<usize>) -> Vec<usize> {
+        logical
+            .and_then(|index| self.logical_ranges.get(index))
+            .map(|range| range.clone().collect())
+            .unwrap_or_default()
+    }
+
     pub fn selected_rows(&self, logical: &[String]) -> Vec<usize> {
         logical
             .iter()
@@ -217,6 +224,7 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
         title,
         &lines,
         app.setup_recovery_view().as_ref(),
+        app.setup_presentation().focused_line,
         palette,
     );
     render_modal(frame, app);
@@ -280,6 +288,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
             content[0],
             main_lines,
             app.config_detail_scroll(),
+            app.config_detail_presentation().focused_line,
             panel_bg,
             palette,
         );
@@ -290,6 +299,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
             panel_area,
             main_lines,
             app.config_detail_scroll(),
+            app.config_detail_presentation().focused_line,
             panel_bg,
             palette,
         );
@@ -333,7 +343,14 @@ pub(super) fn render_setup_surface(frame: &mut Frame, surface: &SurfaceModel) {
     } else {
         "Setup"
     };
-    startup::render_setup_content(frame, title, &setup.lines, setup.recovery.as_ref(), palette);
+    startup::render_setup_content(
+        frame,
+        title,
+        &setup.lines,
+        setup.recovery.as_ref(),
+        setup.focused_line,
+        palette,
+    );
     super::modal::render_modal_surface(frame, &surface.modal, &surface.theme);
 }
 
@@ -395,6 +412,7 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
             content[0],
             main_lines,
             config.detail_scroll,
+            config.focused_line,
             panel_bg,
             palette,
         );
@@ -412,6 +430,7 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
             panel_area,
             main_lines,
             config.detail_scroll,
+            config.focused_line,
             panel_bg,
             palette,
         );
@@ -786,13 +805,14 @@ fn render_config_panel(
     area: Rect,
     lines: Vec<String>,
     manual_scroll: Option<usize>,
+    focused_line: Option<usize>,
     panel_bg: Color,
     palette: &ThemePalette,
 ) {
     let block = config_block_with_palette("", palette.config_primary, panel_bg, palette);
     let content_area = block.inner(area);
     let visual = config_visual_rows(&lines, content_area.width as usize, false, palette);
-    let selected_line_indexes = visual.selected_rows(&lines);
+    let selected_line_indexes = visual.focused_rows(focused_line);
     let scroll_offset =
         visual.scroll_offset(content_area.height, &selected_line_indexes, manual_scroll);
     let detail = visual.rows;

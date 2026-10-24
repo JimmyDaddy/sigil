@@ -10,6 +10,8 @@ use crate::slash::ResolvedSlashCommand;
 
 impl AppState {
     pub(crate) fn begin_run_submission_intent(&mut self) {
+        self.runtime.provider_turn_recovery = None;
+        self.runtime.provider_failure_summary = None;
         self.composer.submitted_input_draft = None;
         self.runtime.run_submission_intent = std::sync::Arc::new(());
         self.runtime.submission_timing = Some(super::run_timing::SubmissionTiming::new());
@@ -426,9 +428,11 @@ impl AppState {
             "/task" => self.execute_task_slash_command(command.arg.trim()),
             "/update" => Ok(self.execute_update_slash_command(&command.arg)),
             "/quit" => {
-                self.should_quit = true;
-                self.push_timeline(TimelineRole::Notice, "quitting");
-                Ok(None)
+                let action = self.request_quit();
+                if self.should_quit {
+                    self.push_timeline(TimelineRole::Notice, "quitting");
+                }
+                Ok(action)
             }
             "/resume" => self.execute_resume_slash_command(&command.arg),
             _ => {

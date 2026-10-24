@@ -1263,6 +1263,10 @@ pub enum WorkerMessage {
     ApprovalCommandReceipt(WorkerApprovalCommandReceipt),
     LocalOperationOutcome(LocalOperationOutcome),
     Notice(String),
+    QueuedPreTurnFallback {
+        queue_id: sigil_kernel::ConversationInputQueueId,
+        reason: String,
+    },
     RunStarted {
         prompt: String,
     },

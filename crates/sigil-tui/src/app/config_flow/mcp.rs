@@ -1,6 +1,10 @@
 use super::*;
 
-pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(
+    app: &AppState,
+    lines: &mut ConfigDetailPresentation,
+    config_state: &ConfigState,
+) {
     lines.push("[servers]".to_owned());
     if !config_state.draft.mcp_servers.is_empty() {
         lines.push(render_config_readonly_row(
@@ -14,7 +18,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
             "Ctrl-N imports selected servers from an MCP JSON file into this draft",
         ));
     } else {
-        lines.push(render_config_value_row(config_state, ConfigField::McpName));
+        lines.field(config_state, ConfigField::McpName);
         if config_state.selected_mcp_server().is_some() {
             lines.push(String::new());
             lines.push("[lifecycle]".to_owned());

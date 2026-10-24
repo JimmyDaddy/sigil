@@ -506,6 +506,11 @@ impl EventHandler for AppState {
             }
             RunEvent::ProviderTurnRecovery(view) => {
                 let label = provider_turn_recovery_label(&view);
+                self.runtime.provider_failure_summary = (view.reason_code.as_deref()
+                    == Some("provider_authentication_required")
+                    && view.user_attention_required)
+                    .then(|| label.clone());
+                self.runtime.provider_turn_recovery = Some(view);
                 self.last_notice = Some(label.clone());
                 self.push_timeline(TimelineRole::Notice, label.clone());
                 self.push_event("provider:recovery", label);

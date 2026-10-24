@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     lines.push("[web data tools]".to_owned());
     for field in [
         ConfigField::WebEnabled,
@@ -8,7 +8,7 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         ConfigField::WebSearchRoute,
         ConfigField::WebBundledSearchEnabled,
     ] {
-        lines.push(render_config_value_row(config_state, field));
+        lines.field(config_state, field);
     }
     lines.push(String::new());
     lines.push("[privacy boundary]".to_owned());

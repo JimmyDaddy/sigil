@@ -1035,6 +1035,7 @@ fn startup_recovery_visual_rows_preserve_multiline_errors_and_fixed_controls() {
         Rect::new(0, 0, 80, 24),
         &lines,
         Some(&view),
+        None,
         &theme::default_palette(),
     );
     let actual = layout.rows[layout.logical_ranges[1].clone()]

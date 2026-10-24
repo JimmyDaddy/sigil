@@ -2310,6 +2310,9 @@ fn apply_configuration_publication(
         )?;
         return Ok(None);
     }
+    if !request.root_only {
+        app.clear_provider_recovery_after_config_save();
+    }
     if request.close_after_save && owns_draft {
         app.close_config_panel_after_save();
     }
@@ -3775,6 +3778,9 @@ fn report_application_action_receipt(
         _ => None,
     };
     if let Some(failure) = failure {
+        if app.reject_approval_action(action, &failure) {
+            return Ok(());
+        }
         fail_pending_application_action(app, action, &failure);
     }
     if matches!(
@@ -4395,6 +4401,12 @@ fn report_application_admission_error(
     action: &AppAction,
     error: &anyhow::Error,
 ) -> Result<()> {
+    if app.reject_approval_action(
+        action,
+        &format!("application command was not admitted: {error}"),
+    ) {
+        return Ok(());
+    }
     fail_pending_application_action(
         app,
         action,

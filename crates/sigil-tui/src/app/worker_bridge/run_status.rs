@@ -7,6 +7,8 @@ impl AppState {
         notice: impl Into<String>,
         phase_marker: impl Into<String>,
     ) {
+        self.runtime.provider_turn_recovery = None;
+        self.runtime.provider_failure_summary = None;
         self.runtime.is_busy = true;
         self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = phase;
@@ -16,6 +18,7 @@ impl AppState {
     }
 
     pub(crate) fn clear_worker_run_state(&mut self) {
+        self.runtime.provider_failure_summary = None;
         self.clear_live_preview();
         self.runtime.is_busy = false;
         self.runtime.allow_projection_run_recovery = false;

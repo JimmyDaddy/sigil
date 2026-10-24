@@ -2,6 +2,11 @@ use sigil_kernel::{PublicProviderTurnRecoveryPhaseV1, PublicProviderTurnRecovery
 
 /// Renders the shared recovery DTO without exposing physical attempt ids or provider internals.
 pub(super) fn provider_turn_recovery_label(view: &PublicProviderTurnRecoveryViewV1) -> String {
+    if view.reason_code.as_deref() == Some("provider_authentication_required")
+        && view.user_attention_required
+    {
+        return "Connection authentication failed · F3 review connection".to_owned();
+    }
     match view.phase {
         PublicProviderTurnRecoveryPhaseV1::Waiting => format!(
             "Reconnecting · retry {}/{} scheduled",
@@ -24,6 +29,7 @@ pub(super) fn provider_turn_recovery_label(view: &PublicProviderTurnRecoveryView
 
 fn provider_turn_recovery_reason_label(reason: Option<&str>) -> &'static str {
     match reason {
+        Some("provider_authentication_required") => "check connection authentication",
         Some("provider_retry_budget_exhausted") => "retry limit reached",
         Some("provider_retry_delay_budget_exhausted") => "retry wait limit reached",
         Some("provider_configuration_or_capacity_required") => "check connection or model settings",

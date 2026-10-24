@@ -2161,6 +2161,340 @@ fn exact_approval_receipt_hides_actions_and_projects_resuming_state() -> Result<
 }
 
 #[test]
+fn r9_feedback_rejected_approval_remains_visible_and_retries_exact_request() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.runtime.is_busy = true;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+        crate::runner::WorkerApprovalCommandReceipt {
+            command_id: "rejected-command".to_owned(),
+            approval_request_id: "approval-call-1".to_owned(),
+            call_id: "call-1".to_owned(),
+            decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+            route_state: crate::runner::WorkerApprovalRouteState::Rejected,
+            replayed: false,
+        },
+    ))?;
+    app.handle_worker_message(WorkerMessage::Notice("another status update".to_owned()))?;
+    let view = app
+        .approval_modal_view()
+        .expect("rejected approval still reviewable");
+    assert_eq!(
+        view.delivery_feedback,
+        Some("Decision not delivered; review and retry")
+    );
+    assert!(
+        crate::view_model::UiViewModel::from_app(&app)
+            .footer
+            .hints
+            .contains("Enter retry")
+    );
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?,
+        Some(AppAction::ApprovalDecision { call_id, approval_request_id, approved: true })
+            if call_id == "call-1" && approval_request_id == "approval-call-1"
+    ));
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_late_rejection_cannot_reopen_accepted_or_uncertain_approval() -> Result<()> {
+    for initial in [
+        crate::runner::WorkerApprovalRouteState::DecisionAccepted,
+        crate::runner::WorkerApprovalRouteState::DeliveryUncertain,
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        inject_write_file_approval(&mut app, sample_approval_preview())?;
+        for route_state in [initial, crate::runner::WorkerApprovalRouteState::Rejected] {
+            app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+                crate::runner::WorkerApprovalCommandReceipt {
+                    command_id: format!("command-{route_state:?}"),
+                    approval_request_id: "approval-call-1".to_owned(),
+                    call_id: "call-1".to_owned(),
+                    decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+                    route_state,
+                    replayed: false,
+                },
+            ))?;
+        }
+        let pending = app.approval.pending.as_ref().expect("acknowledged request");
+        assert!(!pending.actions_available());
+        assert!(app.approval_modal_view().is_none());
+        assert!(!app.reject_approval_delivery("call-1", "approval-call-1"));
+        assert!(
+            !app.approval
+                .pending
+                .as_ref()
+                .expect("retained request")
+                .actions_available()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_typed_queue_fallback_does_not_hide_actionable_failure() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.last_notice = Some("current task status".to_owned());
+    let timeline_len = app.timeline.len();
+    app.handle_worker_message(WorkerMessage::QueuedPreTurnFallback {
+        queue_id: sigil_kernel::ConversationInputQueueId::new("queue-diagnostic")?,
+        reason: "advisory capability unavailable".to_owned(),
+    })?;
+    assert_eq!(app.timeline.len(), timeline_len);
+    assert_eq!(app.last_notice(), Some("current task status"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "queue:preflight-fallback"
+                && event.detail.contains("advisory capability unavailable"))
+    );
+    app.handle_worker_message(WorkerMessage::Notice(
+        "queued follow-up is waiting: execution owner unavailable".to_owned(),
+    ))?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("owner unavailable"))
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("owner unavailable"))
+    );
+    Ok(())
+}
+
+fn r9_authentication_recovery(model_ref: Option<sigil_kernel::ModelRef>) -> RunEvent {
+    RunEvent::ProviderTurnRecovery(sigil_kernel::PublicProviderTurnRecoveryViewV1 {
+        phase: sigil_kernel::PublicProviderTurnRecoveryPhaseV1::Blocked,
+        active_retry_count: 0,
+        active_max_retries: 0,
+        retry_count: 0,
+        max_transport_retries: 0,
+        next_retry_unix_ms: None,
+        reason_code: Some("provider_authentication_required".to_owned()),
+        failed_model_ref: model_ref,
+        available_actions: vec![sigil_kernel::PublicProviderTurnRecoveryActionV1::UpdateConnection],
+        user_attention_required: true,
+    })
+}
+
+#[test]
+fn r9_feedback_session_recovery_scope_drops_previous_authentication_target() -> Result<()> {
+    for code in [
+        sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+        sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable,
+    ] {
+        let temp = tempdir()?;
+        let mut config = test_config();
+        config.connections.insert(
+            "original-a".to_owned(),
+            config.connections["deepseek-default"].clone(),
+        );
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        app.handle(r9_authentication_recovery(Some(
+            sigil_kernel::ModelRef::new(
+                sigil_kernel::ConnectionId::new("original-a")?,
+                "original-model",
+            )?,
+        )))?;
+        assert!(app.runtime.provider_failure_summary.is_some());
+        app.restore_session_view(
+            app.session_id.clone(),
+            app.session_log_path.clone(),
+            app.runtime.provider_name.clone(),
+            app.runtime.model_name.clone(),
+            Vec::new(),
+            "same session",
+        );
+        assert!(
+            app.runtime.provider_turn_recovery.is_some(),
+            "same-identity redraw keeps its repair context"
+        );
+        assert!(app.runtime.provider_failure_summary.is_some());
+
+        app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+            code,
+            actions: vec![sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary],
+            recovery_binding: "session-b-recovery-binding".to_owned(),
+            retryable: false,
+            target_session: Some(crate::runner::WorkerRouteRecoverySessionTarget {
+                session_id: "session-b".to_owned(),
+                session_log_path: temp.path().join("session-b.jsonl"),
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                entries: Vec::new(),
+            }),
+        })?;
+        assert_eq!(app.session_id, "session-b");
+        assert!(app.runtime.provider_turn_recovery.is_none());
+        assert!(app.runtime.provider_failure_summary.is_none());
+        assert_eq!(
+            app.pending_session_route_recovery_binding(),
+            Some("session-b-recovery-binding")
+        );
+        assert_eq!(app.runtime.pending_session_route_recovery_code, Some(code));
+        let recovery_notice = app.last_notice().expect("B recovery notice").to_owned();
+        assert!(!recovery_notice.contains("authentication"));
+        app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+        let state = app
+            .config_state
+            .as_ref()
+            .expect("general connection settings");
+        assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+        assert_eq!(
+            state.draft.selected_connection_id.as_str(),
+            "deepseek-default"
+        );
+        assert_eq!(
+            state.draft.default_model.connection_id.as_str(),
+            "deepseek-default"
+        );
+        assert!(!state.dirty);
+        assert_eq!(
+            app.pending_session_route_recovery_binding(),
+            Some("session-b-recovery-binding")
+        );
+        assert!(
+            app.timeline
+                .iter()
+                .any(|entry| entry.text.contains(&recovery_notice)),
+            "opening settings must preserve B's actionable recovery notice"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_authentication_repair_targets_failed_connection_without_changing_default()
+-> Result<()> {
+    let mut config = test_config();
+    let other_id = sigil_kernel::ConnectionId::new("other-connection")?;
+    config.connections.insert(
+        other_id.to_string(),
+        config.connections["deepseek-default"].clone(),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.composer.input = "保留草稿".to_owned();
+    app.handle(r9_authentication_recovery(Some(
+        sigil_kernel::ModelRef::new(other_id.clone(), "deepseek-v4-flash")?,
+    )))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+    let state = app.config_state.as_ref().expect("config");
+    assert_eq!(state.draft.selected_connection_id, other_id);
+    assert_eq!(
+        state.draft.default_model.connection_id.as_str(),
+        "deepseek-default"
+    );
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
+    assert!(!state.show_advanced);
+    assert!(!state.dirty);
+    assert!(!app.has_modal(), "navigation must not open a secret input");
+    assert_eq!(app.composer.input, "保留草稿");
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_authentication_missing_or_none_source_opens_connection_list() -> Result<()> {
+    for (target, no_credential) in [
+        (None, false),
+        (Some("removed-connection"), false),
+        (Some("local-no-auth"), true),
+    ] {
+        let mut config = test_config();
+        if no_credential {
+            config.connections.insert(
+                "local-no-auth".to_owned(),
+                json!({
+                    "label": "Local test connection",
+                    "provider": "custom",
+                    "protocol": "chat_completions",
+                    "base_url": "http://127.0.0.1:60433/v1",
+                    "credential": {"source": "none"}
+                }),
+            );
+        }
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        let model_ref = target.map(|id| {
+            sigil_kernel::ModelRef::new(
+                sigil_kernel::ConnectionId::new(id).expect("test id"),
+                "deepseek-v4-flash",
+            )
+            .expect("test model")
+        });
+        app.handle(r9_authentication_recovery(model_ref))?;
+        app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+        assert_eq!(app.modal_title(), Some("Connections"));
+        let state = app.config_state.as_ref().expect("config");
+        assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+        assert!(!state.dirty);
+    }
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_capacity_recovery_does_not_direct_users_to_change_a_key() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let RunEvent::ProviderTurnRecovery(mut view) = r9_authentication_recovery(None) else {
+        unreachable!("fixture recovery view");
+    };
+    view.reason_code = Some("provider_configuration_or_capacity_required".to_owned());
+    app.handle(RunEvent::ProviderTurnRecovery(view))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state.as_ref().expect("config").selected_field,
+        Some(ConfigField::ProviderName)
+    );
+    assert!(!app.has_modal());
+    assert!(
+        !app.last_notice()
+            .is_some_and(|notice| notice.contains("authentication failed"))
+    );
+    Ok(())
+}
+
+#[test]
+fn r9_feedback_authentication_failure_uses_typed_summary_and_new_run_clears_target() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(r9_authentication_recovery(None))?;
+    let raw = "provider-turn recovery Blocked provider_authentication_required: physical HTTP 401";
+    app.handle_worker_message(WorkerMessage::RunFailed(raw.to_owned()))?;
+    assert_eq!(
+        app.last_notice(),
+        Some("Connection authentication failed · F3 review connection")
+    );
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.text == "Connection authentication failed · F3 review connection")
+            .count(),
+        1
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("physical HTTP 401"))
+    );
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "run:error" && event.detail == raw)
+    );
+    app.handle_worker_message(WorkerMessage::RunFailed(
+        "execution owner unavailable".to_owned(),
+    ))?;
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("execution owner unavailable")),
+        "a retained authentication target must not hide a later unrelated failure"
+    );
+    app.begin_run_submission_intent();
+    assert!(app.runtime.provider_turn_recovery.is_none());
+    Ok(())
+}
+
+#[test]
 fn exact_resolution_clears_an_accepted_approval_tombstone_idempotently() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;

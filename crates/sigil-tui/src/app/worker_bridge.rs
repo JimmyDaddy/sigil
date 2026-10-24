@@ -4,6 +4,7 @@ mod agent_thread;
 mod background_requests;
 mod command_conversion;
 mod message_labels;
+mod provider_recovery;
 mod run_event_handler;
 mod run_event_helpers;
 mod run_status;
@@ -335,6 +336,17 @@ impl AppState {
                         && pending.approval_request_id == receipt.approval_request_id
                 });
                 if let Some(pending) = exact_pending {
+                    // A later failed command cannot revoke an accepted decision or prove that an
+                    // earlier uncertain delivery had no effect. Only authoritative resolution can.
+                    if !pending.actions_available()
+                        && receipt.route_state != WorkerApprovalRouteState::DecisionAccepted
+                    {
+                        self.push_event(
+                            "approval:receipt-ignored",
+                            format!("{}: preserving acknowledged delivery", receipt.command_id),
+                        );
+                        return Ok(());
+                    }
                     match receipt.route_state {
                         WorkerApprovalRouteState::DecisionAccepted => {
                             pending.presentation_state =
@@ -357,10 +369,11 @@ impl AppState {
                             );
                         }
                         WorkerApprovalRouteState::Rejected => {
-                            pending.presentation_state = ApprovalPresentationState::Pending;
+                            pending.presentation_state = ApprovalPresentationState::Rejected {
+                                command_id: Some(receipt.command_id.clone()),
+                            };
                             self.last_notice = Some(
-                                "approval command was rejected; review the current request"
-                                    .to_owned(),
+                                "Decision not delivered; review and retry".to_owned(),
                             );
                         }
                     }
@@ -1029,6 +1042,7 @@ impl AppState {
                 model_name,
                 entries,
             } => {
+                self.runtime.provider_turn_recovery = None;
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
@@ -1050,6 +1064,7 @@ impl AppState {
                 model_name,
                 entries,
             } => {
+                self.runtime.provider_turn_recovery = None;
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
@@ -1516,6 +1531,12 @@ impl AppState {
                 }
                 self.push_event("worker", message);
             }
+            WorkerMessage::QueuedPreTurnFallback { queue_id, reason } => {
+                self.push_event(
+                    "queue:preflight-fallback",
+                    format!("{}: {reason}; dispatching the frozen request", queue_id.as_str()),
+                );
+            }
             WorkerMessage::McpActivationStatus {
                 server_name,
                 status,
@@ -1560,13 +1581,16 @@ impl AppState {
                 self.open_egress_disclosure(disclosure, receipt_tx);
             }
             WorkerMessage::RunFailed(error) => {
+                let authentication_failure = self.runtime.provider_failure_summary.take();
                 self.worker_startup_progress = None;
                 self.worker_ready = false;
                 self.clear_checkpoint_interaction();
                 self.clear_worker_run_state();
                 self.discard_worker_streaming_assistant_and_finish_reasoning();
                 self.refresh_usage_sidebar_cache();
-                let summary = summarize_error(&error);
+                let summary = authentication_failure
+                    .clone()
+                    .unwrap_or_else(|| summarize_error(&error));
                 self.last_notice = Some(summary.clone());
                 let terminal_summary = summarize_terminal_reason(&error, 120);
                 let task_failure_already_visible = self.timeline.last().is_some_and(|entry| {
@@ -1575,7 +1599,13 @@ impl AppState {
                             || entry.text.starts_with("Task interrupted:"))
                         && entry.text.contains(&terminal_summary)
                 });
-                if !task_failure_already_visible {
+                if authentication_failure.is_some() {
+                    if !self.timeline.last().is_some_and(|entry| {
+                        entry.role == TimelineRole::Notice && entry.text == summary
+                    }) {
+                        self.push_timeline(TimelineRole::Notice, summary);
+                    }
+                } else if !task_failure_already_visible {
                     self.push_timeline(TimelineRole::Notice, format!("Run failed: {summary}"));
                 }
                 self.push_event("run:error", error);

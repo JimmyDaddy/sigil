@@ -23,6 +23,337 @@ fn point_in(area: Rect) -> (u16, u16) {
     (area.x, area.y)
 }
 
+fn present_mouse_frame(
+    session: &mut crate::presentation::PresentationSession,
+    app: &AppState,
+) -> Result<std::sync::Arc<crate::presentation::CommittedPresentation>> {
+    let area = Rect::new(0, 0, 120, 30);
+    let generation = session.begin_prepare()?;
+    let surface = crate::surface_adapter::build_surface_model(
+        area,
+        app,
+        crate::surface::SurfaceState {
+            frame_generation: generation.value(),
+            terminal_epoch: session.terminal_epoch().value(),
+        },
+    );
+    let attempt = session.begin_present(generation)?;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    session.finish_draw(
+        generation,
+        attempt,
+        area,
+        terminal.backend().buffer().clone(),
+        std::sync::Arc::new(surface.layout),
+    )?;
+    Ok(session.current().cloned().expect("committed frame"))
+}
+
+#[test]
+fn novice_quit_confirmation_blocks_current_and_old_committed_mouse_frames() -> Result<()> {
+    for (config_open, folded_paste) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let temp = tempdir()?;
+        let mut config = test_config();
+        config.workspace.root = temp.path().display().to_string();
+        let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+        app.set_terminal_size(120, 30);
+        let entries = ["first", "second"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, prompt)| {
+                Ok(SessionLogEntry::Control(
+                    ControlEntry::ConversationInputQueued(
+                        sigil_kernel::ConversationInputQueuedEntry {
+                            queue_id: sigil_kernel::ConversationInputQueueId::new(format!(
+                                "quit-queue-{index}"
+                            ))?,
+                            target: sigil_kernel::ConversationInputTarget::MainThread,
+                            kind: sigil_kernel::ConversationInputKind::Chat,
+                            prompt_hash: format!("hash-{index}"),
+                            prompt: prompt.to_owned(),
+                            reasoning_effort: None,
+                            created_at_ms: None,
+                        },
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        app.sync_current_session_state(entries);
+        app.handle_paste_text(&format!(
+            "{}\n最后一行",
+            "完整草稿".repeat(if folded_paste { 3_000 } else { 100 })
+        ));
+        if folded_paste {
+            assert!(!app.composer.input_paste_spans.is_empty());
+            assert!(app.composer.input_selection_anchor.is_none());
+        } else {
+            app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))?;
+            assert!(app.composer_input_selection().is_some());
+            assert!(app.composer.input_paste_spans.is_empty());
+        }
+        app.composer
+            .image_attachments
+            .push(sigil_kernel::ImageAttachment::from_bytes(
+                "fixture-image",
+                sigil_kernel::ImageMimeType::Png,
+                1,
+                1,
+                vec![1, 2, 3],
+            )?);
+        app.composer.selected_image_attachment = Some(0);
+        if config_open {
+            app.open_config_panel();
+            let state = app.config_state.as_mut().expect("config");
+            state.draft.provider_model = "unpublished-model".to_owned();
+            state.mark_edited();
+        }
+        let mut session = crate::presentation::PresentationSession::new();
+        let previous = present_mouse_frame(&mut session, &app)?;
+        if !config_open {
+            assert!(
+                !previous
+                    .layout()
+                    .composer_queue_hit_areas
+                    .as_ref()
+                    .expect("visible queue")
+                    .actions
+                    .is_empty()
+            );
+        }
+        assert!(app.request_quit().is_none());
+        assert!(app.quit_confirmation_open());
+        let current = present_mouse_frame(&mut session, &app)?;
+        assert_eq!(previous.layout().background_mouse_blocker, None);
+        assert_eq!(
+            current.layout().background_mouse_blocker,
+            Some(crate::mouse::BackgroundMouseBlocker::QuitConfirmation)
+        );
+        assert!(current.generation() > previous.generation());
+        let composer = format!("{:?}", app.composer);
+        let config_state = format!("{:?}", app.config_state);
+        let queue = app.conversation_queue_projection();
+        let scroll = app.timeline_scroll_back;
+        let notice = app.last_notice.clone();
+        let active_pane = app.active_pane;
+        for frame in [&previous, &current] {
+            let layout = frame.layout();
+            let mut areas = vec![layout.composer_input, layout.live_panel, layout.info_rail];
+            if let Some(queue) = layout.composer_queue_hit_areas.as_ref() {
+                areas.extend(queue.item_rows.iter().map(|row| row.area));
+                areas.extend(queue.actions.iter().map(|action| action.area));
+            }
+            if let Some(config) = layout.config_hit_areas.as_ref() {
+                areas.extend(config.sections.iter().map(|section| section.area));
+                areas.extend(config.fields.iter().map(|field| field.area));
+                areas.extend(config.footer_actions.iter().map(|action| action.area));
+            }
+            for area in areas
+                .into_iter()
+                .filter(|area| area.width > 0 && area.height > 0)
+            {
+                for kind in [
+                    MouseInputKind::LeftDown,
+                    MouseInputKind::LeftUp,
+                    MouseInputKind::ScrollUp,
+                    MouseInputKind::ScrollDown,
+                    MouseInputKind::Drag,
+                ] {
+                    let outcome =
+                        app.handle_committed_mouse_event(mouse(kind, area.x, area.y), frame)?;
+                    assert!(
+                        matches!(outcome, AppMouseOutcome::Noop),
+                        "quit must block {kind:?}"
+                    );
+                    assert_eq!(format!("{:?}", app.composer), composer);
+                    assert_eq!(format!("{:?}", app.config_state), config_state);
+                    assert_eq!(app.conversation_queue_projection(), queue);
+                    assert_eq!(app.timeline_scroll_back, scroll);
+                    assert_eq!(app.active_pane, active_pane);
+                    assert_eq!(app.last_notice, notice);
+                    assert!(app.quit_confirmation_open());
+                    assert!(!app.should_quit);
+                }
+            }
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert!(!app.quit_confirmation_open());
+        assert_eq!(format!("{:?}", app.composer), composer);
+        assert_eq!(format!("{:?}", app.config_state), config_state);
+        let area = if config_open {
+            current
+                .layout()
+                .config_hit_areas
+                .as_ref()
+                .expect("config controls")
+                .fields
+                .iter()
+                .find(|field| field.index == 1)
+                .expect("Model field")
+                .area
+        } else {
+            current
+                .layout()
+                .composer_queue_hit_areas
+                .as_ref()
+                .expect("queue controls")
+                .item_rows[1]
+                .area
+        };
+        for kind in [
+            MouseInputKind::LeftDown,
+            MouseInputKind::LeftUp,
+            MouseInputKind::ScrollUp,
+            MouseInputKind::ScrollDown,
+        ] {
+            assert!(
+                matches!(
+                    app.handle_committed_mouse_event(mouse(kind, area.x, area.y), &current)?,
+                    AppMouseOutcome::Noop
+                ),
+                "a dismissed but still painted quit frame must remain inert"
+            );
+        }
+        assert_eq!(format!("{:?}", app.composer), composer);
+        assert_eq!(format!("{:?}", app.config_state), config_state);
+        let fresh = present_mouse_frame(&mut session, &app)?;
+        assert_eq!(fresh.layout().background_mouse_blocker, None);
+        assert!(matches!(
+            app.handle_committed_mouse_event(
+                mouse(MouseInputKind::LeftDown, area.x, area.y),
+                &fresh
+            )?,
+            AppMouseOutcome::Redraw
+        ));
+        if config_open {
+            assert_eq!(
+                app.config_state.as_ref().expect("config").selected_field,
+                Some(ConfigField::ProviderModel)
+            );
+        } else {
+            assert_eq!(app.composer.queue_selected, 1);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn novice_input_modals_block_background_mouse_until_a_fresh_nonmodal_frame_is_painted() -> Result<()>
+{
+    for secret in [false, true] {
+        let temp = tempdir()?;
+        let path = temp.path().join("sigil.toml");
+        let mut app = AppState::from_root_config(&path, &test_config());
+        app.set_terminal_size(120, 30);
+        app.composer.input = "preserved conversation draft".to_owned();
+        app.open_config_panel();
+        let mut session = crate::presentation::PresentationSession::new();
+        let previous = present_mouse_frame(&mut session, &app)?;
+        let config = format!("{:?}", app.config_state);
+        if secret {
+            app.open_secret_input(
+                super::super::modal_flow::SecretInputTarget::ConfigProviderApiKey,
+                "fixture-only-secret",
+            );
+        } else {
+            app.open_text_input(
+                super::super::modal_flow::TextInputTarget::ConfigField(
+                    ConfigField::ProviderBaseUrl,
+                ),
+                "https://fixture.example.test/v1",
+            );
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))?;
+        let current = present_mouse_frame(&mut session, &app)?;
+        assert_eq!(
+            current.layout().background_mouse_blocker,
+            Some(if secret {
+                crate::mouse::BackgroundMouseBlocker::SecretInput
+            } else {
+                crate::mouse::BackgroundMouseBlocker::TextInput
+            })
+        );
+        let composer = format!("{:?}", app.composer);
+        let modal = format!("{:?}", app.modal_state);
+        for frame in [&previous, &current] {
+            let areas = frame
+                .layout()
+                .config_hit_areas
+                .as_ref()
+                .expect("underlying config remains real");
+            for area in areas
+                .sections
+                .iter()
+                .map(|area| area.area)
+                .chain(areas.fields.iter().map(|area| area.area))
+                .chain(areas.footer_actions.iter().map(|area| area.area))
+            {
+                for kind in [
+                    MouseInputKind::LeftDown,
+                    MouseInputKind::LeftUp,
+                    MouseInputKind::ScrollUp,
+                    MouseInputKind::ScrollDown,
+                    MouseInputKind::Drag,
+                    MouseInputKind::RightDown,
+                ] {
+                    assert!(matches!(
+                        app.handle_committed_mouse_event(mouse(kind, area.x, area.y), frame)?,
+                        AppMouseOutcome::Noop
+                    ));
+                    assert_eq!(format!("{:?}", app.modal_state), modal);
+                    assert_eq!(format!("{:?}", app.config_state), config);
+                    assert_eq!(format!("{:?}", app.composer), composer);
+                }
+            }
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert!(!app.has_modal());
+        let target = current
+            .layout()
+            .config_hit_areas
+            .as_ref()
+            .expect("config")
+            .fields
+            .iter()
+            .find(|field| field.index == 1)
+            .expect("Model")
+            .area;
+        for kind in [
+            MouseInputKind::LeftDown,
+            MouseInputKind::LeftUp,
+            MouseInputKind::ScrollUp,
+            MouseInputKind::ScrollDown,
+        ] {
+            assert!(matches!(
+                app.handle_committed_mouse_event(mouse(kind, target.x, target.y), &current)?,
+                AppMouseOutcome::Noop
+            ));
+        }
+        assert_eq!(format!("{:?}", app.config_state), config);
+        assert_eq!(format!("{:?}", app.composer), composer);
+        assert!(
+            !path.exists(),
+            "background clicks must not publish text or credentials"
+        );
+        let fresh = present_mouse_frame(&mut session, &app)?;
+        assert_eq!(fresh.layout().background_mouse_blocker, None);
+        assert!(matches!(
+            app.handle_committed_mouse_event(
+                mouse(MouseInputKind::LeftDown, target.x, target.y),
+                &fresh
+            )?,
+            AppMouseOutcome::Redraw
+        ));
+        assert_eq!(
+            app.config_state.as_ref().expect("config").selected_field,
+            Some(ConfigField::ProviderModel)
+        );
+    }
+    Ok(())
+}
+
 fn rendered_plain(lines: Vec<Line<'static>>) -> String {
     lines
         .iter()
@@ -466,6 +797,9 @@ fn mouse_click_setup_field_selects_then_activates() -> Result<()> {
         None,
     );
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let state = app.setup_state.as_mut().expect("setup");
+    state.selected_field = SetupField::ContextWindow;
+    state.model_options_open = true;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let model_index = 2;
     let (column, row) = setup_field_point(&layout, model_index);
@@ -499,6 +833,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
         None,
     );
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.setup_state.as_mut().expect("setup").selected_field = SetupField::Save;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let save_index = 5;
     let (column, row) = setup_field_point(&layout, save_index);
@@ -2174,6 +2509,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
         task_strip_toggle: None,
+        background_mouse_blocker: None,
         verification_card: None,
         composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),
@@ -2220,6 +2556,7 @@ fn mouse_scroll_composer_reaches_timeline_history() -> Result<()> {
     ))?;
     let layout = LayoutSnapshot {
         task_strip_toggle: None,
+        background_mouse_blocker: None,
         verification_card: None,
         composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),

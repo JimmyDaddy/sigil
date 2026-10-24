@@ -3362,13 +3362,28 @@ trust: trusted
     assert_eq!(app.modal_title(), Some("Use Skill"));
     let modal = app.modal_lines().join("\n");
     assert!(modal.contains("Optional instructions for how to use the selected skill."));
-    assert!(modal.contains("instructions: |"));
+    assert!(
+        app.modal_lines()
+            .iter()
+            .any(|line| line == "instructions: ")
+    );
+    let input = app.modal_input_view().context("skill arguments input")?;
+    assert_eq!(input.label, "instructions");
+    assert_eq!(input.value, "");
+    assert_eq!(input.cursor, 0);
+    assert_eq!(input.selection, None);
     assert!(!modal.contains("key:"));
 
     for character in "crates/sigil-tui".chars() {
         let _ =
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
+    let input = app
+        .modal_input_view()
+        .context("edited skill arguments input")?;
+    assert_eq!(input.value, "crates/sigil-tui");
+    assert_eq!(input.cursor, "crates/sigil-tui".chars().count());
+    assert_eq!(input.selection, None);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     let Some(AppAction::SubmitPrompt(prompt)) = action else {

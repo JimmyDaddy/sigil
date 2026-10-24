@@ -33,6 +33,8 @@ mod plan_review_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod product_smoke_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod quit_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod session_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod session_lifecycle_flow_tests;

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     lines.push("[discovery]".to_owned());
     if !config_state.plugin_manifests.is_empty() {
         lines.push(render_config_readonly_row(
@@ -30,6 +30,11 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         ));
         lines.push(String::new());
         lines.push("[plugins]".to_owned());
+        lines.collection(
+            config_state,
+            ConfigField::PluginId,
+            Some(config_state.selected_plugin_index),
+        );
         lines.extend(render_plugin_index_lines(config_state));
         if let Some(plugin) = config_state.selected_plugin() {
             lines.push(String::new());

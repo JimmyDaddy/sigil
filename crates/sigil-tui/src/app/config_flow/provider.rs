@@ -1,26 +1,17 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     lines.push("[connections]".to_owned());
     lines.extend(config_state.draft.connection_rows());
     lines.push("  Enter on Connection to choose or add".to_owned());
     lines.push("  A add · Ctrl-D delete".to_owned());
     lines.push(String::new());
     lines.push("[active after save]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ProviderName,
-    ));
+    lines.field(config_state, ConfigField::ProviderName);
     lines.push(String::new());
     lines.push("[model]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ProviderModel,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ProviderContextWindowTokens,
-    ));
+    lines.field(config_state, ConfigField::ProviderModel);
+    lines.field(config_state, ConfigField::ProviderContextWindowTokens);
     lines.push(render_config_hint_row(
         "Enter cycles Automatic / 64K / 128K / 256K / 1M",
     ));
@@ -50,28 +41,16 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         "Provider",
         config_state.draft.provider_name.as_str(),
     ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ProviderApiKey,
-    ));
+    lines.field(config_state, ConfigField::ProviderApiKey);
     lines.push(render_config_readonly_row(
         "Endpoint",
         "private endpoint hidden · edit in advanced config",
     ));
     lines.push(String::new());
     lines.push("[request defaults]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ModelRequestTimeoutSecs,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ModelRequestStreamIdleTimeoutSecs,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::ModelRequestMaxOutputTokens,
-    ));
+    lines.field(config_state, ConfigField::ModelRequestTimeoutSecs);
+    lines.field(config_state, ConfigField::ModelRequestStreamIdleTimeoutSecs);
+    lines.field(config_state, ConfigField::ModelRequestMaxOutputTokens);
     lines.push(render_config_hint_row(
         "Max output: Enter cycles Automatic / 4K / 8K / 16K / 32K / 64K / 128K / 256K",
     ));

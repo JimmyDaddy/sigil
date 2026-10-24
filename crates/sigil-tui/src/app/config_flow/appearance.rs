@@ -1,36 +1,24 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     lines.push("[layout]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::AppearanceInfoRail,
-    ));
+    lines.field(config_state, ConfigField::AppearanceInfoRail);
     lines.push(render_config_hint_row(
         "F2 toggles visibility for the current run; narrow terminals still collapse the rail",
     ));
     lines.push(String::new());
     lines.push("[theme]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::AppearanceTheme,
-    ));
+    lines.field(config_state, ConfigField::AppearanceTheme);
     lines.push(render_config_readonly_row(
         "Name",
         config_state.draft.appearance_theme.display_label(),
     ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::AppearanceSyntaxTheme,
-    ));
+    lines.field(config_state, ConfigField::AppearanceSyntaxTheme);
     lines.push(render_config_readonly_row(
         "Syntax source",
         &render_syntax_theme_source(config_state),
     ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::AppearanceUsageCostCurrency,
-    ));
+    lines.field(config_state, ConfigField::AppearanceUsageCostCurrency);
     lines.push(render_config_readonly_row(
         "Cost source",
         &render_usage_cost_currency_source(config_state),

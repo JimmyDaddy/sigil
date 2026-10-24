@@ -141,6 +141,9 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
     pub(crate) model_route: Option<sigil_kernel::ResolvedModelRoute>,
+    pub(crate) provider_turn_recovery: Option<sigil_kernel::PublicProviderTurnRecoveryViewV1>,
+    // Consume the terminal display once; a retained repair target must not mask later errors.
+    pub(in crate::app) provider_failure_summary: Option<String>,
     pub(crate) permission_mode: String,
     pub(crate) memory_enabled: bool,
     pub(crate) memory_document_count: usize,

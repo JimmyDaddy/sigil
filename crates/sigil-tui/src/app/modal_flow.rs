@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use super::{
     AppState, PaneFocus, TimelineRole,
     formatting::{ProviderModelIdentity, build_model_picker_options, non_empty_or},
+    text_input_editor::{TextCursor, TextInputEditor},
 };
 use crate::commands::{
     KeyboardHelpPage, UiCommand, command_for_key_event, common_keyboard_help_lines,
@@ -203,6 +204,7 @@ pub(super) struct SecretInputState {
     pub(super) target: SecretInputTarget,
     pub(super) buffer: SecretString,
     pub(super) summary: String,
+    pub(super) cursor: TextCursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,24 +270,13 @@ impl TextInputTarget {
             Self::McpImportPath => "file path",
         }
     }
-
-    fn config_key(self) -> Option<&'static str> {
-        match self {
-            Self::SetupModel
-            | Self::SetupEndpoint
-            | Self::SetupContextWindow
-            | Self::SetupMaxOutputTokens => None,
-            Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
-            Self::ConfigField(field) => Some(field.label()),
-            Self::SkillArguments | Self::ToolArtifactSearch | Self::McpImportPath => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct TextInputState {
     pub(super) target: TextInputTarget,
     pub(super) buffer: String,
+    pub(super) editor: TextInputEditor,
 }
 
 #[derive(Debug, Default)]
@@ -355,6 +346,9 @@ pub(super) enum ModalOutcome {
 
 impl AppState {
     pub fn modal_title(&self) -> Option<&'static str> {
+        if self.quit_confirmation_open() {
+            return Some("Quit Sigil?");
+        }
         match self.modal_state.as_ref()? {
             ModalState::ConnectionPicker(_) => Some("Connections"),
             ModalState::ModelPicker(state) => Some(state.target.title()),
@@ -377,6 +371,9 @@ impl AppState {
     }
 
     pub fn modal_lines(&self) -> Vec<String> {
+        if let Some(lines) = self.quit_confirmation_lines() {
+            return lines;
+        }
         match self.modal_state.as_ref() {
             Some(ModalState::ConnectionPicker(state)) => {
                 let mut lines = vec![
@@ -464,29 +461,33 @@ impl AppState {
                 lines.push("  Enter model ID manually…  [M]".to_owned());
                 lines
             }
-            Some(ModalState::SecretInput(state)) => vec![
-                state.summary.clone(),
-                "key: api_key".to_owned(),
-                "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
-                String::new(),
-                format!("api_key: {}|", "*".repeat(state.buffer.char_count())),
-            ],
-            Some(ModalState::TextInput(state)) => {
-                let mut lines = vec![state.target.summary().to_owned()];
-                if let Some(key) = state.target.config_key() {
-                    lines.push(format!("key: {key}"));
-                }
-                let keys = if state.target == TextInputTarget::ToolArtifactSearch {
-                    "Enter search · Ctrl-U clear · Esc cancel"
+            Some(ModalState::SecretInput(state)) => {
+                let keys = if self.is_config_mode() {
+                    "Enter apply · F2 save · F3 save+close · Esc cancel"
                 } else {
-                    "Enter apply  F2 save  F3 save+close  Esc cancel"
+                    "Enter apply · Esc cancel"
                 };
-                lines.extend([
-                    keys.to_owned(),
+                vec![
+                    state.summary.clone(),
+                    format!("{keys} · ←/→ move · Shift select · Ctrl-U clear"),
                     String::new(),
-                    format!("{}: {}|", state.target.prompt_label(), state.buffer),
-                ]);
-                lines
+                    format!("api_key: {}", "*".repeat(state.buffer.char_count())),
+                ]
+            }
+            Some(ModalState::TextInput(state)) => {
+                let keys = if state.target == TextInputTarget::ToolArtifactSearch {
+                    "Enter search · Esc cancel"
+                } else if self.is_config_mode() {
+                    "Enter apply · F2 save · F3 save+close · Esc cancel"
+                } else {
+                    "Enter apply · Esc cancel"
+                };
+                vec![
+                    state.target.summary().to_owned(),
+                    format!("{keys} · ←/→ move · Shift select · Ctrl-U clear"),
+                    String::new(),
+                    format!("{}: {}", state.target.prompt_label(), state.buffer),
+                ]
             }
             Some(ModalState::McpOAuth(state)) => super::mcp_oauth_flow::modal_lines(state),
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
@@ -534,20 +535,59 @@ impl AppState {
         }
     }
 
+    pub(crate) fn background_mouse_blocker(&self) -> Option<crate::mouse::BackgroundMouseBlocker> {
+        use crate::mouse::BackgroundMouseBlocker;
+
+        if self.quit_confirmation_open() {
+            return Some(BackgroundMouseBlocker::QuitConfirmation);
+        }
+        match self.modal_state.as_ref() {
+            Some(ModalState::TextInput(_)) => Some(BackgroundMouseBlocker::TextInput),
+            Some(ModalState::SecretInput(_)) => Some(BackgroundMouseBlocker::SecretInput),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn modal_input_view(&self) -> Option<crate::surface::ModalInputSurface> {
+        if self.quit_confirmation_open() {
+            return None;
+        }
+        let (label, value, cursor, selection) = match self.modal_state.as_ref()? {
+            ModalState::TextInput(state) => (
+                state.target.prompt_label(),
+                state.buffer.clone(),
+                state.editor.cursor.position,
+                state.editor.cursor.selection(),
+            ),
+            ModalState::SecretInput(state) => (
+                "api_key",
+                "*".repeat(state.buffer.char_count()),
+                state.cursor.position,
+                state.cursor.selection(),
+            ),
+            _ => return None,
+        };
+        Some(crate::surface::ModalInputSurface {
+            label: label.to_owned(),
+            value,
+            cursor,
+            selection,
+        })
+    }
+
     pub fn modal_input_cursor(&self) -> Option<(String, usize, usize)> {
+        if self.quit_confirmation_open() {
+            return None;
+        }
         match self.modal_state.as_ref()? {
             ModalState::SecretInput(state) => {
-                Some(("api_key".to_owned(), state.buffer.char_count(), 4))
+                Some(("api_key".to_owned(), state.cursor.position, 3))
             }
             ModalState::TextInput(state) => {
-                let line_index = if state.target.config_key().is_some() {
-                    4
-                } else {
-                    3
-                };
+                let line_index = 3;
                 Some((
                     state.target.prompt_label().to_owned(),
-                    state.buffer.chars().count(),
+                    state.editor.cursor.position,
                     line_index,
                 ))
             }
@@ -1201,10 +1241,13 @@ impl AppState {
         current: impl Into<SecretString>,
     ) {
         let summary = self.secret_input_summary(target);
+        let buffer = current.into();
+        let cursor = TextCursor::at_end(buffer.expose_secret());
         self.modal_state = Some(ModalState::SecretInput(SecretInputState {
             target,
-            buffer: current.into(),
+            buffer,
             summary,
+            cursor,
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
     }
@@ -1219,6 +1262,7 @@ impl AppState {
             target,
             buffer: SecretString::new(character.to_string()),
             summary,
+            cursor: TextCursor::at_end(&character.to_string()),
         }));
         self.last_notice = Some(format!("editing {}", target.title().to_lowercase()));
     }
@@ -1260,6 +1304,7 @@ impl AppState {
         self.modal_state = Some(ModalState::TextInput(TextInputState {
             target,
             buffer: current.to_owned(),
+            editor: TextInputEditor::new(current),
         }));
         self.last_notice = Some(format!("editing {}", target.prompt_label()));
     }
@@ -1268,6 +1313,7 @@ impl AppState {
         self.modal_state = Some(ModalState::TextInput(TextInputState {
             target,
             buffer: character.to_string(),
+            editor: TextInputEditor::new(&character.to_string()),
         }));
         self.last_notice = Some(format!("editing {}", target.prompt_label()));
     }
@@ -1536,66 +1582,70 @@ impl AppState {
                 },
                 _ => ModalOutcome::None,
             },
-            ModalState::SecretInput(state) => match key.code {
-                KeyCode::Esc => {
-                    self.modal_state = None;
-                    ModalOutcome::Dismissed("closed secret input".to_owned())
+            ModalState::SecretInput(state) => {
+                if state.cursor.move_for_key(state.buffer.expose_secret(), key) {
+                    return ModalOutcome::None;
                 }
-                KeyCode::Backspace => {
-                    let _ = state.buffer.pop();
-                    self.last_notice = Some("editing api key".to_owned());
-                    ModalOutcome::None
-                }
-                KeyCode::Enter => {
-                    let target = state.target;
-                    let value = std::mem::take(&mut state.buffer);
-                    self.modal_state = None;
-                    ModalOutcome::SecretSubmitted { target, value }
-                }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    state.buffer.push(character);
-                    self.last_notice = Some("editing api key".to_owned());
-                    ModalOutcome::None
-                }
-                _ => ModalOutcome::None,
-            },
-            ModalState::TextInput(state) => match key.code {
-                KeyCode::Esc => {
-                    self.modal_state = None;
-                    ModalOutcome::Dismissed("closed text input".to_owned())
-                }
-                KeyCode::Char('u')
-                    if state.target == TextInputTarget::ToolArtifactSearch
-                        && key.modifiers == KeyModifiers::CONTROL =>
-                {
-                    state.buffer.clear();
-                    ModalOutcome::None
-                }
-                KeyCode::Backspace => {
-                    let _ = state.buffer.pop();
-                    self.last_notice = Some(format!("editing {}", state.target.prompt_label()));
-                    ModalOutcome::None
-                }
-                KeyCode::Enter => {
-                    let target = state.target;
-                    let value = state.buffer.clone();
-                    self.modal_state = None;
-                    ModalOutcome::TextSubmitted { target, value }
-                }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if !text_input_target_accepts_char(state.target, character) {
-                        self.last_notice = Some(format!(
-                            "{} does not accept '{character}'",
-                            state.target.prompt_label()
-                        ));
-                        return ModalOutcome::None;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal_state = None;
+                        ModalOutcome::Dismissed("closed secret input".to_owned())
                     }
-                    state.buffer.push(character);
-                    self.last_notice = Some(format!("editing {}", state.target.prompt_label()));
-                    ModalOutcome::None
+                    KeyCode::Enter => {
+                        let target = state.target;
+                        let value = std::mem::take(&mut state.buffer);
+                        self.modal_state = None;
+                        ModalOutcome::SecretSubmitted { target, value }
+                    }
+                    _ => {
+                        let mut value = state.buffer.expose_secret().to_owned();
+                        if state.cursor.delete_for_key(&mut value, key) {
+                            state.buffer = SecretString::new(value);
+                        } else if let KeyCode::Char(character) = key.code
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !character.is_control()
+                        {
+                            state.cursor.replace(&mut value, &character.to_string());
+                            state.buffer = SecretString::new(value);
+                        } else {
+                            // Rewrap even an unchanged temporary so its allocation is zeroized.
+                            drop(SecretString::new(value));
+                        }
+                        ModalOutcome::None
+                    }
                 }
-                _ => ModalOutcome::None,
-            },
+            }
+            ModalState::TextInput(state) => {
+                if state.editor.handle_key(&mut state.buffer, key) {
+                    return ModalOutcome::None;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal_state = None;
+                        ModalOutcome::Dismissed("closed text input".to_owned())
+                    }
+                    KeyCode::Enter => {
+                        let target = state.target;
+                        let value = state.buffer.clone();
+                        self.modal_state = None;
+                        ModalOutcome::TextSubmitted { target, value }
+                    }
+                    KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if !text_input_target_accepts_char(state.target, character) {
+                            self.last_notice = Some(format!(
+                                "{} does not accept '{character}'",
+                                state.target.prompt_label()
+                            ));
+                            return ModalOutcome::None;
+                        }
+                        state
+                            .editor
+                            .insert(&mut state.buffer, &character.to_string());
+                        ModalOutcome::None
+                    }
+                    _ => ModalOutcome::None,
+                }
+            }
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
@@ -1649,31 +1699,21 @@ impl AppState {
 
         match modal_state {
             ModalState::SecretInput(state) => {
-                let accepted = text.chars().filter(|character| !character.is_control());
-                let mut count = 0usize;
-                for character in accepted {
-                    state.buffer.push(character);
-                    count += 1;
-                }
-                if count > 0 {
-                    self.last_notice = Some("editing api key".to_owned());
+                let accepted = text.chars().filter(|c| !c.is_control()).collect::<String>();
+                if !accepted.is_empty() {
+                    let mut value = state.buffer.expose_secret().to_owned();
+                    state.cursor.replace(&mut value, &accepted);
+                    state.buffer = SecretString::new(value);
+                    drop(SecretString::new(accepted));
                 }
                 ModalOutcome::None
             }
             ModalState::TextInput(state) => {
-                let mut count = 0usize;
-                for character in text.chars() {
-                    if character.is_control()
-                        || !text_input_target_accepts_char(state.target, character)
-                    {
-                        continue;
-                    }
-                    state.buffer.push(character);
-                    count += 1;
-                }
-                if count > 0 {
-                    self.last_notice = Some(format!("editing {}", state.target.prompt_label()));
-                }
+                let accepted = text
+                    .chars()
+                    .filter(|c| !c.is_control() && text_input_target_accepts_char(state.target, *c))
+                    .collect::<String>();
+                state.editor.insert(&mut state.buffer, &accepted);
                 ModalOutcome::None
             }
             ModalState::McpOAuth(state) => {

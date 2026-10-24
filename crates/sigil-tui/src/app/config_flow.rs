@@ -104,6 +104,44 @@ use storage_detail::*;
 pub(crate) use verification_detail::repo_check_promotion_requirement;
 use verification_detail::*;
 
+#[derive(Debug, Default)]
+pub(crate) struct ConfigDetailPresentation {
+    pub(crate) lines: Vec<String>,
+    pub(crate) field_lines: Vec<(ConfigField, usize)>,
+    pub(crate) focused_line: Option<usize>,
+}
+
+impl std::ops::Deref for ConfigDetailPresentation {
+    type Target = Vec<String>;
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+impl std::ops::DerefMut for ConfigDetailPresentation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.lines
+    }
+}
+impl ConfigDetailPresentation {
+    fn field(&mut self, state: &ConfigState, field: ConfigField) {
+        let row = self.lines.len();
+        self.field_lines.push((field, row));
+        if !state.footer_selected && state.selected_field == Some(field) {
+            self.focused_line = Some(row);
+        }
+        self.lines.push(render_config_value_row(state, field));
+    }
+    fn collection(&mut self, state: &ConfigState, field: ConfigField, selected_row: Option<usize>) {
+        if let Some(row) = selected_row {
+            let row = self.lines.len() + row;
+            self.field_lines.push((field, row));
+            if !state.footer_selected {
+                self.focused_line = Some(row);
+            }
+        }
+    }
+}
+
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
         self.config_state
@@ -287,12 +325,35 @@ impl AppState {
         navigation::render_config_nav_lines(self.config_state.as_ref())
     }
 
-    pub fn config_detail_lines(&self) -> Vec<String> {
-        let Some(config_state) = &self.config_state else {
+    pub(crate) fn config_field_line_indices(&self) -> Vec<(usize, usize)> {
+        let Some(section) = self.config_selected_section() else {
             return Vec::new();
         };
+        self.config_detail_presentation()
+            .field_lines
+            .into_iter()
+            .filter_map(|(field, row)| {
+                ConfigField::fields_for_section(section)
+                    .iter()
+                    .position(|candidate| *candidate == field)
+                    .map(|index| (index, row))
+            })
+            .collect()
+    }
+
+    pub fn config_detail_lines(&self) -> Vec<String> {
+        self.config_detail_presentation().lines
+    }
+
+    pub(crate) fn config_detail_presentation(&self) -> ConfigDetailPresentation {
+        let Some(config_state) = &self.config_state else {
+            return ConfigDetailPresentation::default();
+        };
         let section = config_state.selected_section;
-        let mut lines = render_config_detail_header(config_state);
+        let mut lines = ConfigDetailPresentation {
+            lines: render_config_detail_header(config_state),
+            ..ConfigDetailPresentation::default()
+        };
         if let Some(error) = config_state.save_error.as_deref() {
             let guidance = if config_save_error_target(error).is_some() {
                 "i Fix the highlighted field, then save again"
@@ -354,9 +415,7 @@ impl AppState {
 
     pub(super) fn handle_config_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.config_state = None;
-            self.should_quit = true;
-            return Ok(None);
+            return Ok(self.request_quit());
         }
         if self.mcp_import_modal_open() {
             self.handle_mcp_import_key_event(key);
@@ -1324,6 +1383,41 @@ impl AppState {
         self.last_notice = Some(format!("updated {}", field.label()));
     }
 
+    pub(super) fn focus_connection_list(&mut self) {
+        if self.config_state.is_none() {
+            self.open_config_panel();
+        }
+        if let Some(state) = self.config_state.as_mut() {
+            state.set_section(ConfigSection::Provider);
+            state.focus_field(ConfigField::ProviderName);
+        }
+        self.open_connection_picker(false);
+    }
+
+    pub(super) fn focus_connection_credential(
+        &mut self,
+        connection_id: &sigil_kernel::ConnectionId,
+    ) -> Result<bool> {
+        if self.config_state.is_none() {
+            self.open_config_panel();
+        }
+        let available = self.config_state.as_ref().is_some_and(|state| {
+            state
+                .draft
+                .connection_supports_authentication(connection_id)
+        });
+        if !available {
+            self.focus_connection_list();
+            return Ok(false);
+        }
+        if let Some(state) = self.config_state.as_mut() {
+            state.draft.select_connection(connection_id)?;
+            state.set_section(ConfigSection::Provider);
+            state.focus_field(ConfigField::ProviderApiKey);
+        }
+        Ok(true)
+    }
+
     pub(super) fn open_config_panel(&mut self) {
         let Some(root_config) = self.config_snapshot.as_ref().cloned() else {
             self.last_notice = Some("config is unavailable in setup mode".to_owned());
@@ -2197,6 +2291,7 @@ impl AppState {
                 &root_config,
             )?;
             self.apply_persisted_config_snapshot(&root_config);
+            self.clear_provider_recovery_after_config_save();
             self.runtime.connection_model_catalog_views = compatible_catalog_views;
             let saved_notice = match publish_outcome {
             ConfigPublishOutcome::Published if old_credential_cleanup_warning => {
@@ -2426,6 +2521,10 @@ impl AppState {
             state.draft.base_root_config = root_config.clone();
         }
         false
+    }
+
+    pub(crate) fn clear_provider_recovery_after_config_save(&mut self) {
+        self.runtime.provider_turn_recovery = None;
     }
 
     pub(crate) fn mark_config_draft_saved(&mut self, root_config: &RootConfig) {

@@ -22,7 +22,7 @@ use crate::{
         ApprovalAction, ApprovalChangeSetSummary, ApprovalDiffLine, ApprovalDiffLineKind,
         ApprovalFileRow, ApprovalModalView, PendingApproval,
     },
-    config_panel::ConfigSection,
+    config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
     runner::WorkerMessage,
     view_model::LivePanelViewModel,
@@ -1244,16 +1244,17 @@ fn render_setup_surface_with_checked_hit_areas(
         screen,
         &app.setup_lines(),
         None,
+        app.setup_presentation().focused_line,
         &crate::ui::theme::resolve_for_app(app).palette,
     )
     .body;
-    let hits = &surface
+    let hit_areas = surface
         .layout
         .setup_hit_areas
         .as_ref()
-        .expect("visible setup fields")
-        .fields;
-    assert!(!hits.is_empty());
+        .expect("visible setup controls");
+    let hits = &hit_areas.fields;
+    assert!(!hits.is_empty() || !hit_areas.actions.is_empty());
     assert!(hits.windows(2).all(|pair| pair[0].index < pair[1].index));
     for field in hits {
         assert!(field.area.width > 0 && field.area.height > 0);
@@ -1263,6 +1264,18 @@ fn render_setup_surface_with_checked_hit_areas(
                 assert_eq!(
                     surface.layout.hit_target(x, y),
                     HitTarget::SetupField { index: field.index }
+                );
+            }
+        }
+    }
+    for (action, area) in &hit_areas.actions {
+        assert!(area.width > 0 && area.height > 0);
+        assert_eq!(area.intersection(body), *area);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                assert_eq!(
+                    surface.layout.hit_target(x, y),
+                    HitTarget::SetupAction { action: *action }
                 );
             }
         }
@@ -1314,6 +1327,8 @@ fn setup_short_window_standard_fields_remain_visible_through_resize_and_navigati
     let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     for index in 1..6 {
+        let field = crate::setup::SetupField::from_index(index, false).expect("standard field");
+        app.setup_state_mut().expect("setup").selected_field = field;
         for height in [24, 12, 11, 24] {
             app.set_terminal_size(80, height);
             let (surface, rows) = render_setup_surface_with_checked_hit_areas(&app, 80, height)?;
@@ -1326,12 +1341,13 @@ fn setup_short_window_standard_fields_remain_visible_through_resize_and_navigati
                 .iter()
                 .find(|field| field.index == index)
                 .expect("selected field stays visible after resize");
-            let field = crate::setup::SetupField::from_index(index, false).expect("standard field");
-            assert!(rows[selected.area.y as usize].contains(field.label()));
+            let label = if field == crate::setup::SetupField::Save {
+                "save and start"
+            } else {
+                field.label()
+            };
+            assert!(rows[selected.area.y as usize].contains(label));
             assert_eq!(app.setup_state().expect("setup").selected_field, field);
-        }
-        if index < 5 {
-            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
         }
     }
     Ok(())
@@ -1346,7 +1362,7 @@ fn setup_short_window_custom_wrapped_field_is_clipped_and_clicks_its_original_in
     state.base_url = format!("https://provider.example.test/{}", "segment/".repeat(60));
     state.model = "custom-model".to_owned();
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    for index in 1..=4 {
+    for index in 1..=3 {
         app.set_terminal_size(80, 12);
         let (surface, _) = render_setup_surface_with_checked_hit_areas(&app, 80, 12)?;
         assert!(
@@ -1358,7 +1374,7 @@ fn setup_short_window_custom_wrapped_field_is_clipped_and_clicks_its_original_in
                 .iter()
                 .any(|field| field.index == index)
         );
-        if index < 4 {
+        if index < 3 {
             app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
         }
     }
@@ -1371,7 +1387,7 @@ fn setup_short_window_custom_wrapped_field_is_clipped_and_clicks_its_original_in
         .fields;
     assert_eq!(
         fields.iter().map(|field| field.index).collect::<Vec<_>>(),
-        [2, 3, 4]
+        [2, 3]
     );
     let endpoint = fields
         .iter()
@@ -1425,6 +1441,128 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
 }
 
 #[test]
+fn novice_config_surface_scrolls_to_the_actual_field_and_resets_manual_scroll() -> anyhow::Result<()>
+{
+    let mut config = test_config();
+    config.connections.insert(
+        "other-default-marker".to_owned(),
+        json!({
+            "label": "Other connection", "provider": "custom", "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:60433/v1", "credential": {"source": "none"}
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.composer.input = "/config".to_owned();
+    app.submit_input()?;
+    for (index, field) in ConfigField::fields_for_section(ConfigSection::Provider)
+        .iter()
+        .enumerate()
+    {
+        for (width, height) in [(80, 12), (80, 24), (160, 36)] {
+            app.set_terminal_size(width, height);
+            let surface = crate::surface_adapter::build_surface_model(
+                Rect::new(0, 0, width, height),
+                &app,
+                crate::surface::SurfaceState {
+                    frame_generation: 1,
+                    terminal_epoch: 1,
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+            let area = surface
+                .layout
+                .config_hit_areas
+                .as_ref()
+                .expect("config hits")
+                .fields
+                .iter()
+                .find(|area| area.index == index)
+                .expect("actual selected field must enter viewport")
+                .area;
+            let visible = (area.y..area.bottom())
+                .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+                .map(|point| terminal.backend().buffer()[point].symbol())
+                .collect::<String>();
+            assert!(
+                visible.contains(field.display_label()),
+                "{width}x{height} selected field: {visible}"
+            );
+            assert_eq!(
+                surface.layout.hit_target(area.x, area.y),
+                HitTarget::ConfigField { index }
+            );
+        }
+        if index == 3 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL))?;
+            assert!(app.config_detail_scroll().is_some());
+        }
+        if index + 1 < ConfigField::fields_for_section(ConfigSection::Provider).len() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+            assert!(app.config_detail_scroll().is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn novice_setup_mouse_actions_reject_stale_step_and_provider_frames() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app =
+        AppState::from_setup(temp.path().join("sigil.toml"), temp.path().to_owned(), None);
+    app.setup_state_mut().expect("setup").credential_source =
+        crate::setup::SetupCredentialSource::Environment;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.set_terminal_size(80, 24);
+    let (surface, _) = render_setup_surface_with_checked_hit_areas(&app, 80, 24)?;
+    let area = surface
+        .layout
+        .setup_hit_areas
+        .as_ref()
+        .expect("setup hits")
+        .actions
+        .iter()
+        .find(|(action, _)| *action == crate::setup::SetupAction::Continue)
+        .expect("Continue action")
+        .1;
+    let click = crate::mouse::MouseInput {
+        column: area.x,
+        row: area.y,
+        kind: crate::mouse::MouseInputKind::LeftDown,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(matches!(
+        app.handle_mouse_event(click, &surface.layout)?,
+        crate::mouse::AppMouseOutcome::Redraw
+    ));
+    assert_eq!(
+        app.setup_state().expect("setup").selected_field,
+        crate::setup::SetupField::Model
+    );
+    assert!(matches!(
+        app.handle_mouse_event(click, &surface.layout)?,
+        crate::mouse::AppMouseOutcome::Noop
+    ));
+    assert_eq!(
+        app.setup_state().expect("setup").selected_field,
+        crate::setup::SetupField::Model
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        app.handle_mouse_event(click, &surface.layout)?,
+        crate::mouse::AppMouseOutcome::Noop
+    ));
+    assert_eq!(
+        app.setup_state().expect("setup").provider_name,
+        "openai_responses"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/config".to_owned();
@@ -1452,8 +1590,7 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
 
     assert!(
         config_field_hit_areas(
-            &app,
-            &["Provider: deepseek".to_owned()],
+            &[(0, 0)],
             Rect::new(0, 0, 24, 3),
             1,
             std::slice::from_ref(&(0..1)),
@@ -1461,18 +1598,8 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
         .is_empty()
     );
     assert!(
-        config_field_hit_areas(
-            &app,
-            &[
-                "title".to_owned(),
-                "provider".to_owned(),
-                "Provider: deepseek".to_owned(),
-            ],
-            Rect::new(0, 0, 24, 1),
-            0,
-            &[0..1, 1..2, 2..3],
-        )
-        .is_empty()
+        config_field_hit_areas(&[(0, 2)], Rect::new(0, 0, 24, 1), 0, &[0..1, 1..2, 2..3],)
+            .is_empty()
     );
     assert_eq!(
         config_footer_action_hit_areas(Rect::new(0, 0, 1, 1), &app).len(),
@@ -1496,7 +1623,7 @@ fn config_wrapped_logical_rows_and_rendered_tab_window_share_the_hit_map() -> an
     app.select_config_section_for_test(ConfigSection::Provider);
     let visual = config_visual_rows(&logical, 38, false, &super::super::theme::default_palette());
     let viewport = Rect::new(4, 5, 38, 20);
-    let hits = config_field_hit_areas(&app, &logical, viewport, 0, &visual.logical_ranges);
+    let hits = config_field_hit_areas(&[(1, 3)], viewport, 0, &visual.logical_ranges);
     let model_index = ConfigField::fields_for_section(ConfigSection::Provider)
         .iter()
         .position(|field| *field == ConfigField::ProviderModel)
@@ -1511,8 +1638,7 @@ fn config_wrapped_logical_rows_and_rendered_tab_window_share_the_hit_map() -> an
         viewport.y + visual.logical_ranges[3].start as u16
     );
     let clipped = config_field_hit_areas(
-        &app,
-        &logical,
+        &[(1, 3)],
         Rect::new(4, 5, 38, 3),
         visual.logical_ranges[3].start,
         &visual.logical_ranges,

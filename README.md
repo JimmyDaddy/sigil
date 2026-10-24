@@ -60,7 +60,7 @@ cd /path/to/your/project
 sigil
 ```
 
-Quick Setup opens when configuration is missing or invalid. No values are reused or migrated from an invalid file: Desktop Settings and the TUI offer an explicit reviewed replacement that is published only while the live file is still invalid. Choose a provider and model, add authentication, and run `sigil doctor` if anything looks incomplete. The [Quickstart](docs/en/quickstart.md) takes you from a first read-only task to a small reviewed change.
+Quick Setup opens when configuration is missing or invalid. No values are reused or migrated from an invalid file: Desktop Settings and the TUI offer an explicit reviewed replacement that is published only while the live file is still invalid. TUI guides you through Provider, Connection, Model, and Review; optional limits stay out of the main steps. Review before saving and trusting the folder. Run `sigil doctor` if anything looks incomplete. The [Quickstart](docs/en/quickstart.md) takes you from a first read-only task to a small reviewed change.
 
 Prefer a native app? The [GitHub prerelease](https://github.com/JimmyDaddy/sigil/releases) provides signed and Apple-notarized macOS DMGs for Apple Silicon and Intel. See [Installation](docs/en/installation.md) for the exact asset names and update path.
 

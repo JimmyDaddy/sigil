@@ -30,7 +30,9 @@ pub(crate) struct SetupSurface {
     pub trust_gate: bool,
     pub workspace_trust: Option<WorkspaceTrustSurface>,
     pub lines: Vec<String>,
-    pub field_line_indices: Vec<usize>,
+    pub field_line_indices: Vec<(usize, usize)>,
+    pub action_line_indices: Vec<(crate::setup::SetupAction, usize)>,
+    pub focused_line: Option<usize>,
     pub recovery: Option<SetupRecoverySurface>,
 }
 
@@ -54,6 +56,7 @@ pub(crate) struct ConfigSurface {
     /// A bounded, display-only file label.  The renderer never receives the authority path.
     pub file_label: String,
     pub detail_lines: Vec<String>,
+    pub focused_line: Option<usize>,
     pub footer_hint: String,
     pub selected_footer_action: Option<String>,
     pub footer_actions: Vec<ConfigActionSurface>,
@@ -100,12 +103,21 @@ pub(crate) struct SessionActionsSurface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModalInputSurface {
+    pub label: String,
+    pub value: String,
+    pub cursor: usize,
+    pub selection: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModalSurface {
     pub visible: bool,
     pub checkpoint_restore_visible: bool,
     pub title: Option<String>,
     pub lines: Vec<String>,
     pub input_cursor: Option<(String, usize, usize)>,
+    pub input: Option<ModalInputSurface>,
     pub config_mode: bool,
     pub session_modal_actions: Vec<(SessionModalAction, String)>,
     pub keyboard_help: Option<KeyboardHelpSurface>,

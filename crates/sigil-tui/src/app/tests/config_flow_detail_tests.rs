@@ -8,6 +8,89 @@ fn config_for_workspace(workspace_root: &std::path::Path) -> RootConfig {
 }
 
 #[test]
+fn novice_exact_credential_navigation_preserves_default_siblings_and_unsaved_edits() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    let mut config = config_for_workspace(temp.path());
+    config.connections.insert(
+        "other".to_owned(),
+        serde_json::json!({
+            "label": "Other", "provider": "custom", "protocol": "chat_completions",
+            "base_url": "https://other.example.test/v1",
+            "credential": { "source": "environment", "name": "SIGIL_OPENAI_COMPATIBLE_API_KEY" }
+        }),
+    );
+    config.connections.insert(
+        "local".to_owned(),
+        serde_json::json!({
+            "label": "Local", "provider": "custom", "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:60433/v1", "credential": { "source": "none" }
+        }),
+    );
+    assert!(
+        load_provider_connections(&config).issues.is_empty(),
+        "fixture connections must satisfy the production credential allowlist"
+    );
+    let mut app = AppState::from_root_config(&path, &config);
+    app.open_config_panel();
+    let state = app.config_state.as_mut().expect("config");
+    let original_id = state.draft.selected_connection_id.clone();
+    state.draft.provider_model = "unsaved-original-model".to_owned();
+    state.draft.capture_selected_connection()?;
+    let original_default = state.draft.default_model.clone();
+    state.mark_edited();
+    let binding = state.save_binding();
+    assert!(app.focus_connection_credential(&sigil_kernel::ConnectionId::new("other")?)?);
+    assert!(
+        !app.has_modal(),
+        "navigation must not invent a credential submission"
+    );
+    let state = app.config_state.as_ref().expect("config");
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
+    assert_eq!(state.draft.selected_connection_id.as_str(), "other");
+    assert_eq!(state.draft.default_model, original_default);
+    assert_eq!(
+        state.draft.provider_base_url,
+        "https://other.example.test/v1"
+    );
+    assert!(state.dirty);
+    assert_eq!(state.save_binding(), binding);
+    assert!(
+        !path.exists(),
+        "focusing a repair entry must not publish the draft"
+    );
+    assert!(app.focus_connection_credential(&original_id)?);
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config")
+            .draft
+            .provider_model,
+        "unsaved-original-model"
+    );
+    assert!(!app.focus_connection_credential(&sigil_kernel::ConnectionId::new("local")?)?);
+    assert_eq!(app.modal_title(), Some("Connections"));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config")
+            .draft
+            .selected_connection_id,
+        original_id
+    );
+    assert!(!app.focus_connection_credential(&sigil_kernel::ConnectionId::new("deleted")?)?);
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config")
+            .draft
+            .default_model,
+        original_default
+    );
+    Ok(())
+}
+
+#[test]
 fn core_ui_preserves_editable_configuration_without_discovering_optional_modules() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = config_for_workspace(temp.path());
@@ -1016,6 +1099,7 @@ fn config_private_helpers_cover_missing_snapshot_and_save_guards() -> anyhow::Re
     app.modal_state = Some(ModalState::TextInput(TextInputState {
         target: TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl),
         buffer: "https://api.deepseek.com".to_owned(),
+        editor: super::super::text_input_editor::TextInputEditor::new("https://api.deepseek.com"),
     }));
     assert_eq!(app.config_editing_field_label(), Some("base_url"));
 

@@ -3288,12 +3288,12 @@ where
                 ..
             }) => match candidate {
                 Some(candidate) => {
-                    let notice = format!(
-                        "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
-                    );
-                    let block = (queue_id, notice.clone());
+                    let block = (queue_id.clone(), format!("fallback:{reason}"));
                     if state.session.last_queued_pre_turn_block.as_ref() != Some(&block) {
-                        let _ = message_tx.send(WorkerMessage::Notice(notice));
+                        let _ = message_tx.send(WorkerMessage::QueuedPreTurnFallback {
+                            queue_id: queue_id.clone(),
+                            reason,
+                        });
                     }
                     state.session.last_queued_pre_turn_block = Some(block);
                     Some(*candidate)

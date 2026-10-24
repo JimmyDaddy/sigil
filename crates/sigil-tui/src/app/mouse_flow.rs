@@ -29,6 +29,17 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.background_mouse_blocker().is_some() || layout.background_mouse_blocker.is_some() {
+            return Ok(crate::mouse::AppMouseOutcome::Noop);
+        }
+        if self.is_setup_mode()
+            && self.setup_recovery_view().is_none()
+            && layout.setup_hit_areas.as_ref().is_some_and(|areas| {
+                areas.frame_identity.as_ref() != self.setup_frame_identity().as_ref()
+            })
+        {
+            return Ok(crate::mouse::AppMouseOutcome::Noop);
+        }
         let recovery_frame = layout
             .setup_hit_areas
             .as_ref()
@@ -292,6 +303,11 @@ impl AppState {
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
         match target {
+            crate::mouse::HitTarget::SetupAction { action }
+                if self.is_setup_mode() && !self.has_modal() =>
+            {
+                Ok(mouse_action_outcome(self.handle_setup_action(action)?))
+            }
             crate::mouse::HitTarget::SetupField { index } if self.is_setup_mode() => {
                 self.handle_setup_mouse_field(index)
             }
@@ -692,6 +708,7 @@ impl AppState {
             | crate::mouse::HitTarget::ApprovalHunkNext
             | crate::mouse::HitTarget::ApprovalDiffViewToggle
             | crate::mouse::HitTarget::ApprovalMetadataToggle
+            | crate::mouse::HitTarget::SetupAction { .. }
             | crate::mouse::HitTarget::SetupField { .. }
             | crate::mouse::HitTarget::SetupRecoveryAction { .. }
             | crate::mouse::HitTarget::ConfigAdvancedToggle
@@ -752,6 +769,17 @@ impl AppState {
     }
 
     fn handle_setup_mouse_field(&mut self, index: usize) -> Result<crate::mouse::AppMouseOutcome> {
+        if !self
+            .setup_presentation()
+            .fields
+            .iter()
+            .any(|(available, _)| *available == index)
+        {
+            return Ok(crate::mouse::AppMouseOutcome::Noop);
+        }
+        if let Some(state) = self.setup_state.as_mut() {
+            state.selected_action = None;
+        }
         if self
             .setup_state
             .as_ref()

@@ -953,6 +953,9 @@ fn footer_run_label(app: &AppState) -> String {
 }
 
 fn footer_hints(app: &AppState) -> String {
+    if app.quit_confirmation_open() {
+        return "Enter/Esc keep editing · Ctrl-D discard and quit".to_owned();
+    }
     let queue = app.composer_queue_summary();
     if app.selected_timeline_text().is_some() {
         return "Ctrl-C copy selection · Esc clear selection · F1 help".to_owned();
@@ -1008,7 +1011,8 @@ fn footer_hints(app: &AppState) -> String {
     if let Some(pending) = &app.approval.pending {
         if !pending.actions_available() {
             let state = match &pending.presentation_state {
-                crate::app::ApprovalPresentationState::Pending => unreachable!(),
+                crate::app::ApprovalPresentationState::Pending
+                | crate::app::ApprovalPresentationState::Rejected { .. } => unreachable!(),
                 crate::app::ApprovalPresentationState::DecisionAccepted { .. } => {
                     "approval decision accepted; resuming run"
                 }
@@ -1019,6 +1023,10 @@ fn footer_hints(app: &AppState) -> String {
             return format!("{state} · Esc input");
         }
         if !app.approval_review_open() {
+            if pending.presentation_state.delivery_feedback().is_some() {
+                return "Decision not delivered · Shift-Tab review and retry · Ctrl-C cancel"
+                    .to_owned();
+            }
             if app.active_task_pause_request().is_ok() {
                 return "F5 pause · Shift-Tab review · Ctrl-C cancel · Enter queue".to_owned();
             }
@@ -1026,6 +1034,9 @@ fn footer_hints(app: &AppState) -> String {
         }
         if app.approval.metadata_focused {
             return String::new();
+        }
+        if pending.presentation_state.delivery_feedback().is_some() {
+            return "Decision not delivered · Enter retry · Tab switch · Esc input".to_owned();
         }
         return "Esc input · Y allow once · N deny · Tab switch · Enter select · M details"
             .to_owned();

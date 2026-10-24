@@ -1,4 +1,4 @@
-use super::super::modal_flow::ModalOutcome;
+use super::super::modal_flow::{ModalOutcome, SecretInputTarget, TextInputTarget};
 use super::*;
 use crate::app::{UserInputDraftValue, UserInputFormAction, UserInputFormSource};
 use anyhow::{Context, bail};
@@ -753,7 +753,7 @@ fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
 
     assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("value: |"));
+    assert!(lines.contains("value: "));
     Ok(())
 }
 
@@ -775,8 +775,8 @@ fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
     let detail = app.modal_lines().join("\n");
     assert!(detail.contains("Provider API base URL"));
-    assert!(detail.contains("key: base_url"));
-    assert!(detail.contains("value: https://api.deepseek.comx|"));
+    assert!(!detail.contains("key: base_url"));
+    assert!(detail.contains("value: https://api.deepseek.comx"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(!app.config_is_editing());
@@ -786,6 +786,95 @@ fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
         .expect("config state should still exist");
     assert_eq!(state.draft.provider_base_url, "https://api.deepseek.comx");
     assert!(state.dirty);
+    Ok(())
+}
+
+#[test]
+fn novice_text_modal_home_selection_paste_undo_and_cancel_preserve_target_and_composer()
+-> Result<()> {
+    let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
+    app.composer.input = "conversation draft".to_owned();
+    let original = app.setup_state.as_ref().expect("setup").model.clone();
+    app.open_text_input(TextInputTarget::SetupModel, &original);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))?;
+    assert_eq!(
+        app.modal_input_view().expect("input").value,
+        format!("X{original}")
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT))?;
+    app.handle_paste_text("中文\n-model");
+    assert_eq!(app.modal_input_view().expect("input").value, "X中文-model");
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
+    assert_eq!(
+        app.modal_input_view().expect("input").value,
+        format!("X{original}")
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.modal_input_view().expect("input").value, "X中文-model");
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert_eq!(app.setup_state.as_ref().expect("setup").model, original);
+    assert_eq!(app.composer.input, "conversation draft");
+
+    app.open_text_input(TextInputTarget::SetupModel, &original);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").model,
+        format!("X{original}")
+    );
+    assert_eq!(app.composer.input, "conversation draft");
+    Ok(())
+}
+
+#[test]
+fn novice_token_and_secret_modals_edit_at_cursor_without_exposing_secret_history() -> Result<()> {
+    let mut app = AppState::from_setup("sigil.toml".into(), ".".into(), None);
+    app.open_text_input(TextInputTarget::SetupContextWindow, "128K");
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+    app.handle_paste_text("a2!\n");
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state
+            .as_ref()
+            .expect("setup")
+            .context_window_tokens,
+        "228K"
+    );
+
+    let original = SecretString::new("secret中old");
+    app.open_secret_input(SecretInputTarget::SetupApiKey, &original);
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT))?;
+    app.handle_paste_text("replacement新");
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
+    let Some(ModalState::SecretInput(state)) = app.modal_state.as_ref() else {
+        panic!("secret input")
+    };
+    assert_eq!(state.buffer.expose_secret(), "replacement新");
+    assert!(!format!("{state:?}").contains("replacement"));
+    let projected = format!(
+        "{:?}\n{}",
+        app.modal_input_view(),
+        app.modal_lines().join("\n")
+    );
+    assert!(!projected.contains("secret中old"));
+    assert!(!projected.contains("replacement"));
+    assert_eq!(
+        app.modal_input_view().expect("masked input").value,
+        "*".repeat(12)
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state
+            .as_ref()
+            .expect("setup")
+            .api_key
+            .expose_secret(),
+        "replacement新"
+    );
     Ok(())
 }
 
@@ -946,6 +1035,11 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(!config_path.exists());
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     let Some(AppAction::SetupCompleted {
@@ -1017,13 +1111,13 @@ fn text_input_modal_rejects_invalid_characters_for_numeric_fields() {
         ModalOutcome::None
     ));
     assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
-    assert!(app.modal_lines().join("\n").contains("value: |"));
+    assert!(app.modal_lines().join("\n").contains("value: "));
 
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
         ModalOutcome::None
     ));
-    assert!(app.modal_lines().join("\n").contains("value: 4|"));
+    assert!(app.modal_lines().join("\n").contains("value: 4"));
 }
 
 #[test]

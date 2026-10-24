@@ -20,15 +20,66 @@ use super::{
     modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
 };
 use crate::setup::{
-    SETUP_PROVIDER_ORDER, SetupCredentialSource, SetupRecoveryAction, SetupRecoveryFrameIdentity,
-    StartupBlocker,
+    SETUP_PROVIDER_ORDER, SetupAction, SetupCredentialSource, SetupFrameIdentity,
+    SetupRecoveryAction, SetupRecoveryFrameIdentity, SetupStep, StartupBlocker,
 };
 use crate::token_units::{
     MAX_OUTPUT_TOKEN_PRESETS, cycle_context_window_preset, cycle_token_preset,
     is_token_count_character, parse_optional_token_count, token_count_display,
 };
 
+#[derive(Debug, Default)]
+pub(crate) struct SetupPresentation {
+    pub(crate) lines: Vec<String>,
+    pub(crate) fields: Vec<(usize, usize)>,
+    pub(crate) actions: Vec<(SetupAction, usize)>,
+    pub(crate) focused_line: Option<usize>,
+}
+
+impl SetupPresentation {
+    fn field(
+        &mut self,
+        state: &SetupState,
+        field: SetupField,
+        label: &str,
+        value: &str,
+        hint: Option<&str>,
+    ) {
+        let row = self.lines.len();
+        let selected = state.selected_action.is_none() && state.selected_field == field;
+        self.fields.push((field.index(state.is_custom()), row));
+        if selected {
+            self.focused_line = Some(row);
+        }
+        let mut line = render_setup_value_row(field, state.selected_field, label, value, hint);
+        if !selected && line.starts_with('>') {
+            line.replace_range(..1, " ");
+        }
+        self.lines.push(line);
+    }
+    fn action(&mut self, state: &SetupState, action: SetupAction, label: &str) {
+        let row = self.lines.len();
+        let selected = state.selected_action == Some(action);
+        self.actions.push((action, row));
+        if selected {
+            self.focused_line = Some(row);
+        }
+        self.lines
+            .push(format!("{} [{label}]", if selected { ">" } else { " " }));
+    }
+}
+
 impl AppState {
+    pub(crate) fn setup_frame_identity(&self) -> Option<SetupFrameIdentity> {
+        let state = self.setup_state.as_ref()?;
+        (!state.startup_recovery_visible()).then(|| SetupFrameIdentity {
+            step: state.selected_field.step(),
+            provider_name: state.provider_name.clone(),
+            draft_revision: state.draft_revision,
+            model_options_open: state.model_options_open,
+        })
+    }
+
     pub(crate) fn setup_recovery_view(&self) -> Option<crate::surface::SetupRecoverySurface> {
         let state = self.setup_state.as_ref()?;
         state
@@ -122,163 +173,267 @@ impl AppState {
         }
     }
 
-    pub(crate) fn setup_field_line_indices(&self) -> Vec<usize> {
-        match self.setup_state.as_ref() {
-            Some(state) if state.startup_recovery_visible() => Vec::new(),
-            Some(state) if state.selected_field == SetupField::Provider => {
-                (3..3 + SETUP_PROVIDER_ORDER.len()).collect()
-            }
-            Some(state) if state.is_custom() => (3..=10).collect(),
-            Some(_) => (3..=8).collect(),
-            None => Vec::new(),
-        }
+    #[cfg(test)]
+    pub(crate) fn setup_field_line_indices(&self) -> Vec<(usize, usize)> {
+        self.setup_presentation().fields
     }
 
     pub fn setup_lines(&self) -> Vec<String> {
+        self.setup_presentation().lines
+    }
+
+    pub(crate) fn setup_presentation(&self) -> SetupPresentation {
         let Some(state) = &self.setup_state else {
-            return Vec::new();
+            return SetupPresentation::default();
         };
-
         if state.startup_recovery_visible() {
-            return setup_startup_recovery_lines(state);
-        }
-
-        if state.selected_field == SetupField::Provider {
-            let mut lines = if state.startup_editing_connection {
-                vec![
-                    "Edit connection".to_owned(),
-                    "Choose a provider · Esc returns to Startup".to_owned(),
-                    String::new(),
-                ]
-            } else {
-                vec![
-                    "Set up a model connection".to_owned(),
-                    "Step 1 of 4 · Choose the provider or endpoint you want to connect.".to_owned(),
-                    String::new(),
-                ]
+            return SetupPresentation {
+                lines: setup_startup_recovery_lines(state),
+                ..SetupPresentation::default()
             };
-            for (index, provider_name) in SETUP_PROVIDER_ORDER.iter().enumerate() {
-                let marker = if index == state.provider_index() {
-                    ">"
-                } else {
-                    " "
-                };
-                lines.push(format!(
-                    "{marker} {:<20} {}",
-                    SetupState::provider_choice_label(provider_name),
-                    SetupState::provider_choice_auth_summary(provider_name)
+        }
+        let mut view = SetupPresentation::default();
+        let step = state.selected_field.step();
+        let (number, title) = match step {
+            SetupStep::Provider => (1, "Choose a provider"),
+            SetupStep::Connection => (2, "Connect your account"),
+            SetupStep::Model => (3, "Choose a model"),
+            SetupStep::Review => (4, "Ready to start"),
+        };
+        view.lines
+            .extend([format!("{number}/4 · {title}"), String::new()]);
+        if step == SetupStep::Provider {
+            for (index, name) in SETUP_PROVIDER_ORDER.iter().enumerate() {
+                let row = view.lines.len();
+                let selected = index == state.provider_index();
+                view.fields.push((index, row));
+                if selected {
+                    view.focused_line = Some(row);
+                }
+                view.lines.push(format!(
+                    "{} {}",
+                    if selected { ">" } else { " " },
+                    SetupState::provider_choice_label(name)
                 ));
             }
-            lines.extend([
-                String::new(),
-                "Up/Down choose · Enter continue · Ctrl-C quit".to_owned(),
-            ]);
-            if !state.startup_editing_connection {
-                append_setup_startup_recovery_lines(&mut lines, state);
+            view.lines.push(SetupState::provider_choice_auth_summary(
+                &state.provider_name,
+            ));
+        } else {
+            view.lines
+                .push(format!("Provider: {}", state.provider_label()));
+            match step {
+                SetupStep::Connection => {
+                    if state.is_custom() {
+                        view.field(
+                            state,
+                            SetupField::Protocol,
+                            "protocol",
+                            state.protocol.label(),
+                            Some("←/→ change"),
+                        );
+                        view.field(
+                            state,
+                            SetupField::Endpoint,
+                            "endpoint",
+                            &state.base_url,
+                            Some("Enter edit"),
+                        );
+                    }
+                    view.field(
+                        state,
+                        SetupField::ApiKey,
+                        "authentication",
+                        &state.auth_summary(),
+                        Some("←/→ source · Enter edit"),
+                    );
+                    view.action(state, SetupAction::Continue, "Continue to model");
+                    view.action(state, SetupAction::Back, "Back");
+                }
+                SetupStep::Model => {
+                    view.field(
+                        state,
+                        SetupField::Model,
+                        "model",
+                        &state.model,
+                        Some("Enter choose · type ID"),
+                    );
+                    if state.model_options_open
+                        || matches!(
+                            state.selected_field,
+                            SetupField::ContextWindow | SetupField::MaxOutputTokens
+                        )
+                    {
+                        view.field(
+                            state,
+                            SetupField::ContextWindow,
+                            "context window",
+                            &token_count_display(&state.context_window_tokens, "automatic"),
+                            Some("Enter edit"),
+                        );
+                        view.field(
+                            state,
+                            SetupField::MaxOutputTokens,
+                            "max output tokens",
+                            &token_count_display(&state.max_output_tokens, "automatic"),
+                            Some("Enter edit"),
+                        );
+                    }
+                    view.action(
+                        state,
+                        SetupAction::Options,
+                        if state.model_options_open {
+                            "Hide model options"
+                        } else {
+                            "Model options"
+                        },
+                    );
+                    view.action(state, SetupAction::Continue, "Review and start");
+                    view.action(state, SetupAction::Back, "Back");
+                }
+                SetupStep::Review => {
+                    view.lines.extend([
+                        format!("Model: {}", state.model),
+                        format!("Authentication: {}", state.auth_summary()),
+                    ]);
+                    let label = if state.existing_config_repair_required() {
+                        "Replace invalid config and start"
+                    } else if state.valid_config_boot_retry_required() {
+                        "Save changes and retry start"
+                    } else {
+                        "Trust this folder, save and start"
+                    };
+                    let row = view.lines.len();
+                    view.fields
+                        .push((SetupField::Save.index(state.is_custom()), row));
+                    if state.selected_action.is_none() {
+                        view.focused_line = Some(row);
+                    }
+                    view.lines.push(render_setup_action_row(
+                        SetupField::Save,
+                        if state.selected_action.is_none() {
+                            SetupField::Save
+                        } else {
+                            SetupField::Model
+                        },
+                        label,
+                    ));
+                    view.action(state, SetupAction::Back, "Back to model");
+                }
+                SetupStep::Provider => unreachable!("provider is rendered separately"),
             }
-            append_setup_save_error_lines(&mut lines, state);
-            return lines;
         }
-
-        let (title, description) = if state.startup_editing_connection {
-            (
-                "Edit connection",
-                "Esc returns to Startup. Saving still checks the original configuration snapshot.",
-            )
-        } else {
-            (
-                "Set up a model connection",
-                "Steps 2–4 · Authenticate, choose a model, then review and start.",
-            )
-        };
-        let mut lines = vec![
-            title.to_owned(),
-            description.to_owned(),
-            String::new(),
-            render_setup_value_row(
-                SetupField::Provider,
-                state.selected_field,
-                "provider",
-                state.provider_label(),
-                Some("Enter change"),
-            ),
-        ];
-        if state.is_custom() {
-            lines.push(render_setup_value_row(
-                SetupField::Protocol,
-                state.selected_field,
-                "protocol",
-                state.protocol.label(),
-                Some("Left/Right switch"),
-            ));
-            lines.push(render_setup_value_row(
-                SetupField::Endpoint,
-                state.selected_field,
-                "endpoint",
-                &state.base_url,
-                Some("Enter edit"),
-            ));
-        }
-        let save_label = if state.save_error.is_some() {
-            "retry save and start"
-        } else if state.existing_config_repair_required() {
-            "review, replace invalid config and start"
-        } else if state.valid_config_boot_retry_required()
-            && state.startup_connection_changes_unsaved()
-        {
-            "save changes and retry"
-        } else if state.authority_boot_retry_required() {
-            "Retry Start"
-        } else if state.valid_config_boot_retry_required() {
-            "review, save changes and retry start"
-        } else {
-            "review, trust folder, save and start"
-        };
-        lines.extend([
-            render_setup_value_row(
-                SetupField::ApiKey,
-                state.selected_field,
-                "authentication",
-                &state.auth_summary(),
-                Some("Left/Right choose · Enter continue"),
-            ),
-            render_setup_value_row(
-                SetupField::Model,
-                state.selected_field,
-                "model",
-                &state.model,
-                Some("Enter choose · type model ID"),
-            ),
-            render_setup_value_row(
-                SetupField::ContextWindow,
-                state.selected_field,
-                "context window",
-                &token_count_display(&state.context_window_tokens, "automatic"),
-                Some("Left/Right preset · Enter edit"),
-            ),
-            render_setup_value_row(
-                SetupField::MaxOutputTokens,
-                state.selected_field,
-                "max output tokens",
-                &token_count_display(&state.max_output_tokens, "automatic"),
-                Some("Left/Right preset · Enter edit"),
-            ),
-            render_setup_action_row(SetupField::Save, state.selected_field, save_label),
-        ]);
-        append_setup_save_error_lines(&mut lines, state);
-        if state.credential_source == SetupCredentialSource::SecureStore {
-            lines.push(format!("staged credential: {}", state.masked_api_key()));
-        }
-        if !state.startup_editing_connection {
-            append_setup_startup_recovery_lines(&mut lines, state);
-        }
-
-        lines.push(String::new());
-        lines.push(
-            "Up/Down move · Enter continue · Left/Right change option · Ctrl-S save · Ctrl-C quit"
-                .to_owned(),
+        append_setup_startup_recovery_lines(&mut view.lines, state);
+        append_setup_save_error_lines(&mut view.lines, state);
+        view.lines.push(String::new());
+        view.lines.push(
+            if state.startup_editing_connection {
+                "↑/↓ move · Enter choose · Esc Startup · Ctrl-S review"
+            } else if step == SetupStep::Provider {
+                "↑/↓ choose · Enter continue · Ctrl-C quit"
+            } else if step == SetupStep::Review {
+                "↑/↓ move · Enter start · Esc back · Ctrl-C quit"
+            } else {
+                "↑/↓ move · Enter choose · Esc back · Ctrl-S review"
+            }
+            .to_owned(),
         );
-        lines
+        view
+    }
+
+    fn move_setup_focus(&mut self, forward: bool) {
+        let view = self.setup_presentation();
+        let Some(state) = self.setup_state.as_mut() else {
+            return;
+        };
+        if state.selected_field == SetupField::Provider {
+            state.selected_field = if state.is_custom() {
+                SetupField::Protocol
+            } else {
+                SetupField::ApiKey
+            };
+            state.selected_action = None;
+            return;
+        }
+        let mut targets = view
+            .fields
+            .into_iter()
+            .map(|(index, row)| (row, Some(index), None))
+            .chain(
+                view.actions
+                    .into_iter()
+                    .map(|(action, row)| (row, None, Some(action))),
+            )
+            .collect::<Vec<_>>();
+        targets.sort_by_key(|(row, _, _)| *row);
+        let current = targets
+            .iter()
+            .position(|(_, field, action)| {
+                *action == state.selected_action
+                    && (action.is_some()
+                        || *field == Some(state.selected_field.index(state.is_custom())))
+            })
+            .unwrap_or(0);
+        if targets.is_empty() {
+            return;
+        }
+        let next = if forward {
+            (current + 1) % targets.len()
+        } else {
+            (current + targets.len() - 1) % targets.len()
+        };
+        let (_, field, action) = targets[next];
+        state.selected_action = action;
+        if let Some(index) = field {
+            state.selected_field =
+                SetupField::from_index(index, state.is_custom()).expect("typed setup field");
+        }
+    }
+
+    pub(super) fn handle_setup_action(&mut self, action: SetupAction) -> Result<Option<AppAction>> {
+        if !self
+            .setup_presentation()
+            .actions
+            .iter()
+            .any(|(available, _)| *available == action)
+        {
+            return Ok(None);
+        }
+        let Some(state) = self.setup_state.as_mut() else {
+            return Ok(None);
+        };
+        match action {
+            SetupAction::Continue => {
+                let error = if state.selected_field.step() == SetupStep::Connection {
+                    validate_setup_connection(state)
+                } else {
+                    validate_setup_state(state)
+                };
+                if let Some(error) = error {
+                    state.save_error = Some(error);
+                    return Ok(None);
+                }
+                state.selected_field = if state.selected_field.step() == SetupStep::Connection {
+                    SetupField::Model
+                } else {
+                    SetupField::Save
+                };
+            }
+            SetupAction::Back => {
+                state.selected_field = match state.selected_field.step() {
+                    SetupStep::Provider | SetupStep::Connection => SetupField::Provider,
+                    SetupStep::Model => SetupField::ApiKey,
+                    SetupStep::Review => SetupField::Model,
+                };
+            }
+            SetupAction::Options => {
+                state.model_options_open = !state.model_options_open;
+                state.selected_field = SetupField::Model;
+            }
+        }
+        state.selected_action = None;
+        state.save_error = None;
+        Ok(None)
     }
 
     pub(super) fn handle_setup_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
@@ -297,7 +452,11 @@ impl AppState {
             if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 let outcome = self.submit_modal();
                 self.apply_modal_outcome(outcome);
-                return self.complete_setup();
+                if let Some(state) = self.setup_state.as_mut() {
+                    state.selected_field = SetupField::Save;
+                    state.selected_action = None;
+                }
+                return Ok(None);
             }
             let outcome = self.handle_modal_key_event(key);
             self.apply_modal_outcome(outcome);
@@ -359,34 +518,51 @@ impl AppState {
             return Ok(None);
         }
 
-        let Some((selected_field, custom)) = self
-            .setup_state
-            .as_ref()
-            .map(|state| (state.selected_field, state.is_custom()))
+        let Some(selected_field) = self.setup_state.as_ref().map(|state| state.selected_field)
         else {
             return Ok(None);
         };
 
+        let action = self
+            .setup_state
+            .as_ref()
+            .and_then(|state| state.selected_action);
+        if key.code == KeyCode::Enter
+            && let Some(action) = action
+        {
+            return self.handle_setup_action(action);
+        }
+        if key.code == KeyCode::Esc {
+            return self.handle_setup_action(SetupAction::Back);
+        }
+        let review_shortcut =
+            key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if action.is_some()
+            && !matches!(
+                key.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down
+            )
+            && !review_shortcut
+        {
+            return Ok(None);
+        }
         match key.code {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.complete_setup();
+                if selected_field == SetupField::Save {
+                    return self.complete_setup();
+                }
+                if let Some(state) = self.setup_state.as_mut() {
+                    state.selected_field = SetupField::Save;
+                    state.selected_action = None;
+                }
+                return Ok(None);
             }
             KeyCode::Tab => {
-                let state = self
-                    .setup_state
-                    .as_mut()
-                    .expect("setup state was checked before setup key handling");
-                state.selected_field = state.selected_field.next(custom);
-                self.last_notice = Some(format!("setup field {}", state.selected_field.label()));
+                self.move_setup_focus(true);
                 return Ok(None);
             }
             KeyCode::BackTab => {
-                let state = self
-                    .setup_state
-                    .as_mut()
-                    .expect("setup state was checked before setup key handling");
-                state.selected_field = state.selected_field.previous(custom);
-                self.last_notice = Some(format!("setup field {}", state.selected_field.label()));
+                self.move_setup_focus(false);
                 return Ok(None);
             }
             KeyCode::Down | KeyCode::Right if selected_field == SetupField::Provider => {
@@ -412,6 +588,7 @@ impl AppState {
                     .setup_state
                     .as_mut()
                     .expect("setup state was checked before setup key handling");
+                state.selected_action = None;
                 state.selected_field = if state.is_custom() {
                     SetupField::Protocol
                 } else {
@@ -421,21 +598,11 @@ impl AppState {
                 return Ok(None);
             }
             KeyCode::Down => {
-                let state = self
-                    .setup_state
-                    .as_mut()
-                    .expect("setup state was checked before setup key handling");
-                state.selected_field = state.selected_field.next(custom);
-                self.last_notice = Some(format!("setup field {}", state.selected_field.label()));
+                self.move_setup_focus(true);
                 return Ok(None);
             }
             KeyCode::Up => {
-                let state = self
-                    .setup_state
-                    .as_mut()
-                    .expect("setup state was checked before setup key handling");
-                state.selected_field = state.selected_field.previous(custom);
-                self.last_notice = Some(format!("setup field {}", state.selected_field.label()));
+                self.move_setup_focus(false);
                 return Ok(None);
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Enter
@@ -503,16 +670,7 @@ impl AppState {
                     let current = state.api_key.clone();
                     self.open_secret_input(SecretInputTarget::SetupApiKey, &current);
                 } else {
-                    let custom = state.is_custom();
-                    let state = self
-                        .setup_state
-                        .as_mut()
-                        .expect("setup state was checked before setup key handling");
-                    state.selected_field = state.selected_field.next(custom);
-                    self.last_notice = Some(format!(
-                        "authentication confirmed: {}",
-                        state.credential_source.label()
-                    ));
+                    return self.handle_setup_action(SetupAction::Continue);
                 }
                 return Ok(None);
             }
@@ -597,7 +755,7 @@ impl AppState {
         let Some(state) = self.setup_state.as_mut() else {
             return;
         };
-        if state.startup_recovery_visible() {
+        if state.startup_recovery_visible() || state.selected_action.is_some() {
             return;
         }
         let value = text
@@ -892,19 +1050,32 @@ fn render_setup_action_row(field: SetupField, selected_field: SetupField, label:
 }
 
 pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
+    if let Some(error) = validate_setup_connection(state) {
+        return Some(error);
+    }
+    if state.model.trim().is_empty() {
+        return Some("model cannot be empty".to_owned());
+    }
+    build_setup_root_config(state)
+        .err()
+        .map(|error| format!("{error:#}"))
+}
+
+fn validate_setup_connection(state: &SetupState) -> Option<String> {
     if state.startup_config_snapshot_missing() {
         return Some(
             "config changed since Provider settings were loaded; restart setup and retry"
                 .to_owned(),
         );
     }
-    if state.model.trim().is_empty() {
-        return Some("model cannot be empty".to_owned());
-    }
-    if state.is_custom()
-        && let Err(error) = url::Url::parse(state.base_url.trim())
-    {
-        return Some(format!("custom endpoint is invalid: {error}"));
+    if state.is_custom() {
+        match url::Url::parse(state.base_url.trim()) {
+            Err(error) => return Some(format!("custom endpoint is invalid: {error}")),
+            Ok(url) if !matches!(url.scheme(), "http" | "https") => {
+                return Some("custom endpoint must use HTTP or HTTPS".to_owned());
+            }
+            Ok(_) => {}
+        }
     }
     if let Err(error) = setup_connection_identity(state) {
         return Some(format!("{error:#}"));
@@ -919,9 +1090,7 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
         SetupCredentialSource::NoAuthentication if !state.no_authentication_allowed() => Some(
             "no authentication is only allowed for an explicit loopback custom endpoint".to_owned(),
         ),
-        _ => build_setup_root_config(state)
-            .err()
-            .map(|error| format!("{error:#}")),
+        _ => None,
     }
 }
 

@@ -720,6 +720,8 @@ impl AppState {
         self.composer.queue_edit_target = None;
         self.restore_queue_edit_draft();
         if self.session_id != session_id || self.session_log_path != session_log_path {
+            self.runtime.provider_turn_recovery = None;
+            self.runtime.provider_failure_summary = None;
             self.reset_composer_edit_context();
         }
         self.composer.pending_queue_operations.clear();

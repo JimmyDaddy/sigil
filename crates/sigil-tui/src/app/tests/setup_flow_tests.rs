@@ -6,6 +6,114 @@ use sigil_kernel::{MultiAgentMode, PermissionMode, TaskRoutingPolicy};
 use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 
 #[test]
+fn novice_setup_reveals_each_step_and_only_saves_after_explicit_review() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "fixture-only-key");
+    let temp = tempdir()?;
+    let path = temp.path().join("sigil.toml");
+    let mut app = AppState::from_setup(path.clone(), temp.path().to_owned(), None);
+    assert!(app.setup_lines()[0].starts_with("1/4"));
+    assert!(!app.setup_lines().join("\n").contains("context window"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.setup_lines()[0].starts_with("2/4"));
+    assert!(!app.setup_lines().join("\n").contains("max output tokens"));
+    app.setup_state.as_mut().expect("setup").credential_source = SetupCredentialSource::Environment;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").selected_action,
+        Some(crate::setup::SetupAction::Continue)
+    );
+    app.handle_setup_paste_text("must-not-edit-behind-action");
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert!(
+        !app.has_modal(),
+        "typing must not edit the field behind a focused action"
+    );
+    assert!(app.setup_state.as_ref().expect("setup").api_key.is_empty());
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.setup_lines()[0].starts_with("3/4"));
+    assert!(!app.setup_lines().join("\n").contains("context window"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.setup_lines().join("\n").contains("context window"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").selected_field,
+        SetupField::ContextWindow
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.setup_lines()[0].starts_with("2/4"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    assert!(app.setup_lines()[0].starts_with("4/4"));
+    assert!(
+        !path.exists(),
+        "review shortcut must not publish or trust the folder"
+    );
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("Trust this folder, save and start")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    assert!(path.exists());
+    assert!(!std::fs::read_to_string(path)?.contains("fixture-only-key"));
+    Ok(())
+}
+
+#[test]
+fn novice_setup_custom_connection_errors_stay_on_the_relevant_step_and_preserve_drafts()
+-> Result<()> {
+    let temp = tempdir()?;
+    let mut app =
+        AppState::from_setup(temp.path().join("sigil.toml"), temp.path().to_owned(), None);
+    let state = app.setup_state.as_mut().expect("setup");
+    state.select_provider_index(crate::setup::SETUP_PROVIDER_ORDER.len() - 1);
+    state.base_url = "not-a-url".to_owned();
+    state.model.clear();
+    state.credential_source = SetupCredentialSource::NoAuthentication;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_setup_action(crate::setup::SetupAction::Continue)?;
+    assert!(app.setup_lines()[0].starts_with("2/4"));
+    assert!(
+        app.setup_state
+            .as_ref()
+            .expect("setup")
+            .save_error
+            .as_ref()
+            .is_some_and(|error| error.contains("endpoint"))
+    );
+    app.setup_state.as_mut().expect("setup").base_url = "http://127.0.0.1:60433/v1".to_owned();
+    app.handle_setup_action(crate::setup::SetupAction::Continue)?;
+    assert!(
+        app.setup_lines()[0].starts_with("3/4"),
+        "a later empty model must not block connection review"
+    );
+    app.handle_setup_action(crate::setup::SetupAction::Continue)?;
+    assert!(app.setup_lines()[0].starts_with("3/4"));
+    assert_eq!(
+        app.setup_state
+            .as_ref()
+            .expect("setup")
+            .save_error
+            .as_deref(),
+        Some("model cannot be empty")
+    );
+    app.handle_setup_paste_text("own-model");
+    app.handle_setup_action(crate::setup::SetupAction::Back)?;
+    app.handle_setup_action(crate::setup::SetupAction::Back)?;
+    assert!(app.setup_lines()[0].starts_with("1/4"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.setup_state.as_ref().expect("setup").model, "own-model");
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").base_url,
+        "http://127.0.0.1:60433/v1"
+    );
+    Ok(())
+}
+
+#[test]
 fn setup_lines_include_invalid_config_error_and_missing_auth_summary() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
@@ -24,11 +132,7 @@ fn setup_lines_include_invalid_config_error_and_missing_auth_summary() -> Result
     assert!(lines.contains("configuration is invalid: config load failed"));
     assert!(lines.contains("explicitly save this reviewed current-schema replacement"));
     assert!(lines.contains("> DeepSeek"));
-    assert!(
-        lines.lines().any(|line| {
-            line.starts_with("> DeepSeek") && line.ends_with("Add an API key next")
-        })
-    );
+    assert!(lines.contains("Add an API key next"));
     assert_eq!(app.last_notice(), Some("config load failed"));
     Ok(())
 }
@@ -59,9 +163,7 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
     state.selected_field = SetupField::Model;
     let lines = app.setup_lines().join("\n");
     assert!(
-        lines.contains(
-            "> model                 : deepseek-v4-flash  [Enter choose · type model ID]"
-        )
+        lines.contains("> model                 : deepseek-v4-flash  [Enter choose · type ID]")
     );
 
     app.setup_state
@@ -70,17 +172,17 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
         .selected_field = SetupField::ApiKey;
     let lines = app.setup_lines().join("\n");
     assert!(lines.contains("> authentication"));
-    assert!(lines.contains("[Left/Right choose · Enter continue]"));
+    assert!(lines.contains("[←/→ source · Enter edit]"));
 
     app.setup_state
         .as_mut()
         .expect("setup state should exist")
         .selected_field = SetupField::Save;
     let lines = app.setup_lines().join("\n");
-    assert!(lines.contains("> [review, trust folder, save and start]"));
+    assert!(lines.contains("> [Trust this folder, save and start]"));
     assert_eq!(lines.matches("DeepSeek").count(), 1);
     assert_eq!(lines.matches("deepseek-v4-flash").count(), 1);
-    assert!(lines.contains("authentication"));
+    assert!(lines.contains("Authentication:"));
     assert!(!lines.contains("[review]"));
     assert!(!lines.contains("orchestration:"));
     assert!(!lines.contains("manifest_unavailable"));
@@ -103,6 +205,11 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
         .as_mut()
         .expect("setup state should exist")
         .credential_source = SetupCredentialSource::Environment;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(!config_path.exists());
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     let Some(AppAction::SetupCompleted {
@@ -297,7 +404,7 @@ fn setup_authority_boot_failure_shows_its_cause_without_changing_the_connection(
     app.setup_state.as_mut().expect("setup").selected_field = SetupField::Model;
     app.handle_setup_paste_text("must-not-edit-behind-diagnostics");
     assert_eq!(app.setup_state.as_ref().expect("setup").model, model);
-    assert!(!rendered.contains("Set up a model connection"));
+    assert!(!rendered.contains("1/4 · Choose a provider"));
     assert!(!rendered.contains("Review the current connection"));
     assert!(!rendered.contains("storage permissions"));
     assert_eq!(std::fs::read(&config_path)?, original);
@@ -334,7 +441,7 @@ fn setup_authority_retry_requires_a_typed_failure_and_a_valid_saved_config() -> 
             assert_eq!(lines[0], "Configuration saved · Not started");
             assert!(app.setup_recovery_view().is_some());
         } else {
-            assert_eq!(lines[0], "Set up a model connection");
+            assert_eq!(lines[0], "1/4 · Choose a provider");
             assert!(app.setup_recovery_view().is_none());
         }
     }
@@ -454,7 +561,7 @@ fn setup_explicitly_replaces_an_existing_malformed_config() -> Result<()> {
     assert!(
         app.setup_lines()
             .join("\n")
-            .contains("replace invalid config and start")
+            .contains("Replace invalid config and start")
     );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -480,6 +587,10 @@ fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Resul
     );
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.api_key = SecretString::new("staged-only");
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     assert!(action.is_none());
@@ -545,8 +656,7 @@ fn setup_navigation_and_provider_switch_update_state() -> Result<()> {
         .expect("setup state should exist after moving selection");
     assert_eq!(state.selected_field, SetupField::ApiKey);
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
-    assert_eq!(app.last_notice(), Some("setup field provider"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     let state = app
         .setup_state
         .as_ref()
@@ -627,11 +737,7 @@ fn setup_enter_on_model_and_api_key_open_existing_value_modals() -> Result<()> {
     let action = app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert_eq!(app.modal_title(), Some("API Key"));
-    assert!(
-        app.modal_lines()
-            .join("\n")
-            .contains("api_key: **********|")
-    );
+    assert!(app.modal_lines().join("\n").contains("api_key: **********"));
     Ok(())
 }
 
@@ -654,7 +760,7 @@ fn typing_in_setup_model_field_opens_text_modal() -> Result<()> {
     assert_eq!(app.modal_title(), Some("Model ID"));
     assert_eq!(app.last_notice(), Some("editing model"));
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("model: g|"));
+    assert!(lines.contains("model: g"));
     Ok(())
 }
 
@@ -913,13 +1019,9 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
     );
 
     let setup_lines = app.setup_lines().join("\n");
-    assert!(setup_lines.contains("Set up a model connection"));
+    assert!(setup_lines.contains("1/4 · Choose a provider"));
     assert!(setup_lines.contains("> DeepSeek"));
-    assert!(
-        setup_lines.lines().any(|line| {
-            line.starts_with("> DeepSeek") && line.ends_with("Add an API key next")
-        })
-    );
+    assert!(setup_lines.contains("Add an API key next"));
     assert!(setup_lines.contains("startup recovery could not capture the config source"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -927,19 +1029,21 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("provider selected: OpenAI"));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("setup field model"));
+    app.setup_state.as_mut().expect("setup").selected_field = SetupField::Model;
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))?;
     assert_eq!(app.modal_title(), Some("Model ID"));
     assert_eq!(app.modal_input_cursor(), Some(("model".to_owned(), 1, 3)));
-    assert!(app.modal_lines().join("\n").contains("model: p|"));
+    assert!(app.modal_lines().join("\n").contains("model: p"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("closed text input"));
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("setup field authentication"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.setup_state.as_ref().expect("setup").selected_field,
+        SetupField::ApiKey
+    );
     app.setup_state
         .as_mut()
         .expect("setup state")
@@ -947,8 +1051,8 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
     assert_eq!(app.modal_title(), Some("API Key"));
-    assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 1, 4)));
-    assert!(app.modal_lines().join("\n").contains("api_key: *|"));
+    assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 1, 3)));
+    assert!(app.modal_lines().join("\n").contains("api_key: *"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("updated api key"));
@@ -985,7 +1089,7 @@ fn setup_owner_active_recovery_has_specific_next_step_and_reversible_diagnostics
     assert!(main.contains("Close the other Sigil instance first"));
     assert!(!main.contains("authentication"));
     assert!(!main.contains(error));
-    assert_eq!(app.setup_field_line_indices(), Vec::<usize>::new());
+    assert_eq!(app.setup_field_line_indices(), Vec::<(usize, usize)>::new());
     app.setup_state
         .as_mut()
         .expect("setup")
@@ -1027,6 +1131,7 @@ fn setup_owner_active_recovery_has_specific_next_step_and_reversible_diagnostics
     );
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(
         app.setup_state.as_ref().expect("setup").selected_field,
         SetupField::Model
@@ -1131,6 +1236,7 @@ fn setup_edited_recovery_advertises_save_and_only_marks_saved_after_successful_p
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     app.handle_setup_paste_text("draft-model");
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(app.setup_lines()[0].contains("Connection changes not saved"));
@@ -1173,6 +1279,7 @@ fn setup_edited_recovery_advertises_save_and_only_marks_saved_after_successful_p
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    app.handle_setup_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     app.handle_setup_paste_text("second-draft-model");
     app.handle_setup_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(

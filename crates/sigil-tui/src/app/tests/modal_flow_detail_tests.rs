@@ -226,10 +226,7 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
         SecretInputTarget::SetupApiKey.summary("SIGIL_API_KEY"),
         "Saved to the protected credential store. The value never enters sigil.toml; SIGIL_API_KEY is a separate selectable source."
     );
-    assert_eq!(
-        TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl).config_key(),
-        Some("base_url")
-    );
+    assert_eq!(ConfigField::ProviderBaseUrl.label(), "base_url");
 
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     app.modal_state = Some(ModalState::ModelPicker(ModelPickerState {
@@ -262,14 +259,13 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
     assert_eq!(TextInputTarget::SetupModel.title(), "Model ID");
     assert_eq!(TextInputTarget::SetupModel.summary(), "Custom model id.");
     assert_eq!(TextInputTarget::SetupModel.prompt_label(), "model");
-    assert_eq!(TextInputTarget::SetupModel.config_key(), None);
 
     app.open_secret_input(SecretInputTarget::SetupApiKey, "abc");
     assert_eq!(app.modal_title(), Some("API Key"));
     let secret_lines = app.modal_lines().join("\n");
     assert!(secret_lines.contains("SIGIL_API_KEY is a separate selectable source"));
-    assert!(secret_lines.contains("api_key: ***|"));
-    assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 3, 4)));
+    assert!(secret_lines.contains("api_key: ***"));
+    assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 3, 3)));
 
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let mut setup_app = AppState::from_setup(
@@ -293,7 +289,7 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
     assert_eq!(app.modal_title(), Some("Model ID"));
     let text_lines = app.modal_lines().join("\n");
     assert!(text_lines.contains("Custom model id."));
-    assert!(text_lines.contains("model: flash|"));
+    assert!(text_lines.contains("model: flash"));
     assert_eq!(app.modal_input_cursor(), Some(("model".to_owned(), 5, 3)));
 
     app.open_text_input(
@@ -301,7 +297,7 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
         "https://api.deepseek.com",
     );
     assert_eq!(app.modal_title(), Some("Endpoint"));
-    assert_eq!(app.modal_input_cursor(), Some(("value".to_owned(), 24, 4)));
+    assert_eq!(app.modal_input_cursor(), Some(("value".to_owned(), 24, 3)));
 
     app.open_keyboard_help();
     assert!(app.modal_input_cursor().is_none());

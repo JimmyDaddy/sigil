@@ -424,7 +424,16 @@ fn render_approval_footer(
     }
     let lines = approval_footer_hint_lines(view, inner.width)
         .into_iter()
-        .map(|line| line.style(Style::default().fg(palette.text_muted)))
+        .enumerate()
+        .map(|(index, line)| {
+            line.style(
+                Style::default().fg(if view.delivery_feedback.is_some() && index == 0 {
+                    palette.status_warning
+                } else {
+                    palette.text_muted
+                }),
+            )
+        })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(Text::from(lines)),

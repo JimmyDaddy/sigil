@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(lines: &mut ConfigDetailPresentation, config_state: &ConfigState) {
     let (_skill_count, skill_agent_count) = skill_config_counts(config_state);
     let agent_count = config_state.agent_profiles.len();
     lines.push("[discovery]".to_owned());
@@ -44,6 +44,11 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         ));
         lines.push(String::new());
         lines.push("[agents]".to_owned());
+        lines.collection(
+            config_state,
+            ConfigField::SkillId,
+            Some(config_state.selected_agent_index),
+        );
         lines.extend(render_agent_index_lines(config_state));
         if let Some(agent) = config_state.selected_agent() {
             lines.push(String::new());

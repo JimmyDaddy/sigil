@@ -9,7 +9,6 @@ use crate::{
         AppState, ApprovalAction, ApprovalModalView, ComposerQueueAction,
         session_lifecycle_flow::SessionModalAction,
     },
-    config_panel::ConfigField,
     mouse::HitTarget,
     view_model::{InfoRailViewModel, displayed_info_rail_agent_row_entries},
 };
@@ -43,6 +42,7 @@ pub enum LayoutMode {
 pub struct LayoutSnapshot {
     pub screen: Rect,
     pub mode: LayoutMode,
+    pub(crate) background_mouse_blocker: Option<crate::mouse::BackgroundMouseBlocker>,
     pub live_panel: Rect,
     pub egress_disclosure: Option<Rect>,
     pub composer: Rect,
@@ -185,6 +185,8 @@ pub(crate) struct IntentStackRowHitArea {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupHitAreas {
+    pub(crate) frame_identity: Option<crate::setup::SetupFrameIdentity>,
+    pub(crate) actions: Vec<(crate::setup::SetupAction, Rect)>,
     pub fields: Vec<SetupFieldHitArea>,
     pub(crate) recovery: Option<SetupRecoveryHitAreas>,
 }
@@ -264,6 +266,12 @@ impl LayoutSnapshot {
     }
 
     pub fn from_app(screen: Rect, app: &AppState) -> Self {
+        let mut snapshot = Self::from_app_content(screen, app);
+        snapshot.background_mouse_blocker = app.background_mouse_blocker();
+        snapshot
+    }
+
+    fn from_app_content(screen: Rect, app: &AppState) -> Self {
         let _phase_timing = crate::phase_timing::PhaseTimer::new("layout_snapshot");
         if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Setup);
@@ -290,6 +298,7 @@ impl LayoutSnapshot {
         let mut snapshot = Self {
             screen,
             mode: LayoutMode::Main,
+            background_mouse_blocker: None,
             live_panel: shell.live_panel,
             egress_disclosure,
             composer: shell.composer,
@@ -336,6 +345,7 @@ impl LayoutSnapshot {
         Self {
             screen,
             mode,
+            background_mouse_blocker: None,
             live_panel: Rect::default(),
             egress_disclosure: None,
             composer: Rect::default(),
@@ -436,6 +446,11 @@ impl LayoutSnapshot {
         }
 
         if let Some(areas) = &self.setup_hit_areas {
+            for (action, area) in &areas.actions {
+                if contains(*area, column, row) {
+                    return HitTarget::SetupAction { action: *action };
+                }
+            }
             if let Some(recovery) = &areas.recovery {
                 for (action, area) in &recovery.actions {
                     if contains(*area, column, row) {
@@ -776,12 +791,14 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
     if app.is_workspace_trust_gate_mode() {
         return None;
     }
-    let lines = app.setup_lines();
+    let presentation = app.setup_presentation();
+    let lines = &presentation.lines;
     let recovery = app.setup_recovery_view();
     let layout = super::setup_config::setup_content_layout(
         screen,
-        &lines,
+        lines,
         recovery.as_ref(),
+        presentation.focused_line,
         &super::theme::resolve_for_app(app).palette,
     );
     if layout.body.width == 0 || layout.body.height == 0 {
@@ -789,6 +806,8 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
     }
     if let Some(identity) = app.setup_recovery_frame_identity() {
         return Some(SetupHitAreas {
+            frame_identity: None,
+            actions: Vec::new(),
             fields: Vec::new(),
             recovery: Some(SetupRecoveryHitAreas {
                 identity,
@@ -796,10 +815,9 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
             }),
         });
     }
-    let fields = app
-        .setup_field_line_indices()
+    let fields = presentation
+        .fields
         .into_iter()
-        .enumerate()
         .filter_map(|(index, logical)| {
             let range = layout.logical_ranges.get(logical)?;
             let start = range.start.max(layout.scroll);
@@ -820,7 +838,31 @@ fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
             })
         })
         .collect::<Vec<_>>();
-    (!fields.is_empty()).then_some(SetupHitAreas {
+    let actions = presentation
+        .actions
+        .into_iter()
+        .filter_map(|(action, logical)| {
+            let range = layout.logical_ranges.get(logical)?;
+            let start = range.start.max(layout.scroll);
+            let end = range
+                .end
+                .min(layout.scroll.saturating_add(layout.body.height as usize));
+            (start < end).then(|| {
+                (
+                    action,
+                    Rect::new(
+                        layout.body.x,
+                        layout.body.y.saturating_add((start - layout.scroll) as u16),
+                        layout.body.width,
+                        (end - start) as u16,
+                    ),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    (!fields.is_empty() || !actions.is_empty()).then_some(SetupHitAreas {
+        frame_identity: app.setup_frame_identity(),
+        actions,
         fields,
         recovery: None,
     })
@@ -859,7 +901,7 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
         false,
         &super::theme::default_palette(),
     );
-    let selected = visual.selected_rows(&main_lines);
+    let selected = visual.focused_rows(app.config_detail_presentation().focused_line);
     let context_rows = if show_context_panel {
         config_visual_rows(
             &context,
@@ -893,8 +935,7 @@ fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
             &visual.logical_ranges,
         );
         fields = config_field_hit_areas(
-            app,
-            &main_lines,
+            &app.config_field_line_indices(),
             panel_content,
             scroll_offset,
             &visual.logical_ranges,
@@ -986,40 +1027,29 @@ fn config_section_hit_areas(
 }
 
 fn config_field_hit_areas(
-    app: &AppState,
-    lines: &[String],
+    field_rows: &[(usize, usize)],
     panel_content: Rect,
     scroll_offset: usize,
     logical_ranges: &[std::ops::Range<usize>],
 ) -> Vec<ConfigFieldHitArea> {
-    let Some(section) = app.config_selected_section() else {
-        return Vec::new();
-    };
-    ConfigField::fields_for_section(section)
+    field_rows
         .iter()
-        .enumerate()
-        .filter_map(|(index, field)| {
-            let line_index = lines.iter().position(|line| {
-                let trimmed = line.trim_start_matches([' ', '>']);
-                trimmed.starts_with(field.display_label())
-                    && trimmed
-                        .get(field.display_label().len()..)
-                        .is_some_and(|suffix| suffix.starts_with(':'))
-            })?;
-            let range = logical_ranges.get(line_index)?;
+        .filter_map(|(index, line)| {
+            let range = logical_ranges.get(*line)?;
             let start = range.start.max(scroll_offset);
             let end = range
                 .end
                 .min(scroll_offset.saturating_add(panel_content.height as usize));
-            if start >= end {
+            if start >= end || panel_content.width == 0 {
                 return None;
             }
-            let row_offset = start - scroll_offset;
             Some(ConfigFieldHitArea {
-                index,
+                index: *index,
                 area: Rect::new(
                     panel_content.x,
-                    panel_content.y.saturating_add(row_offset as u16),
+                    panel_content
+                        .y
+                        .saturating_add((start - scroll_offset) as u16),
                     panel_content.width,
                     (end - start) as u16,
                 ),
@@ -1781,6 +1811,15 @@ pub(super) fn approval_footer_hint_lines(
     view: &ApprovalModalView,
     width: u16,
 ) -> Vec<Line<'static>> {
+    if let Some(feedback) = view.delivery_feedback {
+        return wrap_terminal_lines(
+            vec![
+                Line::raw(feedback),
+                Line::raw("Tab/←→ actions · Enter retry · Esc input"),
+            ],
+            width as usize,
+        );
+    }
     let selection = "Tab/←→ actions · Enter select";
     let mut decisions = "Y allow once · N deny".to_owned();
     if view.command_family_allow_pattern.is_some() {

@@ -23,6 +23,13 @@ pub enum MouseInputKind {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundMouseBlocker {
+    QuitConfirmation,
+    TextInput,
+    SecretInput,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMouseOutcome {
     Noop,
@@ -53,6 +60,9 @@ pub(crate) enum HitTarget {
     ApprovalHunkNext,
     ApprovalDiffViewToggle,
     ApprovalMetadataToggle,
+    SetupAction {
+        action: crate::setup::SetupAction,
+    },
     SetupField {
         index: usize,
     },

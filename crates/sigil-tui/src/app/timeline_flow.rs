@@ -1598,6 +1598,12 @@ impl AppState {
                 ApprovalPresentationState::Pending => {
                     format!("waiting for decision on {}", pending.call.name)
                 }
+                ApprovalPresentationState::Rejected { .. } => {
+                    format!(
+                        "decision not delivered for {}; review and retry",
+                        pending.call.name
+                    )
+                }
                 ApprovalPresentationState::DecisionAccepted { .. } => {
                     format!("decision accepted for {}; resuming run", pending.call.name)
                 }

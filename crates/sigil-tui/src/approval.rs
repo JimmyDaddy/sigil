@@ -172,6 +172,7 @@ pub(crate) struct ApprovalModalView {
     pub session_grant_available: bool,
     pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
     pub command_family_allow_pattern: Option<String>,
+    pub delivery_feedback: Option<&'static str>,
 }
 
 #[cfg(test)]
@@ -208,6 +209,7 @@ impl Default for ApprovalModalView {
                 code: ToolApprovalSessionGrantUnavailableReasonCode::NoReusableApprovalFacet,
             }),
             command_family_allow_pattern: None,
+            delivery_feedback: None,
         }
     }
 }
@@ -300,13 +302,23 @@ pub(crate) fn session_grant_unavailable_reason_label(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalPresentationState {
     Pending,
+    Rejected { command_id: Option<String> },
     DecisionAccepted { command_id: String },
     DeliveryUncertain { command_id: String },
 }
 
+impl ApprovalPresentationState {
+    pub(crate) fn delivery_feedback(&self) -> Option<&'static str> {
+        matches!(self, Self::Rejected { .. }).then_some("Decision not delivered; review and retry")
+    }
+}
+
 impl PendingApproval {
     pub(crate) fn actions_available(&self) -> bool {
-        matches!(self.presentation_state, ApprovalPresentationState::Pending)
+        matches!(
+            self.presentation_state,
+            ApprovalPresentationState::Pending | ApprovalPresentationState::Rejected { .. }
+        )
     }
 }
 

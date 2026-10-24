@@ -75,6 +75,12 @@ pub(super) fn connection_drafts_from_root_config(
 }
 
 impl ConfigDraft {
+    pub(crate) fn connection_supports_authentication(&self, id: &ConnectionId) -> bool {
+        self.connection_drafts
+            .get(id)
+            .is_some_and(|draft| !matches!(draft.config.credential, CredentialRefConfig::None))
+    }
+
     pub(super) fn selected_connection(&self) -> Option<&ProviderConnectionDraft> {
         self.connection_drafts.get(&self.selected_connection_id)
     }
@@ -394,7 +400,7 @@ impl ConfigDraft {
             .iter()
             .map(|(id, draft)| {
                 let selected = if id == &self.selected_connection_id {
-                    ">"
+                    "●"
                 } else {
                     " "
                 };

@@ -1,11 +1,12 @@
 use super::*;
 
-pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(
+    app: &AppState,
+    lines: &mut ConfigDetailPresentation,
+    config_state: &ConfigState,
+) {
     lines.push("[permissions]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::PermissionMode,
-    ));
+    lines.field(config_state, ConfigField::PermissionMode);
     lines.push(render_config_readonly_row(
         "Local boundary",
         "read-only blocks local write + execute",

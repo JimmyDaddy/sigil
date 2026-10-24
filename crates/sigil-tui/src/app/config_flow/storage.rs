@@ -1,6 +1,10 @@
 use super::*;
 
-pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(
+    app: &AppState,
+    lines: &mut ConfigDetailPresentation,
+    config_state: &ConfigState,
+) {
     let paths = &app.sigil_paths;
     lines.push("[roots]".to_owned());
     lines.push(render_config_readonly_row(

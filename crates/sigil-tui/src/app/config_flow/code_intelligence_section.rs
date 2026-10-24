@@ -1,15 +1,13 @@
 use super::*;
 
-pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_state: &ConfigState) {
+pub(super) fn render_section(
+    app: &AppState,
+    lines: &mut ConfigDetailPresentation,
+    config_state: &ConfigState,
+) {
     lines.push("[controls]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CodeIntelEnabled,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CodeIntelServerStartup,
-    ));
+    lines.field(config_state, ConfigField::CodeIntelEnabled);
+    lines.field(config_state, ConfigField::CodeIntelServerStartup);
     lines.push(render_config_readonly_row(
         "Auto discover",
         bool_summary(config_state.draft.code_intelligence_auto_discover),

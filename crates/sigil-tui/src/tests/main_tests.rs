@@ -219,13 +219,45 @@ fn application_admission_failure_preserves_pending_approval_and_live_worker() ->
     assert!(pending.actions_available());
     assert_eq!(
         app.last_notice(),
-        Some("application command was not admitted: approval binding is unavailable")
+        Some("Decision not delivered; review and retry")
     );
     assert!(matches!(
         app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?,
         Some(AppAction::ApprovalDecision { call_id, approval_request_id, approved: true })
             if call_id == "call-1" && approval_request_id == "approval-1"
     ));
+    let retry = AppAction::ApprovalDecision {
+        call_id: "call-1".to_owned(),
+        approval_request_id: "approval-1".to_owned(),
+        approved: true,
+    };
+    report_application_action_receipt(
+        &mut app,
+        &retry,
+        &sigil_application::ApplicationCommandReceipt::Rejected(
+            sigil_application::CommandRejection {
+                kind: "approval".to_owned(),
+                reason: "exact approval owner was not available".to_owned(),
+            },
+        ),
+    )?;
+    assert!(
+        app.approval
+            .pending
+            .as_ref()
+            .expect("retryable approval")
+            .actions_available()
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("Decision not delivered; review and retry")
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "approval:delivery-rejected"
+            && event
+                .detail
+                .contains("exact approval owner was not available")
+    }));
     Ok(())
 }
 
@@ -2100,3 +2132,6 @@ fn tab_enter_run_next_reaches_the_worker_command_channel() -> Result<()> {
     ));
     Ok(())
 }
+
+#[path = "launcher_configuration_recovery_tests.rs"]
+mod configuration_recovery_tests;

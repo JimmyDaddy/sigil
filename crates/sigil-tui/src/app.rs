@@ -38,6 +38,7 @@ mod modal_flow;
 mod mouse_flow;
 mod pending_plan_flow;
 mod plan_revision_editor;
+mod quit_flow;
 mod run_timing;
 mod runtime_command_flow;
 mod runtime_status;
@@ -54,6 +55,7 @@ mod state;
 mod submit_flow;
 pub(crate) mod task_sidebar;
 mod task_strip_flow;
+mod text_input_editor;
 mod timeline_flow;
 mod timeline_render_store;
 mod tool_card_interaction;
@@ -667,6 +669,7 @@ pub struct AppState {
     workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
+    quit_confirmation: Option<quit_flow::QuitConfirmation>,
     pending_mcp_elicitation: Option<PendingMcpElicitation>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
     // Populated only from kernel safe-persistence projections, never exact provider arguments.
@@ -1336,6 +1339,8 @@ impl AppState {
                 provider_name: configured_provider_name,
                 model_name: configured_model_name,
                 model_route: configured_model_route,
+                provider_turn_recovery: None,
+                provider_failure_summary: None,
                 permission_mode,
                 memory_enabled: runtime_config.memory.enabled,
                 memory_document_count: 0,
@@ -1405,6 +1410,7 @@ impl AppState {
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
+            quit_confirmation: None,
             pending_mcp_elicitation: None,
             tool_preview_snapshots: HashMap::new(),
             safe_tool_calls: HashMap::new(),
@@ -1504,6 +1510,8 @@ impl AppState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
                 model_route: None,
+                provider_turn_recovery: None,
+                provider_failure_summary: None,
                 permission_mode: PermissionMode::Manual.as_str().to_owned(),
                 memory_enabled: true,
                 memory_document_count: 0,
@@ -1577,6 +1585,7 @@ impl AppState {
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
+            quit_confirmation: None,
             pending_mcp_elicitation: None,
             tool_preview_snapshots: HashMap::new(),
             safe_tool_calls: HashMap::new(),
@@ -1796,6 +1805,9 @@ impl AppState {
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
         self.action_feedback = None;
+        if self.quit_confirmation_open() {
+            return Ok(self.handle_quit_confirmation_key(key));
+        }
         if self.is_workspace_trust_gate_mode() {
             return self.handle_workspace_trust_gate_key_event(key);
         }
@@ -1831,14 +1843,7 @@ impl AppState {
             if let Some(text) = self.selected_timeline_text() {
                 return Ok(Some(self.request_clipboard_copy(text)));
             }
-            self.modal_state = None;
-            if self.runtime.is_busy {
-                self.last_notice = Some("cancellation requested".to_owned());
-                self.push_timeline(TimelineRole::Notice, "cancel requested");
-                return Ok(Some(AppAction::CancelRun));
-            }
-            self.should_quit = true;
-            return Ok(None);
+            return Ok(self.request_quit());
         }
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
@@ -1992,7 +1997,7 @@ impl AppState {
             // shortcut or the composer is empty.
             if !composer_owns_shortcut {
                 if command == UiCommand::OpenConfig {
-                    self.open_config_panel();
+                    self.open_recovery_connection_settings()?;
                     return Ok(None);
                 }
                 if command == UiCommand::OpenChangeReview {

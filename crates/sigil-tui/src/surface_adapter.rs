@@ -82,15 +82,18 @@ fn setup_surface(app: &AppState) -> Option<SetupSurface> {
     if !app.is_setup_mode() && !app.is_workspace_trust_gate_mode() {
         return None;
     }
+    let presentation = app.setup_presentation();
     Some(SetupSurface {
         trust_gate: app.is_workspace_trust_gate_mode(),
         workspace_trust: app.workspace_trust_view(),
         lines: if app.is_workspace_trust_gate_mode() {
             Vec::new()
         } else {
-            app.setup_lines()
+            presentation.lines
         },
-        field_line_indices: app.setup_field_line_indices(),
+        field_line_indices: presentation.fields,
+        action_line_indices: presentation.actions,
+        focused_line: presentation.focused_line,
         recovery: app.setup_recovery_view(),
     })
 }
@@ -99,9 +102,11 @@ fn config_surface(app: &AppState) -> Option<ConfigSurface> {
     if !app.is_config_mode() {
         return None;
     }
+    let detail = app.config_detail_presentation();
     Some(ConfigSurface {
         file_label: display_file_label(&app.config_path),
-        detail_lines: app.config_detail_lines(),
+        detail_lines: detail.lines,
+        focused_line: detail.focused_line,
         footer_hint: app.config_footer_hint(),
         selected_footer_action: app.config_selected_footer_action_label().map(str::to_owned),
         footer_actions: app
@@ -160,6 +165,7 @@ fn modal_surface(app: &AppState) -> ModalSurface {
         title: app.modal_title().map(str::to_owned),
         lines: app.modal_lines(),
         input_cursor: app.modal_input_cursor(),
+        input: app.modal_input_view(),
         config_mode: app.is_config_mode(),
         session_modal_actions: app.session_modal_action_rows(),
         keyboard_help: app.keyboard_help_view(),

@@ -1651,6 +1651,32 @@ fn rendered_content(terminal: &Terminal<TestBackend>) -> String {
         .collect::<String>()
 }
 
+#[test]
+fn r9_feedback_approval_rejection_is_visible_with_retry_at_short_and_regular_heights()
+-> anyhow::Result<()> {
+    let mut view = modal_view("file write");
+    view.metadata_collapsed = true;
+    view.delivery_feedback = Some("Decision not delivered; review and retry");
+    let current_theme = theme::Theme::default();
+    for (width, height) in [(80, 12), (140, 44)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal
+            .draw(|frame| render_approval_modal_surface(frame, Some(&view), 0, &current_theme))?;
+        let rendered = rendered_content(&terminal);
+        assert!(
+            rendered.contains("Decision not delivered"),
+            "{width}x{height}: {rendered}"
+        );
+        assert!(
+            rendered.contains("Enter retry"),
+            "{width}x{height}: {rendered}"
+        );
+        assert!(rendered.contains("Allow"));
+        assert!(rendered.contains("Deny"));
+    }
+    Ok(())
+}
+
 fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)

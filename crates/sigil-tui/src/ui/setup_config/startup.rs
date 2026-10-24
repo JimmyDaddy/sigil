@@ -27,6 +27,7 @@ pub(in crate::ui) fn setup_content_layout(
     screen: Rect,
     lines: &[String],
     recovery: Option<&SetupRecoverySurface>,
+    focused_line: Option<usize>,
     palette: &ThemePalette,
 ) -> SetupContentLayout {
     let outer = Layout::default()
@@ -74,8 +75,7 @@ pub(in crate::ui) fn setup_content_layout(
     let scroll = recovery
         .map_or_else(
             || {
-                let selected = lines.iter().position(|line| line.starts_with("> "));
-                selected
+                focused_line
                     .map(|index| {
                         logical_ranges[index]
                             .end
@@ -130,6 +130,7 @@ pub(crate) fn setup_recovery_scroll_bounds(
         Rect::new(0, 0, width, height),
         lines,
         Some(recovery),
+        None,
         &super::theme::default_palette(),
     );
     (layout.max_scroll, (layout.body.height as usize).max(1))
@@ -140,9 +141,10 @@ pub(super) fn render_setup_content(
     title: &str,
     lines: &[String],
     recovery: Option<&SetupRecoverySurface>,
+    focused_line: Option<usize>,
     palette: &ThemePalette,
 ) {
-    let layout = setup_content_layout(frame.area(), lines, recovery, palette);
+    let layout = setup_content_layout(frame.area(), lines, recovery, focused_line, palette);
     frame.render_widget(
         Block::default()
             .title(title)

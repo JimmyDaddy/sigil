@@ -511,6 +511,6 @@ impl AppState {
     }
 
     pub fn has_modal(&self) -> bool {
-        self.modal_state.is_some()
+        self.quit_confirmation_open() || self.modal_state.is_some()
     }
 }

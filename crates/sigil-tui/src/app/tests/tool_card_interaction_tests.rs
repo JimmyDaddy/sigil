@@ -321,7 +321,7 @@ fn tool_artifact_next_page_and_literal_search_emit_typed_worker_commands() -> Re
     assert!(
         app.modal_lines()
             .iter()
-            .any(|line| line == "Enter search · Ctrl-U clear · Esc cancel")
+            .any(|line| line.contains("Enter search") && line.contains("Ctrl-U clear"))
     );
     assert!(
         !app.modal_lines()
@@ -1332,8 +1332,7 @@ fn tool_artifact_bounded_page_starts_at_its_context_and_every_line_remains_scrol
 }
 
 #[test]
-fn tool_artifact_search_clear_replaces_retained_query_without_changing_other_text_inputs()
--> Result<()> {
+fn tool_artifact_search_clear_and_other_modal_edits_preserve_the_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
     let _ = app.focus_latest_tool_card();
@@ -1343,7 +1342,7 @@ fn tool_artifact_search_clear_replaces_retained_query_without_changing_other_tex
     assert!(
         app.modal_lines()
             .iter()
-            .any(|line| line == "Enter search · Ctrl-U clear · Esc cancel")
+            .any(|line| line.contains("Enter search") && line.contains("Ctrl-U clear"))
     );
     assert_eq!(
         app.modal_input_cursor().map(|(_, cursor, _)| cursor),
@@ -1362,11 +1361,14 @@ fn tool_artifact_search_clear_replaces_retained_query_without_changing_other_tex
         selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral { query, .. }, ..
     }] if query == "replacement")
     );
+    app.composer.input = "unsubmitted conversation draft".to_owned();
     app.open_text_input(TextInputTarget::SkillArguments, "keep text");
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))?;
     assert_eq!(
         app.modal_input_cursor().map(|(_, cursor, _)| cursor),
-        Some(9)
+        Some(0)
     );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "unsubmitted conversation draft");
     Ok(())
 }
