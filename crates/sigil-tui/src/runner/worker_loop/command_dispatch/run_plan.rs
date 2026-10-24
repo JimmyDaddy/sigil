@@ -1254,7 +1254,9 @@ where
                 if receipt.route_state != WorkerApprovalRouteState::Rejected {
                     state.remember_approval_command_receipt(receipt.clone());
                 }
-                if envelope_matches && let Some(pattern) = family_pattern {
+                if receipt.route_state == WorkerApprovalRouteState::DecisionAccepted
+                    && let Some(pattern) = family_pattern
+                {
                     // The family rule is durable best-effort: the current command is already
                     // approved, and a persist failure only surfaces a notice. The rule applies to
                     // subsequent runs because the run options were assembled before this write.
