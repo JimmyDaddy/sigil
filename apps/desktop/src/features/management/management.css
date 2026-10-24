@@ -486,7 +486,4 @@
 
 .library-filter-bar > .sg-button { width: auto; }
 .support-privacy > .sg-collapsible { margin-top: var(--sg-sys-space-3); }
-.support-privacy code { overflow-wrap: anywhere; }
 .support-privacy > .sg-collapsible > .sg-collapsible-content { display: grid; gap: var(--sg-sys-space-3); }
-.support-privacy-identifiers h3 { margin: 0; font-size: var(--sg-sys-type-label-size); }
-.support-privacy-identifiers p { margin: var(--sg-sys-space-2) 0 0; color: var(--sg-sys-color-on-surface-subtle); font-size: var(--sg-sys-type-label-size); }

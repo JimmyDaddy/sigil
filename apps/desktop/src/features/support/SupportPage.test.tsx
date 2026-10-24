@@ -104,7 +104,7 @@ it("does not replace the new workspace diagnosis with a late previous workspace 
   expect(screen.queryByText("First independent error.")).toBeNull();
 });
 
-it.each(["en", "zh-CN"] as const)("preserves compact counts and localizes known privacy IDs in %s while retaining unknown categories and exact identifiers", async (locale) => {
+it.each(["en", "zh-CN"] as const)("shows privacy categories once in %s without implementation details while retaining unknown categories", async (locale) => {
   window.localStorage.setItem("sigil.desktop.locale.v1", locale);
   const actual = { ...report, summary: { ...report.summary, ok: 42, warn: 4, error: 3 },
     privacy: { included: ["build_metadata", "mcp_aliases", "future_included"], excluded: ["conversation_content", "credential_and_environment_names_and_values", "future_excluded"], reviewBeforeSharing: true } };
@@ -119,15 +119,19 @@ it.each(["en", "zh-CN"] as const)("preserves compact counts and localizes known 
   expect(within(categories).getByText("future_excluded")).toBeTruthy();
   const details = container.querySelector(".support-privacy details")! as HTMLDetailsElement;
   expect(details.open).toBe(false);
-  expect(within(details).getByText(locale === "en"
-    ? "The native shell saves the report you explicitly request; the web renderer never receives its content or destination path."
-    : "只有你明确请求时，原生层才会保存报告；Web 渲染层不会收到报告内容或目标路径。")).toBeTruthy();
-  expect(details.textContent).toContain("credential_and_environment_names_and_values");
-  expect(details.textContent).toContain("future_included");
   expect(container.querySelector(".support-review-note")?.textContent).toContain(locale === "en" ? "Review the saved JSON" : "请先检查保存的 JSON");
   expect(container.querySelector(".support-review-note")?.closest("details")).toBeNull();
   fireEvent.click(screen.getByText(locale === "en" ? "Report contents" : "报告内容", { selector: "summary span" }));
   expect(details.open).toBe(true);
+  expect(details.querySelectorAll("ul")).toHaveLength(2);
+  expect(details.querySelectorAll("li")).toHaveLength(6);
+  for (const category of ["build_metadata", "mcp_aliases", "conversation_content", "credential_and_environment_names_and_values"]) {
+    expect(details.textContent).not.toContain(category);
+  }
+  expect(within(details).getAllByText("future_included")).toHaveLength(1);
+  expect(within(details).getAllByText("future_excluded")).toHaveLength(1);
+  expect(within(details).queryByText(locale === "en" ? "Report category identifiers" : "报告类别标识")).toBeNull();
+  expect(details.textContent).not.toMatch(/native shell|web renderer|destination path|原生层|Web 渲染层|目标路径/i);
   const technical = container.querySelector(".support-technical-details")! as HTMLDetailsElement;
   expect(technical.open).toBe(false);
   expect(technical.textContent).toContain("Sigil test · test-target");

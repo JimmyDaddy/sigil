@@ -178,16 +178,10 @@ export function SupportPage({
             </div>
             {report.privacy.reviewBeforeSharing ? <p className="support-review-note">{t("reviewSupportBeforeSharing")}</p> : null}
             <Collapsible label={t("supportPrivacyScope")}>
-            <p>{t("supportPrivacyDetail")}</p>
             <div className="support-privacy-columns">
               <div><h3>{t("supportIncludes")}</h3><ul>{report.privacy.included.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
               <div><h3>{t("supportExcludes")}</h3><ul>{report.privacy.excluded.map((item) => <li key={item}>{privacyCategory(item, t)}</li>)}</ul></div>
             </div>
-            {[...report.privacy.included, ...report.privacy.excluded].some((item) => privacyCategories.has(item)) ? <div className="support-privacy-identifiers">
-              <h3>{t("supportPrivacyIdentifiers")}</h3>
-              <p><strong>{t("supportIncludes")}: </strong><code>{report.privacy.included.join(", ")}</code></p>
-              <p><strong>{t("supportExcludes")}: </strong><code>{report.privacy.excluded.join(", ")}</code></p>
-            </div> : null}
             </Collapsible>
           </section>
         </>
