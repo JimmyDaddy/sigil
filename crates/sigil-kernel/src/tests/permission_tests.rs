@@ -37,6 +37,75 @@ fn spec(access: ToolAccess) -> ToolSpec {
 }
 
 #[test]
+fn permission_denial_summary_uses_resolved_facets_and_keeps_the_decision_unchanged() {
+    for (local, network, source, expected) in [
+        (true, false, false, "blocked by permission settings"),
+        (false, true, false, "network access is blocked by policy"),
+        (false, false, true, "blocked by this tool's policy"),
+        (
+            true,
+            true,
+            false,
+            "blocked by permission settings and network policy",
+        ),
+        (
+            true,
+            false,
+            true,
+            "blocked by permission settings and this tool's policy",
+        ),
+        (
+            false,
+            true,
+            true,
+            "blocked by network policy and this tool's policy",
+        ),
+        (
+            true,
+            true,
+            true,
+            "blocked by permission settings, network policy, and this tool's policy",
+        ),
+    ] {
+        let mut decision = PermissionDecision::new(
+            ApprovalMode::Deny,
+            "mcp_activate_server",
+            ToolAccess::Execute,
+            vec![ToolSubject::mcp_trust_class("fixture", "third_party")],
+            false,
+        );
+        decision.local_policy_decision = if local {
+            ApprovalMode::Deny
+        } else {
+            ApprovalMode::Ask
+        };
+        decision.network_policy_decision = if network {
+            ApprovalMode::Deny
+        } else {
+            ApprovalMode::Allow
+        };
+        decision.source_policy_decision = if source {
+            ApprovalMode::Deny
+        } else {
+            ApprovalMode::Ask
+        };
+        let before = decision.clone();
+        assert_eq!(decision.denial_summary(), Some(expected));
+        assert_eq!(decision, before, "formatting cannot change the decision");
+        decision.subjects = vec![ToolSubject::mcp_trust_class("network", "self_hosted")];
+        assert_eq!(
+            decision.denial_summary(),
+            Some(expected),
+            "subject labels do not select the reason"
+        );
+    }
+    for mode in [ApprovalMode::Allow, ApprovalMode::Ask] {
+        let decision = PermissionDecision::new(mode, "tool", ToolAccess::Read, Vec::new(), false);
+        assert_eq!(decision.denial_summary(), None);
+    }
+}
+
+#[test]
 fn r71_headless_admission_keeps_confirmation_after_allow_or_grant() {
     let mut decision = PermissionDecision::new(
         ApprovalMode::Allow,

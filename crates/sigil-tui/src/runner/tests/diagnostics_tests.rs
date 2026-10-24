@@ -536,10 +536,17 @@ fn permission_block_reason_covers_approval_deny_and_external_directory() {
     assert_eq!(ask_kind, ToolErrorKind::ApprovalRequired);
     assert!(ask_reason.contains("requires approval"));
     assert_eq!(deny_kind, ToolErrorKind::PermissionDenied);
-    assert!(deny_reason.contains("src/main.rs"));
+    assert_eq!(deny_reason, "blocked by permission settings");
     assert_eq!(external_kind, ToolErrorKind::ExternalDirectoryRequired);
     assert!(external_reason.contains("permission.external_directory.enabled"));
     assert!(external_reason.contains("$SIGIL_SCRATCH_DIR"));
+
+    let mut network = ask;
+    network.mode = ApprovalMode::Deny;
+    network.network_policy_decision = ApprovalMode::Deny;
+    let (network_kind, network_reason) = permission_block_reason(&call, &network);
+    assert_eq!(network_kind, ToolErrorKind::PermissionDenied);
+    assert_eq!(network_reason, "network access is blocked by policy");
 }
 
 #[test]

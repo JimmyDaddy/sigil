@@ -384,7 +384,7 @@ fn submit_plan_prompt_rejects_write_tool_under_readonly_permissions() -> Result<
                                 &result.status,
                                 ToolResultStatus::Error(error)
                                     if error.kind == ToolErrorKind::PermissionDenied
-                                        && result.content.contains("denied by permission policy")
+                                        && result.content == "blocked by permission settings"
                             ))
             )
         },
@@ -399,7 +399,7 @@ fn submit_plan_prompt_rejects_write_tool_under_readonly_permissions() -> Result<
                         &result.status,
                         ToolResultStatus::Error(error)
                             if error.kind == ToolErrorKind::PermissionDenied
-                                && result.content.contains("denied by permission policy")
+                                && result.content == "blocked by permission settings"
                     ))
     ));
 

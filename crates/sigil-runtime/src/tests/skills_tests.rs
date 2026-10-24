@@ -1111,7 +1111,7 @@ async fn load_skill_agent_permission_modes_allow_ask_and_deny() -> Result<()> {
     assert_eq!(deny_output.result.final_text, "done");
     assert!(deny_output.outcome.tool_errors.iter().any(|error| {
         error.kind == ToolErrorKind::PermissionDenied
-            && error.message.contains("denied by permission policy")
+            && error.message == "blocked by permission settings"
     }));
     assert_no_skill_loaded(&deny_session);
     assert_request_omits_loaded_skill_body(&deny_requests);

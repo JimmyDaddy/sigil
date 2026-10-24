@@ -666,6 +666,34 @@ pub struct PermissionDecision {
 }
 
 impl PermissionDecision {
+    /// Returns a concise explanation of the policy facets that denied this action.
+    /// This only formats the resolved decision; it does not change policy or grant authority.
+    /// Callers may retain a more specific external-directory explanation when available.
+    #[must_use]
+    pub fn denial_summary(&self) -> Option<&'static str> {
+        if self.mode != ApprovalMode::Deny {
+            return None;
+        }
+        Some(
+            match (
+                self.local_policy_decision == ApprovalMode::Deny,
+                self.network_policy_decision == ApprovalMode::Deny,
+                self.source_policy_decision == ApprovalMode::Deny,
+            ) {
+                (true, false, false) => "blocked by permission settings",
+                (false, true, false) => "network access is blocked by policy",
+                (false, false, true) => "blocked by this tool's policy",
+                (true, true, false) => "blocked by permission settings and network policy",
+                (true, false, true) => "blocked by permission settings and this tool's policy",
+                (false, true, true) => "blocked by network policy and this tool's policy",
+                (true, true, true) => {
+                    "blocked by permission settings, network policy, and this tool's policy"
+                }
+                (false, false, false) => "blocked by permission policy",
+            },
+        )
+    }
+
     /// Returns the blocker that prevents this decision from executing without an interactive
     /// route. This is evaluated after session-grant matching, so a grant may only remove the
     /// ordinary `Ask` blocker; it cannot satisfy `confirmation`.

@@ -259,6 +259,72 @@ async fn network_session_grant_executes_reloads_and_reuses_without_shell_contain
     Ok(())
 }
 
+#[tokio::test]
+async fn permission_denial_reports_network_policy_without_approval_or_execution() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NetworkReadTool {
+        executions: executions.clone(),
+        binding: Arc::new(Mutex::new(BTreeMap::new())),
+    }));
+    let agent = Agent::new(NetworkGrantProvider(AtomicUsize::new(0)), registry);
+    let mut session = Session::new("network-denial", "mock-model").with_store(
+        JsonlSessionStore::new(workspace.path().join("session.jsonl"))?,
+    );
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = PanicApprovalHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "inspect the configured network resource",
+            AgentRunOptions {
+                workspace_root: workspace.path().to_path_buf(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext {
+                    network_policy: crate::NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+                tool_authority: None,
+            },
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    assert_eq!(result.final_text, "done");
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(session.entries().iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+            if decision.tool_name == "read_path"
+                && decision.policy_decision == ApprovalMode::Deny
+                && decision.local_policy_decision == ApprovalMode::Allow
+                && decision.network_policy_decision == ApprovalMode::Deny
+                && decision.source_policy_decision == ApprovalMode::Allow
+    )));
+    assert!(
+        !session.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(_))
+        )),
+        "denied calls must not request approval"
+    );
+    assert!(handler.events.iter().any(|event| matches!(event,
+        RunEvent::ToolResult(result)
+            if result.content == "network access is blocked by policy"
+                && matches!(&result.status, crate::ToolResultStatus::Error(error)
+                    if error.kind == ToolErrorKind::PermissionDenied && !error.retryable)
+    )));
+    Ok(())
+}
+
 #[test]
 fn local_session_grant_json_remains_readable_and_mixed_bindings_are_rejected() -> Result<()> {
     let legacy = json!({

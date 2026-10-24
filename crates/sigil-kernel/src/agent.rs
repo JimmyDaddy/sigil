@@ -5452,14 +5452,10 @@ where
                 } else {
                     (
                         ToolErrorKind::PermissionDenied,
-                        format!(
-                            "denied by permission policy for {}",
-                            if subject_label == "-" {
-                                call.name.as_str()
-                            } else {
-                                subject_label.as_str()
-                            }
-                        ),
+                        decision
+                            .denial_summary()
+                            .unwrap_or("blocked by permission policy")
+                            .to_owned(),
                     )
                 };
                 let mut result =

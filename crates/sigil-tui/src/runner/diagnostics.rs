@@ -339,7 +339,10 @@ pub(super) fn permission_block_reason(
     } else {
         (
             ToolErrorKind::PermissionDenied,
-            format!("denied by permission policy for {subject_label}"),
+            decision
+                .denial_summary()
+                .unwrap_or("blocked by permission policy")
+                .to_owned(),
         )
     }
 }

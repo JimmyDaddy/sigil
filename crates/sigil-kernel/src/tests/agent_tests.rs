@@ -8890,7 +8890,7 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
             event,
             RunEvent::ToolResult(result)
                 if result.is_error()
-                    && result.content.contains("denied by permission policy")
+                    && result.content == "blocked by permission settings"
         )
     }));
     Ok(())
