@@ -1,4 +1,4 @@
-use super::{AppAction, AppState};
+use super::{AppAction, AppState, PaneFocus};
 use crate::commands::UiCommand;
 use sigil_kernel::{CodeIntelStartup, TerminalTaskProjection};
 
@@ -204,7 +204,11 @@ impl AppState {
             }
             return self.cycle_agent_view(true);
         }
-        if self.approval.has_actionable_pending() || !self.composer.input.is_empty() {
+        if self.approval.has_actionable_pending()
+            || (self.active_pane == PaneFocus::Composer
+                && !self.composer.input.is_empty()
+                && command != UiCommand::FocusLatestToolCard)
+        {
             return false;
         }
 

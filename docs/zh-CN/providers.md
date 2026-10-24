@@ -11,7 +11,7 @@ provider 协议、端点、凭据来源和模型目录。保存默认值与运�
 Desktop 输入区会按 connection 分组展示所有已配置且可用连接中的已知模型。选择另一个 Provider
 或模型时，Sigil 会为该精确 route 创建新会话，不会原地改写正在查看的会话。在**设置**中选择默认
 Provider/模型，会发布与 TUI 共用的 `connection-id/model-id` 默认值。TUI 的 `/model` 会追加可审计
-route 边界并在当前会话继续；在精确模型候选上按 `D` 只修改未来会话的默认 route。TUI `/config`
+route 边界并在当前会话继续；在精确模型候选上按 `Ctrl-S` 只修改未来会话的默认 route。TUI `/config`
 中选择 connection 或模型并保存时，会同时更新保存默认值和当前会话 route。
 
 ## 选择模型服务

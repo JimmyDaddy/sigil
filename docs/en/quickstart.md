@@ -51,7 +51,7 @@ Choose an allowlisted environment variable for CI or an already managed shell se
 
 Later, `/model connection-id/model-id` switches an idle current session to an exact ready route
 without losing its conversation history. In its selector, Enter switches the current session and
-`D` changes only the saved default. In `/config`, choosing a connection or model and saving applies
+`Ctrl-S` changes only the saved default. In `/config`, choosing a connection or model and saving applies
 it to both the current conversation and future sessions.
 
 ## 4. Run The First Checks

@@ -67,7 +67,7 @@
 | `/plan [prompt]` | 运行只读计划；接受计划后开始任务 |
 | `/task <任务>` | 开始多步骤执行 |
 | `/task continue` | 继续最近的未完成任务 |
-| `/model <model-id|connection-id/model-id>` | 让空闲的当前会话在准确 ready route 上继续；手动输入完整模型 ID 时，即使目录未列出也会保留 **Use exact model ID** 候选；在选择器中按 `D` 只修改保存默认值 |
+| `/model <model-id|connection-id/model-id>` | 让空闲的当前会话在准确 ready route 上继续；手动输入完整模型 ID 时，即使目录未列出也会保留 **Use exact model ID** 候选；在选择器中按 `Ctrl-S` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
 | `/compact` | 生成、校验并激活一个可恢复的上下文 checkpoint |
 | `/control-log preview` · `/control-log confirm <preview-digest>` | 预览受损命令历史，再明确确认封存旧代并建立新代；原未决命令保留身份 |

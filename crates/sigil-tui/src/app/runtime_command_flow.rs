@@ -78,12 +78,7 @@ impl AppState {
             provider_name.clone(),
             route.clone(),
         )?;
-        let notice = format!(
-            "switching to {}/{}; draft retained",
-            model_ref.connection_id, model_ref.model_id
-        );
-        self.last_notice = Some(notice.clone());
-        self.push_timeline(TimelineRole::Notice, notice);
+        self.last_notice = Some("switching model".to_owned());
 
         Ok(Some(AppAction::SessionRuntimeRouteUpdated { route }))
     }

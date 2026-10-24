@@ -306,10 +306,11 @@ impl AppState {
         }
 
         match key.code {
-            KeyCode::Char('d' | 'D')
+            KeyCode::Char('s' | 'S')
                 if self.active_pane == PaneFocus::Composer
-                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    && key.modifiers == KeyModifiers::CONTROL
                     && self.has_slash_selector()
+                    && self.slash_selector_command() == Some("/model")
                     && self
                         .selected_slash_entry()
                         .is_some_and(|entry| entry.resolved.canonical == "/model") =>

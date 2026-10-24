@@ -46,7 +46,7 @@ CI 或已由 Shell 管理 secret 时选择允许列表中的环境变量。详�
 [模型服务指南](providers.md#认证优先级)。
 
 之后可用 `/model connection-id/model-id` 把空闲的当前会话切换到精确 ready route，并保留对话
-历史。在选择器中，Enter 切换当前会话，`D` 只修改保存默认值；在 `/config` 中选择 connection
+历史。在选择器中，Enter 切换当前会话，`Ctrl-S` 只修改保存默认值；在 `/config` 中选择 connection
 或模型并保存，则会同时应用到当前对话和未来会话。
 
 ## 4. 跑第一轮检查

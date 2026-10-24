@@ -67,7 +67,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/plan [prompt]` | Run a read-only plan; accept its card to start a task |
 | `/task <task>` | Start multi-step execution |
 | `/task continue` | Continue the latest unfinished task |
-| `/model <model-id|connection-id/model-id>` | Continue the current idle session on an exact ready route. A typed full model ID remains available as **Use exact model ID**, even when discovery does not list it; `D` changes only the saved default |
+| `/model <model-id|connection-id/model-id>` | Continue the current idle session on an exact ready route. A typed full model ID remains available as **Use exact model ID**, even when discovery does not list it; `Ctrl-S` changes only the saved default |
 | `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
 | `/compact` | Generate, validate, and activate one recoverable context checkpoint |
 | `/control-log preview` · `/control-log confirm <preview-digest>` | Preview damaged command history, then explicitly confirm sealing the old history and opening a new generation; original pending commands retain their identities |

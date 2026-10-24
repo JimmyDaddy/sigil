@@ -300,7 +300,7 @@ fn model_picker_shows_each_action_once_with_fill_and_switch_request_semantics() 
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert_eq!(text.matches("D saves default").count(), 1);
+    assert_eq!(text.matches("Ctrl-S saves default").count(), 1);
     assert!(text.contains("current session unchanged"));
     assert!(surface.footer.hints.contains("Tab fill"));
     assert!(surface.footer.hints.contains("Enter request switch"));

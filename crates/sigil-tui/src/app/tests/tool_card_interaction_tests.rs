@@ -1,8 +1,12 @@
 use super::*;
 use crate::{
     app::modal_flow::{ModalOutcome, TextInputTarget},
+    commands::UiCommand,
+    mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
     runner::ToolArtifactDisplayReadFailure,
+    ui::LayoutSnapshot,
 };
+use ratatui::layout::Rect;
 
 fn full_plain_timeline(app: &AppState) -> String {
     app.timeline_plain_lines().join("\n")
@@ -136,11 +140,9 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     assert_eq!(app.composer.input, "draft");
     assert_eq!(
         app.timeline_state.selected_tool_activity_key,
-        Some(first_key.clone())
+        Some(second_key.clone())
     );
 
-    app.composer.input.clear();
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
     assert!(
         app.timeline_state
@@ -155,6 +157,8 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     assert!(full_plain_timeline(&app).contains("src/lib.rs"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.timeline_state.selected_tool_activity_key, None);
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.composer.input, "draft");
     assert_eq!(app.last_notice(), Some("activity focus cleared"));
     Ok(())
 }
@@ -1149,10 +1153,160 @@ fn tool_artifact_cached_navigation_preserves_composer_word_navigation() -> Resul
     assert!(app.apply_tool_artifact_page(&reading_page(200, "second body", None)));
     app.active_pane = PaneFocus::Composer;
     app.composer.input = "one two".to_owned();
-    app.composer.input_cursor = app.composer.input.len();
+    app.composer.input_cursor = 0;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT))?;
+    assert_eq!(app.composer.input_cursor, 3);
+    assert!(app.modal_title().is_none());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+    assert_eq!(app.composer.input_cursor, 0);
+    app.composer.input_cursor = app.input_char_len();
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+    assert_eq!(app.composer.input_cursor, 0);
     assert!(full_plain_timeline(&app).contains("second body"));
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.composer.input, "one two");
+    Ok(())
+}
+
+#[test]
+fn tool_card_reading_shortcuts_preserve_draft_after_keyboard_or_mouse_focus() -> Result<()> {
+    for mouse_focus in [false, true] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.set_terminal_size(80, 24);
+        app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+        let _ = app.drain_pending_worker_commands();
+        let draft = "保留草稿 N20 中文\n👨‍👩‍👧‍👦e\u{301}";
+        app.handle_paste_text(draft);
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))?;
+        let cursor = app.composer.input_cursor;
+        let anchor = app.composer.input_selection_anchor;
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))?;
+        assert_eq!(app.active_pane, PaneFocus::Composer);
+        assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
+        assert!(app.drain_pending_worker_commands().is_empty());
+
+        if mouse_focus {
+            let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 24), &app);
+            let header = layout.tool_cards[0]
+                .header_area
+                .expect("visible tool header");
+            assert!(matches!(
+                app.handle_mouse_event(
+                    MouseInput {
+                        column: header.x,
+                        row: header.y,
+                        kind: MouseInputKind::LeftDown,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    &layout,
+                )?,
+                AppMouseOutcome::Redraw
+            ));
+        } else {
+            let _ =
+                app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+        }
+        assert_eq!(app.active_pane, PaneFocus::Activity);
+        let selected = app
+            .timeline_state
+            .selected_tool_activity_key
+            .clone()
+            .expect("focused tool");
+        let expanded = app
+            .timeline_state
+            .expanded_tool_activity_keys
+            .contains(&selected);
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+        assert_ne!(
+            app.timeline_state
+                .expanded_tool_activity_keys
+                .contains(&selected),
+            expanded
+        );
+
+        for (start_line, body, next) in [(0, "first body", Some(200)), (200, "second body", None)] {
+            let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))?;
+            assert!(matches!(
+                app.drain_pending_worker_commands().as_slice(),
+                [WorkerCommand::ReadToolArtifactPage {
+                    selector: sigil_kernel::ToolArtifactSelectorV1::LinePage { start_line: requested, .. },
+                    ..
+                }] if *requested == start_line
+            ));
+            assert!(app.apply_tool_artifact_page(&reading_page(start_line, body, next)));
+        }
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))?;
+        assert!(full_plain_timeline(&app).contains("first body"));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))?;
+        assert!(full_plain_timeline(&app).contains("second body"));
+        assert!(app.drain_pending_worker_commands().is_empty());
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT))?;
+        assert_eq!(app.modal_title(), Some("Search Full Tool Output"));
+        app.handle_paste_text("literal");
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(matches!(
+            app.drain_pending_worker_commands().as_slice(),
+            [WorkerCommand::ReadToolArtifactPage {
+                selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral { query, .. }, ..
+            }] if query == "literal"
+        ));
+        assert!(app.apply_tool_artifact_page(&search_reading_page("literal", "matched output")));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+        assert!(full_plain_timeline(&app).contains("second body"));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::ALT))?;
+        assert!(full_plain_timeline(&app).contains("bounded preview"));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert_eq!(app.active_pane, PaneFocus::Composer);
+        assert_eq!(app.timeline_state.selected_tool_activity_key, None);
+        assert_eq!(app.composer.input, draft);
+        assert_eq!(app.composer.input_cursor, cursor);
+        assert_eq!(app.composer.input_selection_anchor, anchor);
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
+        assert!(
+            app.composer.input.is_empty(),
+            "reading must not add a composer edit"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_card_reading_shortcuts_keep_the_pending_approval_guard() -> Result<()> {
+    for pane in [PaneFocus::Composer, PaneFocus::Activity] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+        app.composer.input = "保留草稿".to_owned();
+        inject_write_file_approval(&mut app, sample_approval_preview())?;
+        app.active_pane = pane;
+        app.timeline_state.selected_tool_activity_key = None;
+        let _ = app.drain_pending_worker_commands();
+        for command in [
+            UiCommand::FocusLatestToolCard,
+            UiCommand::SelectNextToolCard,
+            UiCommand::SelectPreviousToolCard,
+            UiCommand::ToggleSelectedToolCard,
+            UiCommand::ReadNextToolArtifactPage,
+            UiCommand::ReadPreviousToolArtifactPage,
+            UiCommand::ReturnToToolArtifactText,
+            UiCommand::SearchToolArtifact,
+            UiCommand::ClearToolCardFocus,
+        ] {
+            assert!(!app.handle_ui_command(command));
+        }
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?
+                .is_none()
+        );
+        assert_eq!(app.active_pane, pane);
+        assert_eq!(app.timeline_state.selected_tool_activity_key, None);
+        assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
+        assert!(app.drain_pending_worker_commands().is_empty());
+        assert!(app.approval.has_actionable_pending());
+        assert_eq!(app.composer.input, "保留草稿");
+    }
     Ok(())
 }
 

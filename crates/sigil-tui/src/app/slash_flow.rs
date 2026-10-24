@@ -945,7 +945,7 @@ impl AppState {
         }
         match self.slash_selector_command() {
             Some("/agent") => Some("Agent"),
-            Some("/model") => Some("Model · D saves default; current session unchanged"),
+            Some("/model") => Some("Model · Ctrl-S saves default; current session unchanged"),
             Some("/resume") => Some("Resume session"),
             _ => None,
         }

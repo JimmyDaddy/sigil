@@ -253,7 +253,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::FocusLatestToolCard,
         keys: &[KeyBinding { label: "Ctrl-G" }],
         slash: None,
-        help: "Focus the latest activity.",
+        help: "Focus the latest activity while keeping the draft.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
@@ -312,7 +312,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ClearToolCardFocus,
         keys: &[KeyBinding { label: "Esc" }],
         slash: None,
-        help: "Clear activity focus when the composer is empty.",
+        help: "Return from activity to the composer while keeping the draft.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
@@ -481,6 +481,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Shift-Enter or Alt-Enter: Insert a newline when terminal keyboard enhancement is active and reports modifiers.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
         "Ctrl-Z: Undo an edit, including clearing with Esc. Ctrl-Y or Ctrl-Shift-Z: Redo.".to_owned(),
+        "Ctrl-S in /model: Save the selected default without switching this session.".to_owned(),
         "Enter while busy: Queue a follow-up after the current reply.".to_owned(),
         String::new(),
         "Review".to_owned(),

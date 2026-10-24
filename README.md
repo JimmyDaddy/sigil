@@ -46,9 +46,11 @@
 
 Desktop and TUI show bounded live previews while an answer is streaming, then replace them with the saved result. Reopening a session restores committed history; a truncated preview is not the complete answer. In Desktop, use “View complete message” to read the saved text page by page. Plan revision can keep accepting input while details load, and an interrupted cleanup remains visible as unfinished recovery work. Only the current session and protocol formats are supported; older formats are rejected without automatic migration.
 
-TUI keeps the rail compact. Press `F4` (`Alt-I` / `Shift-F2` also work), or click **F4 details** in the rail, for scrollable workspace, session, and usage details even in narrow terminals. `F3` opens settings while keeping your draft. `F1` lists the keys; `Ctrl-O` expands focused tool output.
+TUI keeps the rail compact. Press `F4` (`Alt-I` / `Shift-F2` also work), or click **F4 details** in the rail, for scrollable workspace, session, and usage details even in narrow terminals. `F3` opens settings while keeping your draft. `F1` lists the keys. Press `Ctrl-G` or click an activity to read its output while keeping your draft; `Ctrl-O` expands it and `Esc` returns to editing.
 
 In the TUI composer, `Ctrl-Z` undoes edits, including clearing with `Esc`; `Ctrl-Y` or `Ctrl-Shift-Z` redoes them. `Alt-Y` pastes back cut text; `Ctrl-Y` keeps that behavior when there is no edit to redo. [Composer editing details](dev/docs/tui-composer-selection.md#撤销与重做) cover selection and draft recovery.
+
+Use `/model` to choose a model for the current TUI session. `Enter` requests the switch; `Ctrl-S` saves the selected default for future sessions while keeping the current route.
 
 In TUI, `Alt-B` opens completed conversation turns for branching. Choose a turn, then edit your next draft in the new session; branching does not send it or restore workspace files. See the [TUI guide](docs/en/user-guide.md#controlled-checkpoints-and-conversation-forks).
 

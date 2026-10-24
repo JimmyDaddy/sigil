@@ -14,7 +14,7 @@ Desktop groups the known models from every configured, usable connection in the 
 a different Provider or model creates a fresh conversation on that exact route; the conversation
 you are viewing is never rewritten in place. In **Settings**, choosing a default publishes the
 same shared `connection-id/model-id` used by the TUI. In the TUI, `/model` appends an audited route
-boundary and continues the current conversation; `D` on an exact model candidate changes only the
+boundary and continues the current conversation; `Ctrl-S` on an exact model candidate changes only the
 default for future sessions. In `/config`, selecting a connection or model and saving intentionally
 updates both the saved default and the current conversation route.
 

@@ -902,6 +902,7 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let previous_session_id = app.session_id.clone();
     app.push_timeline(TimelineRole::Assistant, "old context");
+    let previous_timeline_len = app.timeline.len();
     app.composer.input = "/model pro".to_owned();
 
     let action = app.submit_input()?;
@@ -926,12 +927,69 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
         )
     }));
-    assert!(
+    assert_eq!(app.last_notice(), Some("switching model"));
+    assert_eq!(app.timeline.len(), previous_timeline_len);
+    Ok(())
+}
+
+#[test]
+fn model_switch_progress_keeps_connection_labels_out_of_history_and_preserves_draft() -> Result<()>
+{
+    let fixture = tempfile::tempdir()?;
+    let path = fixture.path().join("sigil.toml");
+    let mut config = config_for_workspace(fixture.path());
+    config.connections.insert(
+        "failed-auth".to_owned(),
+        serde_json::json!({
+            "label":"Test connection", "provider":"custom", "protocol":"chat_completions",
+            "base_url":"http://127.0.0.1:1/v1", "credential":{"source":"none"}
+        }),
+    );
+    let mut app = AppState::from_root_config(&path, &config);
+    app.push_timeline(TimelineRole::Assistant, "previous answer");
+    app.set_input_and_cursor("保留这份 **草稿**".to_owned());
+    let draft = app.composer.input.clone();
+    let timeline = app
+        .timeline
+        .iter()
+        .map(|entry| (entry.role, entry.text.clone()))
+        .collect::<Vec<_>>();
+    let entries = serde_json::to_vec(&app.session_browser.current_entries)?;
+    let session = app.session_id.clone();
+    let active_route = app.runtime.model_route.clone();
+
+    let Some(AppAction::SessionRuntimeRouteUpdated { route }) =
+        app.set_runtime_model_from_command("failed-auth/error-deny-missing-model")?
+    else {
+        panic!("a valid explicit route must remain available regardless of its label");
+    };
+    assert_eq!(route.model_ref.connection_id.as_str(), "failed-auth");
+    assert_eq!(route.model_ref.model_id, "error-deny-missing-model");
+    assert_eq!(
+        app.pending_session_route_selection()
+            .expect("pending route")
+            .1,
+        route
+    );
+    assert_eq!(app.last_notice(), Some("switching model"));
+    assert_eq!(app.composer.input, draft);
+    assert_eq!(app.runtime.model_route, active_route);
+    assert_eq!(app.session_id, session);
+    assert_eq!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("switching to")
-                && entry.text.contains("deepseek-v4-pro"))
+            .map(|entry| (entry.role, entry.text.clone()))
+            .collect::<Vec<_>>(),
+        timeline
     );
+    assert_eq!(
+        serde_json::to_vec(&app.session_browser.current_entries)?,
+        entries
+    );
+    let saved = app.root_config_snapshot().expect("original configuration");
+    assert_eq!(saved.agent.connection, config.agent.connection);
+    assert_eq!(saved.agent.model, config.agent.model);
+    assert!(!path.exists(), "progress must not save configuration");
     Ok(())
 }
 
@@ -1496,9 +1554,9 @@ fn slash_model_default_key_changes_saved_route_without_mutating_current_session(
     let current_session_id = app.session_id.clone();
     app.composer.input = "/model deepseek-team/deepseek-v4-pro".to_owned();
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
     let Some(AppAction::SetDefaultModel { root_config, .. }) = action else {
-        panic!("D should create an independent saved-default mutation");
+        panic!("Ctrl-S should create an independent saved-default mutation");
     };
     assert_eq!(
         root_config.agent.connection.as_ref().map(|id| id.as_str()),
@@ -1568,10 +1626,7 @@ fn slash_model_keeps_configured_routes_available_despite_cached_inventory_failur
         Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
     assert_eq!(app.session_id, previous_session_id);
-    assert!(
-        app.last_notice()
-            .is_some_and(|notice| notice.contains("switching to"))
-    );
+    assert_eq!(app.last_notice(), Some("switching model"));
     assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     Ok(())
 }
@@ -1664,10 +1719,7 @@ fn model_command_revalidates_runtime_when_selected_model_is_already_configured()
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     assert_eq!(app.session_id, previous_session_id);
-    assert_eq!(
-        app.last_notice(),
-        Some("switching to deepseek-default/deepseek-v4-flash; draft retained")
-    );
+    assert_eq!(app.last_notice(), Some("switching model"));
     Ok(())
 }
 
@@ -1741,9 +1793,9 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
         Some("Use exact model ID: ds-custom-2026-08")
     );
     let Some(AppAction::SetDefaultModel { root_config, .. }) =
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE))?
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
     else {
-        panic!("D should save the exact model candidate as the default route");
+        panic!("Ctrl-S should save the exact model candidate as the default route");
     };
     assert_eq!(
         root_config.agent.connection.as_ref().map(|id| id.as_str()),
@@ -1756,10 +1808,7 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
     ));
     assert_eq!(app.session_id, previous_session_id);
     assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
-    assert!(app.last_notice().is_some_and(|notice| {
-        notice.contains("switching to deepseek-default/ds-custom-2026-08")
-            && notice.contains("draft retained")
-    }));
+    assert_eq!(app.last_notice(), Some("switching model"));
     Ok(())
 }
 
@@ -1956,6 +2005,72 @@ fn exit_alias_quits_tui() -> Result<()> {
 }
 
 #[test]
+fn model_picker_typed_command_and_model_id_keep_d_without_saving_default() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _openai_key =
+        crate::test_env::EnvScope::set("SIGIL_OPENAI_RESPONSES_API_KEY", "openai-test-key");
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
+    let config = multi_connection_v2_config()?;
+    for command in ["/model", "/m"] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        let route_before = app.runtime.model_route.clone();
+        let session_before = app.session_id.clone();
+        let input = format!("{command} deepseek-team/ds-custom-moDel-id");
+        for character in input.chars() {
+            let modifiers = if character.is_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            assert!(
+                app.handle_key_event(KeyEvent::new(KeyCode::Char(character), modifiers))?
+                    .is_none(),
+                "typing {character:?} in {input:?} must not request a configuration mutation"
+            );
+        }
+        assert_eq!(app.composer.input, input);
+        assert_eq!(app.slash_selector_command(), Some("/model"));
+        let Some(AppAction::SessionRuntimeRouteUpdated { route }) =
+            app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        else {
+            panic!("Enter should request the exact session route");
+        };
+        assert_eq!(route.model_ref.connection_id.as_str(), "deepseek-team");
+        assert_eq!(route.model_ref.model_id, "ds-custom-moDel-id");
+        assert_eq!(app.session_id, session_before);
+        assert_eq!(app.runtime.model_route, route_before);
+        let (_, pending_route) = app
+            .pending_session_route_selection()
+            .expect("the worker must activate the selected session route");
+        assert_eq!(pending_route, &route);
+        let saved = app.root_config_snapshot().expect("saved configuration");
+        assert_eq!(saved.agent.connection, config.agent.connection);
+        assert_eq!(saved.agent.model, config.agent.model);
+    }
+    Ok(())
+}
+
+#[test]
+fn model_picker_save_default_shortcut_requires_an_exact_model_command() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
+    let config = test_config();
+    for input in ["ordinary draft", "/mo", "/effort high"] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+        app.set_input_and_cursor(input.to_owned());
+        assert!(
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?
+                .is_none()
+        );
+        assert_eq!(app.composer.input, input);
+        let saved = app.root_config_snapshot().expect("saved configuration");
+        assert_eq!(saved.agent.connection, config.agent.connection);
+        assert_eq!(saved.agent.model, config.agent.model);
+    }
+    Ok(())
+}
+
+#[test]
 fn model_picker_default_modifiers_and_paste_keep_routes_distinct() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _openai_key =
@@ -1963,9 +2078,14 @@ fn model_picker_default_modifiers_and_paste_keep_routes_distinct() -> Result<()>
     let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let config = multi_connection_v2_config()?;
     for (character, modifiers, saves) in [
-        ('d', KeyModifiers::NONE, true),
-        ('D', KeyModifiers::SHIFT, true),
-        ('D', KeyModifiers::NONE, true),
+        ('s', KeyModifiers::CONTROL, true),
+        ('S', KeyModifiers::CONTROL, true),
+        ('S', KeyModifiers::CONTROL | KeyModifiers::SHIFT, false),
+        ('s', KeyModifiers::NONE, false),
+        ('S', KeyModifiers::SHIFT, false),
+        ('d', KeyModifiers::NONE, false),
+        ('D', KeyModifiers::SHIFT, false),
+        ('D', KeyModifiers::NONE, false),
         ('d', KeyModifiers::CONTROL, false),
         ('D', KeyModifiers::CONTROL | KeyModifiers::SHIFT, false),
         ('d', KeyModifiers::ALT, false),
@@ -1984,6 +2104,12 @@ fn model_picker_default_modifiers_and_paste_keep_routes_distinct() -> Result<()>
             assert_eq!(
                 app.composer.input, "/model deepseek-team/deepseek-v4-pro",
                 "saving default must not also type its shortcut into the query"
+            );
+        } else if matches!(modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+            assert_eq!(
+                app.composer.input,
+                format!("/model deepseek-team/deepseek-v4-pro{character}"),
+                "ordinary characters must remain editable in the model query"
             );
         }
     }
