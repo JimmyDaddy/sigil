@@ -1,4 +1,4 @@
-use super::*;
+use super::{output::json_wire_bytes, *};
 use std::{
     ffi::OsStr,
     fs::File,
@@ -25,6 +25,126 @@ pub(super) struct McpTool {
     pub(super) tool_name: McpToolName,
     pub(super) trust: McpServerTrustPolicy,
     pub(super) annotations: McpToolAnnotations,
+}
+
+const MCP_APPROVAL_REVIEW_MAX_BYTES: usize = 64 * 1024;
+
+/// Builds an argument-only, policy-safe review of one exact MCP request.
+///
+/// This reports the destination and arguments, not a verified account of external side effects.
+/// It performs no server, filesystem or network access. Oversized requests have no review rather
+/// than a truncated body that could conceal part of the action. The approval protocol separately
+/// binds the original, unredacted call and this frozen preview to the exact request identity.
+///
+/// # Errors
+///
+/// Returns an error when the request or its safe review cannot be encoded as JSON.
+pub fn mcp_tool_approval_preview(
+    server_name: &str,
+    remote_tool_name: &str,
+    args: &Value,
+    secret_redactor: &SecretRedactor,
+) -> Result<Option<sigil_kernel::ToolPreview>> {
+    if server_name.len() > 512
+        || remote_tool_name.len() > 512
+        || json_wire_bytes(args) > MCP_APPROVAL_REVIEW_MAX_BYTES
+    {
+        return Ok(None);
+    }
+    let review = json!({
+        "server": server_name,
+        "tool": remote_tool_name,
+        "arguments": args,
+    });
+    // Validate before redact_value collects a new Map: changing two distinct private keys to
+    // the same redaction marker would otherwise silently discard part of this exact request.
+    if !mcp_approval_review_keys_are_stable(&review, secret_redactor) {
+        return Ok(None);
+    }
+    let Some(review) = mcp_approval_review_paths(safe_persistence_json_value(
+        secret_redactor.redact_value(&review),
+    )) else {
+        return Ok(None);
+    };
+    let body = serde_json::to_string_pretty(&review)?;
+    if body.len() > MCP_APPROVAL_REVIEW_MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(sigil_kernel::ToolPreview {
+        title: "Call MCP tool".to_owned(),
+        summary: "Review the server, tool, and arguments before approving this request.".to_owned(),
+        body,
+        changed_files: Vec::new(),
+        file_diffs: Vec::new(),
+    }))
+}
+
+fn mcp_approval_review_keys_are_stable(value: &Value, redactor: &SecretRedactor) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().all(|(key, value)| {
+            redactor.redact_text(key) == *key
+                && sigil_kernel::safe_persistence_text(key) == *key
+                && !mcp_approval_text_contains_local_path(key)
+                && mcp_approval_review_keys_are_stable(value, redactor)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .all(|value| mcp_approval_review_keys_are_stable(value, redactor)),
+        _ => true,
+    }
+}
+
+fn mcp_approval_review_paths(value: Value) -> Option<Value> {
+    match value {
+        Value::String(text) if mcp_approval_text_contains_local_path(&text) => {
+            Some(Value::String("[local path redacted]".to_owned()))
+        }
+        Value::Array(values) => values
+            .into_iter()
+            .map(mcp_approval_review_paths)
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array),
+        Value::Object(fields) => {
+            let mut safe = serde_json::Map::new();
+            for (key, value) in fields {
+                // Renaming private keys could merge fields and conceal part of this request.
+                if mcp_approval_text_contains_local_path(&key) {
+                    return None;
+                }
+                safe.insert(key, mcp_approval_review_paths(value)?);
+            }
+            Some(Value::Object(safe))
+        }
+        other => Some(other),
+    }
+}
+
+fn mcp_approval_text_contains_local_path(text: &str) -> bool {
+    text.split(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '"' | '\'' | '=' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '<' | '>'
+            )
+    })
+    .any(|token| {
+        // URI separators belong to a complete public URL, not a local absolute path.
+        if url::Url::parse(token).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) {
+            return false;
+        }
+        // Non-ASCII characters conservatively delimit a local-path candidate in review text.
+        // This covers natural-language adjacency and Unicode punctuation without guessing words.
+        // Recognized complete public URLs above keep their full Unicode host/path display.
+        token
+            .split(|character: char| character == ':' || !character.is_ascii())
+            .any(|part| {
+                part.starts_with(['/', '\\'])
+                    || part.starts_with("~/")
+                    || part.starts_with("~\\")
+                    || part.starts_with("../")
+                    || part.starts_with("..\\")
+            })
+    })
 }
 
 pub(super) fn stdio_mcp_permission_inputs(
@@ -71,6 +191,23 @@ impl Tool for McpTool {
 
     fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
         Some(self.client.lifecycle_owner())
+    }
+
+    fn argument_only_preview(&self) -> bool {
+        true
+    }
+
+    async fn preview(
+        &self,
+        _ctx: ToolContext,
+        args: Value,
+    ) -> Result<Option<sigil_kernel::ToolPreview>> {
+        mcp_tool_approval_preview(
+            &self.tool_name.server_name,
+            &self.tool_name.original_name,
+            &args,
+            &self.client.secret_redactor,
+        )
     }
 
     fn permission_plan(
@@ -524,3 +661,7 @@ fn digest_mcp_executable(executable: &Path) -> Result<String> {
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
+
+#[cfg(test)]
+#[path = "tests/tools_tests.rs"]
+mod tests;

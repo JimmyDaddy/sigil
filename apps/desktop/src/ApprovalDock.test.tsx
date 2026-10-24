@@ -251,6 +251,91 @@ it("enables the exact file request when canonical review text returns", () => {
   expect(onDecision).toHaveBeenCalledWith("approve_once");
 });
 
+it.each([
+  { effects: ["file_write", "execute_dynamic_code", "network_unknown", "remote_mutation", "unknown"] },
+  { effects: ["network_unknown", "remote_mutation", "unknown"] },
+])("reviews opaque network requests without inventing a file change or reusable grant: %j", ({ effects }) => {
+  const onDecision = vi.fn();
+  const approval: TimelineApproval = {
+    callId: "opaque-call", toolName: "arbitrary-service-tool", approvalRequestId: "opaque-request",
+    toolCallHash: "e".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+    operation: "network_request", risk: "high", snapshotRequired: false,
+    effects,
+    analysisStatus: "conservative", safeSummaryDetail: "The service's effects are not fully known.",
+    sessionGrantAvailable: false, sessionGrantUnavailableReason: { code: "analysis_incomplete" },
+    previewBody: '{"server":"fixture","tool":"echo","arguments":{"text":"中文"}}',
+  };
+  const props = { busy: false, phase: "pending" as const, composerRef: createRef<HTMLTextAreaElement>(),
+    onDecision, onOpenSettings: vi.fn(), onOpenSupport: vi.fn() };
+  const view = render(<LocaleProvider><ApprovalDock {...props} approval={approval} /></LocaleProvider>);
+  expect(screen.getByText("High risk")).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Requested action" }).textContent).toContain('"text":"中文"');
+  expect(screen.queryByText("The exact file change is unavailable")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Allow for session" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Allow family" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+  expect(onDecision).toHaveBeenCalledOnce();
+  expect(onDecision).toHaveBeenCalledWith("approve_once");
+  onDecision.mockClear();
+
+  // Raw arguments from a different timeline projection are not frozen review evidence.
+  view.rerender(<LocaleProvider><ApprovalDock {...props} approval={{ ...approval,
+    approvalRequestId: "next-opaque-request", toolCallHash: "f".repeat(64),
+    previewBody: undefined, toolInput: "RAW INPUT MUST NOT AUTHORIZE" }} /></LocaleProvider>);
+  expect(screen.getByRole("alert").textContent).toContain("The exact action is unavailable");
+  expect(screen.queryByText("The exact file change is unavailable")).toBeNull();
+  const approve = screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement;
+  expect(approve.disabled).toBe(true);
+  fireEvent.click(approve);
+  expect(onDecision).not.toHaveBeenCalled();
+
+  view.rerender(<LocaleProvider><ApprovalDock {...props} approval={{ ...approval, expiresAtMs: 1 }} /></LocaleProvider>);
+  expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("preserves one-time approval for a lifecycle network request without a mutation preview", () => {
+  const onDecision = vi.fn();
+  render(<LocaleProvider><ApprovalDock phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={onDecision}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} approval={{
+      callId: "lifecycle-call", toolName: "arbitrary-lifecycle-action", approvalRequestId: "lifecycle-request",
+      toolCallHash: "a".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+      operation: "network_request", effects: ["network_unknown", "unknown"],
+      analysisStatus: "complete", risk: "high", snapshotRequired: false,
+      safeSummaryDetail: "Activate the configured service.", sessionGrantAvailable: false,
+      sessionGrantUnavailableReason: { code: "non_grantable_effect" },
+    }} /></LocaleProvider>);
+  expect(screen.getByText("High risk")).toBeTruthy();
+  expect(screen.getByText("Activate the configured service.")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Allow for session" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Allow family" })).toBeNull();
+  const approve = screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement;
+  expect(approve.disabled).toBe(false);
+  expect(onDecision).not.toHaveBeenCalled();
+  fireEvent.click(approve);
+  expect(onDecision).toHaveBeenCalledOnce();
+  expect(onDecision).toHaveBeenCalledWith("approve_once");
+});
+
+it.each([
+  { operation: undefined },
+  { operation: "unknown_operation" },
+  { operation: "edit_file" },
+])("keeps unknown and explicit file mutations guarded with opaque effects: %j", (operation) => {
+  const onDecision = vi.fn();
+  render(<LocaleProvider><ApprovalDock phase="pending" busy={false}
+    composerRef={createRef<HTMLTextAreaElement>()} onDecision={onDecision}
+    onOpenSettings={vi.fn()} onOpenSupport={vi.fn()} approval={{
+      callId: "file-fallback", toolName: "arbitrary-tool", approvalRequestId: "file-fallback-request",
+      toolCallHash: "e".repeat(64), policyVersion: "manual", expiresAtMs: Number.MAX_SAFE_INTEGER,
+      effects: ["file_write", "unknown"], snapshotRequired: true, ...operation,
+    }} /></LocaleProvider>);
+  expect(screen.getByRole("alert").textContent).toContain("The exact file change is unavailable");
+  expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(onDecision).not.toHaveBeenCalled();
+});
+
 it("shows one frozen command review before and after canonical reconciliation", () => {
   const command = "python3 split_trip.py bill.csv";
   const body = `Working directory: .\nShell: sh (posix)\n\nCommand:\n${command}`;

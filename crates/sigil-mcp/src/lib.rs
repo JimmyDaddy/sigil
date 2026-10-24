@@ -163,7 +163,8 @@ pub use streamable_http::{
 };
 pub use tools::{
     mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at,
-    mcp_resolved_launch_static_fingerprint_at, mcp_transport_static_fingerprint,
+    mcp_resolved_launch_static_fingerprint_at, mcp_tool_approval_preview,
+    mcp_transport_static_fingerprint,
 };
 
 #[cfg(test)]

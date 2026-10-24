@@ -58,7 +58,9 @@ export function ApprovalDock({
     && !approval.previewBody?.trim();
   const commandReviewUnavailable = requiresCommandReview(approval)
     && !approval.previewBody?.trim();
-  const reviewUnavailable = fileReviewUnavailable || commandReviewUnavailable;
+  const opaqueReviewUnavailable = requiresOpaqueReview(approval)
+    && !approval.previewBody?.trim();
+  const reviewUnavailable = fileReviewUnavailable || commandReviewUnavailable || opaqueReviewUnavailable;
   const unsupportedShellAnalysis = approval.analysisStatus === "unsupported"
     || approval.analysisStatus === "invalid"
     || approval.analysisReasonCodes?.some((code) =>
@@ -200,8 +202,10 @@ export function ApprovalDock({
       {reviewUnavailable ? (
         <aside className="approval-remediation" role="alert">
           <div>
-            <strong>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableTitle" : "approvalFileReviewUnavailableTitle")}</strong>
-            <p>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableDetail" : "approvalFileReviewUnavailableDetail")}</p>
+            <strong>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableTitle"
+              : opaqueReviewUnavailable ? "approvalOpaqueReviewUnavailableTitle" : "approvalFileReviewUnavailableTitle")}</strong>
+            <p>{t(commandReviewUnavailable ? "approvalCommandReviewUnavailableDetail"
+              : opaqueReviewUnavailable ? "approvalOpaqueReviewUnavailableDetail" : "approvalFileReviewUnavailableDetail")}</p>
           </div>
           <Button variant="quiet" type="button" onClick={onOpenSupport}>{t("openSupport")}</Button>
         </aside>
@@ -282,12 +286,24 @@ function frozenCommandReview(approval: TimelineApproval): {
 }
 
 function requiresFileReview(approval: TimelineApproval): boolean {
+  // Effects can be conservative possibilities, rather than prepared file mutations.
+  // A typed opaque request or command needs its own review, never a fabricated file diff.
+  if (requiresOpaqueReview(approval) || requiresCommandReview(approval)) return false;
   if (approval.effects?.some((effect) => effect === "file_write" || effect === "file_delete")) return true;
   // These are typed tool operations, never inferred from prompts or tool names.
   return new Set([
     "create_file", "edit_file", "overwrite_file", "delete_file", "rename_path",
     "create_directory", "delete_directory", "recursive_delete", "apply_change_set",
   ]).has(approval.operation ?? "");
+}
+
+function requiresOpaqueReview(approval: TimelineApproval): boolean {
+  // Generic unknown network exposure alone does not describe an opaque mutation. Lifecycle
+  // requests keep their existing single-call approval; possible mutations need frozen review.
+  return approval.operation === "network_request"
+    && approval.effects?.some((effect) => [
+      "remote_mutation", "file_write", "file_delete", "execute_dynamic_code",
+    ].includes(effect)) === true;
 }
 
 function requiresCommandReview(approval: TimelineApproval): boolean {

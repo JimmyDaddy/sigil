@@ -366,6 +366,63 @@ async fn execute_tool(
         .await
 }
 
+#[tokio::test]
+async fn stdio_mcp_approval_preview_does_not_send_the_request_to_the_server() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("approval-review.py");
+    let request_log = temp.path().join("called.txt");
+    write_server(
+        &script,
+        &basic_probe_server(
+            "        write_message({\"jsonrpc\":\"2.0\",\"id\":message[\"id\"],\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"received\"}]}})",
+            &request_log,
+        ),
+    )?;
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(&mut registry, &[server_config("review", &script, 5)]).await?;
+    let call = ToolCall {
+        id: "review-only".to_owned(),
+        name: "mcp__review__probe".to_owned(),
+        args_json: json!({"text":"中文 exact action"}).to_string(),
+    };
+    let context = ToolContext::new(temp.path(), 5);
+    let plan_before = registry.permission_plan(&context, &call)?;
+    let preview = registry
+        .preview(context.clone(), call.clone())
+        .await?
+        .expect("stdio MCP tools should provide argument-only reviews");
+    assert_eq!(
+        serde_json::from_str::<Value>(&preview.body)?["arguments"]["text"],
+        "中文 exact action"
+    );
+    assert!(
+        !request_log.exists(),
+        "reviewing arguments must not send tools/call"
+    );
+    let plan_after = registry.permission_plan(&context, &call)?;
+    assert_eq!(
+        plan_before, plan_after,
+        "reviewing cannot alter permission authority"
+    );
+    assert!(
+        plan_after
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::Unknown)
+    );
+    assert_eq!(
+        plan_after.operation,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
+    assert!(!plan_after.analysis.is_complete());
+    for owner in registry.lifecycle_owners_by_namespace(crate::MCP_TOOL_LIFECYCLE_NAMESPACE) {
+        registry
+            .retire_by_lifecycle_owner(&owner)
+            .dispose_and_quiesce()
+            .await?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn mcp_timeout_closes_old_client_reaps_process_group_and_refreshes_cleanly() -> Result<()> {

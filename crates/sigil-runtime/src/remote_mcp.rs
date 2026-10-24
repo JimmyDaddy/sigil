@@ -18,7 +18,8 @@ use sigil_mcp::{
     McpRemoteTool, McpStreamableHttpBearerProvider, McpStreamableHttpClient,
     McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment, McpStreamableHttpLimits,
     McpToolName, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
-    classify_mcp_permission, mcp_permission_fingerprint, mcp_tool_permission_plan,
+    classify_mcp_permission, mcp_permission_fingerprint, mcp_tool_approval_preview,
+    mcp_tool_permission_plan,
 };
 use url::Url;
 
@@ -561,7 +562,7 @@ impl Tool for RemoteMcpTool {
             category: ToolCategory::Mcp,
             access: permission.access,
             network_effect: permission.network_effect,
-            preview: ToolPreviewCapability::None,
+            preview: ToolPreviewCapability::Optional,
         }
     }
 
@@ -574,6 +575,23 @@ impl Tool for RemoteMcpTool {
 
     fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
         Some(self.lifecycle_owner.clone())
+    }
+
+    fn argument_only_preview(&self) -> bool {
+        true
+    }
+
+    async fn preview(
+        &self,
+        _ctx: ToolContext,
+        args: Value,
+    ) -> Result<Option<sigil_kernel::ToolPreview>> {
+        mcp_tool_approval_preview(
+            &self.server_name,
+            &self.remote_tool.name,
+            &args,
+            &self.redactor,
+        )
     }
 
     fn permission_plan(

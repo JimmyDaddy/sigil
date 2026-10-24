@@ -10,4 +10,6 @@ Desktop 的设置导入使用同一转换和精确选择语义，用户确认“
 
 激活失败时，拒绝消息区分网络策略、权限设置、工具自身策略及同时阻止的情况，不根据服务器名称或 third-party 标签猜测原因。网络阻止不表示导入失败：未选择 Web 的 `core` 组合会关闭运行时网络；无法证明禁网的本地 stdio 服务也受此约束。只有用户明确允许联网后，才在配置文件为原 `composition.enhancements` 加入 `web`，并设置 `[web] enabled = true`、`network_mode = "ask"`；保存、重启工作区后新建会话，继续通过原手动审批。已有 Web 选择的 TUI 可在 `/config` → Web 调整 Network mode；Desktop 当前需编辑配置文件。无需搜索能力时可保持 `search_route = "disabled"` 和 `[web.bundled_search] enabled = false`。导入本身不会修改这些网络设置，普通权限模式或工具 allow 规则也不会覆盖网络 deny。
 
+MCP 工具调用的审批展示由 host 从本次服务器、原始工具身份和参数生成的有界脱敏预览；该预览不发送 `tools/call`，也不宣称已知文件 diff 或副作用。秘密和本地路径只在展示中隐藏，原始调用与冻结预览仍分别绑定同一审批身份。完整安全展示超过 64 KiB，或参数键含秘密或本地路径、无法原样安全展示时，预览不可用，Desktop 保持不能批准并要求缩小请求。第三方或不完整 annotations 继续按高风险未知影响处理，只能对本次精确调用批准一次；网络 deny、快照和真正文件修改的审阅边界不变。
+
 验证覆盖共享 file reader 的 symlink、FIFO、目录及超预算，以及真实 TUI path→preview→selection→settings save、缺少环境凭证、重复名称、并发配置 CAS、关闭/更换面板、非法与未选条目。测试通过统一隔离入口运行；通过情况见 repo-local 执行记录，不把编写测试表述为通过。

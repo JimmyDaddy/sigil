@@ -124,7 +124,7 @@ fn protocol_error_data_projection(value: &Value) -> Value {
     projection
 }
 
-fn json_wire_bytes(value: &Value) -> usize {
+pub(super) fn json_wire_bytes(value: &Value) -> usize {
     struct CountingWriter(usize);
 
     impl Write for CountingWriter {

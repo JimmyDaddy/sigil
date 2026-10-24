@@ -484,7 +484,7 @@ async fn register_prepared_mcp_server(
                 category: ToolCategory::Mcp,
                 access: permission.access,
                 network_effect: permission.network_effect,
-                preview: ToolPreviewCapability::None,
+                preview: ToolPreviewCapability::Optional,
             },
             tool_name,
             trust: server.trust.clone(),

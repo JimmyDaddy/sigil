@@ -3628,6 +3628,24 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
     };
     let unknown_plan = registry.permission_plan(&context, &remote_call)?;
     let repeated_unknown_plan = registry.permission_plan(&context, &remote_call)?;
+    let preview = registry
+        .preview(
+            context.clone(),
+            ToolCall {
+                args_json: json!({"text":"remote 中文 review", "api_key":"must-not-display"})
+                    .to_string(),
+                ..remote_call.clone()
+            },
+        )
+        .await?
+        .expect("remote MCP tools should provide a safe argument-only review");
+    let preview_body: serde_json::Value = serde_json::from_str(&preview.body)?;
+    assert_eq!(preview_body["server"], "remote-eager");
+    assert_eq!(preview_body["tool"], "echo");
+    assert_eq!(preview_body["arguments"]["text"], "remote 中文 review");
+    assert!(!preview.body.contains("must-not-display"));
+    assert!(preview.changed_files.is_empty());
+    assert!(preview.file_diffs.is_empty());
     assert_eq!(unknown_plan.access, ToolAccess::Execute);
     assert_eq!(
         unknown_plan.operation,
