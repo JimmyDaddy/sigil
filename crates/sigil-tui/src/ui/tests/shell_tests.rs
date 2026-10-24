@@ -1834,8 +1834,25 @@ fn workspace_trust_short_surface_scrolls_complete_path_with_fixed_facts_and_acti
         let mut terminal = Terminal::new(TestBackend::new(80, 12))?;
         terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
         let rendered = rendered_content(&terminal);
-        assert!(rendered.contains(contains), "{rendered}");
-        assert!(!rendered.contains(absent), "{rendered}");
+        // Path markers can cross wrapped rows; remove only their row edges and padding.
+        let rows = rendered_rows(&terminal);
+        let visible_path = rows
+            .iter()
+            .map(|row| {
+                row.trim_matches(|character: char| character.is_whitespace() || character == '│')
+            })
+            .skip_while(|row| !row.is_empty())
+            .skip(1)
+            .take_while(|row| !row.starts_with("Folder lines"))
+            .collect::<String>();
+        assert!(visible_path.contains(contains), "{rendered}");
+        assert!(!visible_path.contains(absent), "{rendered}");
+        let workspace_path = workspace.display().to_string();
+        match key {
+            KeyCode::Home => assert!(workspace_path.starts_with(&visible_path), "{rendered}"),
+            KeyCode::End => assert!(workspace_path.ends_with(&visible_path), "{rendered}"),
+            _ => unreachable!("only Home and End are exercised"),
+        }
         assert!(rendered.contains("Trust this workspace?"));
         assert!(rendered.contains("repo-local instructions/checks"));
         assert!(rendered.contains("normal agent execution stays blocked"));

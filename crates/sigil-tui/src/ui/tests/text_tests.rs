@@ -88,6 +88,130 @@ fn bidi_reordering_keeps_logical_and_visual_positions_bijective() {
 }
 
 #[test]
+fn bidi_reordering_preserves_pasted_emoji_joiners_and_character_styles() {
+    let line = Line::from(vec![
+        Span::styled("真实粘贴 R12：中文 ", Style::default().fg(Color::Blue)),
+        Span::styled("👩‍💻 e\u{301}", Style::default().fg(Color::Green)),
+    ]);
+    let logical = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style))
+        })
+        .collect::<Vec<_>>();
+    let (visual, map) = bidi_reorder_line_with_map(&line);
+    let rendered = visual
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered, logical);
+    assert_eq!(
+        map.visual_to_logical,
+        (0..logical.len()).collect::<Vec<_>>()
+    );
+    assert_eq!(map.logical_to_visual, map.visual_to_logical);
+}
+
+#[test]
+fn bidi_reordering_maps_formatting_codepoints_in_mixed_and_control_only_lines() {
+    for text in [
+        "prefix אבג 👩‍💻 suffix",
+        "אבג 👩‍💻 e\u{301}",
+        "\u{202a}\u{202c}\u{200d}",
+    ] {
+        let (visual, map) = bidi_reorder_line_with_map(&Line::from(text));
+        let logical = text.chars().collect::<Vec<_>>();
+        let rendered = visual
+            .spans
+            .iter()
+            .flat_map(|span| span.content.chars())
+            .collect::<Vec<_>>();
+        assert_eq!(map.visual_to_logical.len(), logical.len());
+        assert_eq!(map.logical_to_visual.len(), logical.len());
+        for (visual_index, logical_index) in map.visual_to_logical.iter().copied().enumerate() {
+            assert_eq!(map.logical_to_visual[logical_index], visual_index);
+            assert_eq!(rendered[visual_index], logical[logical_index]);
+        }
+        if text.contains("👩‍💻") {
+            assert!(rendered.iter().collect::<String>().contains("👩‍💻"));
+        }
+    }
+}
+
+#[test]
+fn bidi_reordering_keeps_rtl_graphemes_and_cross_span_styles_together() {
+    let line = Line::from(vec![
+        Span::styled("אבג 👩", Style::default().fg(Color::Blue)),
+        Span::styled("‍💻 ש\u{5b8}", Style::default().fg(Color::Green)),
+    ]);
+    let logical = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style))
+        })
+        .collect::<Vec<_>>();
+    let (visual, map) = bidi_reorder_line_with_map(&line);
+    let rendered = visual
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style))
+        })
+        .collect::<Vec<_>>();
+    let text = rendered
+        .iter()
+        .map(|(character, _)| character)
+        .collect::<String>();
+
+    assert!(text.contains("👩‍💻"));
+    assert!(text.contains("ש\u{5b8}"));
+    for (visual_index, logical_index) in map.visual_to_logical.iter().copied().enumerate() {
+        assert_eq!(map.logical_to_visual[logical_index], visual_index);
+        assert_eq!(rendered[visual_index], logical[logical_index]);
+    }
+}
+
+#[test]
+fn bidi_reordering_preserves_long_joiner_and_control_runs() {
+    let joined = format!("👩{}💻", "\u{200d}".repeat(20_000));
+    assert_eq!(sanitize_terminal_text(&joined), joined);
+    for text in [joined, "\u{202a}".repeat(20_000)] {
+        let style = Style::default().fg(Color::Green);
+        let line = Line::from(Span::styled(text.clone(), style));
+        let (visual, map) = bidi_reorder_line_with_map(&line);
+        let rendered = visual
+            .spans
+            .iter()
+            .map(|span| {
+                assert_eq!(span.style, style);
+                span.content.as_ref()
+            })
+            .collect::<String>();
+        let character_count = text.chars().count();
+        assert_eq!(rendered, text);
+        assert_eq!(
+            map.visual_to_logical,
+            (0..character_count).collect::<Vec<_>>()
+        );
+        assert_eq!(map.logical_to_visual, map.visual_to_logical);
+    }
+}
+
+#[test]
 fn wrap_display_width_preserves_empty_and_multichar_lines() {
     assert_eq!(wrap_display_width("", 10), vec![String::from("")]);
     assert_eq!(

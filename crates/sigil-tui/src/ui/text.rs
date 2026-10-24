@@ -481,7 +481,46 @@ pub(crate) fn bidi_reorder_line_with_map(line: &Line<'static>) -> (Line<'static>
     let mut context = BidiContext::new();
     context.resolve_paragraph(&logical, ParagraphDirectionHint::AutoLeftToRight);
     let (_, visual_order) = context.reorder_line(0..logical.len());
-    let mut logical_to_visual = vec![0; visual_order.len()];
+    let mut seen = vec![false; logical.len()];
+    for &logical in &visual_order {
+        seen[logical] = true;
+    }
+    // Rule X9 omits formatting codepoints, including the joiner in emoji sequences.
+    // Keep them in the logical/visual bijection and in the styled output.
+    let mut missing = seen
+        .into_iter()
+        .enumerate()
+        .filter_map(|(logical, was_seen)| (!was_seen).then_some(logical))
+        .peekable();
+    let mut complete_order = Vec::with_capacity(logical.len());
+    for logical in visual_order {
+        while let Some(missing) = missing.next_if(|&missing| missing < logical) {
+            complete_order.push(missing);
+        }
+        complete_order.push(logical);
+    }
+    complete_order.extend(missing);
+    // Reorder whole graphemes so RTL paragraphs cannot split emoji or combining marks.
+    let logical_text = logical.iter().collect::<String>();
+    let mut grapheme_ranges = Vec::new();
+    let mut logical_graphemes = Vec::with_capacity(logical.len());
+    for grapheme in logical_text.graphemes(true) {
+        let start = logical_graphemes.len();
+        let end = start + grapheme.chars().count();
+        logical_graphemes.resize(end, grapheme_ranges.len());
+        grapheme_ranges.push(start..end);
+    }
+    let mut seen_graphemes = vec![false; grapheme_ranges.len()];
+    let mut grapheme_order = Vec::with_capacity(logical.len());
+    for logical in complete_order {
+        let grapheme = logical_graphemes[logical];
+        if !seen_graphemes[grapheme] {
+            seen_graphemes[grapheme] = true;
+            grapheme_order.extend(grapheme_ranges[grapheme].clone());
+        }
+    }
+    let visual_order = grapheme_order;
+    let mut logical_to_visual = vec![0; logical.len()];
     for (visual, logical) in visual_order.iter().copied().enumerate() {
         logical_to_visual[logical] = visual;
     }
