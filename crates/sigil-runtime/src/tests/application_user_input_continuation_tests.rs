@@ -57,10 +57,28 @@ fn use_question_provider(
     Ok(())
 }
 
-#[tokio::test]
+#[test]
+fn sequential_user_input_application_continuations_publish_two_real_questions() -> Result<()> {
+    let test = std::thread::Builder::new()
+        .name("user-input-continuation-small-stack".to_owned())
+        .stack_size(1024 * 1024)
+        .spawn(|| -> Result<()> {
+            // Construct and poll the full prepare + execute + user-input continuation chain on a
+            // Windows-sized 1 MiB stack so large async state machines or construction temporaries
+            // fail immediately in local verification.
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(sequential_user_input_application_continuations_on_small_stack())
+        })?;
+    match test.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 #[allow(clippy::await_holding_lock)]
-async fn sequential_user_input_application_continuations_publish_two_real_questions() -> Result<()>
-{
+async fn sequential_user_input_application_continuations_on_small_stack() -> Result<()> {
     let _environment = crate::test_env::lock();
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");

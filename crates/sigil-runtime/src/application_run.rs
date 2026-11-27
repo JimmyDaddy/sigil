@@ -49,6 +49,8 @@ mod run_start;
 mod task_control;
 mod user_input;
 
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 pub use live_preview::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub use recorder::ApplicationRunEventRecorder;
 pub use run_start::{
@@ -2463,7 +2465,7 @@ impl ApplicationRunExecution {
         H: ApplicationRunEventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        self.execute_with_settlement(handler, approval_handler, false)
+        self.execute_with_settlement_boxed(handler, approval_handler, false)
             .await
     }
 
@@ -2489,7 +2491,7 @@ impl ApplicationRunExecution {
         let background_runs = self.extension_background_runs.clone();
         let runtime = tokio::runtime::Handle::current();
         match tokio::task::spawn_blocking(move || {
-            runtime.block_on(self.execute_with_settlement(
+            runtime.block_on(self.execute_with_settlement_boxed(
                 &mut handler,
                 &mut approval_handler,
                 true,
@@ -2515,6 +2517,21 @@ impl ApplicationRunExecution {
         }
     }
 
+    fn execute_with_settlement_boxed<'a, H, A>(
+        self,
+        handler: &'a mut H,
+        approval_handler: &'a mut A,
+        owned_blocking: bool,
+    ) -> BoxFuture<'a, Result<ApplicationRunOutput>>
+    where
+        H: ApplicationRunEventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        // Construct the execution future in a short-lived frame so large state machines and
+        // construction temporaries do not accumulate in caller poll stacks on Windows.
+        Box::pin(self.execute_with_settlement(handler, approval_handler, owned_blocking))
+    }
+
     async fn execute_with_settlement<H, A>(
         self,
         handler: &mut H,
@@ -2527,26 +2544,40 @@ impl ApplicationRunExecution {
     {
         let registry = self.extension_registry.clone();
         let background_runs = self.extension_background_runs.clone();
-        let result = async {
-            validate_execution_contract(self.interaction, approval_handler, owned_blocking)?;
-            self.execute_inner(handler, approval_handler).await
-        }
-        .await;
+        let result =
+            match validate_execution_contract(self.interaction, approval_handler, owned_blocking) {
+                Ok(()) => self.execute_inner_boxed(handler, approval_handler).await,
+                Err(error) => Err(error),
+            };
         // Normal terminals settle before publishing below. Join on early errors as well;
         // registry retirement is idempotent and keeps live child generations intact.
-        if let Err(error) = result {
-            return match crate::verification_lifecycle::settle_idle_mcp(&registry, &background_runs)
-                .await
-            {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(ApplicationRunCleanupError {
-                    cleanup,
-                    execution: Some(error),
+        match result {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                match crate::verification_lifecycle::settle_idle_mcp(&registry, &background_runs)
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(ApplicationRunCleanupError {
+                        cleanup,
+                        execution: Some(error),
+                    }
+                    .into()),
                 }
-                .into()),
-            };
+            }
         }
-        result
+    }
+
+    fn execute_inner_boxed<'a, H, A>(
+        self,
+        handler: &'a mut H,
+        approval_handler: &'a mut A,
+    ) -> BoxFuture<'a, Result<ApplicationRunOutput>>
+    where
+        H: ApplicationRunEventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        Box::pin(self.execute_inner(handler, approval_handler))
     }
 
     async fn execute_inner<H, A>(
@@ -2698,33 +2729,33 @@ impl ApplicationRunExecution {
                 mut agent_tool_runtime,
             } => {
                 if let Some(runtime) = agent_tool_runtime.as_mut() {
-                    agent
-                        .run_with_approval_input_and_agent_delegate(
-                            &mut self.session,
-                            *input,
-                            self.options,
-                            &mut bridge,
-                            approval_handler,
-                            runtime.as_mut(),
-                        )
-                        .await
+                    run_agent_with_approval_input_and_delegate_boxed(
+                        &agent,
+                        &mut self.session,
+                        *input,
+                        self.options,
+                        &mut bridge,
+                        approval_handler,
+                        runtime.as_mut(),
+                    )
+                    .await
                 } else {
-                    agent
-                        .run_with_approval_input(
-                            &mut self.session,
-                            *input,
-                            self.options,
-                            &mut bridge,
-                            approval_handler,
-                        )
-                        .await
+                    run_agent_with_approval_input_boxed(
+                        &agent,
+                        &mut self.session,
+                        *input,
+                        self.options,
+                        &mut bridge,
+                        approval_handler,
+                    )
+                    .await
                 }
             }
             ApplicationRunExecutionKind::AgentProfile {
                 mut runtime,
                 profile_id,
             } => {
-                execute_application_agent_profile(
+                execute_application_agent_profile_boxed(
                     &mut runtime,
                     &mut self.session,
                     profile_id,
@@ -2740,7 +2771,7 @@ impl ApplicationRunExecution {
                     .plan_review_runtime
                     .take()
                     .ok_or_else(|| anyhow!("explicit plan review runtime is unavailable"))?;
-                run_application_plan_review_request(
+                run_application_plan_review_request_boxed(
                     &mut self.session,
                     AgentRunOutput {
                         disposition: AgentRunDisposition::FinalAnswer,
@@ -2764,7 +2795,7 @@ impl ApplicationRunExecution {
         };
         let run = match run {
             Ok(agent_output) => {
-                let output = continue_application_task_handoff(
+                let output = continue_application_task_handoff_boxed(
                     &mut self.session,
                     agent_output,
                     self.task_execution.take(),
@@ -2775,7 +2806,7 @@ impl ApplicationRunExecution {
                 .await;
                 match output {
                     Ok(output) => {
-                        continue_application_plan_review(
+                        continue_application_plan_review_boxed(
                             &mut self.session,
                             output,
                             self.plan_review_runtime.take(),
@@ -3015,6 +3046,71 @@ pub fn application_public_route_transition(
         model_id: transition.model_id.clone(),
         remote_context_reset: transition.remote_context_reset,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_agent_with_approval_input_boxed<'a, P, H, A>(
+    agent: &'a Agent<P>,
+    session: &'a mut Session,
+    input: AgentRunInput,
+    options: AgentRunOptions,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+) -> BoxFuture<'a, Result<AgentRunOutput>>
+where
+    P: Provider,
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    Box::pin(agent.run_with_approval_input(session, input, options, handler, approval_handler))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_agent_with_approval_input_and_delegate_boxed<'a, P, H, A, D>(
+    agent: &'a Agent<P>,
+    session: &'a mut Session,
+    input: AgentRunInput,
+    options: AgentRunOptions,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+    delegate: &'a mut D,
+) -> BoxFuture<'a, Result<AgentRunOutput>>
+where
+    P: Provider,
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+    D: sigil_kernel::AgentToolDelegate + Send,
+{
+    Box::pin(agent.run_with_approval_input_and_agent_delegate(
+        session,
+        input,
+        options,
+        handler,
+        approval_handler,
+        delegate,
+    ))
+}
+
+fn continue_application_task_handoff_boxed<'a, H, A>(
+    session: &'a mut Session,
+    output: AgentRunOutput,
+    task_execution: Option<ApplicationTaskExecutionRuntime>,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+    cancellation_handle: &'a RunCancellationHandle,
+) -> BoxFuture<'a, Result<AgentRunOutput>>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    Box::pin(continue_application_task_handoff(
+        session,
+        output,
+        task_execution,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    ))
 }
 
 async fn continue_application_task_handoff<H, A>(
@@ -3264,6 +3360,33 @@ where
     application_task_terminal_output(session, &action.task_id, status, output)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn continue_application_plan_review_boxed<'a, H, A>(
+    session: &'a mut Session,
+    output: AgentRunOutput,
+    plan_review_runtime: Option<ApplicationPlanReviewRuntime>,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+    cancellation_handle: &'a RunCancellationHandle,
+    run_id: &'a str,
+    redactor: &'a sigil_kernel::SecretRedactor,
+) -> BoxFuture<'a, Result<AgentRunOutput>>
+where
+    H: EventHandler + ApplicationRunEventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    Box::pin(continue_application_plan_review(
+        session,
+        output,
+        plan_review_runtime,
+        handler,
+        approval_handler,
+        cancellation_handle,
+        run_id,
+        redactor,
+    ))
+}
+
 async fn continue_application_plan_review<H, A>(
     session: &mut Session,
     output: AgentRunOutput,
@@ -3302,6 +3425,35 @@ where
         redactor,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_application_plan_review_request_boxed<'a, H, A>(
+    session: &'a mut Session,
+    output: AgentRunOutput,
+    runtime: ApplicationPlanReviewRuntime,
+    request: crate::PlanReviewRunRequest,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+    cancellation_handle: &'a RunCancellationHandle,
+    run_id: &'a str,
+    redactor: &'a sigil_kernel::SecretRedactor,
+) -> BoxFuture<'a, Result<AgentRunOutput>>
+where
+    H: EventHandler + ApplicationRunEventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    Box::pin(run_application_plan_review_request(
+        session,
+        output,
+        runtime,
+        request,
+        handler,
+        approval_handler,
+        cancellation_handle,
+        run_id,
+        redactor,
+    ))
 }
 
 async fn run_application_plan_review_request<H, A>(
@@ -3797,6 +3949,26 @@ fn application_task_terminal_output(
     Ok(output)
 }
 
+fn execute_application_agent_profile_boxed<'a>(
+    runtime: &'a mut crate::AgentToolRuntime,
+    session: &'a mut Session,
+    profile_id: AgentProfileId,
+    prompt: String,
+    options: &'a AgentRunOptions,
+    handler: &'a mut (dyn EventHandler + Send),
+    approval_handler: &'a mut (dyn ApprovalHandler + Send),
+) -> BoxFuture<'a, Result<AgentRunOutput>> {
+    Box::pin(execute_application_agent_profile(
+        runtime,
+        session,
+        profile_id,
+        prompt,
+        options,
+        handler,
+        approval_handler,
+    ))
+}
+
 async fn execute_application_agent_profile(
     runtime: &mut crate::AgentToolRuntime,
     session: &mut Session,
@@ -3877,6 +4049,41 @@ fn application_agent_status_label(status: Option<AgentThreadStatus>) -> &'static
         Some(AgentThreadStatus::Unavailable) => "unavailable",
         Some(AgentThreadStatus::Unknown) | None => "unknown",
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_application_tool_surface_boxed<'a>(
+    root_config: &'a RootConfig,
+    provider_capabilities: &'a sigil_kernel::ProviderCapabilities,
+    workspace_root: &'a Path,
+    mutation_recorder: MutationEventRecorder,
+    workspace_trust: WorkspaceTrust,
+    options: &'a AgentRunOptions,
+    session: &'a Session,
+    services: &'a ApplicationRunServices,
+    redactor: &'a sigil_kernel::SecretRedactor,
+    skill_descriptor: Option<&'a sigil_kernel::SkillDescriptor>,
+    agent_delegation_available: bool,
+    tool_scope: Option<&'a ToolRegistryScope>,
+    terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+    process_environments: crate::application_mcp::ProcessEnvironments,
+) -> BoxFuture<'a, Result<(crate::RuntimeToolSurface, Vec<String>)>> {
+    Box::pin(assemble_application_tool_surface(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        mutation_recorder,
+        workspace_trust,
+        options,
+        session,
+        services,
+        redactor,
+        skill_descriptor,
+        agent_delegation_available,
+        tool_scope,
+        terminal_lifecycle_sink,
+        process_environments,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4108,7 +4315,7 @@ pub async fn prepare_application_run(
         .require_current_schema_authority()
         .map_err(application_authority_prepare_error)?;
     let (prepared, frozen_request) =
-        prepare_application_run_internal(request, services, None).await?;
+        prepare_application_run_internal_boxed(request, services, None).await?;
     debug_assert!(frozen_request.is_none());
     Ok(prepared)
 }
@@ -4130,7 +4337,7 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
             message: "queued exact prompt and durable user message id must not be empty".to_owned(),
         });
     }
-    let (prepared, assembly) = prepare_application_run_internal(
+    let (prepared, assembly) = prepare_application_run_internal_boxed(
         request,
         services,
         Some((exact_prompt, durable_user_message_id)),
@@ -4145,6 +4352,28 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
 pub(crate) struct ApplicationExactFirstRequestAssembly {
     pub(crate) frozen_request: FrozenProviderRequestMaterial,
     pub(crate) run_input: AgentRunInput,
+}
+
+type PreparedApplicationRunInternalResult = std::result::Result<
+    (
+        PreparedApplicationRun,
+        Option<ApplicationExactFirstRequestAssembly>,
+    ),
+    ApplicationRunPrepareError,
+>;
+
+fn prepare_application_run_internal_boxed<'a>(
+    request: ApplicationRunRequest,
+    services: &'a ApplicationRunServices,
+    queued_first_request: Option<(SecretString, String)>,
+) -> BoxFuture<'a, PreparedApplicationRunInternalResult> {
+    // Construct the large preparation future in a short-lived frame so its temporaries do not
+    // accumulate in caller poll stacks on Windows.
+    Box::pin(prepare_application_run_internal(
+        request,
+        services,
+        queued_first_request,
+    ))
 }
 
 async fn prepare_application_run_internal(
@@ -4326,7 +4555,7 @@ async fn prepare_application_run_internal(
         && task_agent_registry.is_some()
         && services.task_role_provider_builder.is_some();
     let surface_timer = PreparationPhaseTimer::new(&run_id, RunTimingPhase::ToolSurface);
-    let (surface, warnings) = assemble_application_tool_surface(
+    let (surface, warnings) = assemble_application_tool_surface_boxed(
         &root_config,
         &provider.capabilities(),
         &workspace_root,
@@ -4605,35 +4834,37 @@ async fn prepare_application_run_internal(
             selected_composition,
         )
         .map_err(ApplicationRunPrepareError::execution)?;
+        let plan_review_runtime = if plan_review_selected {
+            let tool_registry =
+                crate::build_plan_review_tool_registry(&registry, &root_config).into_registry();
+            let plan_review_provider =
+                crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+                    .await
+                    .map_err(ApplicationRunPrepareError::provider_unavailable)?;
+            Some(ApplicationPlanReviewRuntime {
+                options: options.clone(),
+                workspace_snapshot_id: plan_review_workspace_snapshot_id,
+                agent: Box::new(
+                    crate::configured_agent(
+                        &root_config,
+                        plan_review_provider,
+                        tool_registry.clone(),
+                    )
+                    .map_err(ApplicationRunPrepareError::execution)?,
+                ),
+                tool_registry,
+                child_resource_provisioner: services
+                    .authority_composition()
+                    .map(|composition| composition.plan_review_child_resource_provisioner()),
+            })
+        } else {
+            None
+        };
         let prepared = PreparedApplicationRun {
             execution: ApplicationRunExecution {
                 extension_registry: registry.clone(),
                 extension_background_runs: agent_background_runs.clone(),
-                plan_review_runtime: if plan_review_selected {
-                    let tool_registry =
-                        crate::build_plan_review_tool_registry(&registry, &root_config)
-                            .into_registry();
-                    Some(ApplicationPlanReviewRuntime {
-                        options: options.clone(),
-                        workspace_snapshot_id: plan_review_workspace_snapshot_id,
-                        agent: Box::new(
-                            crate::configured_agent(
-                                &root_config,
-                                crate::build_provider_for_model_ref_async(&root_config, &model_ref)
-                                    .await
-                                    .map_err(ApplicationRunPrepareError::provider_unavailable)?,
-                                tool_registry.clone(),
-                            )
-                            .map_err(ApplicationRunPrepareError::execution)?,
-                        ),
-                        tool_registry,
-                        child_resource_provisioner: services.authority_composition().map(
-                            |composition| composition.plan_review_child_resource_provisioner(),
-                        ),
-                    })
-                } else {
-                    None
-                },
+                plan_review_runtime,
                 kind,
                 task_execution,
                 session,
@@ -4673,25 +4904,27 @@ async fn prepare_application_run_internal(
         Ok((prepared, queued_first_assembly))
     }
     .await;
-    if let Err(error) = assembled {
-        let preparation_cleanup = cleanup_registry
-            .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle)
-            .await;
-        let generation_cleanup = crate::shutdown_mcp_generations(&mut cleanup_registry).await;
-        let failures = [preparation_cleanup, generation_cleanup]
-            .into_iter()
-            .filter_map(Result::err)
-            .map(|error| format!("{error:#}"))
-            .collect::<Vec<_>>();
-        if !failures.is_empty() {
-            return Err(ApplicationRunPrepareError::execution(anyhow!(
-                "{error}; extension cleanup incomplete: {}",
-                failures.join("; ")
-            )));
+    match assembled {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let preparation_cleanup = cleanup_registry
+                .quiesce_background_work(&sigil_kernel::ToolBackgroundWorkSettlement::CancelIdle)
+                .await;
+            let generation_cleanup = crate::shutdown_mcp_generations(&mut cleanup_registry).await;
+            let failures = [preparation_cleanup, generation_cleanup]
+                .into_iter()
+                .filter_map(Result::err)
+                .map(|error| format!("{error:#}"))
+                .collect::<Vec<_>>();
+            if !failures.is_empty() {
+                return Err(ApplicationRunPrepareError::execution(anyhow!(
+                    "{error}; extension cleanup incomplete: {}",
+                    failures.join("; ")
+                )));
+            }
+            Err(error)
         }
-        return Err(error);
     }
-    assembled
 }
 
 /// Creates or reopens the durable V2 session used by an adapter routing handle.

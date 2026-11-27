@@ -298,6 +298,27 @@ pub async fn prepare_application_user_input_decision(
     request: ApplicationUserInputDecisionRequest,
     services: &ApplicationRunServices,
 ) -> std::result::Result<PreparedApplicationUserInputDecision, ApplicationRunPrepareError> {
+    prepare_application_user_input_decision_boxed(request, services).await
+}
+
+fn prepare_application_user_input_decision_boxed<'a>(
+    request: ApplicationUserInputDecisionRequest,
+    services: &'a ApplicationRunServices,
+) -> BoxFuture<
+    'a,
+    std::result::Result<PreparedApplicationUserInputDecision, ApplicationRunPrepareError>,
+> {
+    // Construct the large continuation preparation future in a short-lived frame so its
+    // temporaries do not accumulate in caller poll stacks on Windows.
+    Box::pin(prepare_application_user_input_decision_inner(
+        request, services,
+    ))
+}
+
+async fn prepare_application_user_input_decision_inner(
+    request: ApplicationUserInputDecisionRequest,
+    services: &ApplicationRunServices,
+) -> std::result::Result<PreparedApplicationUserInputDecision, ApplicationRunPrepareError> {
     if request.expected_session_scope_id.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "expected user-input session scope must not be empty".to_owned(),
@@ -552,7 +573,7 @@ pub async fn prepare_application_user_input_decision(
         .attachment
         .agent_tool_background_runs()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let (surface, warnings) = assemble_application_tool_surface(
+    let (surface, warnings) = assemble_application_tool_surface_boxed(
         &root_config,
         &provider.capabilities(),
         &workspace_root,
@@ -571,12 +592,15 @@ pub async fn prepare_application_user_input_decision(
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
     let mut cleanup_registry = surface.registry.clone();
-    let assembled = async {
-        let runtime_context = surface
-            .context_resolver
-            .resolve(&preview.request.prompt)
-            .await
-            .unwrap_or_default();
+    let runtime_context = surface
+        .context_resolver
+        .resolve(&preview.request.prompt)
+        .await
+        .unwrap_or_default();
+    let assembled = (|| -> std::result::Result<
+        PreparedApplicationUserInputDecision,
+        ApplicationRunPrepareError,
+    > {
         let continuation_logical_run_id = sigil_kernel::user_input_continuation_logical_run_id(
             &request.identity,
             &request.request_hash,
@@ -685,17 +709,16 @@ pub async fn prepare_application_user_input_decision(
             revision_request: None,
             terminal_outbox: None,
         })
-    }
-    .await;
-    if let Err(error) = assembled {
-        return match crate::shutdown_mcp_generations(&mut cleanup_registry).await {
+    })();
+    match assembled {
+        Ok(decision) => Ok(decision),
+        Err(error) => match crate::shutdown_mcp_generations(&mut cleanup_registry).await {
             Ok(()) => Err(error),
             Err(cleanup) => Err(ApplicationRunPrepareError::execution(anyhow!(
                 "{error}; extension cleanup incomplete: {cleanup:#}"
             ))),
-        };
+        },
     }
-    assembled
 }
 
 pub(super) fn start_application_user_input_continuation(
