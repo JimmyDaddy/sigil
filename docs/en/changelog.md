@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-7-2026-11-27,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,12 +8,18 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No additional changes.
+
+## v0.0.1-beta.7 - 2026-11-27
+
+This beta resumes signed macOS Desktop releases alongside cross-platform TUI updates, with upgraded Desktop dependencies and a rotated beta updater signing key.
+
 - Desktop replaces the split Markdown composer with inline formatting in a single compact editor, clarifies typography and empty/filtered library states, preserves IME cancellation in popovers, and discloses failed tool output on demand.
 - Desktop and TUI simplify first-run setup, workspace trust, and short-window approval layouts; preserve drafts, selections, and pending clarifications across consecutive questions, navigation, and settings changes; and support selecting custom model routes without a remote model catalog.
 - Importing MCP servers now enables MCP cleanly without losing prior conversation history, shows reviewable MCP tool approvals without fabricated file diffs, and explains permission denials by the blocking policy.
 - TUI preserves joined emoji and Unicode graphemes during transcript reflow, keeps tool artifacts readable across session switches, clears `/resume` selectors after switching sessions, and persists command-family approval grants only after the decision is accepted.
 - Fixed `sigil doctor` misreporting healthy or uninitialized workspaces as corrupted startup state; diagnostics now inspect the active workspace state read-only without creating files, and release archive smoke checks validate the structured JSON report.
-- Rotated the Desktop beta updater signing key. Users on earlier signed Desktop beta builds need to download and install the next signed DMG once manually; subsequent updates resume verified in-app updates.
+- Upgraded Desktop runtime, updater, storage, and transport security dependencies, and rotated the Desktop beta updater signing key. Users on earlier signed Desktop beta builds need to download and install this signed DMG once manually; subsequent updates resume verified in-app updates.
 
 ## v0.0.1-beta.6 - 2026-10-22
 
