@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-7-2026-11-27,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-8-2026-11-27,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -10,7 +10,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 No additional changes.
 
-## v0.0.1-beta.7 - 2026-11-27
+## v0.0.1-beta.8 - 2026-11-27
 
 This beta resumes signed macOS Desktop releases alongside cross-platform TUI updates, with upgraded Desktop dependencies and a rotated beta updater signing key.
 

@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-7-2026-11-27,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-8-2026-11-27,v0-0-1-beta-6-2026-10-22,v0-0-1-beta-5-2026-09-29,v0-0-1-beta-4-2026-08-11,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -10,7 +10,7 @@
 
 暂无新增变更。
 
-## v0.0.1-beta.7 - 2026-11-27
+## v0.0.1-beta.8 - 2026-11-27
 
 本次 beta 同步恢复 macOS 签名 Desktop 安装包与跨平台 TUI 更新，升级了 Desktop 与安全依赖，并轮换了 beta 更新签名密钥。
 
