@@ -132,7 +132,7 @@ export async function submitRegisteredArtifacts(root, options = {}) {
       let response;
       try {
         response = parseNotaryResponse(result, `submit ${key}`);
-        validateSubmissionResponse(response);
+        validateSubmissionResponse(response, undefined, { requireStatus: false });
       } catch (error) {
         await appendEvent(root, {
           type: "submission_error",
@@ -146,6 +146,10 @@ export async function submitRegisteredArtifacts(root, options = {}) {
           { cause: error },
         );
       }
+      const recordedStatus =
+        typeof response.status === "string" && response.status.length > 0
+          ? response.status
+          : "In Progress";
       const responsePath = join(
         NOTARY_DIRECTORY,
         "responses",
@@ -157,7 +161,7 @@ export async function submitRegisteredArtifacts(root, options = {}) {
         artifactKey: key,
         attemptId,
         submissionId: response.id,
-        status: response.status,
+        status: recordedStatus,
         submittedAt: response.createdDate ?? startedAt,
         responsePath,
       });
@@ -437,13 +441,17 @@ async function recoverUncertainAttempts(root, state, runner) {
     );
     try {
       const response = JSON.parse(await readFile(resolveOwnedPath(root, responsePath), "utf8"));
-      validateSubmissionResponse(response);
+      validateSubmissionResponse(response, undefined, { requireStatus: false });
+      const recoveredStatus =
+        typeof response.status === "string" && response.status.length > 0
+          ? response.status
+          : "In Progress";
       await appendEvent(root, {
         type: "submission_recovered",
         artifactKey: artifact.registration.key,
         attemptId: attempt.attemptId,
         submissionId: response.id,
-        status: response.status,
+        status: recoveredStatus,
         submittedAt: response.createdDate ?? attempt.startedAt,
         recoveredAt: new Date().toISOString(),
         responsePath,
@@ -775,19 +783,25 @@ function parseNotaryResponse(result, operation) {
     const detail = boundedText(result.stderr || result.error?.message || result.stdout || "no response");
     throw new Error(`${operation} returned invalid JSON: ${detail}`, { cause: error });
   }
-  if (typeof response.message === "string" && !response.status && !response.history) {
+  const hasSubmissionId = UUID_PATTERN.test(response.id ?? "");
+  if (
+    typeof response.message === "string"
+    && !response.status
+    && !response.history
+    && !(result.status === 0 && hasSubmissionId)
+  ) {
     throw new Error(`${operation} failed: ${boundedText(response.message)}`);
   }
-  if (result.status !== 0 && !response.id) {
+  if (result.status !== 0 && !hasSubmissionId) {
     throw new Error(`${operation} exited with ${result.status ?? result.signal ?? "unknown"}`);
   }
   return response;
 }
 
-function validateSubmissionResponse(response, expectedId) {
+function validateSubmissionResponse(response, expectedId, { requireStatus = true } = {}) {
   if (!UUID_PATTERN.test(response.id ?? "")) throw new Error("Apple response has no valid submission ID");
   if (expectedId && response.id !== expectedId) throw new Error("Apple response submission ID changed");
-  if (typeof response.status !== "string" || response.status.length === 0) {
+  if (requireStatus && (typeof response.status !== "string" || response.status.length === 0)) {
     throw new Error("Apple response has no notarization status");
   }
 }

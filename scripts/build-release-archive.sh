@@ -115,8 +115,31 @@ if [[ "${run_smoke}" -eq 1 ]]; then
   mkdir -p "${smoke_home}"
   smoke_config="${stage_dir}/smoke-sigil.toml"
   smoke_doctor_json="${stage_dir}/smoke-doctor.json"
-  printf '[workspace]\nroot = "."\n\n[storage]\ncredential_store = "file"\n' >"${smoke_config}"
+  cat >"${smoke_config}" <<'EOF'
+config_version = 2
+
+[workspace]
+root = "."
+
+[storage]
+credential_store = "file"
+
+[agent]
+connection = "smoke-default"
+model = "deepseek-chat"
+
+[connections.smoke-default]
+label = "Smoke"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
+EOF
   HOME="${smoke_home}" \
+    USERPROFILE="${smoke_home}" \
+    APPDATA="${smoke_home}/AppData/Roaming" \
+    LOCALAPPDATA="${smoke_home}/AppData/Local" \
     XDG_CONFIG_HOME="${smoke_home}/.config" \
     XDG_STATE_HOME="${smoke_home}/.local/state" \
     XDG_CACHE_HOME="${smoke_home}/.cache" \

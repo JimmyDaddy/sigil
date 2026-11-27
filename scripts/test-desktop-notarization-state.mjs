@@ -36,6 +36,7 @@ const FIRST_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_ID = "22222222-2222-4222-8222-222222222222";
 
 await testAcceptedLifecycle();
+await testAsyncSubmitMessageOnlyResponse();
 await testUncertainSubmissionRecovery();
 await testAtomicResponseRecovery();
 await testMissingSubmissionRequiresExplicitResubmit();
@@ -92,6 +93,28 @@ async function testAcceptedLifecycle() {
     "utf8",
   );
   assert.equal(JSON.parse(submitResponses).id, FIRST_ID);
+}
+
+async function testAsyncSubmitMessageOnlyResponse() {
+  const fixture = await createFixture();
+  const responses = [
+    history([]),
+    // Real `xcrun notarytool submit --output-format json` without `--wait` emits `id` + `message`
+    // without a `status` field.
+    success({ id: FIRST_ID, message: "Successfully uploaded file" }),
+    success({ id: FIRST_ID, status: "Accepted", createdDate: "2026-11-27T14:52:03.482Z" }),
+  ];
+  const runner = async () => responses.shift();
+  await submitRegisteredArtifacts(fixture.root, { runner });
+  let summary = stateSummary(await projectLedger(fixture.root));
+  assert.equal(summary.recoveryRequired, false);
+  assert.equal(summary.artifacts[0].submissionId, FIRST_ID);
+  assert.equal(summary.artifacts[0].status, "In Progress");
+
+  await refreshNotarizationStatus(fixture.root, { runner });
+  summary = stateSummary(await projectLedger(fixture.root));
+  assert.equal(summary.artifacts[0].status, "Accepted");
+  await assertAccepted(fixture.root);
 }
 
 async function testUncertainSubmissionRecovery() {
