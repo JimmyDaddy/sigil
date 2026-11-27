@@ -86,6 +86,12 @@ fi
 
 grep -Fqx "publish ${packages_dir}/sigil-linux-x64 --access public --tag alpha" "${log_file}"
 grep -Fqx "publish ${packages_dir}/sigil-win32-x64 --access public --tag alpha" "${log_file}"
+win32_publish_line="$(grep -n -Fx "publish ${packages_dir}/sigil-win32-x64 --access public --tag alpha" "${log_file}" | head -n 1 | cut -d: -f1)"
+first_linux_converge_line="$(grep -n -Fx "view @sigil-ai/sigil-linux-x64@alpha version --prefer-online" "${log_file}" | head -n 1 | cut -d: -f1)"
+if [[ -z "${win32_publish_line}" || -z "${first_linux_converge_line}" || "${win32_publish_line}" -gt "${first_linux_converge_line}" ]]; then
+  echo "platform packages were not uploaded before waiting for registry convergence" >&2
+  exit 1
+fi
 if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "3" ]]; then
   echo "transient npm registry propagation was not retried" >&2
   exit 1

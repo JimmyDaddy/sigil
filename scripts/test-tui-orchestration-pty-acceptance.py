@@ -400,6 +400,60 @@ class DirectTaskPtyAcceptanceTests(unittest.TestCase):
                                         for event in events), encoding="utf-8")
             self.assertEqual(MODULE.managed_parent_session_files(root), [parent])
 
+    def test_conversation_recovery_outbox_settled_requires_delivery_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            records: list[dict[str, object]] = []
+
+            def write() -> None:
+                path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+            write()
+            self.assertFalse(MODULE.conversation_recovery_outbox_settled(path))
+            records.append(
+                {
+                    "event_type": "public_event_outbox",
+                    "payload": {"public_event_id": "conversation-recovery-public:abc123"},
+                }
+            )
+            write()
+            self.assertFalse(MODULE.conversation_recovery_outbox_settled(path))
+            records.append(
+                {
+                    "event_type": "public_event_delivery_receipt",
+                    "payload": {"public_event_id": "other-public-event"},
+                }
+            )
+            write()
+            self.assertFalse(MODULE.conversation_recovery_outbox_settled(path))
+            records.append(
+                {
+                    "event_type": "public_event_delivery_receipt",
+                    "payload": {"public_event_id": "conversation-recovery-public:abc123"},
+                }
+            )
+            write()
+            self.assertTrue(MODULE.conversation_recovery_outbox_settled(path))
+            records.append(
+                {
+                    "event_type": "public_event_outbox",
+                    "payload": {"public_event_id": "conversation-recovery-public:def456"},
+                }
+            )
+            write()
+            self.assertFalse(MODULE.conversation_recovery_outbox_settled(path))
+            records.append(
+                {
+                    "event_type": "public_event_delivery_receipt",
+                    "payload": {"public_event_id": "conversation-recovery-public:def456"},
+                }
+            )
+            write()
+            self.assertTrue(MODULE.conversation_recovery_outbox_settled(path))
+
     def test_fixture_protocol_error_is_persisted_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "errors.json"

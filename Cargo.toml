@@ -116,3 +116,6 @@ unwrap_used = "deny"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
+[profile.release]
+strip = "symbols"

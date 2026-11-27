@@ -120,31 +120,67 @@ jobs:
         include:
           - label: Linux x64
             os: ubuntu-latest
+            platform_package: "@sigil-ai/sigil-linux-x64"
           - label: Windows x64
             os: windows-latest
+            platform_package: "@sigil-ai/sigil-win32-x64"
           - label: macOS arm64
             os: macos-latest
+            platform_package: "@sigil-ai/sigil-darwin-arm64"
           - label: macOS Intel
             os: macos-15-intel
+            platform_package: "@sigil-ai/sigil-darwin-x64"
     steps:
       - name: Install Node
         uses: actions/setup-node@v7
         with:
           node-version: "22.22.0"
 
+      - name: Wait for npm packages to converge on this runner
+        shell: bash
+        env:
+          PLATFORM_PACKAGE: ${{ matrix.platform_package }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pkg in "@sigil-ai/sigil" "${PLATFORM_PACKAGE}"; do
+            for attempt in $(seq 1 20); do
+              if observed="$(npm view "${pkg}@${VERSION}" version --prefer-online 2>/dev/null)" &&
+                [[ "${observed}" == "${VERSION}" ]]; then
+                echo "npm ${pkg}@${VERSION} visible on runner edge"
+                break
+              fi
+              if [[ "${attempt}" -eq 20 ]]; then
+                echo "npm ${pkg}@${VERSION} did not become visible on runner edge" >&2
+                exit 1
+              fi
+              sleep 15
+            done
+          done
+
       - name: Install current prerelease in an isolated directory
         shell: bash
         env:
+          PLATFORM_PACKAGE: ${{ matrix.platform_package }}
           VERSION: ${{ needs.resolve-release.outputs.version }}
         run: |
           set -euo pipefail
           work_dir="${RUNNER_TEMP}/sigil-npm-smoke"
-          rm -rf "${work_dir}"
-          mkdir -p "${work_dir}"
-          cd "${work_dir}"
-          npm init --yes >/dev/null
-          npm install --save-exact "@sigil-ai/sigil@${VERSION}"
-          npm ls "@sigil-ai/sigil@${VERSION}"
+          for attempt in $(seq 1 5); do
+            rm -rf "${work_dir}"
+            mkdir -p "${work_dir}"
+            cd "${work_dir}"
+            npm init --yes >/dev/null
+            npm install --prefer-online --save-exact "@sigil-ai/sigil@${VERSION}"
+            if npm ls "@sigil-ai/sigil@${VERSION}" && npm ls "${PLATFORM_PACKAGE}@${VERSION}"; then
+              break
+            fi
+            if [[ "${attempt}" -eq 5 ]]; then
+              echo "npm install omitted optional platform package ${PLATFORM_PACKAGE}@${VERSION}" >&2
+              exit 1
+            fi
+            sleep 15
+          done
 
       - name: Verify binary and doctor JSON
         shell: bash

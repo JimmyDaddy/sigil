@@ -685,6 +685,13 @@ jobs:
       - name: Build production Sigil binary
         run: cargo build --locked -p sigil
 
+      - name: Verify release archive packaging and doctor smoke
+        run: >-
+          python3 scripts/run-isolated-tests.py --
+          scripts/build-release-archive.sh
+          --binary target/debug/sigil
+          --out-dir "${RUNNER_TEMP}/release-archive-smoke"
+
       - name: Run deterministic Web V1 real-PTY acceptance
         run: python3 scripts/run-isolated-tests.py -- timeout 150s python3 scripts/tui-web-pty-acceptance.py --binary target/debug/sigil
 

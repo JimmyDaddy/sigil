@@ -30,6 +30,8 @@ required_lines=(
   "              sleep 30"
   "            --retry 20 --retry-delay 30 --retry-all-errors \\"
   "      - name: Wait for the public tap to converge"
+  "      - name: Wait for npm packages to converge on this runner"
+  "            if npm ls \"@sigil-ai/sigil@\${VERSION}\" && npm ls \"\${PLATFORM_PACKAGE}@\${VERSION}\"; then"
   "            gh attestation verify \"\${archive}\" --repo \"\${GITHUB_REPOSITORY}\""
   "          node scripts/release-candidate.mjs verify \\"
   "          brew install JimmyDaddy/sigil/sigil-ai"

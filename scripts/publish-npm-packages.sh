@@ -158,46 +158,65 @@ if [[ "${#platform_package_sources[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-wait_for_published_dist_tag() {
-  local package_name="$1"
-  local expected_version="$2"
+wait_for_published_dist_tags() {
+  local -a pending=("$@")
+  local -a next_pending=()
   local attempt
+  local package_name
   local observed_version
   local npm_error
 
+  if [[ "${#pending[@]}" -eq 0 ]]; then
+    return
+  fi
+
   for ((attempt = 1; attempt <= publish_verify_attempts; attempt++)); do
-    npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
-    if observed_version="$(
-      npm view "${package_name}@${dist_tag}" version --prefer-online 2>"${npm_error}"
-    )"; then
-      rm -f "${npm_error}"
-      if [[ "${observed_version}" == "${expected_version}" ]]; then
-        echo "npm ${package_name}@${dist_tag} converged to ${expected_version}"
-        return
+    next_pending=()
+    for package_name in "${pending[@]}"; do
+      npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
+      if observed_version="$(
+        npm view "${package_name}@${dist_tag}" version --prefer-online 2>"${npm_error}"
+      )"; then
+        rm -f "${npm_error}"
+        if [[ "${observed_version}" == "${version}" ]]; then
+          echo "npm ${package_name}@${dist_tag} converged to ${version}"
+          continue
+        fi
+        echo "waiting for npm ${package_name}@${dist_tag}: observed ${observed_version}" >&2
+      elif grep -Fq "E404" "${npm_error}"; then
+        rm -f "${npm_error}"
+        echo "waiting for npm ${package_name}@${dist_tag}: not visible yet" >&2
+      else
+        cat "${npm_error}" >&2
+        rm -f "${npm_error}"
+        echo "cannot prove npm convergence for ${package_name}@${dist_tag}" >&2
+        return 1
       fi
-      echo "waiting for npm ${package_name}@${dist_tag}: observed ${observed_version}" >&2
-    elif grep -Fq "E404" "${npm_error}"; then
-      rm -f "${npm_error}"
-      echo "waiting for npm ${package_name}@${dist_tag}: not visible yet" >&2
-    else
-      cat "${npm_error}" >&2
-      rm -f "${npm_error}"
-      echo "cannot prove npm convergence for ${package_name}@${dist_tag}" >&2
-      return 1
+      next_pending+=("${package_name}")
+    done
+
+    if [[ "${#next_pending[@]}" -eq 0 ]]; then
+      return
     fi
+    pending=("${next_pending[@]}")
 
     if ((attempt < publish_verify_attempts)); then
       sleep "${publish_verify_delay_seconds}"
     fi
   done
 
-  echo "npm ${package_name}@${dist_tag} did not converge to ${expected_version} after ${publish_verify_attempts} attempts" >&2
+  for package_name in "${pending[@]}"; do
+    echo "npm ${package_name}@${dist_tag} did not converge to ${version} after ${publish_verify_attempts} attempts" >&2
+  done
   return 1
 }
+
+declare -a pending_platform_packages=()
 
 publish_package() {
   local package_source="$1"
   local package_json="$2"
+  local wait_mode="${3:-wait}"
   local package_name
   local package_version
   local published_version
@@ -279,14 +298,22 @@ publish_package() {
 
   echo "publishing ${package_name}@${version} with tag ${dist_tag}"
   npm publish "${package_source}" --access public --tag "${dist_tag}"
-  wait_for_published_dist_tag "${package_name}" "${version}"
+  if [[ "${wait_mode}" == "defer" ]]; then
+    pending_platform_packages+=("${package_name}")
+  else
+    wait_for_published_dist_tags "${package_name}"
+  fi
 }
 
 for index in "${!platform_package_sources[@]}"; do
   package_source="${platform_package_sources[$index]}"
   if [[ -d "${package_source}" || -f "${package_source}" ]]; then
-    publish_package "${package_source}" "${platform_package_metadata[$index]}"
+    publish_package "${package_source}" "${platform_package_metadata[$index]}" defer
   fi
 done
 
-publish_package "${root_package_source}" "${root_package_metadata}"
+if [[ "${#pending_platform_packages[@]}" -gt 0 ]]; then
+  wait_for_published_dist_tags "${pending_platform_packages[@]}"
+fi
+
+publish_package "${root_package_source}" "${root_package_metadata}" wait

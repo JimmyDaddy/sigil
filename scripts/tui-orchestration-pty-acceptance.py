@@ -958,6 +958,30 @@ def task_cancellation_settled(path: Path, task_id: str) -> bool:
     return False
 
 
+def conversation_recovery_outbox_settled(path: Path) -> bool:
+    """Return True once crash recovery appended and delivered its public-event outbox entry."""
+    recovery_public_ids: set[str] = set()
+    delivered_public_ids: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        record = json.loads(raw_line)
+        event_type = record.get("event_type")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        public_event_id = payload.get("public_event_id")
+        if not isinstance(public_event_id, str):
+            continue
+        if event_type == "public_event_outbox" and public_event_id.startswith(
+            "conversation-recovery-public:"
+        ):
+            recovery_public_ids.add(public_event_id)
+        elif event_type == "public_event_delivery_receipt":
+            delivered_public_ids.add(public_event_id)
+    return bool(recovery_public_ids) and recovery_public_ids.issubset(delivered_public_ids)
+
+
 def validate_resumed_direct_identity(path: Path, task_id: str, admission_id: str) -> None:
     admissions = [entry for entry in direct_task_controls(path, "task_direct_execution_admitted_v1") if entry.get("task_id") == task_id]
     if {entry.get("admission_id") for entry in admissions} != {admission_id}:
@@ -1095,7 +1119,9 @@ def run_direct_task_acceptance(
     session_path, interrupted_audit = wait_for_audit(
         managed_session_dir,
         runner,
-        lambda value: value.paused_task_run_count >= 1 and value.task_final_count == 2,
+        lambda value: value.paused_task_run_count >= 1
+        and value.task_final_count == 2
+        and conversation_recovery_outbox_settled(session_path),
         deadline.remaining(),
     )
     runner.type_text("/task continue")

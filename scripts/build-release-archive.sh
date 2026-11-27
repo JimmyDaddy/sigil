@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build-release-archive.sh [--target <triple>] [--out-dir <dir>] [--orchestration-eval-manifest <path>] [--skip-smoke]
+Usage: scripts/build-release-archive.sh [--target <triple>] [--out-dir <dir>] [--binary <path>] [--orchestration-eval-manifest <path>] [--skip-smoke]
 
 Build the release `sigil` binary, run install-oriented smoke checks, and write a
 versioned tar.gz archive plus a sha256 checksum file.
@@ -11,6 +11,7 @@ versioned tar.gz archive plus a sha256 checksum file.
 Options:
   --target TRIPLE  Build for an explicit Rust target triple.
   --out-dir DIR    Output directory. Defaults to dist.
+  --binary PATH    Reuse an already-built `sigil` binary instead of running `cargo build --release`.
   --orchestration-eval-manifest PATH
                    Qualified RFC-0053 report for this exact commit. The built
                    binary validates it and derives the release rollout sidecar.
@@ -24,6 +25,7 @@ cd "${repo_root}"
 
 out_dir="dist"
 target_triple=""
+prebuilt_binary=""
 run_smoke=1
 orchestration_eval_manifest=""
 
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       out_dir="$2"
+      shift 2
+      ;;
+    --binary)
+      if [[ $# -lt 2 ]]; then
+        echo "missing value for --binary" >&2
+        exit 2
+      fi
+      prebuilt_binary="$2"
       shift 2
       ;;
     --orchestration-eval-manifest)
@@ -84,20 +94,25 @@ case "${target_triple}" in
   *windows*) binary_name="sigil.exe" ;;
 esac
 
-target_args=()
-binary_path="target/release/${binary_name}"
-if [[ -n "${target_triple}" ]]; then
-  target_args=(--target "${target_triple}")
-  binary_path="target/${target_triple}/release/${binary_name}"
-fi
+if [[ -n "${prebuilt_binary}" ]]; then
+  binary_path="${prebuilt_binary}"
+  echo "packaging prebuilt sigil ${version} for ${target_triple}: ${binary_path}"
+else
+  target_args=()
+  binary_path="target/release/${binary_name}"
+  if [[ -n "${target_triple}" ]]; then
+    target_args=(--target "${target_triple}")
+    binary_path="target/${target_triple}/release/${binary_name}"
+  fi
 
-echo "building sigil ${version} for ${target_triple}"
-SIGIL_BUILD_GIT_HASH="${git_hash}" \
-  SIGIL_RUNTIME_BUILD_GIT_HASH="${git_hash}" \
-  SIGIL_BUILD_TARGET="${target_triple}" \
-  SIGIL_BUILD_PROFILE="release" \
-  SIGIL_BUILD_DISTRIBUTION="github-release" \
-  cargo build -p sigil --release --locked "${target_args[@]}"
+  echo "building sigil ${version} for ${target_triple}"
+  SIGIL_BUILD_GIT_HASH="${git_hash}" \
+    SIGIL_RUNTIME_BUILD_GIT_HASH="${git_hash}" \
+    SIGIL_BUILD_TARGET="${target_triple}" \
+    SIGIL_BUILD_PROFILE="release" \
+    SIGIL_BUILD_DISTRIBUTION="github-release" \
+    cargo build -p sigil --release --locked "${target_args[@]}"
+fi
 
 if [[ ! -x "${binary_path}" ]]; then
   echo "built binary is missing or not executable: ${binary_path}" >&2
@@ -143,6 +158,8 @@ EOF
     XDG_CONFIG_HOME="${smoke_home}/.config" \
     XDG_STATE_HOME="${smoke_home}/.local/state" \
     XDG_CACHE_HOME="${smoke_home}/.cache" \
+    SIGIL_STATE_HOME="${smoke_home}/.local/state" \
+    SIGIL_CACHE_HOME="${smoke_home}/.cache" \
     "${binary_path}" --config "${smoke_config}" doctor --output json >"${smoke_doctor_json}"
   python3 - "${smoke_doctor_json}" "${smoke_home}" <<'PY'
 import json

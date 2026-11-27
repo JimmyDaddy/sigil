@@ -150,6 +150,11 @@ jobs:
           rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
           rustup default "${RUST_TOOLCHAIN_VERSION}"
 
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.os }}
+
       - name: Build release archive
         shell: bash
         env:
