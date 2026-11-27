@@ -48,9 +48,9 @@ Sigil release admission 后由 replacement engine 使用。升级 `self_update` 
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
-| `tauri` / `tauri-build` | `2.11.5` / `2.6.3`；桌面默认 runtime | `apps/desktop/src-tauri` | 提供system-WebView native shell、local IPC和bundle build；capability仅向`main`window开放Sigil自有command，不启用generic HTTP、shell、filesystem、process、opener或remote URL permission | MIT OR Apache-2.0；tauri-apps/tauri | renderer不能取得bearer、child、loopback address或absolute state/session path；Linux CI安装官方WebKitGTK 4.1 prerequisites |
-| `tauri-plugin-dialog` | `2.7.2`；Rust backend API only | `apps/desktop/src-tauri/commands` | 由Rust backend发起native folder picker；选择结果直接进入native manager，不向renderer开放dialog plugin command或filesystem scope | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`dialog:*`；transitive fs helper没有renderer permission，不能被frontend调用 |
-| `tauri-plugin-opener` | `2.5.4`；Rust backend API only，JS link interception disabled | `apps/desktop/src-tauri/commands` | 仅由Sigil自有`desktop_open_external_url`命令打开native校验后的credential-free `https:` URL；不开放path、program selector、generic scheme或plugin command | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`opener:*`；默认JS link injection明确关闭，renderer只能调用2 KiB上限的typed HTTPS route，失败回退copy |
+| `tauri` / `tauri-build` | `2.12.7` / `2.7.6`；桌面默认 runtime | `apps/desktop/src-tauri` | 提供system-WebView native shell、local IPC和bundle build；capability仅向`main`window开放Sigil自有command，不启用generic HTTP、shell、filesystem、process、opener或remote URL permission | MIT OR Apache-2.0；tauri-apps/tauri | renderer不能取得bearer、child、loopback address或absolute state/session path；Linux CI安装官方WebKitGTK 4.1 prerequisites |
+| `tauri-plugin-dialog` | `2.8.4`；Rust backend API only | `apps/desktop/src-tauri/commands` | 由Rust backend发起native folder picker；选择结果直接进入native manager，不向renderer开放dialog plugin command或filesystem scope | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`dialog:*`；transitive fs helper没有renderer permission，不能被frontend调用 |
+| `tauri-plugin-opener` | `2.7.3`；Rust backend API only，JS link interception disabled | `apps/desktop/src-tauri/commands` | 仅由Sigil自有`desktop_open_external_url`命令打开native校验后的credential-free `https:` URL；不开放path、program selector、generic scheme或plugin command | MIT OR Apache-2.0；tauri-apps/plugins-workspace | capability未列出`opener:*`；默认JS link injection明确关闭，renderer只能调用2 KiB上限的typed HTTPS route，失败回退copy |
 | React / Vite / TypeScript | `19.2.7` / `8.1.6` / `5.9.3` | `apps/desktop` renderer | 构建stateful desktop view；production CSP禁止remote content、object/frame/base/form，renderer只调用窄Tauri IPC bridge | React MIT；Vite MIT；TypeScript Apache-2.0；各官方项目维护 | npm lockfile提交；Node 24 + pnpm 10.30.3在CI执行typecheck/test/build与high-severity audit |
 | `react-markdown` / `remark-gfm` / `rehype-highlight` | `10.1.0` / `4.0.1` / `7.0.2`；ESM runtime | `apps/desktop/SafeMarkdown` | CommonMark+GFM AST渲染与随bundle的37种常用language grammar；不开启raw-HTML插件、remote grammar、auto-detect、remote CSS/font/script或image element | MIT；remarkjs/react-markdown、remarkjs/remark-gfm、rehypejs/rehype-highlight | 第三方API只存在于Sigil-owned renderer；URL二次限制为credential-free HTTPS，其他scheme降级为文本；lockfile、high-severity audit与bundle差异是R48.2 gate |
 | `openapi-typescript` | `7.13.0`，dev-only | `apps/desktop/contracts` | 从Rust server实际生成的OpenAPI snapshot机械生成frontend DTO；CI重新生成并byte-compare，避免手写wire contract漂移 | MIT；openapi-ts/openapi-typescript | 只生成type declarations，不生成renderer HTTP client，bearer仍只存在Rust typed client |
@@ -437,3 +437,14 @@ Rustls、WebPKI、根证书和 Quinn 的兼容安全版本。没有新增直接�
 [updater 2.10.1 下载验签与安装源码](https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.10.1/plugins/updater/src/updater.rs)、
 [尚未发布的 ZIP 9 迁移](https://github.com/tauri-apps/plugins-workspace/commit/ba98bfadc4c868c9a7e1a226c83af528e1f11b89)、
 [opener 的 zbus 6 迁移](https://github.com/tauri-apps/plugins-workspace/pull/3722)。
+
+## 2026-11-27 Desktop Tauri 2.12 升级与 ZIP 例外移除
+
+`apps/desktop` 升级至稳定版 `tauri 2.12.7`、`tauri-build 2.7.6`、`tauri-plugin-updater 2.14.1`、`tauri-plugin-dialog 2.8.4`、`tauri-plugin-opener 2.7.3`，前端同步更新 `@tauri-apps/api 2.12.5` 与 `@tauri-apps/cli 2.12.6`（安装使用 `--ignore-scripts`）。
+
+- `tauri-plugin-updater 2.14.1` 已正式迁移至 `zip ^9`，因此从 `deny.toml` 与 `.github/workflows/dependency-supply-chain.yml` 彻底移除了 `RUSTSEC-2026-0367`、`RUSTSEC-2026-0368`、`RUSTSEC-2026-0369` 三项 Windows updater ZIP 漏洞例外。
+- `tauri-utils 2.10.4` 将 `urlpattern` 升级至 `0.6.0`，移除 `rust-unic` 传递依赖，同步删除 `RUSTSEC-2025-0075`、`RUSTSEC-2025-0080`、`RUSTSEC-2025-0081`、`RUSTSEC-2025-0098`、`RUSTSEC-2025-0100` 五项历史例外。
+- 同步将 `rusqlite` 升级至 `0.43.0`（MSRV `1.89.0`，兼容本仓库 Rust `1.94.1`；bundled `libsqlite3-sys >= 0.39.0` 修复 `RUSTSEC-2026-0459`），并将锁定图中的 `cookie`、`quinn-udp`、`url`、`zstd` / `zstd-safe` / `zstd-sys`、`rustix`、`tokio`、`event-listener`、`lru`、`clipboard-win`、`async-executor`、`chacha20` 更新至兼容安全补丁版本。
+- `tauri-plugin-opener 2.7.3` 当前仍依赖 `zbus ^5.9`，故仅保留 Linux/BSD 维护态提示 `RUSTSEC-2026-0370`、`RUSTSEC-2026-0371`、`RUSTSEC-2026-0372`，待稳定 opener 完成 `zbus 6` 迁移后移除。
+- 上游近期新增两项非漏洞维护态归档通知：`RUSTSEC-2026-0441`（`pin-utils 0.1.0`，经既有的 Windows ConPTY 固定依赖 `portable-pty 0.8.1 -> nix 0.25.1` 引入，移除条件同 `RUSTSEC-2017-0008`）与 `RUSTSEC-2026-0543`（`chrono 0.4.45`，经 `serde_with 3.21.0` 传递进入锁图，待上游移除 `chrono` 默认/传递路径后删除）；两项已精确同步至 `deny.toml` 与 CI workflow。
+- 同步将开发依赖 override 的 `cheerio>undici` / `jsdom>undici` 从 `7.29.1` 更新至 `7.30.1`，`webdriver>undici` 从 `6.28.1` 更新至 `6.29.1`，清零 `pnpm audit --audit-level high` 的 7 项 `undici` 高危告警。
