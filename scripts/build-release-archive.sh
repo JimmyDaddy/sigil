@@ -110,10 +110,33 @@ trap 'rm -rf "${stage_dir}"' EXIT
 if [[ "${run_smoke}" -eq 1 ]]; then
   echo "smoke: ${binary_path} --version"
   "${binary_path}" --version
-  echo "smoke: ${binary_path} doctor"
+  echo "smoke: ${binary_path} doctor --output json"
+  smoke_home="${stage_dir}/smoke-home"
+  mkdir -p "${smoke_home}"
   smoke_config="${stage_dir}/smoke-sigil.toml"
+  smoke_doctor_json="${stage_dir}/smoke-doctor.json"
   printf '[workspace]\nroot = "."\n\n[storage]\ncredential_store = "file"\n' >"${smoke_config}"
-  "${binary_path}" --config "${smoke_config}" doctor >/dev/null
+  HOME="${smoke_home}" \
+    XDG_CONFIG_HOME="${smoke_home}/.config" \
+    XDG_STATE_HOME="${smoke_home}/.local/state" \
+    XDG_CACHE_HOME="${smoke_home}/.cache" \
+    "${binary_path}" --config "${smoke_config}" doctor --output json >"${smoke_doctor_json}"
+  python3 - "${smoke_doctor_json}" "${smoke_home}" <<'PY'
+import json
+import os
+import sys
+
+report_path, smoke_home = sys.argv[1], sys.argv[2]
+with open(report_path, encoding="utf-8") as fh:
+    report = json.load(fh)
+assert report.get("schema_version", 0) >= 1, f"invalid schema_version: {report}"
+checks = {item["name"]: item for item in report.get("checks", [])}
+assert checks.get("config:load", {}).get("status") == "ok", f"config:load failed: {checks.get('config:load')}"
+assert report.get("cutover", {}).get("blockers") == [], f"unexpected cutover blockers: {report.get('cutover')}"
+for name in ("cutover:epoch", "cutover:authority", "cutover:blocker"):
+    assert checks.get(name, {}).get("status") != "error", f"{name} reported error: {checks.get(name)}"
+assert not os.path.exists(os.path.join(smoke_home, ".sigil")), "doctor smoke must stay read-only"
+PY
 fi
 
 archive_base="sigil-${version}-${target_triple}"

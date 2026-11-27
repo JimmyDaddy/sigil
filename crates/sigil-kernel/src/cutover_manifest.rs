@@ -242,6 +242,16 @@ impl CutoverSurfaceStatusV1 {
     }
 
     #[must_use]
+    pub fn not_initialized() -> Self {
+        Self {
+            schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,
+            epoch: CutoverSurfaceEpochV1::Unavailable,
+            authority: CutoverAuthorityStateV1::Unavailable,
+            blockers: Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn unavailable() -> Self {
         Self {
             schema_version: CUTOVER_SURFACE_SCHEMA_VERSION,

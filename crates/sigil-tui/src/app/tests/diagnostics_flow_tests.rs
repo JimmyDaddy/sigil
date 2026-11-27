@@ -35,7 +35,7 @@ fn doctor_slash_command_renders_appearance_warnings() -> anyhow::Result<()> {
         .clone();
     assert!(rendered.contains("appearance:contrast:text-base"));
     assert!(rendered.contains("text_primary on surface_base"));
-    assert!(rendered.contains("cutover: epoch=unavailable authority=unavailable blockers=1"));
+    assert!(rendered.contains("cutover: epoch=unavailable authority=unavailable blockers=0"));
     Ok(())
 }
 

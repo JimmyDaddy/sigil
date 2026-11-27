@@ -1986,55 +1986,158 @@ impl Drop for EnvScope {
 #[test]
 fn doctor_reports_cutover_epoch_state_without_side_effects() -> Result<()> {
     let temp = tempdir()?;
-    // No manifest yet: the shared doctor reports unavailable current-schema authority, read-only.
+
+    // Missing config / no bootstrap yet: doctor reports uninitialized (Warn, no corrupt blocker)
+    // without creating any bootstrap directory or suggesting manifest deletion.
     let missing = build_doctor_report(&temp.path().join("config-missing.toml"), temp.path());
     let epoch = missing
         .checks
         .iter()
         .find(|check| check.name == "cutover:epoch")
         .expect("cutover:epoch check");
-    assert_eq!(epoch.status, DoctorStatus::Error);
+    assert_eq!(epoch.status, DoctorStatus::Warn);
+    assert_eq!(epoch.message, "epoch=uninitialized");
     assert!(
-        !missing
+        epoch
+            .remediation
+            .as_deref()
+            .is_some_and(|text| !text.contains("remove the manifest"))
+    );
+    assert!(missing.cutover.blockers.is_empty());
+
+    // Boot a real current-schema workspace A and verify doctor reads the exact bootstrap realm.
+    let workspace_a = temp.path().join("workspace-a");
+    let workspace_b = temp.path().join("workspace-b");
+    fs::create_dir_all(&workspace_a)?;
+    fs::create_dir_all(&workspace_b)?;
+    let state = temp.path().join(".doctor-r71-state");
+    let cache = temp.path().join(".doctor-r71-cache");
+    fs::create_dir_all(&cache)?;
+    let config_path = temp.path().join("sigil.toml");
+    let state_toml = state.to_string_lossy().replace('\\', "/");
+    let cache_toml = cache.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &config_path,
+        format!(
+            "config_version = 2\n[workspace]\nroot = \".\"\n[storage]\nstate_root = \"{state_toml}\"\ncache_root = \"{cache_toml}\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = {{ source = \"none\" }}\n"
+        ),
+    )?;
+    let manifest_a =
+        crate::r71_authority_composition::authority_bootstrap_manifest_path(&config_path)?;
+    let realm_a = manifest_a.parent().expect("realm A");
+    assert!(!realm_a.exists());
+
+    // Before first boot with a valid config: uninitialized, no errors on cutover, no bootstrap dir.
+    let pre_boot = build_doctor_report(&config_path, &workspace_a);
+    assert!(pre_boot.cutover.blockers.is_empty());
+    assert_eq!(
+        pre_boot
             .checks
             .iter()
-            .any(|check| check.name == "cutover:manifest")
+            .find(|check| check.name == "cutover:epoch")
+            .expect("cutover:epoch")
+            .status,
+        DoctorStatus::Warn
+    );
+    assert!(
+        !realm_a.exists(),
+        "doctor on valid uninitialized config must stay read-only"
     );
 
-    // Publish a legacy manifest next to the config, then rebuild: the doctor shows the exact
-    // epoch/instance/manifest digest without mutating it.
-    let seed = temp.path().join("config.toml");
-    fs::write(&seed, "[core]\nmodel = \"deepseek\"\n")?;
-    let decision = crate::r71_global_cutover::legacy_boot_decision(&seed)?;
-    let manifest_path = temp.path().join(".sigil-cutover-manifest.json");
-    let before = fs::read_to_string(&manifest_path)?;
-    let report = build_doctor_report(&seed, temp.path());
-    let epoch = report
-        .checks
-        .iter()
-        .find(|check| check.name == "cutover:epoch")
-        .expect("cutover:epoch check");
-    assert!(epoch.message.starts_with("epoch=legacy"));
-    let after = fs::read_to_string(&manifest_path)?;
-    assert_eq!(before, after, "doctor must not mutate the manifest");
-    drop(decision);
+    // Complete real boot in workspace A, drop owner, and inspect via doctor.
+    let boot_a = crate::r71_authority_composition::boot_current_schema(&config_path, &workspace_a)?;
+    assert!(boot_a.cutover().is_current_schema_ready());
+    drop(boot_a);
 
-    // Corrupt the manifest: doctor reports the startup blocker as an error.
-    fs::write(
-        &manifest_path,
-        "{\"schema_version\":1,\"application_generation\":9}",
-    )?;
-    let report = build_doctor_report(&seed, temp.path());
-    let blocker = report
+    let before = fs::read_to_string(&manifest_a)?;
+    let report_a = build_doctor_report(&config_path, &workspace_a);
+    assert!(report_a.cutover.is_ready());
+    assert_eq!(
+        report_a
+            .checks
+            .iter()
+            .find(|check| check.name == "cutover:epoch")
+            .expect("cutover:epoch")
+            .status,
+        DoctorStatus::Ok
+    );
+    assert_eq!(
+        report_a
+            .checks
+            .iter()
+            .find(|check| check.name == "cutover:authority")
+            .expect("cutover:authority")
+            .status,
+        DoctorStatus::Ok
+    );
+    assert_eq!(
+        fs::read_to_string(&manifest_a)?,
+        before,
+        "doctor must not mutate the persisted manifest"
+    );
+
+    // Same config on an unbooted workspace B reports uninitialized without creating B's realm.
+    let pre_boot_b = build_doctor_report(&config_path, &workspace_b);
+    assert!(pre_boot_b.cutover.blockers.is_empty());
+    assert_eq!(
+        pre_boot_b
+            .checks
+            .iter()
+            .find(|check| check.name == "cutover:epoch")
+            .expect("cutover:epoch")
+            .status,
+        DoctorStatus::Warn
+    );
+    assert!(
+        !manifest_a
+            .parent()
+            .expect("realm A")
+            .join("workspace-realms-v1")
+            .exists(),
+        "doctor on unbooted workspace B must not create workspace-realms-v1"
+    );
+
+    // Boot workspace B and confirm both workspace A and B report ready independently.
+    let boot_b = crate::r71_authority_composition::boot_current_schema(&config_path, &workspace_b)?;
+    assert!(boot_b.cutover().is_current_schema_ready());
+    drop(boot_b);
+    assert!(
+        build_doctor_report(&config_path, &workspace_b)
+            .cutover
+            .is_ready()
+    );
+    assert!(
+        build_doctor_report(&config_path, &workspace_a)
+            .cutover
+            .is_ready()
+    );
+
+    // Corrupt workspace A's persisted manifest: doctor reports ManifestCorrupt as Error without modifying it.
+    let corrupt_bytes = "{\"schema_version\":1,\"application_generation\":9}";
+    fs::write(&manifest_a, corrupt_bytes)?;
+    let corrupted = build_doctor_report(&config_path, &workspace_a);
+    let blocker = corrupted
         .checks
         .iter()
         .find(|check| check.name == "cutover:blocker")
         .expect("cutover:blocker check");
     assert_eq!(blocker.status, DoctorStatus::Error);
     assert_eq!(
-        report.cutover.authority,
+        corrupted.cutover.authority,
         sigil_kernel::cutover_manifest::CutoverAuthorityStateV1::Unavailable
     );
-    assert!(report.has_errors());
+    assert_eq!(corrupted.cutover.blockers.len(), 1);
+    assert_eq!(
+        corrupted.cutover.blockers[0].code,
+        sigil_kernel::cutover_manifest::CutoverBlockerCodeV1::ManifestCorrupt
+    );
+    assert!(corrupted.has_errors());
+    assert_eq!(fs::read_to_string(&manifest_a)?, corrupt_bytes);
+    // Workspace B remains unaffected and ready.
+    assert!(
+        build_doctor_report(&config_path, &workspace_b)
+            .cutover
+            .is_ready()
+    );
     Ok(())
 }

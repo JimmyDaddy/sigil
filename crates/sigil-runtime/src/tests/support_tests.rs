@@ -651,3 +651,51 @@ fn support_bundle_writer_rejects_symlinked_destination_directory() -> Result<()>
     assert_eq!(fs::read_dir(&external)?.count(), 0);
     Ok(())
 }
+
+#[test]
+fn cutover_support_projection_distinguishes_uninitialized_warning_from_error() -> Result<()> {
+    let report = DoctorReport {
+        cutover: sigil_kernel::cutover_manifest::CutoverSurfaceStatusV1::not_initialized(),
+        checks: vec![
+            DoctorCheck {
+                status: DoctorStatus::Warn,
+                name: "cutover:epoch".to_owned(),
+                message: "epoch=uninitialized".to_owned(),
+                remediation: Some(
+                    "start Sigil in this workspace to initialize current-schema authority"
+                        .to_owned(),
+                ),
+            },
+            DoctorCheck {
+                status: DoctorStatus::Error,
+                name: "cutover:blocker".to_owned(),
+                message: "persisted cutover manifest is unavailable or corrupt".to_owned(),
+                remediation: Some(
+                    "restore or remove the manifest before selecting the current-schema epoch"
+                        .to_owned(),
+                ),
+            },
+        ],
+    };
+    let build = SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug");
+    let environment = SupportEnvironmentV1::from_terminal_values("macos", "aarch64", None, None);
+    let projected = project_doctor_support_report_v1(
+        &report,
+        DoctorSupportProjectionContext {
+            build: &build,
+            environment: &environment,
+            redactor: &SecretRedactor::default(),
+            path_redactions: &[],
+            generated_at_unix_ms: 1,
+        },
+    )?;
+    assert_eq!(
+        projected.checks[0].remediation.as_deref(),
+        Some("start Sigil in this workspace to initialize current-schema authority")
+    );
+    assert_eq!(
+        projected.checks[1].remediation.as_deref(),
+        Some("repair the cutover authority blocker before selecting current-schema boot")
+    );
+    Ok(())
+}

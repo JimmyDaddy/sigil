@@ -382,3 +382,12 @@ fn r71_current_schema_only_different_manifest_republish_rejected() {
     let error = registry.publish(&manifest).expect_err("fixed forward");
     assert!(matches!(error, CutoverErrorV1::AlreadyPublished));
 }
+
+#[test]
+fn cutover_surface_not_initialized_has_no_corrupt_blocker() {
+    let status = CutoverSurfaceStatusV1::not_initialized();
+    assert_eq!(status.epoch, CutoverSurfaceEpochV1::Unavailable);
+    assert_eq!(status.authority, CutoverAuthorityStateV1::Unavailable);
+    assert!(status.blockers.is_empty());
+    assert!(!status.is_ready());
+}

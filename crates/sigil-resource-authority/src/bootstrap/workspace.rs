@@ -95,6 +95,63 @@ impl AuthorityBootstrapStoreV1 {
         Ok(Self::root_for_canonical_config_path(&canonical)?.join(CUTOVER_POINTER_FILE))
     }
 
+    /// Reads the persisted cutover manifest bytes for `(config_path, workspace_root)` without
+    /// creating any bootstrap directory, lock file, or metadata.
+    ///
+    /// Returns `Ok(None)` when the config or selected workspace realm has not yet published a
+    /// cutover manifest. Returns `Err` when bootstrap directories, workspace bindings, or the
+    /// persisted cutover pointer file are unsafe, malformed, drifted, or unreadable.
+    ///
+    /// # Errors
+    /// Rejects symlinked or non-owner-only bootstrap roots, malformed workspace bindings,
+    /// workspace identity drift, and unsafe or oversized cutover pointer files.
+    pub fn read_cutover_manifest_bytes_readonly(
+        config_path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Result<Option<Vec<u8>>, BootstrapErrorV1> {
+        let canonical_config = match fs::canonicalize(config_path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BootstrapErrorV1::HardeningFailed(error.to_string())),
+        };
+        let Some(namespace) = Self::inspect_root_for_canonical_config_path(&canonical_config)?
+        else {
+            return Ok(None);
+        };
+        let target_root = if let Some(workspace_root) = workspace_root {
+            let workspace = AuthorityBootstrapWorkspaceV1::observe(workspace_root)?;
+            workspace.validate()?;
+            match read_workspace_binding_readonly(&namespace)? {
+                None => namespace,
+                Some(binding) if binding.path_hash == workspace.path_hash => {
+                    if binding != workspace {
+                        return Err(BootstrapErrorV1::IdentityDrift);
+                    }
+                    namespace
+                }
+                Some(_) => {
+                    let realms_dir = namespace.join("workspace-realms-v1");
+                    if !inspect_existing_owner_only_directory(&realms_dir)? {
+                        return Ok(None);
+                    }
+                    let selected_root = realms_dir.join(workspace.path_hash.to_hex());
+                    if !inspect_existing_owner_only_directory(&selected_root)? {
+                        return Ok(None);
+                    }
+                    if let Some(binding) = read_workspace_binding_readonly(&selected_root)?
+                        && binding != workspace
+                    {
+                        return Err(BootstrapErrorV1::IdentityDrift);
+                    }
+                    selected_root
+                }
+            }
+        } else {
+            namespace
+        };
+        read_bounded_private_file(&target_root.join(CUTOVER_POINTER_FILE))
+    }
+
     /// Selects one workspace's controller realm while retaining the original config realm.
     ///
     /// An unbound original realm is returned unchanged. Its runtime must complete the existing
@@ -240,6 +297,43 @@ impl AuthorityBootstrapStoreV1 {
             &bytes,
         )
     }
+}
+
+fn read_bounded_private_file(path: &Path) -> Result<Option<Vec<u8>>, BootstrapErrorV1> {
+    let Some(file) = open_private_read_file(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BOOTSTRAP_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+    if bytes.len() as u64 > MAX_BOOTSTRAP_METADATA_BYTES {
+        return Err(BootstrapErrorV1::MetadataCorrupted(format!(
+            "{} exceeds the bounded metadata size",
+            path.display()
+        )));
+    }
+    Ok(Some(bytes))
+}
+
+fn read_workspace_binding_readonly(
+    root: &Path,
+) -> Result<Option<AuthorityBootstrapWorkspaceV1>, BootstrapErrorV1> {
+    let path = root.join("workspace-binding-v1.json");
+    let Some(bytes) = read_bounded_private_file(&path)? else {
+        return Ok(None);
+    };
+    let record: WorkspaceBindingRecordV1 = serde_json::from_slice(&bytes).map_err(|error| {
+        BootstrapErrorV1::MetadataCorrupted(format!("{}: {error}", path.display()))
+    })?;
+    let workspace = AuthorityBootstrapWorkspaceV1 {
+        schema_version: record.schema_version,
+        path_hash: record.path_hash,
+        identity: record.identity,
+        canonical_root: record.canonical_root,
+    };
+    workspace.validate()?;
+    Ok(Some(workspace))
 }
 
 #[cfg(test)]

@@ -141,14 +141,40 @@ pub struct DoctorReportOptions<'a> {
 }
 
 /// RFC-0071 R71.6: cutover epoch state for the shared doctor (four surfaces read the same
-/// manifest next to the config). Read-only; a corrupted manifest is an Error so the startup
-/// blocker is visible in doctor before any run.
+/// host-owned bootstrap/workspace realm manifest). Read-only; an uninitialized realm is reported
+/// as a warning without corrupt-manifest blockers, while a corrupted, drifted, or unsafe
+/// manifest is an Error so the startup blocker is visible in doctor before any run.
 pub(crate) fn check_cutover(
     report: &mut DoctorReport,
     config_path: &Path,
+    workspace_root: Option<&Path>,
 ) -> CutoverSurfaceStatusV1 {
-    let status = match crate::r71_global_cutover::inspect_cutover_manifest(config_path) {
-        Ok(None) => CutoverSurfaceStatusV1::default(),
+    let status = match crate::r71_global_cutover::inspect_cutover_manifest_for_workspace(
+        config_path,
+        workspace_root,
+    ) {
+        Ok(None) => {
+            let remediation =
+                "start Sigil in this workspace to initialize current-schema authority";
+            report.push_with_remediation(
+                DoctorStatus::Warn,
+                "cutover:epoch",
+                "epoch=uninitialized",
+                Some(remediation),
+            );
+            report.push_with_remediation(
+                DoctorStatus::Warn,
+                "cutover:authority",
+                "authority=uninitialized",
+                Some(remediation),
+            );
+            report.push(
+                DoctorStatus::Ok,
+                "cutover:blocker",
+                "no active cutover blockers",
+            );
+            return CutoverSurfaceStatusV1::not_initialized();
+        }
         Ok(Some(manifest)) => CutoverSurfaceStatusV1::from_manifest(&manifest),
         Err(_) => CutoverSurfaceStatusV1::unavailable(),
     };
@@ -244,9 +270,9 @@ pub fn build_doctor_report_with_options(
         "config:path",
         config_path.display().to_string(),
     );
-    report.cutover = check_cutover(&mut report, config_path);
 
     if !config_path.exists() {
+        report.cutover = check_cutover(&mut report, config_path, None);
         report.push_with_remediation(
             DoctorStatus::Error,
             "config:load",
@@ -263,6 +289,7 @@ pub fn build_doctor_report_with_options(
             config
         }
         Err(error) => {
+            report.cutover = check_cutover(&mut report, config_path, None);
             report.push_with_remediation(
                 DoctorStatus::Error,
                 "config:load",
@@ -365,6 +392,7 @@ pub fn build_doctor_report_with_options(
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let canonical_workspace = check_workspace(&mut report, &workspace_root);
+    report.cutover = check_cutover(&mut report, config_path, canonical_workspace.as_deref());
     let sigil_paths =
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);

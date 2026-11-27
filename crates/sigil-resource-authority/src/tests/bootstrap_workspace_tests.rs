@@ -141,3 +141,90 @@ fn workspace_realms_reject_symlinked_binding_without_touching_target() {
     );
     assert_eq!(fs::read(target).expect("target"), b"unchanged");
 }
+
+#[test]
+fn workspace_realms_readonly_cutover_lookup_supports_uninitialized_multi_workspace_and_drift() {
+    let (fixture, config, a, b) = fixture();
+    let c = fixture.path().join("c");
+    fs::create_dir(&c).expect("workspace C");
+
+    // Before first boot: read-only inspection returns None and must not create the realm.
+    let pointer = AuthorityBootstrapStoreV1::cutover_manifest_path_for_config(&config)
+        .expect("diagnostic path");
+    assert!(!pointer.parent().expect("realm").exists());
+    assert_eq!(
+        AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(&config, Some(&a))
+            .expect("uninitialized lookup"),
+        None
+    );
+    assert!(
+        !pointer.parent().expect("realm").exists(),
+        "readonly lookup must not create bootstrap directories"
+    );
+
+    // Boot workspace A (original realm) and workspace B (workspace-realms-v1 child).
+    let ws_a = AuthorityBootstrapWorkspaceV1::observe(&a).expect("A identity");
+    let ws_b = AuthorityBootstrapWorkspaceV1::observe(&b).expect("B identity");
+    let (store_a, guard_a) =
+        AuthorityBootstrapStoreV1::for_canonical_config_workspace_with_publication(&config, &ws_a)
+            .expect("A realm");
+    store_a
+        .publish_bytes(
+            &guard_a,
+            AuthorityBootstrapObjectClassV1::CutoverPointer,
+            br#"{"realm":"a"}"#,
+        )
+        .expect("publish A pointer");
+    store_a.bind_workspace(&guard_a, &ws_a).expect("bind A");
+    drop(guard_a);
+
+    let (store_b, guard_b) =
+        AuthorityBootstrapStoreV1::for_canonical_config_workspace_with_publication(&config, &ws_b)
+            .expect("B realm");
+    store_b
+        .publish_bytes(
+            &guard_b,
+            AuthorityBootstrapObjectClassV1::CutoverPointer,
+            br#"{"realm":"b"}"#,
+        )
+        .expect("publish B pointer");
+    store_b.bind_workspace(&guard_b, &ws_b).expect("bind B");
+    drop(guard_b);
+
+    assert_eq!(
+        AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(&config, Some(&a))
+            .expect("read A"),
+        Some(br#"{"realm":"a"}"#.to_vec())
+    );
+    assert_eq!(
+        AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(&config, Some(&b))
+            .expect("read B"),
+        Some(br#"{"realm":"b"}"#.to_vec())
+    );
+    assert_eq!(
+        AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(&config, Some(&c))
+            .expect("uninitialized C"),
+        None
+    );
+    assert!(
+        !store_a
+            .namespace()
+            .join("workspace-realms-v1")
+            .join(
+                AuthorityBootstrapWorkspaceV1::observe(&c)
+                    .expect("C")
+                    .path_hash
+                    .to_hex()
+            )
+            .exists(),
+        "readonly lookup for an uninitialized workspace must not create its realm directory"
+    );
+
+    // Replacing workspace B triggers identity drift instead of silently returning None.
+    fs::rename(&b, fixture.path().join("original-b")).expect("keep old B inode");
+    fs::create_dir(&b).expect("replacement B");
+    assert!(matches!(
+        AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(&config, Some(&b)),
+        Err(BootstrapErrorV1::IdentityDrift)
+    ));
+}

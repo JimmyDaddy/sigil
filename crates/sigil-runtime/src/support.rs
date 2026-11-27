@@ -723,6 +723,9 @@ impl SupportCheckKind {
             }
             Self::Compaction => "review local tokenizer readiness in the troubleshooting guide",
             Self::Configuration => "review the reported configuration check with sigil doctor",
+            Self::Cutover if status == DoctorStatus::Warn => {
+                "start Sigil in this workspace to initialize current-schema authority"
+            }
             Self::Cutover => {
                 "repair the cutover authority blocker before selecting current-schema boot"
             }

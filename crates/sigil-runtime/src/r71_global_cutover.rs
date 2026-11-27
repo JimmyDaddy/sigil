@@ -771,21 +771,53 @@ pub fn attach_legacy_boot_cutover(
     Ok(services)
 }
 
-/// Read-only cutover manifest inspection for doctor/support surfaces: returns None when not
-/// yet published and the validated manifest otherwise. Never writes (doctor must stay side
-/// effect free); a tampered or corrupted manifest surfaces as an error so startup blockers
-/// become visible before a run is attempted.
+/// Read-only cutover manifest inspection for doctor/support surfaces across the host-owned
+/// bootstrap and workspace realms: returns `Ok(None)` when the config or workspace realm has
+/// not yet published a manifest, and the validated manifest otherwise. Never creates bootstrap
+/// directories or writes files; a tampered, drifted, or corrupted manifest surfaces as an error
+/// so startup blockers become visible before a run is attempted.
 pub fn inspect_cutover_manifest(
     seed: &std::path::Path,
 ) -> Result<Option<CutoverManifestV1>, CutoverPersistenceErrorV1> {
-    let manifest_path = seed
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(".sigil-cutover-manifest.json");
-    if !manifest_path.exists() {
+    inspect_cutover_manifest_for_workspace(seed, None)
+}
+
+/// Workspace-aware read-only cutover manifest inspection that resolves the exact bootstrap
+/// realm (`authority-bootstrap-v1/<config_key>` or its `workspace-realms-v1/<workspace_hash>`
+/// child) without creating directories or taking publication locks.
+pub fn inspect_cutover_manifest_for_workspace(
+    config_path: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Option<CutoverManifestV1>, CutoverPersistenceErrorV1> {
+    let Some(bytes) =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::read_cutover_manifest_bytes_readonly(
+            config_path,
+            workspace_root,
+        )
+        .map_err(|error| match error {
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+            | sigil_resource_authority::bootstrap::BootstrapErrorV1::ManifestCorrupted
+            | sigil_resource_authority::bootstrap::BootstrapErrorV1::IdentityDrift => {
+                CutoverPersistenceErrorV1::CorruptManifest
+            }
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::NotPlainDirectory(_)
+            | sigil_resource_authority::bootstrap::BootstrapErrorV1::HardeningFailed(_) => {
+                CutoverPersistenceErrorV1::NotPrivateFile
+            }
+            other => CutoverPersistenceErrorV1::Io(other.to_string()),
+        })?
+    else {
         return Ok(None);
+    };
+    let manifest: CutoverManifestV1 =
+        serde_json::from_slice(&bytes).map_err(|_| CutoverPersistenceErrorV1::CorruptManifest)?;
+    match validate_cutover_manifest(&manifest) {
+        Ok(())
+        | Err(CutoverErrorV1::AdapterNotReady(_))
+        | Err(CutoverErrorV1::MissingReadinessProbe) => Ok(Some(manifest)),
+        Err(CutoverErrorV1::UnknownSchemaVersion) => Err(CutoverPersistenceErrorV1::UnknownVersion),
+        Err(_) => Err(CutoverPersistenceErrorV1::CorruptManifest),
     }
-    RuntimeGlobalCutoverV1::load_and_validate_manifest(&manifest_path).map(Some)
 }
 
 /// Closed guarded session-open error.

@@ -192,6 +192,49 @@ impl AuthorityBootstrapStoreV1 {
             .join(config_key))
     }
 
+    /// Resolves an existing bootstrap namespace for read-only inspection without creating
+    /// any directory or mutating permissions.
+    fn inspect_root_for_canonical_config_path(
+        config_path: &Path,
+    ) -> Result<Option<PathBuf>, BootstrapErrorV1> {
+        if !config_path.is_absolute() {
+            return Err(BootstrapErrorV1::HardeningFailed(
+                "canonical bootstrap config path must be absolute".to_owned(),
+            ));
+        }
+        let config_key = canonical_bootstrap_hash(
+            format!("authority-bootstrap-instance-v1\0{}", config_path.display()).as_bytes(),
+        )
+        .to_hex();
+        let configured_user_root = sigil_kernel::default_user_config_dir()
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+        let user_parent = configured_user_root.parent().ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed("user config directory has no parent".to_owned())
+        })?;
+        let user_parent = match fs::canonicalize(user_parent) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(BootstrapErrorV1::HardeningFailed(error.to_string())),
+        };
+        let user_root = user_parent.join(configured_user_root.file_name().ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed(
+                "user config directory has no final component".to_owned(),
+            )
+        })?);
+        if !inspect_existing_plain_directory(&user_root)? {
+            return Ok(None);
+        }
+        let bootstrap_dir = user_root.join(AUTHORITY_BOOTSTRAP_DIRECTORY_NAME);
+        if !inspect_existing_owner_only_directory(&bootstrap_dir)? {
+            return Ok(None);
+        }
+        let namespace = bootstrap_dir.join(config_key);
+        if !inspect_existing_owner_only_directory(&namespace)? {
+            return Ok(None);
+        }
+        Ok(Some(namespace))
+    }
+
     fn open_with_publication(
         root: PathBuf,
         authority_epoch: u64,
@@ -640,7 +683,14 @@ fn ensure_owner_only_directory(path: &Path) -> Result<(), BootstrapErrorV1> {
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|create_error| {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path).map_err(|create_error| {
                 BootstrapErrorV1::HardeningFailed(format!("{}: {create_error}", path.display()))
             })?;
         }
@@ -684,6 +734,66 @@ fn ensure_owner_only_directory(path: &Path) -> Result<(), BootstrapErrorV1> {
         )));
     }
     Ok(())
+}
+
+/// Read-only plain-directory check for the outer user config directory (`~/.sigil`), which may
+/// already exist with wider permissions before first boot (reported separately by doctor's
+/// `config:parent_permissions` check). Still rejects symlinks and non-directory files.
+fn inspect_existing_plain_directory(path: &Path) -> Result<bool, BootstrapErrorV1> {
+    reject_symlink_components(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(BootstrapErrorV1::HardeningFailed(format!(
+                "{}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(BootstrapErrorV1::NotPlainDirectory(
+            path.display().to_string(),
+        ));
+    }
+    Ok(true)
+}
+
+/// Read-only equivalent of [`ensure_owner_only_directory`]: returns `Ok(false)` when `path`
+/// does not exist and validates plain-directory + owner-only invariants without creating
+/// directories or modifying permissions.
+fn inspect_existing_owner_only_directory(path: &Path) -> Result<bool, BootstrapErrorV1> {
+    if !inspect_existing_plain_directory(path)? {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            BootstrapErrorV1::HardeningFailed(format!("{}: {error}", path.display()))
+        })?;
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(BootstrapErrorV1::HardeningFailed(format!(
+                "{} is not owned by the current user",
+                path.display()
+            )));
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(BootstrapErrorV1::HardeningFailed(format!(
+                "{} is not owner-only",
+                path.display()
+            )));
+        }
+    }
+    if !sigil_kernel::private_path_permissions_are_restricted(path)
+        .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?
+    {
+        return Err(BootstrapErrorV1::HardeningFailed(format!(
+            "{} is not owner-only",
+            path.display()
+        )));
+    }
+    Ok(true)
 }
 
 fn reject_symlink_components(path: &Path) -> Result<(), BootstrapErrorV1> {

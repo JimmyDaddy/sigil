@@ -171,10 +171,7 @@ credential = { source = "none" }
     assert_eq!(doctor["version"], "0.0.1-test");
     assert_eq!(doctor["cutover"]["epoch"], "unavailable");
     assert_eq!(doctor["cutover"]["authority"], "unavailable");
-    assert_eq!(
-        doctor["cutover"]["blockers"],
-        json!([{ "code": "manifest_corrupt", "adapter": null }])
-    );
+    assert_eq!(doctor["cutover"]["blockers"], json!([]));
     assert!(doctor["checks"].is_array());
     assert!(
         !doctor
