@@ -366,3 +366,22 @@ fn consumed_user_input_resolution_is_exact_and_read_only() -> Result<()> {
     assert_eq!(std::fs::read(&binding.session_log_path)?, before);
     Ok(())
 }
+
+#[test]
+fn application_run_and_user_input_types_stay_compact_for_small_stacks() {
+    assert!(
+        std::mem::size_of::<super::super::ApplicationRunExecution>() <= 2048,
+        "ApplicationRunExecution grew to {} bytes; box large embedded fields to preserve Windows 1 MiB stack headroom",
+        std::mem::size_of::<super::super::ApplicationRunExecution>()
+    );
+    assert!(
+        std::mem::size_of::<super::super::PreparedApplicationRun>() <= 2560,
+        "PreparedApplicationRun grew to {} bytes; box large embedded fields to preserve Windows 1 MiB stack headroom",
+        std::mem::size_of::<super::super::PreparedApplicationRun>()
+    );
+    assert!(
+        std::mem::size_of::<super::super::PreparedApplicationUserInputDecision>() <= 2560,
+        "PreparedApplicationUserInputDecision grew to {} bytes; box large embedded fields to preserve Windows 1 MiB stack headroom",
+        std::mem::size_of::<super::super::PreparedApplicationUserInputDecision>()
+    );
+}

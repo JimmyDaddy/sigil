@@ -2163,10 +2163,10 @@ pub struct ApplicationRunExecution {
     extension_registry: sigil_kernel::ToolRegistry,
     extension_background_runs: crate::AgentToolBackgroundRuns,
     kind: ApplicationRunExecutionKind,
-    task_execution: Option<ApplicationTaskExecutionRuntime>,
-    plan_review_runtime: Option<ApplicationPlanReviewRuntime>,
-    session: Session,
-    options: AgentRunOptions,
+    task_execution: Option<Box<ApplicationTaskExecutionRuntime>>,
+    plan_review_runtime: Option<Box<ApplicationPlanReviewRuntime>>,
+    session: Box<Session>,
+    options: Box<AgentRunOptions>,
     session_id: String,
     run_id: String,
     prompt: String,
@@ -2181,7 +2181,7 @@ pub struct ApplicationRunExecution {
     events: ApplicationRunEventSequence,
     conversation_coordinator: Option<crate::ConversationCoordinator>,
     parent_session_ref: SessionRef,
-    pending_session_title: Option<ApplicationSessionTitleRequest>,
+    pending_session_title: Option<Box<ApplicationSessionTitleRequest>>,
     pending_user_input_continuation: Option<user_input::ApplicationUserInputContinuationContext>,
     route_transition: crate::provider_connections::SessionRouteTransitionView,
     managed_session_log: Option<ManagedApplicationSessionLogLease>,
@@ -2288,11 +2288,11 @@ struct ApplicationSessionTitleRequest {
 /// maintenance action never changes the already durable terminal outcome of the run.
 #[derive(Debug, Clone)]
 pub struct ApplicationPostRunMaintenance {
-    session_title: Option<ApplicationSessionTitleRequest>,
+    session_title: Option<Box<ApplicationSessionTitleRequest>>,
 }
 
 impl ApplicationPostRunMaintenance {
-    fn from_session_title(request: Option<ApplicationSessionTitleRequest>) -> Option<Self> {
+    fn from_session_title(request: Option<Box<ApplicationSessionTitleRequest>>) -> Option<Self> {
         request.map(|request| Self {
             session_title: Some(request),
         })
@@ -2310,7 +2310,7 @@ impl ApplicationPostRunMaintenance {
         prompt: String,
     ) -> Self {
         Self {
-            session_title: Some(ApplicationSessionTitleRequest {
+            session_title: Some(Box::new(ApplicationSessionTitleRequest {
                 root_config,
                 workspace_root,
                 model_ref,
@@ -2318,7 +2318,7 @@ impl ApplicationPostRunMaintenance {
                 session_id,
                 prompt,
                 managed_writer: None,
-            }),
+            })),
         }
     }
 
@@ -2733,7 +2733,7 @@ impl ApplicationRunExecution {
                         &agent,
                         &mut self.session,
                         *input,
-                        self.options,
+                        *self.options,
                         &mut bridge,
                         approval_handler,
                         runtime.as_mut(),
@@ -2744,7 +2744,7 @@ impl ApplicationRunExecution {
                         &agent,
                         &mut self.session,
                         *input,
-                        self.options,
+                        *self.options,
                         &mut bridge,
                         approval_handler,
                     )
@@ -2782,7 +2782,7 @@ impl ApplicationRunExecution {
                         },
                         outcome: AgentRunOutcome::default(),
                     },
-                    runtime,
+                    *runtime,
                     *request,
                     &mut bridge,
                     approval_handler,
@@ -2798,7 +2798,7 @@ impl ApplicationRunExecution {
                 let output = continue_application_task_handoff_boxed(
                     &mut self.session,
                     agent_output,
-                    self.task_execution.take(),
+                    self.task_execution.take().map(|runtime| *runtime),
                     &mut bridge,
                     approval_handler,
                     &self.cancellation_handle,
@@ -2809,7 +2809,7 @@ impl ApplicationRunExecution {
                         continue_application_plan_review_boxed(
                             &mut self.session,
                             output,
-                            self.plan_review_runtime.take(),
+                            self.plan_review_runtime.take().map(|runtime| *runtime),
                             &mut bridge,
                             approval_handler,
                             &self.cancellation_handle,
@@ -4627,7 +4627,7 @@ async fn prepare_application_run_internal(
                 provider.capabilities(),
             )
             .with_background_runs(agent_background_runs.clone());
-            Some(ApplicationTaskExecutionRuntime {
+            Some(Box::new(ApplicationTaskExecutionRuntime {
                 root_config: root_config.clone(),
                 parent_session_ref: parent_session_ref.clone(),
                 options: options.clone(),
@@ -4642,7 +4642,7 @@ async fn prepare_application_run_internal(
                         agent_background_runs.clone(),
                     )
                 }),
-            })
+            }))
         } else {
             None
         };
@@ -4767,16 +4767,18 @@ async fn prepare_application_run_internal(
             .transpose()
             .map_err(ApplicationRunPrepareError::execution)?;
         let pending_session_title = (queued_first_request.is_none() && generate_session_title)
-            .then(|| ApplicationSessionTitleRequest {
-                root_config: root_config.clone(),
-                workspace_root: workspace_root.clone(),
-                model_ref: model_ref.clone(),
-                session_log_path: session_path.clone(),
-                session_id: session_id.clone(),
-                prompt: prompt.clone(),
-                managed_writer: services
-                    .authority_composition()
-                    .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
+            .then(|| {
+                Box::new(ApplicationSessionTitleRequest {
+                    root_config: root_config.clone(),
+                    workspace_root: workspace_root.clone(),
+                    model_ref: model_ref.clone(),
+                    session_log_path: session_path.clone(),
+                    session_id: session_id.clone(),
+                    prompt: prompt.clone(),
+                    managed_writer: services
+                        .authority_composition()
+                        .map(|composition| std::sync::Arc::clone(&composition.storage_writer)),
+                })
             });
         let conversation_lifecycle = session
             .conversation_run_lifecycle_recorder()
@@ -4841,7 +4843,7 @@ async fn prepare_application_run_internal(
                 crate::build_provider_for_model_ref_async(&root_config, &model_ref)
                     .await
                     .map_err(ApplicationRunPrepareError::provider_unavailable)?;
-            Some(ApplicationPlanReviewRuntime {
+            Some(Box::new(ApplicationPlanReviewRuntime {
                 options: options.clone(),
                 workspace_snapshot_id: plan_review_workspace_snapshot_id,
                 agent: Box::new(
@@ -4856,7 +4858,7 @@ async fn prepare_application_run_internal(
                 child_resource_provisioner: services
                     .authority_composition()
                     .map(|composition| composition.plan_review_child_resource_provisioner()),
-            })
+            }))
         } else {
             None
         };
@@ -4867,8 +4869,8 @@ async fn prepare_application_run_internal(
                 plan_review_runtime,
                 kind,
                 task_execution,
-                session,
-                options,
+                session: Box::new(session),
+                options: Box::new(options),
                 session_id,
                 run_id,
                 prompt,

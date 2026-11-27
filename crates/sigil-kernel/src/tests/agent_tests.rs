@@ -15229,3 +15229,57 @@ async fn provider_first_content_reaches_handler_before_remaining_stream_is_relea
     assert_eq!(output.result.final_text, "answer now");
     Ok(())
 }
+
+#[test]
+fn agent_run_loop_completes_on_bounded_small_stack() -> Result<()> {
+    let test = std::thread::Builder::new()
+        .name("kernel-agent-small-stack".to_owned())
+        .stack_size(1024 * 1024)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let temp = tempfile::tempdir()?;
+                    let store = JsonlSessionStore::new(temp.path().join("small-stack.jsonl"))?;
+                    let mut session = Session::load_from_store("mock-write", "mock-model", store)?;
+                    let executed = Arc::new(AtomicBool::new(false));
+                    let mut registry = ToolRegistry::new();
+                    registry.register(Arc::new(WriteTool {
+                        executed: Arc::clone(&executed),
+                    }));
+                    let agent = Agent::new(WriteMockProvider, registry);
+                    let mut handler = RecordingEventHandler::default();
+                    let mut approval_handler = AutoApproveHandler;
+                    let output = agent
+                        .run_with_approval_input(
+                            &mut session,
+                            AgentRunInput::user("write on small stack"),
+                            AgentRunOptions {
+                                workspace_root: temp.path().to_path_buf(),
+                                max_turns: Some(4),
+                                tool_timeout_secs: 5,
+                                reasoning_effort: Some(ReasoningEffort::Medium),
+                                traffic_partition_key: None,
+                                interaction_mode: InteractionMode::Interactive,
+                                permission_config: PermissionConfig::default(),
+                                permission_mode_override: None,
+                                permission_context: crate::PermissionEvaluationContext::default(),
+                                memory_config: MemoryConfig::with_enabled(false),
+                                compaction_config: CompactionConfig::default(),
+                                tool_authority: None,
+                            },
+                            &mut handler,
+                            &mut approval_handler,
+                        )
+                        .await?;
+                    assert_eq!(output.result.final_text, "done");
+                    assert!(executed.load(Ordering::SeqCst));
+                    Ok(())
+                })
+        })?;
+    match test.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}

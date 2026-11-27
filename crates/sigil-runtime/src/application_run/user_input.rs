@@ -35,8 +35,8 @@ pub struct ApplicationUserInputDecisionRequest {
 /// Accepted decision plus an optional supervised continuation.
 pub struct PreparedApplicationUserInputDecision {
     receipt: sigil_kernel::UserInputDecisionReceiptV1,
-    continuation: Option<PreparedApplicationRun>,
-    revision_request: Option<crate::PlanReviewRunRequest>,
+    continuation: Option<Box<PreparedApplicationRun>>,
+    revision_request: Option<Box<crate::PlanReviewRunRequest>>,
     terminal_outbox: Option<sigil_kernel::PublicEventOutboxEntryV1>,
 }
 
@@ -68,7 +68,11 @@ impl PreparedApplicationUserInputDecision {
         Option<PreparedApplicationRun>,
         Option<crate::PlanReviewRunRequest>,
     ) {
-        (self.receipt, self.continuation, self.revision_request)
+        (
+            self.receipt,
+            self.continuation.map(|continuation| *continuation),
+            self.revision_request.map(|request| *request),
+        )
     }
 }
 
@@ -379,7 +383,7 @@ async fn prepare_application_user_input_decision_inner(
         return Ok(PreparedApplicationUserInputDecision {
             receipt,
             continuation: None,
-            revision_request,
+            revision_request: revision_request.map(Box::new),
             terminal_outbox: revision_terminal_outbox,
         });
     }
@@ -420,7 +424,7 @@ async fn prepare_application_user_input_decision_inner(
         return Ok(PreparedApplicationUserInputDecision {
             receipt,
             continuation: None,
-            revision_request,
+            revision_request: revision_request.map(Box::new),
             terminal_outbox: None,
         });
     }
@@ -664,8 +668,8 @@ async fn prepare_application_user_input_decision_inner(
                 },
                 task_execution: None,
                 plan_review_runtime: None,
-                session,
-                options,
+                session: Box::new(session),
+                options: Box::new(options),
                 session_id,
                 run_id,
                 prompt: public_prompt,
@@ -705,7 +709,7 @@ async fn prepare_application_user_input_decision_inner(
         };
         Ok(PreparedApplicationUserInputDecision {
             receipt,
-            continuation: Some(continuation),
+            continuation: Some(Box::new(continuation)),
             revision_request: None,
             terminal_outbox: None,
         })

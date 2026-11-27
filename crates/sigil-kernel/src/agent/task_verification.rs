@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
     AgentRunOptions, DirectTaskVerificationContext, EventHandler, RunCancellationHandle, ToolCall,
@@ -13,7 +14,31 @@ use super::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_verification_feedback_call<H: EventHandler + Send>(
+pub(super) fn handle_verification_feedback_call<'a, H: EventHandler + Send>(
+    session: &'a mut Session,
+    handler: &'a mut H,
+    outcome: &'a mut AgentRunOutcome,
+    call: &'a ToolCall,
+    context: Option<&'a mut DirectTaskVerificationContext>,
+    options: &'a AgentRunOptions,
+    cancellation: Option<&'a RunCancellationHandle>,
+    results: &'a mut Vec<(ToolCall, ToolResult)>,
+) -> BoxFuture<'a, Result<()>> {
+    handle_verification_feedback_call_inner(
+        session,
+        handler,
+        outcome,
+        call,
+        context,
+        options,
+        cancellation,
+        results,
+    )
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_verification_feedback_call_inner<H: EventHandler + Send>(
     session: &mut Session,
     handler: &mut H,
     outcome: &mut AgentRunOutcome,

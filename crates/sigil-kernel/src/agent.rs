@@ -1221,25 +1221,28 @@ fn claim_natural_run_terminal(
 
 /// Consults the pending-input provider at a safe turn boundary and emits the follow-up
 /// injection notice when one was promoted.
-async fn promote_pending_follow_up<H>(
-    provider: &dyn PendingConversationInputProvider,
-    session: &mut Session,
-    logical_run_id: &str,
-    handler: &mut H,
-) -> Result<Option<RuntimeContextCandidates>>
+fn promote_pending_follow_up<'a, H>(
+    provider: &'a dyn PendingConversationInputProvider,
+    session: &'a mut Session,
+    logical_run_id: &'a str,
+    handler: &'a mut H,
+) -> BoxFuture<'a, Result<Option<RuntimeContextCandidates>>>
 where
     H: EventHandler + Send,
 {
-    if let Some(promoted) = provider
-        .promote_next_pending_input(session, logical_run_id)
-        .await?
-    {
-        handler.handle(RunEvent::Notice(
-            "queued follow-up injected at a safe point".to_owned(),
-        ))?;
-        return Ok(Some(promoted.runtime_context));
+    async move {
+        if let Some(promoted) = provider
+            .promote_next_pending_input(session, logical_run_id)
+            .await?
+        {
+            handler.handle(RunEvent::Notice(
+                "queued follow-up injected at a safe point".to_owned(),
+            ))?;
+            return Ok(Some(promoted.runtime_context));
+        }
+        Ok(None)
     }
-    Ok(None)
+    .boxed()
 }
 
 /// Model-visible context that should be injected before accepting a final answer.
@@ -2360,7 +2363,8 @@ where
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
         if let Some(context) = task_verification.as_ref()
-            && let Some(prompt) = context.restore_prompt(session, &options).await?
+            && let Some(prompt) =
+                restore_task_verification_prompt_boxed(context, session, &options).await?
         {
             transient_context.push(ModelMessage::user(prompt));
         }
@@ -3759,9 +3763,15 @@ where
             outcome.tool_calls = total_tool_calls;
             let verification_action = match task_verification.as_mut() {
                 Some(context) => {
-                    context
-                        .evaluate_final(session, &options, &outcome, handler, cancellation.as_ref())
-                        .await?
+                    evaluate_task_verification_final_boxed(
+                        context,
+                        session,
+                        &options,
+                        &outcome,
+                        handler,
+                        cancellation.as_ref(),
+                    )
+                    .await?
                 }
                 None => TaskVerificationFinalAction::Ready,
             };
@@ -3873,6 +3883,30 @@ where
     }
 }
 
+fn restore_task_verification_prompt_boxed<'a>(
+    context: &'a crate::DirectTaskVerificationContext,
+    session: &'a Session,
+    options: &'a AgentRunOptions,
+) -> BoxFuture<'a, Result<Option<String>>> {
+    context.restore_prompt(session, options).boxed()
+}
+
+fn evaluate_task_verification_final_boxed<'a, H>(
+    context: &'a mut crate::DirectTaskVerificationContext,
+    session: &'a mut Session,
+    options: &'a AgentRunOptions,
+    outcome: &'a AgentRunOutcome,
+    handler: &'a mut H,
+    cancellation: Option<&'a RunCancellationHandle>,
+) -> BoxFuture<'a, Result<TaskVerificationFinalAction>>
+where
+    H: EventHandler + Send,
+{
+    context
+        .evaluate_final(session, options, outcome, handler, cancellation)
+        .boxed()
+}
+
 // Provider collection is a separate phase: its construction scratch must not remain in the
 // run-loop poll frame when the completed tool batch invokes another agent loop.
 #[allow(clippy::too_many_arguments)]
@@ -3904,8 +3938,7 @@ where
             handler,
             cancellation,
             dispatch,
-        )
-        .boxed(),
+        ),
         None => collect_provider_turn(
             provider,
             recovery_policy,
@@ -3917,8 +3950,7 @@ where
             handler,
             cancellation,
             dispatch,
-        )
-        .boxed(),
+        ),
     }
 }
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt, future::BoxFuture};
 
 use crate::{
     FrozenProviderRequestMaterial, MAX_PROVIDER_TURN_TOOL_ARGS_BYTES, MAX_PROVIDER_TURN_TOOL_CALLS,
@@ -29,7 +29,20 @@ struct ProviderTurnPartialOutput {
     streamed_tool_call_count: usize,
 }
 
-async fn commit_provider_output_control<H>(
+fn commit_provider_output_control<'a, H>(
+    physical_attempt: &'a mut ProviderPhysicalAttemptAudit,
+    session: &'a mut Session,
+    control: ControlEntry,
+    event: RunEvent,
+    handler: &'a mut H,
+) -> BoxFuture<'a, Result<()>>
+where
+    H: EventHandler + Send,
+{
+    commit_provider_output_control_inner(physical_attempt, session, control, event, handler).boxed()
+}
+
+async fn commit_provider_output_control_inner<H>(
     physical_attempt: &mut ProviderPhysicalAttemptAudit,
     session: &mut Session,
     control: ControlEntry,
@@ -86,18 +99,19 @@ struct RecoveredProviderTurnAttempt {
     physical_attempt_id: String,
 }
 
-pub(super) async fn collect_provider_turn<H>(
-    provider: &dyn Provider,
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_provider_turn<'turn, H>(
+    provider: &'turn dyn Provider,
     recovery_policy: ProviderTurnRecoveryPolicyV1,
-    session: &mut Session,
+    session: &'turn mut Session,
     request: CompletionRequest,
-    logical_run_id: &str,
-    previous_response_handle: &mut Option<ResponseHandle>,
-    _total_tool_calls: usize,
-    handler: &mut H,
-    cancellation: Option<&crate::RunCancellationHandle>,
-    dispatch: ProviderTurnDispatchContext<'_>,
-) -> Result<ProviderTurnOutput>
+    logical_run_id: &'turn str,
+    previous_response_handle: &'turn mut Option<ResponseHandle>,
+    total_tool_calls: usize,
+    handler: &'turn mut H,
+    cancellation: Option<&'turn crate::RunCancellationHandle>,
+    dispatch: ProviderTurnDispatchContext<'turn>,
+) -> BoxFuture<'turn, Result<ProviderTurnOutput>>
 where
     H: EventHandler + Send,
 {
@@ -112,11 +126,13 @@ where
     let frozen_request = match frozen_request_result {
         Ok(request) => request,
         Err(error) => {
-            finish_undispatched_hosted_turn(
+            if let Err(lifecycle_error) = finish_undispatched_hosted_turn(
                 dispatch.hosted_dispatch_lifecycle,
                 crate::HostedToolTerminalStatus::RequestFailed,
-            )?;
-            return Err(error);
+            ) {
+                return futures::future::ready(Err(lifecycle_error)).boxed();
+            }
+            return futures::future::ready(Err(error)).boxed();
         }
     };
     collect_frozen_provider_turn(
@@ -126,12 +142,11 @@ where
         frozen_request,
         logical_run_id,
         previous_response_handle,
-        _total_tool_calls,
+        total_tool_calls,
         handler,
         cancellation,
         dispatch,
     )
-    .await
 }
 
 /// Streams one provider turn from material frozen by a durable pre-send admission boundary.
@@ -139,7 +154,38 @@ where
 /// The supplied request is never rebuilt or re-frozen. Its session binding is checked before the
 /// same physical-attempt Started barrier used by ordinary turns is appended.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn collect_frozen_provider_turn<H>(
+pub(super) fn collect_frozen_provider_turn<'turn, H>(
+    provider: &'turn dyn Provider,
+    recovery_policy: ProviderTurnRecoveryPolicyV1,
+    session: &'turn mut Session,
+    frozen_request: FrozenProviderRequestMaterial,
+    logical_run_id: &'turn str,
+    previous_response_handle: &'turn mut Option<ResponseHandle>,
+    total_tool_calls: usize,
+    handler: &'turn mut H,
+    cancellation: Option<&'turn crate::RunCancellationHandle>,
+    dispatch: ProviderTurnDispatchContext<'turn>,
+) -> BoxFuture<'turn, Result<ProviderTurnOutput>>
+where
+    H: EventHandler + Send,
+{
+    collect_frozen_provider_turn_inner(
+        provider,
+        recovery_policy,
+        session,
+        frozen_request,
+        logical_run_id,
+        previous_response_handle,
+        total_tool_calls,
+        handler,
+        cancellation,
+        dispatch,
+    )
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn collect_frozen_provider_turn_inner<H>(
     provider: &dyn Provider,
     recovery_policy: ProviderTurnRecoveryPolicyV1,
     session: &mut Session,
@@ -196,7 +242,7 @@ where
     }
     recovery_policy.validate()?;
     let recovery_started = Instant::now();
-    let recovered_attempt_result = resume_scheduled_provider_turn_recovery(
+    let recovered_attempt_result = resume_scheduled_provider_turn_recovery_boxed(
         provider,
         recovery_policy,
         session,
@@ -228,33 +274,14 @@ where
             model_name: request.model_name.clone(),
         };
         let attempt_started = Instant::now();
-        let attempt_result = match recovered_attempt.take() {
-            Some(recovery) => {
-                ProviderPhysicalAttemptAudit::start_recovery(
-                    session,
-                    logical_run_id,
-                    &frozen_request,
-                    &recovery.schedule,
-                    &recovery.physical_attempt_id,
-                )
-                .await
-            }
-            None => match next_physical_attempt_id.take() {
-                Some(physical_attempt_id) => {
-                    ProviderPhysicalAttemptAudit::start_with_id(
-                        session,
-                        logical_run_id,
-                        &frozen_request,
-                        &physical_attempt_id,
-                    )
-                    .await
-                }
-                None => {
-                    ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request)
-                        .await
-                }
-            },
-        };
+        let attempt_result = start_provider_physical_attempt_boxed(
+            session,
+            logical_run_id,
+            &frozen_request,
+            recovered_attempt.take(),
+            next_physical_attempt_id.take(),
+        )
+        .await;
         crate::run_diagnostics::record_run_timing(
             diagnostic_run_id,
             crate::run_diagnostics::RunTimingPhase::ProviderAttemptStart,
@@ -275,7 +302,7 @@ where
         }
         let mut generation_observed = false;
         let mut partial_output = ProviderTurnPartialOutput::default();
-        let result = collect_provider_turn_after_send_barrier(
+        let result = collect_provider_turn_after_send_barrier_boxed(
             provider,
             diagnostic_run_id,
             session,
@@ -340,225 +367,25 @@ where
                 return Err(error.context("provider physical-attempt terminal append failed"));
             }
             (Err(error), Ok(())) => {
-                let Some(physical_attempt_id) = physical_attempt_id else {
-                    finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
-                    return Err(error);
-                };
-                if partial_output.text_bytes > 0
-                    || partial_output.reasoning_bytes > 0
-                    || partial_output.streamed_tool_call_count > 0
-                {
-                    let discarded = ProviderTurnRecoveryAudit::discard_partial_output(
+                recovered_attempt = Some(
+                    handle_failed_provider_turn_attempt_boxed(
+                        provider,
+                        recovery_policy,
                         session,
+                        &frozen_request,
+                        &request_template,
                         logical_run_id,
-                        &physical_attempt_id,
-                        partial_output.text_bytes,
-                        partial_output.reasoning_bytes,
-                        partial_output.streamed_tool_call_count,
+                        handler,
+                        cancellation,
+                        hosted_dispatch_lifecycle,
+                        error,
+                        rejection,
+                        generation_observed,
+                        partial_output,
+                        physical_attempt_id,
                     )
-                    .await?;
-                    let public = discarded.as_ref().map_or_else(
-                        || crate::PublicProviderTurnPartialOutputDiscardedViewV1 {
-                            text_discarded: partial_output.text_bytes > 0,
-                            reasoning_discarded: partial_output.reasoning_bytes > 0,
-                            tool_request_discarded: partial_output.streamed_tool_call_count > 0,
-                        },
-                        crate::PublicProviderTurnPartialOutputDiscardedViewV1::from,
-                    );
-                    handler.handle(RunEvent::ProviderTurnPartialOutputDiscarded(public))?;
-                }
-                let wire_state = if generation_observed {
-                    ProviderWireStateV1::ResponseStarted
-                } else if rejection
-                    == Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch)
-                {
-                    ProviderWireStateV1::NoBytesSent
-                } else {
-                    ProviderWireStateV1::RequestBytesMayHaveBeenSent
-                };
-                let failure = provider.observe_failure(&error, wire_state);
-                let attempts = session.provider_physical_attempt_projection()?;
-                let attempt = attempts
-                    .attempt(&physical_attempt_id)
-                    .context("finished provider attempt is missing from durable projection")?;
-                let mut evidence = ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(
-                    attempt,
-                    failure,
-                    &frozen_request,
-                )?;
-                evidence.partial_output_has_tool_calls =
-                    partial_output.streamed_tool_call_count > 0;
-                let budget = session
-                    .provider_turn_recovery_projection()?
-                    .budget_for_logical_run_id(logical_run_id);
-                let transport_fallback =
-                    provider.transport_fallback_candidate(&request_template, &evidence.failure);
-                if let Some(candidate) = &transport_fallback {
-                    candidate.validate()?;
-                }
-                match recovery_policy.decide(
-                    &evidence,
-                    budget,
-                    cancellation.is_some_and(crate::RunCancellationHandle::is_cancel_requested),
-                ) {
-                    RecoveryDispositionV1::RetryProviderTurn { retry_after_ms } => {
-                        let schedule = ProviderTurnRecoveryAudit::schedule(
-                            session,
-                            &evidence,
-                            budget,
-                            retry_after_ms,
-                            recovery_policy,
-                        )
-                        .await?;
-                        if let Some(candidate) = transport_fallback {
-                            let selection = ProviderTurnRecoveryAudit::select_transport_fallback(
-                                session, &schedule, candidate,
-                            )
-                            .await?;
-                            if let Err(activation_error) =
-                                provider.activate_transport_fallback(&selection.candidate)
-                            {
-                                let exhausted = ProviderTurnRecoveryAudit::exhaust_scheduled(
-                                    session,
-                                    &schedule,
-                                    false,
-                                    ProviderTurnRecoveryTerminalDispositionV1::Blocked,
-                                    "transport_fallback_unavailable",
-                                )
-                                .await?;
-                                handler.handle(RunEvent::ProviderTurnRecovery(
-                                    crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                                ))?;
-                                return Err(activation_error.context(
-                                    ProviderTurnRecoveryTerminalError {
-                                        disposition: exhausted.terminal_disposition,
-                                        reason_code: "transport_fallback_unavailable",
-                                    },
-                                ));
-                            }
-                        }
-                        let recovery_view =
-                            crate::PublicProviderTurnRecoveryViewV1::waiting(&schedule);
-                        handler.handle(RunEvent::ProviderTurnRecovery(recovery_view.clone()))?;
-                        handler.handle(RunEvent::Notice(format!(
-                            "Reconnecting... {}/{}",
-                            recovery_view.active_retry_count, recovery_view.active_max_retries
-                        )))?;
-                        if let Err(wait_error) = wait_for_pre_dispatch_connect_retry(
-                            Duration::from_millis(retry_after_ms),
-                            cancellation,
-                        )
-                        .await
-                        {
-                            finish_undispatched_hosted_turn(
-                                hosted_dispatch_lifecycle,
-                                crate::HostedToolTerminalStatus::Cancelled,
-                            )?;
-                            // The schedule is durable authority.  If cancellation wins the
-                            // backoff race, close that authority explicitly so restart repair
-                            // never mistakes it for a retry that still needs dispatching.
-                            let disposition = ProviderTurnRecoveryTerminalDispositionV1::Cancelled;
-                            let exhausted = ProviderTurnRecoveryAudit::exhaust(
-                                session,
-                                &evidence,
-                                schedule.budget_snapshot,
-                                disposition,
-                                "provider_recovery_cancelled",
-                            )
-                            .await?;
-                            handler.handle(RunEvent::ProviderTurnRecovery(
-                                crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                            ))?;
-                            return Err(wait_error.context(ProviderTurnRecoveryTerminalError {
-                                disposition,
-                                reason_code: "provider_recovery_cancelled",
-                            }));
-                        }
-                        let started = ProviderTurnRecoveryAudit::start(session, &schedule).await?;
-                        handler.handle(RunEvent::ProviderTurnRecovery(
-                            crate::PublicProviderTurnRecoveryViewV1::recovering(&schedule),
-                        ))?;
-                        recovered_attempt = Some(RecoveredProviderTurnAttempt {
-                            schedule,
-                            physical_attempt_id: started.physical_attempt_id,
-                        });
-                    }
-                    RecoveryDispositionV1::Block { reason_code } => {
-                        finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
-                        let disposition = ProviderTurnRecoveryTerminalDispositionV1::Blocked;
-                        let exhausted = ProviderTurnRecoveryAudit::exhaust(
-                            session,
-                            &evidence,
-                            budget,
-                            disposition,
-                            reason_code,
-                        )
-                        .await?;
-                        handler.handle(RunEvent::ProviderTurnRecovery(
-                            crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                        ))?;
-                        return Err(error.context(ProviderTurnRecoveryTerminalError {
-                            disposition,
-                            reason_code,
-                        }));
-                    }
-                    RecoveryDispositionV1::Pause { reason_code } => {
-                        finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
-                        let disposition = ProviderTurnRecoveryTerminalDispositionV1::Paused;
-                        let exhausted = ProviderTurnRecoveryAudit::exhaust(
-                            session,
-                            &evidence,
-                            budget,
-                            disposition,
-                            reason_code,
-                        )
-                        .await?;
-                        handler.handle(RunEvent::ProviderTurnRecovery(
-                            crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                        ))?;
-                        return Err(error.context(ProviderTurnRecoveryTerminalError {
-                            disposition,
-                            reason_code,
-                        }));
-                    }
-                    RecoveryDispositionV1::Cancelled => {
-                        finish_undispatched_hosted_turn(
-                            hosted_dispatch_lifecycle,
-                            crate::HostedToolTerminalStatus::Cancelled,
-                        )?;
-                        let disposition = ProviderTurnRecoveryTerminalDispositionV1::Cancelled;
-                        let exhausted = ProviderTurnRecoveryAudit::exhaust(
-                            session,
-                            &evidence,
-                            budget,
-                            disposition,
-                            "provider_recovery_cancelled",
-                        )
-                        .await?;
-                        handler.handle(RunEvent::ProviderTurnRecovery(
-                            crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                        ))?;
-                        return Err(error.context(ProviderTurnRecoveryTerminalError {
-                            disposition,
-                            reason_code: "provider_recovery_cancelled",
-                        }));
-                    }
-                    RecoveryDispositionV1::Irrecoverable { reason_code } => {
-                        finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
-                        let exhausted = ProviderTurnRecoveryAudit::exhaust(
-                            session,
-                            &evidence,
-                            budget,
-                            ProviderTurnRecoveryTerminalDispositionV1::Irrecoverable,
-                            reason_code,
-                        )
-                        .await?;
-                        handler.handle(RunEvent::ProviderTurnRecovery(
-                            crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
-                        ))?;
-                        return Err(error);
-                    }
-                }
+                    .await?,
+                );
             }
             (Err(error), Err(terminal_error)) => {
                 finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
@@ -566,6 +393,318 @@ where
                     "provider turn failed and physical-attempt terminal append also failed: {terminal_error:#}"
                 )));
             }
+        }
+    }
+}
+
+fn start_provider_physical_attempt_boxed<'a>(
+    session: &'a mut Session,
+    logical_run_id: &'a str,
+    frozen_request: &'a FrozenProviderRequestMaterial,
+    recovered_attempt: Option<RecoveredProviderTurnAttempt>,
+    next_physical_attempt_id: Option<String>,
+) -> BoxFuture<'a, Result<ProviderPhysicalAttemptAudit>> {
+    async move {
+        match recovered_attempt {
+            Some(recovery) => {
+                ProviderPhysicalAttemptAudit::start_recovery(
+                    session,
+                    logical_run_id,
+                    frozen_request,
+                    &recovery.schedule,
+                    &recovery.physical_attempt_id,
+                )
+                .await
+            }
+            None => match next_physical_attempt_id {
+                Some(physical_attempt_id) => {
+                    ProviderPhysicalAttemptAudit::start_with_id(
+                        session,
+                        logical_run_id,
+                        frozen_request,
+                        &physical_attempt_id,
+                    )
+                    .await
+                }
+                None => {
+                    ProviderPhysicalAttemptAudit::start(session, logical_run_id, frozen_request)
+                        .await
+                }
+            },
+        }
+    }
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_failed_provider_turn_attempt_boxed<'a, H>(
+    provider: &'a dyn Provider,
+    recovery_policy: ProviderTurnRecoveryPolicyV1,
+    session: &'a mut Session,
+    frozen_request: &'a FrozenProviderRequestMaterial,
+    request_template: &'a CompletionRequest,
+    logical_run_id: &'a str,
+    handler: &'a mut H,
+    cancellation: Option<&'a crate::RunCancellationHandle>,
+    hosted_dispatch_lifecycle: Option<
+        &'a std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>,
+    >,
+    error: anyhow::Error,
+    rejection: Option<crate::ProviderRequestRejection>,
+    generation_observed: bool,
+    partial_output: ProviderTurnPartialOutput,
+    physical_attempt_id: Option<String>,
+) -> BoxFuture<'a, Result<RecoveredProviderTurnAttempt>>
+where
+    H: EventHandler + Send,
+{
+    handle_failed_provider_turn_attempt(
+        provider,
+        recovery_policy,
+        session,
+        frozen_request,
+        request_template,
+        logical_run_id,
+        handler,
+        cancellation,
+        hosted_dispatch_lifecycle,
+        error,
+        rejection,
+        generation_observed,
+        partial_output,
+        physical_attempt_id,
+    )
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_failed_provider_turn_attempt<H>(
+    provider: &dyn Provider,
+    recovery_policy: ProviderTurnRecoveryPolicyV1,
+    session: &mut Session,
+    frozen_request: &FrozenProviderRequestMaterial,
+    request_template: &CompletionRequest,
+    logical_run_id: &str,
+    handler: &mut H,
+    cancellation: Option<&crate::RunCancellationHandle>,
+    hosted_dispatch_lifecycle: Option<&std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>>,
+    error: anyhow::Error,
+    rejection: Option<crate::ProviderRequestRejection>,
+    generation_observed: bool,
+    partial_output: ProviderTurnPartialOutput,
+    physical_attempt_id: Option<String>,
+) -> Result<RecoveredProviderTurnAttempt>
+where
+    H: EventHandler + Send,
+{
+    let Some(physical_attempt_id) = physical_attempt_id else {
+        finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
+        return Err(error);
+    };
+    if partial_output.text_bytes > 0
+        || partial_output.reasoning_bytes > 0
+        || partial_output.streamed_tool_call_count > 0
+    {
+        let discarded = ProviderTurnRecoveryAudit::discard_partial_output(
+            session,
+            logical_run_id,
+            &physical_attempt_id,
+            partial_output.text_bytes,
+            partial_output.reasoning_bytes,
+            partial_output.streamed_tool_call_count,
+        )
+        .await?;
+        let public = discarded.as_ref().map_or_else(
+            || crate::PublicProviderTurnPartialOutputDiscardedViewV1 {
+                text_discarded: partial_output.text_bytes > 0,
+                reasoning_discarded: partial_output.reasoning_bytes > 0,
+                tool_request_discarded: partial_output.streamed_tool_call_count > 0,
+            },
+            crate::PublicProviderTurnPartialOutputDiscardedViewV1::from,
+        );
+        handler.handle(RunEvent::ProviderTurnPartialOutputDiscarded(public))?;
+    }
+    let wire_state = if generation_observed {
+        ProviderWireStateV1::ResponseStarted
+    } else if rejection == Some(crate::ProviderRequestRejection::ConnectFailedBeforeDispatch) {
+        ProviderWireStateV1::NoBytesSent
+    } else {
+        ProviderWireStateV1::RequestBytesMayHaveBeenSent
+    };
+    let failure = provider.observe_failure(&error, wire_state);
+    let attempts = session.provider_physical_attempt_projection()?;
+    let attempt = attempts
+        .attempt(&physical_attempt_id)
+        .context("finished provider attempt is missing from durable projection")?;
+    let mut evidence =
+        ProviderTurnRecoveryEvidenceV1::from_terminal_attempt(attempt, failure, frozen_request)?;
+    evidence.partial_output_has_tool_calls = partial_output.streamed_tool_call_count > 0;
+    let budget = session
+        .provider_turn_recovery_projection()?
+        .budget_for_logical_run_id(logical_run_id);
+    let transport_fallback =
+        provider.transport_fallback_candidate(request_template, &evidence.failure);
+    if let Some(candidate) = &transport_fallback {
+        candidate.validate()?;
+    }
+    match recovery_policy.decide(
+        &evidence,
+        budget,
+        cancellation.is_some_and(crate::RunCancellationHandle::is_cancel_requested),
+    ) {
+        RecoveryDispositionV1::RetryProviderTurn { retry_after_ms } => {
+            let schedule = ProviderTurnRecoveryAudit::schedule(
+                session,
+                &evidence,
+                budget,
+                retry_after_ms,
+                recovery_policy,
+            )
+            .await?;
+            if let Some(candidate) = transport_fallback {
+                let selection = ProviderTurnRecoveryAudit::select_transport_fallback(
+                    session, &schedule, candidate,
+                )
+                .await?;
+                if let Err(activation_error) =
+                    provider.activate_transport_fallback(&selection.candidate)
+                {
+                    let exhausted = ProviderTurnRecoveryAudit::exhaust_scheduled(
+                        session,
+                        &schedule,
+                        false,
+                        ProviderTurnRecoveryTerminalDispositionV1::Blocked,
+                        "transport_fallback_unavailable",
+                    )
+                    .await?;
+                    handler.handle(RunEvent::ProviderTurnRecovery(
+                        crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+                    ))?;
+                    return Err(activation_error.context(ProviderTurnRecoveryTerminalError {
+                        disposition: exhausted.terminal_disposition,
+                        reason_code: "transport_fallback_unavailable",
+                    }));
+                }
+            }
+            let recovery_view = crate::PublicProviderTurnRecoveryViewV1::waiting(&schedule);
+            handler.handle(RunEvent::ProviderTurnRecovery(recovery_view.clone()))?;
+            handler.handle(RunEvent::Notice(format!(
+                "Reconnecting... {}/{}",
+                recovery_view.active_retry_count, recovery_view.active_max_retries
+            )))?;
+            if let Err(wait_error) = wait_for_pre_dispatch_connect_retry(
+                Duration::from_millis(retry_after_ms),
+                cancellation,
+            )
+            .await
+            {
+                finish_undispatched_hosted_turn(
+                    hosted_dispatch_lifecycle,
+                    crate::HostedToolTerminalStatus::Cancelled,
+                )?;
+                // The schedule is durable authority.  If cancellation wins the
+                // backoff race, close that authority explicitly so restart repair
+                // never mistakes it for a retry that still needs dispatching.
+                let disposition = ProviderTurnRecoveryTerminalDispositionV1::Cancelled;
+                let exhausted = ProviderTurnRecoveryAudit::exhaust(
+                    session,
+                    &evidence,
+                    schedule.budget_snapshot,
+                    disposition,
+                    "provider_recovery_cancelled",
+                )
+                .await?;
+                handler.handle(RunEvent::ProviderTurnRecovery(
+                    crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+                ))?;
+                return Err(wait_error.context(ProviderTurnRecoveryTerminalError {
+                    disposition,
+                    reason_code: "provider_recovery_cancelled",
+                }));
+            }
+            let started = ProviderTurnRecoveryAudit::start(session, &schedule).await?;
+            handler.handle(RunEvent::ProviderTurnRecovery(
+                crate::PublicProviderTurnRecoveryViewV1::recovering(&schedule),
+            ))?;
+            Ok(RecoveredProviderTurnAttempt {
+                schedule,
+                physical_attempt_id: started.physical_attempt_id,
+            })
+        }
+        RecoveryDispositionV1::Block { reason_code } => {
+            finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
+            let disposition = ProviderTurnRecoveryTerminalDispositionV1::Blocked;
+            let exhausted = ProviderTurnRecoveryAudit::exhaust(
+                session,
+                &evidence,
+                budget,
+                disposition,
+                reason_code,
+            )
+            .await?;
+            handler.handle(RunEvent::ProviderTurnRecovery(
+                crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+            ))?;
+            Err(error.context(ProviderTurnRecoveryTerminalError {
+                disposition,
+                reason_code,
+            }))
+        }
+        RecoveryDispositionV1::Pause { reason_code } => {
+            finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
+            let disposition = ProviderTurnRecoveryTerminalDispositionV1::Paused;
+            let exhausted = ProviderTurnRecoveryAudit::exhaust(
+                session,
+                &evidence,
+                budget,
+                disposition,
+                reason_code,
+            )
+            .await?;
+            handler.handle(RunEvent::ProviderTurnRecovery(
+                crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+            ))?;
+            Err(error.context(ProviderTurnRecoveryTerminalError {
+                disposition,
+                reason_code,
+            }))
+        }
+        RecoveryDispositionV1::Cancelled => {
+            finish_undispatched_hosted_turn(
+                hosted_dispatch_lifecycle,
+                crate::HostedToolTerminalStatus::Cancelled,
+            )?;
+            let disposition = ProviderTurnRecoveryTerminalDispositionV1::Cancelled;
+            let exhausted = ProviderTurnRecoveryAudit::exhaust(
+                session,
+                &evidence,
+                budget,
+                disposition,
+                "provider_recovery_cancelled",
+            )
+            .await?;
+            handler.handle(RunEvent::ProviderTurnRecovery(
+                crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+            ))?;
+            Err(error.context(ProviderTurnRecoveryTerminalError {
+                disposition,
+                reason_code: "provider_recovery_cancelled",
+            }))
+        }
+        RecoveryDispositionV1::Irrecoverable { reason_code } => {
+            finish_failed_hosted_attempt(hosted_dispatch_lifecycle, &error, rejection)?;
+            let exhausted = ProviderTurnRecoveryAudit::exhaust(
+                session,
+                &evidence,
+                budget,
+                ProviderTurnRecoveryTerminalDispositionV1::Irrecoverable,
+                reason_code,
+            )
+            .await?;
+            handler.handle(RunEvent::ProviderTurnRecovery(
+                crate::PublicProviderTurnRecoveryViewV1::terminal(&exhausted),
+            ))?;
+            Err(error)
         }
     }
 }
@@ -595,6 +734,30 @@ async fn wait_for_pre_dispatch_connect_retry(
 /// I/O before the process died. Unstarted schedules instead prove the reconstructed request at
 /// their original durable frontier, wait against the absolute deadline, then use the schedule's
 /// CAS claim as the only authority for the new physical attempt.
+fn resume_scheduled_provider_turn_recovery_boxed<'a, H>(
+    provider: &'a dyn Provider,
+    recovery_policy: ProviderTurnRecoveryPolicyV1,
+    session: &'a mut Session,
+    frozen_request: &'a FrozenProviderRequestMaterial,
+    logical_run_id: &'a str,
+    handler: &'a mut H,
+    cancellation: Option<&'a crate::RunCancellationHandle>,
+) -> BoxFuture<'a, Result<Option<RecoveredProviderTurnAttempt>>>
+where
+    H: EventHandler + Send,
+{
+    resume_scheduled_provider_turn_recovery(
+        provider,
+        recovery_policy,
+        session,
+        frozen_request,
+        logical_run_id,
+        handler,
+        cancellation,
+    )
+    .boxed()
+}
+
 async fn resume_scheduled_provider_turn_recovery<H>(
     provider: &dyn Provider,
     recovery_policy: ProviderTurnRecoveryPolicyV1,
@@ -854,6 +1017,49 @@ fn finish_failed_hosted_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn collect_provider_turn_after_send_barrier_boxed<'a, H>(
+    provider: &'a dyn Provider,
+    diagnostic_run_id: &'a str,
+    session: &'a mut Session,
+    request: CompletionRequest,
+    previous_response_handle: &'a mut Option<ResponseHandle>,
+    total_tool_calls: usize,
+    handler: &'a mut H,
+    cancellation: Option<&'a crate::RunCancellationHandle>,
+    hosted_processor: Option<&'a std::sync::Arc<dyn crate::HostedEvidenceProcessor>>,
+    hosted_dispatch_lifecycle: Option<
+        &'a std::sync::Arc<dyn crate::AgentHostedTurnDispatchLifecycle>,
+    >,
+    hosted_enabled: bool,
+    hosted_context: crate::HostedFinalizationContext,
+    physical_attempt: &'a mut ProviderPhysicalAttemptAudit,
+    generation_observed: &'a mut bool,
+    partial_output: &'a mut ProviderTurnPartialOutput,
+) -> BoxFuture<'a, Result<ProviderTurnOutput>>
+where
+    H: EventHandler + Send,
+{
+    collect_provider_turn_after_send_barrier(
+        provider,
+        diagnostic_run_id,
+        session,
+        request,
+        previous_response_handle,
+        total_tool_calls,
+        handler,
+        cancellation,
+        hosted_processor,
+        hosted_dispatch_lifecycle,
+        hosted_enabled,
+        hosted_context,
+        physical_attempt,
+        generation_observed,
+        partial_output,
+    )
+    .boxed()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn collect_provider_turn_after_send_barrier<H>(
     provider: &dyn Provider,
     diagnostic_run_id: &str,
@@ -920,7 +1126,7 @@ where
         }
     }).boxed();
     if hosted_enabled {
-        return collect_hosted_provider_turn(
+        return collect_hosted_provider_turn_boxed(
             &mut stream,
             session,
             previous_response_handle,
@@ -1169,6 +1375,41 @@ where
         pending_states,
         hosted_finalized: None,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_hosted_provider_turn_boxed<'a, H>(
+    stream: &'a mut std::pin::Pin<
+        Box<dyn futures::Stream<Item = anyhow::Result<ProviderChunk>> + Send>,
+    >,
+    session: &'a mut Session,
+    previous_response_handle: &'a mut Option<ResponseHandle>,
+    handler: &'a mut H,
+    cancellation: Option<&'a crate::RunCancellationHandle>,
+    processor: &'a std::sync::Arc<dyn crate::HostedEvidenceProcessor>,
+    context: crate::HostedFinalizationContext,
+    physical_attempt: &'a mut ProviderPhysicalAttemptAudit,
+    generation_observed: &'a mut bool,
+    partial_output: &'a mut ProviderTurnPartialOutput,
+    pricing_snapshot: Option<&'a crate::ModelPricingSnapshotV1>,
+) -> BoxFuture<'a, Result<ProviderTurnOutput>>
+where
+    H: EventHandler + Send,
+{
+    collect_hosted_provider_turn(
+        stream,
+        session,
+        previous_response_handle,
+        handler,
+        cancellation,
+        processor,
+        context,
+        physical_attempt,
+        generation_observed,
+        partial_output,
+        pricing_snapshot,
+    )
+    .boxed()
 }
 
 #[allow(clippy::too_many_arguments)]
