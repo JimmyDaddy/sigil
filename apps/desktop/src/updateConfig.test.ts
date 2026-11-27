@@ -24,8 +24,8 @@ describe("signed Desktop updater configuration", () => {
 
     const decodedPublicKey = Buffer.from(updater.pubkey as string, "base64").toString("utf8");
     expect(decodedPublicKey).toBe(
-      "untrusted comment: minisign public key: 6C04D7096E4FD608\n"
-      + "RWQI1k9uCdcEbMTkCZjIBTDNHH7eKm0ly0Xl/Ec1bVh4F7D2N8aU7sb9\n",
+      "untrusted comment: minisign public key: 0B2D357F027FD0C6\n"
+      + "RWTG0H8CfzUtC10qDq+LifPGZyE2TjCnvR2RBgQLQWlbdgZu3YsszLRh\n",
     );
   });
 

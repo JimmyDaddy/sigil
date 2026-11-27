@@ -13,6 +13,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 - Importing MCP servers now enables MCP cleanly without losing prior conversation history, shows reviewable MCP tool approvals without fabricated file diffs, and explains permission denials by the blocking policy.
 - TUI preserves joined emoji and Unicode graphemes during transcript reflow, keeps tool artifacts readable across session switches, clears `/resume` selectors after switching sessions, and persists command-family approval grants only after the decision is accepted.
 - Fixed `sigil doctor` misreporting healthy or uninitialized workspaces as corrupted startup state; diagnostics now inspect the active workspace state read-only without creating files, and release archive smoke checks validate the structured JSON report.
+- Rotated the Desktop beta updater signing key. Users on earlier signed Desktop beta builds need to download and install the next signed DMG once manually; subsequent updates resume verified in-app updates.
 
 ## v0.0.1-beta.6 - 2026-10-22
 

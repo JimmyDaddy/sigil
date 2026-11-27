@@ -28,7 +28,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZDMDRENzA5NkU0RkQ2MDgKUldRSTFrOXVDZGNFYk1Ua0NaaklCVEROSEg3ZUttMGx5MFhsL0VjMWJWaDRGN0QyTjhhVTdzYjkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBCMkQzNTdGMDI3RkQwQzYKUldURzBIOENmelV0QzEwcURxK0xpZlBHWnlFMlRqQ252UjJSQmdRTFFXbGJkZ1p1M1lzc3pMUmgK",
       "endpoints": [
         "https://sigil.corerobin.com/updates/beta/latest.json"
       ]
