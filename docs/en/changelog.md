@@ -8,7 +8,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No additional changes.
+- Desktop replaces the split Markdown composer with inline formatting in a single compact editor, clarifies typography and empty/filtered library states, preserves IME cancellation in popovers, and discloses failed tool output on demand.
+- Desktop and TUI simplify first-run setup, workspace trust, and short-window approval layouts; preserve drafts, selections, and pending clarifications across consecutive questions, navigation, and settings changes; and support selecting custom model routes without a remote model catalog.
+- Importing MCP servers now enables MCP cleanly without losing prior conversation history, shows reviewable MCP tool approvals without fabricated file diffs, and explains permission denials by the blocking policy.
+- TUI preserves joined emoji and Unicode graphemes during transcript reflow, keeps tool artifacts readable across session switches, clears `/resume` selectors after switching sessions, and persists command-family approval grants only after the decision is accepted.
+- Fixed `sigil doctor` misreporting healthy or uninitialized workspaces as corrupted startup state; diagnostics now inspect the active workspace state read-only without creating files, and release archive smoke checks validate the structured JSON report.
 
 ## v0.0.1-beta.6 - 2026-10-22
 
